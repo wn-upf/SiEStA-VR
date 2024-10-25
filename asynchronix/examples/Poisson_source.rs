@@ -5,12 +5,55 @@ use asynchronix::ports::{EventBuffer, Output};
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
 
+use std::cmp::{self, max, min}; 
 use rand::thread_rng;
 use rand_distr::{Exp, Distribution}; 
 
 use std::time::{Instant, Duration}; 
 
+use std::collections::VecDeque;
+use colored::*;
+use std::fmt::Display;
 
+pub enum DebugColor {
+    Red,
+    Green,
+    Blue,
+}
+
+impl DebugColor {
+    fn to_color_fn(&self) -> fn(String) -> colored::ColoredString {
+        match self {
+            DebugColor::Red => |s| s.red(),
+            DebugColor::Green => |s| s.green(),
+            DebugColor::Blue => |s| s.blue(),
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! debug_print {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_color_fn()(msg));
+    };
+}
+
+pub trait DebugPrint {
+    fn print_debug(&self, color: DebugColor, prefix: &str);
+}
+
+impl DebugPrint for MpduPacket {
+    fn print_debug(&self, color: DebugColor, prefix: &str) {
+        debug_print!(
+            color,
+            "[{}] Packet ID: {}, Length: {}",
+            prefix,
+            self.packet_id,
+            self.length_packet
+        );
+    }
+}
 
 pub fn exponential(mean: f64) -> f64{
     let mut rng = thread_rng(); 
@@ -30,12 +73,25 @@ fn format_duration(duration: Duration) -> String {
 pub struct MpduPacket {
     pub packet_id: usize,
     pub length_packet: usize,
+    pub queue_in_instant: Instant,
+    pub queue_out_instant: Instant,
+    pub sink_in_instant: Instant,
+    pub T_q: Duration,
+    pub T_s: Duration,
+    pub expected_T_s: Duration,
 }
+
 impl MpduPacket{
     pub fn new() -> Self {
         Self {
             packet_id : 0, 
             length_packet: 0, 
+            queue_in_instant:  Instant::now(),
+            queue_out_instant: Instant::now(),
+            sink_in_instant: Instant::now(),
+            T_q: Duration::ZERO,
+            T_s: Duration::ZERO,
+            expected_T_s: Duration::ZERO,
         }
     }
 
@@ -77,15 +133,17 @@ impl PoissonSource{
 
             let mut packet =  MpduPacket::new() ; 
 
-            let mut time_interarrival = Duration::from_secs_f64(exponential(1.0/ self.arrival_rate)) ;
-             packet.length_packet = exponential(self.mean_length_packets as f64) as usize; 
-            
+            let time_interarrival = Duration::from_secs_f64(exponential(1.0/ self.arrival_rate)) ;
+            let len_random = exponential(self.mean_length_packets as f64) as usize; 
+            packet.length_packet = cmp::max(1, len_random); 
+
 
             self.num_packets_sent += 1; 
             packet.packet_id = self.num_packets_sent; 
             self.output_port.send(packet.clone()).await; 
 
             context.scheduler.schedule_event(time_interarrival, Self::send_packet, () ).unwrap(); 
+        
         }
     }
 }
@@ -93,6 +151,97 @@ impl PoissonSource{
 impl Model for PoissonSource{} 
 
 
+pub struct QueueModule {
+    pub output_port: Output<MpduPacket>,
+    pub queue: VecDeque<MpduPacket>,
+    pub queue_maxsize: usize,
+    pub service_timer: Duration,
+    pub aux_packet_serviced: MpduPacket,
+    pub packet_being_served: bool,
+    pub blocked_packet_counter: usize,
+    pub arrived_packet_counter: usize,
+    pub queue_length_counter: usize,
+    pub arrival_rate: f64,
+    pub service_rate: f64,
+    pub rate_departures_bps: f64,
+}
+
+impl QueueModule {
+    pub fn new(queue_size: usize, rate_departures_bps: f64) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            queue_maxsize: queue_size,
+            output_port: Default::default(),
+            service_timer: Duration::ZERO,
+            aux_packet_serviced: MpduPacket::new(),
+            packet_being_served: false,
+            blocked_packet_counter: 0,
+            arrived_packet_counter: 0,
+            queue_length_counter: 0,
+            arrival_rate: 0.0,
+            service_rate: 0.0,
+            rate_departures_bps,
+        }
+    }
+
+    pub async fn input(&mut self, packet: MpduPacket, context: &Context<Self>) {
+        
+        self.arrived_packet_counter += 1;
+        self.queue_length_counter += self.queue.len();
+
+        if self.queue.len() < self.queue_maxsize {
+            self.queue.push_back(packet);
+
+            if self.queue.len() == 1 && !self.packet_being_served {
+                self.deque_schedule_service((), context).await;
+            }
+        } else {
+            self.blocked_packet_counter += 1;
+        }
+    }
+
+    fn deque_schedule_service<'a> (
+            &'a mut self,
+            _: (),
+            context: &'a Context<Self>,
+        ) -> impl Future<Output = ()> + Send + 'a {
+    
+        async move {
+    
+
+            if self.packet_being_served == true {
+                println!("DEQUE!");
+                self.aux_packet_serviced.print(); 
+                self.output_port.send(self.aux_packet_serviced).await; 
+                self.aux_packet_serviced = MpduPacket::new(); 
+            }
+
+            if let Some(packet) = self.queue.pop_front() {
+                let now = Instant::now();
+                let mut serviced_packet = packet;
+                serviced_packet.queue_out_instant = now;
+                serviced_packet.T_q = now.duration_since(serviced_packet.queue_in_instant);
+                
+                println!("Length packet: {}", serviced_packet.length_packet); 
+                let time_of_service_secs = Duration::from_secs_f64(
+                    serviced_packet.length_packet as f64 / self.rate_departures_bps
+                );
+
+                serviced_packet.expected_T_s = time_of_service_secs;
+                self.packet_being_served = true;
+                self.aux_packet_serviced = serviced_packet;
+
+                context.scheduler.schedule_event(
+                    time_of_service_secs,
+                    Self::deque_schedule_service, () ).unwrap(); 
+            }
+        }
+    }
+
+    
+}
+
+impl Model for QueueModule {}
 
 
 // #[derive(Default)]
@@ -127,43 +276,58 @@ impl Sink {
         println!("{} - Packet received!!", format_duration(elapsed)); 
         packet.print(); 
         self.received_packet_counter += 1; 
-        
     }
 }
 
 impl Model for Sink {}
 
 fn main( ){
-
+    // DEFINE SIM PARAMS
     let mean_length: f64 = 1000.0; 
     let rate_bps = 50.0; 
 
+    let k_queue: usize = 100; 
+    let rate_queue_bps:f64 = 60.0; 
+    //// DEFINE COMPONENTS
     let mut source = PoissonSource::new(rate_bps, mean_length); 
+    let mut queue: QueueModule = QueueModule::new(k_queue-1 as usize, rate_queue_bps) ; 
+    let mut sink = Sink::new() ; 
+
     let mbox_src = Mailbox::new(); 
     let mbox_src_address = mbox_src.address(); 
 
+    let mbox_queue = Mailbox::new(); 
+    let queue_address = mbox_queue.address(); 
 
-    let mut sink = Sink::new() ; 
+
     let sink_mbox = Mailbox::new(); 
     let sink_mbox_address = sink_mbox.address(); 
-    source.output_port.connect(Sink::input, &sink_mbox); 
+    
+    // CONNECT COMPONENTS
+    // source.output_port.connect(Sink::input, &sink_mbox); 
 
+    source.output_port.connect(QueueModule::input, &mbox_queue); 
+    queue.output_port.connect(Sink::input, &sink_mbox); 
 
     let t0 = MonotonicTime::EPOCH; 
 
+    // let mut simu = SimInit::new()
+    // .add_model(source, mbox_src, "Source")
+    // .add_model(sink, sink_mbox, "Sink")
+    // .init(t0); 
+
     let mut simu = SimInit::new()
-    .add_model(source, mbox_src, "Source")
-    .add_model(sink, sink_mbox, "Sink")
-    .init(t0); 
+                .add_model(source, mbox_src, "Poisson")
+                .add_model(queue, mbox_queue, "Queue")
+                .add_model(sink, sink_mbox, "Sink")
+                .init(t0); 
 
     let scheduler = simu.scheduler(); 
-
     // ----------
     // Simulation.
     // ----------
 
     // Check initial conditions.
-
 
     let mut t = t0; 
     assert_eq!(simu.time(), t); 
@@ -176,7 +340,8 @@ fn main( ){
     ) 
     .unwrap(); 
 
-    for i in 0..80000{
+
+    for i in 0..10000000{
         simu.step(); 
 
     }
