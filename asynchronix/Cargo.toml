@@ -46,6 +46,7 @@ spin_sleep = "1"
 st3 = "0.4"
 tai-time = "0.3.3"
 
+
 # Optional dependencies.
 bytes = { version = "1", default-features = false, optional = true }
 ciborium = { version = "0.2.2", optional = true }
@@ -63,6 +64,8 @@ futures-util = "0.3"
 futures-executor = "0.3"
 mio = { version = "1.0", features = ["os-poll", "net"] }
 tracing-subscriber = { version= "0.3.18", features=["env-filter"] }
+rand = "0.8.5"
+rand_distr = "0.4.3"
 
 [target.'cfg(asynchronix_loom)'.dev-dependencies]
 loom = "0.5"
