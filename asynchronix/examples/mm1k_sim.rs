@@ -255,20 +255,24 @@ impl QueueModule {
                 serviced_packet.queue_out_instant = now;
                 serviced_packet.T_q = now.duration_since(serviced_packet.queue_in_instant);
                 let elapsed = now.duration_since(self.t0_time); 
-                debug_print!(
-                    DebugColor::Yellow,
-                    "{} [DBG DEQUE] -Packet {} dequeued, length: {}, Q_size = {}",
-                    format_duration(elapsed),
-                    serviced_packet.packet_id,
-                    serviced_packet.length_packet,
-                    self.queue.len()
-                ); 
+
                 // println!("Length packet: {}", serviced_packet.length_packet); 
                 let time_of_service_secs = Duration::from_secs_f64(
                     serviced_packet.length_packet as f64 / self.rate_departures_bps
                 );
 
                 serviced_packet.expected_T_s = time_of_service_secs;
+
+                debug_print!(
+                    DebugColor::Yellow,
+                    "{} [DBG DEQUE] -Packet {} dequeued, length: {}, Q_size = {}, T_q = {}, exp_T_s = {}",
+                    format_duration(elapsed),
+                    serviced_packet.packet_id,
+                    serviced_packet.length_packet,
+                    self.queue.len(),
+                    serviced_packet.T_q.as_secs_f32(),
+                    serviced_packet.expected_T_s.as_secs_f32(), 
+                ); 
                 self.packet_being_served = true;
                 self.aux_packet_serviced = serviced_packet;
 
@@ -316,10 +320,9 @@ impl Sink {
         let elapsed = self.t0_sink.elapsed(); 
         debug_print!(
             DebugColor::Red,
-            "{} [DBG SINK]  --- Packet {} received, Length: {}",
+            "{} [DBG SINK]  --- Packet {} at sink", 
             format_duration(elapsed),
             packet.packet_id,
-            packet.length_packet
         );
         // println!("{} - Packet received!!", format_duration(elapsed)); 
         // packet.print(); 
@@ -386,10 +389,6 @@ fn main( ){
     let mut t = t0; 
     assert_eq!(simu.time(), t); 
 
-
-
-
-
     // START WITH FIRST EVENT
     scheduler.schedule_event(
         Duration::from_secs(1),
@@ -399,13 +398,12 @@ fn main( ){
     ) 
     .unwrap(); 
 
-
     for i in 0..100{ // CARRY ON 
         simu.step(); 
-
     }
-    // t += Duration::new(3, 0 ); 
-    // assert_eq!(simu.time(), t); 
+
+    println!("************ END RESULTS ***********\n LT: {:#?}", LT); 
+
 
 }
 
