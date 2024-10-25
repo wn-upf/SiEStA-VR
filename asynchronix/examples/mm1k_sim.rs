@@ -12,6 +12,9 @@ use rand_distr::{Exp, Distribution};
 use std::time::{Instant, Duration}; 
 
 use std::collections::VecDeque;
+
+mod libs;                // for callign local library
+use crate::libs::{LittleTheoremMM1K, compute_mm1k_metrics}; 
 use colored::*;
 use std::fmt::Display;
 
@@ -19,6 +22,8 @@ pub enum DebugColor {
     Red,
     Green,
     Blue,
+    Yellow,
+    Magenta,
 }
 
 impl DebugColor {
@@ -27,6 +32,8 @@ impl DebugColor {
             DebugColor::Red => |s| s.red(),
             DebugColor::Green => |s| s.green(),
             DebugColor::Blue => |s| s.blue(),
+            DebugColor::Yellow => |s| s.yellow(), 
+            DebugColor::Magenta => |s| s.magenta(), 
         }
     }
 }
@@ -100,6 +107,7 @@ impl MpduPacket{
     }
 }
 
+
 pub struct PoissonSource{
 
     pub arrival_rate: f64, 
@@ -164,6 +172,7 @@ pub struct QueueModule {
     pub arrival_rate: f64,
     pub service_rate: f64,
     pub rate_departures_bps: f64,
+    pub t0_time: Instant, 
 }
 
 impl QueueModule {
@@ -181,6 +190,7 @@ impl QueueModule {
             arrival_rate: 0.0,
             service_rate: 0.0,
             rate_departures_bps,
+            t0_time: Instant::now(), 
         }
     }
 
@@ -188,15 +198,31 @@ impl QueueModule {
         
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
-
+     
         if self.queue.len() < self.queue_maxsize {
             self.queue.push_back(packet);
+            let elapsed =Instant::now().duration_since(self.t0_time); 
+            debug_print!(
+                DebugColor::Blue,
+                "{} [DBG QUEUE] Packet {} arrives, Q_size = {}",
+                format_duration(elapsed),
+                packet.packet_id,
+                self.queue.len()
+            ); 
 
             if self.queue.len() == 1 && !self.packet_being_served {
                 self.deque_schedule_service((), context).await;
             }
         } else {
             self.blocked_packet_counter += 1;
+            let elapsed = Instant::now().duration_since(self.t0_time); 
+            debug_print!(
+                DebugColor::Red,
+                "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {}",
+                format_duration(elapsed),
+                packet.packet_id,
+                self.queue.len()
+            ); 
         }
     }
 
@@ -207,13 +233,20 @@ impl QueueModule {
         ) -> impl Future<Output = ()> + Send + 'a {
     
         async move {
-    
-
             if self.packet_being_served == true {
-                println!("DEQUE!");
-                self.aux_packet_serviced.print(); 
+
+                let elapsed = Instant::now().duration_since(self.t0_time); 
+                debug_print!(
+                    DebugColor::Magenta,
+                    "{} [DBG SERVE] --Packet {} sent, Q_size = {}",
+                    format_duration(elapsed),
+                    self.aux_packet_serviced.packet_id,
+                    self.queue.len()
+                );
+                // self.aux_packet_serviced.print(); 
                 self.output_port.send(self.aux_packet_serviced).await; 
                 self.aux_packet_serviced = MpduPacket::new(); 
+                self.packet_being_served = false; 
             }
 
             if let Some(packet) = self.queue.pop_front() {
@@ -221,8 +254,16 @@ impl QueueModule {
                 let mut serviced_packet = packet;
                 serviced_packet.queue_out_instant = now;
                 serviced_packet.T_q = now.duration_since(serviced_packet.queue_in_instant);
-                
-                println!("Length packet: {}", serviced_packet.length_packet); 
+                let elapsed = now.duration_since(self.t0_time); 
+                debug_print!(
+                    DebugColor::Yellow,
+                    "{} [DBG DEQUE] -Packet {} dequeued, length: {}, Q_size = {}",
+                    format_duration(elapsed),
+                    serviced_packet.packet_id,
+                    serviced_packet.length_packet,
+                    self.queue.len()
+                ); 
+                // println!("Length packet: {}", serviced_packet.length_packet); 
                 let time_of_service_secs = Duration::from_secs_f64(
                     serviced_packet.length_packet as f64 / self.rate_departures_bps
                 );
@@ -273,9 +314,16 @@ impl Sink {
     pub async fn input(&mut self, packet: MpduPacket){
 
         let elapsed = self.t0_sink.elapsed(); 
-        println!("{} - Packet received!!", format_duration(elapsed)); 
-        packet.print(); 
-        self.received_packet_counter += 1; 
+        debug_print!(
+            DebugColor::Red,
+            "{} [DBG SINK]  --- Packet {} received, Length: {}",
+            format_duration(elapsed),
+            packet.packet_id,
+            packet.length_packet
+        );
+        // println!("{} - Packet received!!", format_duration(elapsed)); 
+        // packet.print(); 
+        self.received_packet_counter += 1;  
     }
 }
 
@@ -284,10 +332,16 @@ impl Model for Sink {}
 fn main( ){
     // DEFINE SIM PARAMS
     let mean_length: f64 = 1000.0; 
-    let rate_bps = 50.0; 
+    let rate_bps = 20.0; 
 
     let k_queue: usize = 100; 
-    let rate_queue_bps:f64 = 60.0; 
+    let rate_queue_bps:f64 = 20000.0; 
+
+
+    let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue); 
+
+
+
     //// DEFINE COMPONENTS
     let mut source = PoissonSource::new(rate_bps, mean_length); 
     let mut queue: QueueModule = QueueModule::new(k_queue-1 as usize, rate_queue_bps) ; 
@@ -331,7 +385,12 @@ fn main( ){
 
     let mut t = t0; 
     assert_eq!(simu.time(), t); 
-    
+
+
+
+
+
+    // START WITH FIRST EVENT
     scheduler.schedule_event(
         Duration::from_secs(1),
         PoissonSource::send_packet,
@@ -341,7 +400,7 @@ fn main( ){
     .unwrap(); 
 
 
-    for i in 0..10000000{
+    for i in 0..100{ // CARRY ON 
         simu.step(); 
 
     }
