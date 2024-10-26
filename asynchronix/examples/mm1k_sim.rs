@@ -4,6 +4,7 @@ use asynchronix::model::{Context, InitializedModel, Model};
 use asynchronix::ports::{EventBuffer, Output};
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
+use tai_time::TaiTime;
 
 use std::cmp::{self, max, min}; 
 use rand::thread_rng;
@@ -14,9 +15,26 @@ use std::time::{Instant, Duration};
 use std::collections::VecDeque;
 
 mod libs;                // for callign local library
-use crate::libs::{LittleTheoremMM1K, compute_mm1k_metrics}; 
+use crate::libs::{LittleTheoremMM1K, CsvType, compute_mm1k_metrics, CumulativeStats }; 
 use colored::*;
 use std::fmt::Display;
+
+
+use std::fs::File; // for CSVs
+use std::io::{self, Write};
+use std::fmt::Write as FmtWrite; // For `fmt::Write` trait on `std::string::String`
+use std::path::Path;
+
+
+use asynchronix::time::NoClock; 
+
+#[macro_export]
+macro_rules! format_elapsed {
+    ($elapsed:expr) => {{
+        let total_seconds = $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
+        format!("{:.9}", total_seconds)
+    }};
+}
 
 pub enum DebugColor {
     Red,
@@ -80,8 +98,8 @@ fn format_duration(duration: Duration) -> String {
 pub struct MpduPacket {
     pub packet_id: usize,
     pub length_packet: usize,
-    pub queue_in_instant: Instant,
-    pub queue_out_instant: Instant,
+    pub queue_in_instant: TaiTime<0>,
+    pub queue_out_instant: TaiTime<0>,
     pub sink_in_instant: Instant,
     pub T_q: Duration,
     pub T_s: Duration,
@@ -93,8 +111,8 @@ impl MpduPacket{
         Self {
             packet_id : 0, 
             length_packet: 0, 
-            queue_in_instant:  Instant::now(),
-            queue_out_instant: Instant::now(),
+            queue_in_instant:  TaiTime::default(),
+            queue_out_instant: TaiTime::default(),
             sink_in_instant: Instant::now(),
             T_q: Duration::ZERO,
             T_s: Duration::ZERO,
@@ -158,7 +176,7 @@ impl PoissonSource{
 
 impl Model for PoissonSource{} 
 
-
+#[derive(Clone)]
 pub struct QueueModule {
     pub output_port: Output<MpduPacket>,
     pub queue: VecDeque<MpduPacket>,
@@ -173,6 +191,8 @@ pub struct QueueModule {
     pub service_rate: f64,
     pub rate_departures_bps: f64,
     pub t0_time: Instant, 
+
+    pub csv_metrics: CsvType, 
 }
 
 impl QueueModule {
@@ -191,21 +211,27 @@ impl QueueModule {
             service_rate: 0.0,
             rate_departures_bps,
             t0_time: Instant::now(), 
+
+            csv_metrics: CsvType::new(), 
         }
     }
 
-    pub async fn input(&mut self, packet: MpduPacket, context: &Context<Self>) {
+    
+
+    pub async fn input(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
      
         if self.queue.len() < self.queue_maxsize {
+            packet.queue_in_instant = context.scheduler.time(); 
             self.queue.push_back(packet);
-            let elapsed =Instant::now().duration_since(self.t0_time); 
+            let elapsed =context.scheduler.time();  
+
             debug_print!(
                 DebugColor::Blue,
                 "{} [DBG QUEUE] Packet {} arrives, Q_size = {}",
-                format_duration(elapsed),
+                format_elapsed!(elapsed),
                 packet.packet_id,
                 self.queue.len()
             ); 
@@ -215,11 +241,11 @@ impl QueueModule {
             }
         } else {
             self.blocked_packet_counter += 1;
-            let elapsed = Instant::now().duration_since(self.t0_time); 
+            let elapsed = context.scheduler.time(); 
             debug_print!(
                 DebugColor::Red,
                 "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {}",
-                format_duration(elapsed),
+                format_elapsed!(elapsed),
                 packet.packet_id,
                 self.queue.len()
             ); 
@@ -234,12 +260,11 @@ impl QueueModule {
     
         async move {
             if self.packet_being_served == true {
-
-                let elapsed = Instant::now().duration_since(self.t0_time); 
+                let elapsed = context.scheduler.time(); 
                 debug_print!(
                     DebugColor::Magenta,
                     "{} [DBG SERVE] --Packet {} sent, Q_size = {}",
-                    format_duration(elapsed),
+                    format_elapsed!(elapsed),
                     self.aux_packet_serviced.packet_id,
                     self.queue.len()
                 );
@@ -250,11 +275,13 @@ impl QueueModule {
             }
 
             if let Some(packet) = self.queue.pop_front() {
-                let now = Instant::now();
+
+                let now: tai_time::TaiTime<0> = context.scheduler.time(); 
+
                 let mut serviced_packet = packet;
                 serviced_packet.queue_out_instant = now;
-                serviced_packet.T_q = now.duration_since(serviced_packet.queue_in_instant);
-                let elapsed = now.duration_since(self.t0_time); 
+                serviced_packet.T_q = now.duration_since( serviced_packet.queue_in_instant);
+                let elapsed: tai_time::TaiTime<0> = context.scheduler.time(); 
 
                 // println!("Length packet: {}", serviced_packet.length_packet); 
                 let time_of_service_secs = Duration::from_secs_f64(
@@ -266,7 +293,7 @@ impl QueueModule {
                 debug_print!(
                     DebugColor::Yellow,
                     "{} [DBG DEQUE] -Packet {} dequeued, length: {}, Q_size = {}, T_q = {}, exp_T_s = {}",
-                    format_duration(elapsed),
+                    format_elapsed!(elapsed),
                     serviced_packet.packet_id,
                     serviced_packet.length_packet,
                     self.queue.len(),
@@ -274,7 +301,9 @@ impl QueueModule {
                     serviced_packet.expected_T_s.as_secs_f32(), 
                 ); 
                 self.packet_being_served = true;
-                self.aux_packet_serviced = serviced_packet;
+                self.aux_packet_serviced = serviced_packet.clone();
+                let elapsed = context.scheduler.time(); 
+                self.csv_metrics.update_stats(elapsed, serviced_packet.packet_id, self.queue.len(), serviced_packet.expected_T_s.as_secs_f64(), serviced_packet.T_q.as_secs_f64(), serviced_packet.length_packet );
 
                 context.scheduler.schedule_event(
                     time_of_service_secs,
@@ -315,13 +344,14 @@ impl Sink {
         }
     }
 
-    pub async fn input(&mut self, packet: MpduPacket){
+    pub async fn input(&mut self, packet: MpduPacket, context: &Context<Self>,
+){
 
-        let elapsed = self.t0_sink.elapsed(); 
+        let elapsed = context.scheduler.time(); 
         debug_print!(
             DebugColor::Red,
-            "{} [DBG SINK]  --- Packet {} at sink", 
-            format_duration(elapsed),
+            "{} [DBG SINK]  ---Packet {} at sink", 
+            format_elapsed!(elapsed),
             packet.packet_id,
         );
         // println!("{} - Packet received!!", format_duration(elapsed)); 
@@ -373,11 +403,22 @@ fn main( ){
     // .add_model(sink, sink_mbox, "Sink")
     // .init(t0); 
 
-    let mut simu = SimInit::new()
+    let mut simu = SimInit::with_num_threads(1)
                 .add_model(source, mbox_src, "Poisson")
                 .add_model(queue, mbox_queue, "Queue")
                 .add_model(sink, sink_mbox, "Sink")
                 .init(t0); 
+
+
+    // let clock = NoClock::new(); 
+
+    // let mut simu = SimInit::new()
+    // .set_clock(clock)
+    // .add_model(source, mbox_src, "Poisson")
+    // .add_model(queue, mbox_queue, "Queue")
+    // .add_model(sink, sink_mbox, "Sink")
+    // .init(t0); 
+    // ; 
 
     let scheduler = simu.scheduler(); 
     // ----------
@@ -386,7 +427,7 @@ fn main( ){
 
     // Check initial conditions.
 
-    let mut t = t0; 
+    let t = t0; 
     assert_eq!(simu.time(), t); 
 
     // START WITH FIRST EVENT
@@ -398,11 +439,41 @@ fn main( ){
     ) 
     .unwrap(); 
 
-    for i in 0..100{ // CARRY ON 
-        simu.step(); 
-    }
+    let stoptime = 1E3 ;
+    simu.step_by(Duration::from_secs_f64(stoptime)) ; 
+    // for i in 0..stoptime{ // CARRY ON 
+    //     simu.step(); 
+    // }
 
     println!("************ END RESULTS ***********\n LT: {:#?}", LT); 
+
+    // DUMP CSV METRICS
+
+    // fn dump_csvs(queue: QueueModule, T_end: f64, k_queue: usize){
+
+    //     let filename = format!("Results/QUEUE_T{}_K{}.csv", T_end, k_queue) ; 
+    //     let mut file = File::create(&filename)?; 
+    
+    //     writeln!(file, "timestamp,packet_ID,queue_size,L_packet,T_q,T_s");
+    
+    //     for i in 0..queue.csv_metrics.v_timestamp.len(){
+
+    //         writeln!(file, "{},{},{},{},{},{}", 
+    //             queue.csv_metrics.v_timestamp[i],
+    //             queue.csv_metrics.v_packet_id[i],
+    //             queue.csv_metrics.v_queue_size[i],
+    //             queue.csv_metrics.v_packet_l[i],
+    //             queue.csv_metrics.v_queue_tq[i],
+    //             queue.csv_metrics.v_queue_ts[i]
+    //         ); 
+    //     }
+    //     println!("QUEUE CSV file has been created successfully.");
+
+    // }
+
+    // dump_csvs(queue.clone(), stoptime as f64, k_queue);
+
+
 
 
 }
