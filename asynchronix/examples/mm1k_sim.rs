@@ -219,6 +219,23 @@ impl QueueModule {
         }
     }
 
+
+    pub async fn send_ampdu(&mut self, context: &Context<Self>){
+        let elapsed = context.scheduler.time();
+        debug_print!(
+            DebugColor::Magenta,
+            "{} [DBG SERVE] --AMPDU sent to STA {} with {} packets inside, Q_size = {}",
+            format_elapsed!(elapsed),
+            self.aux_ampdu_serviced.sta_id,
+            self.aux_ampdu_serviced.mpdu_packets.len(),
+            self.queue.len()
+        );
+        self.output_port.send(self.aux_ampdu_serviced.clone()).await;
+        self.aux_ampdu_serviced.reset();
+        self.packet_being_served = false;
+    }
+
+
     fn deque_schedule_service<'a>(
         &'a mut self,
         _: (),
@@ -226,18 +243,7 @@ impl QueueModule {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             if self.packet_being_served == true {
-                let elapsed = context.scheduler.time();
-                debug_print!(
-                    DebugColor::Magenta,
-                    "{} [DBG SERVE] --AMPDU sent to STA {} with {} packets inside, Q_size = {}",
-                    format_elapsed!(elapsed),
-                    self.aux_ampdu_serviced.sta_id,
-                    self.aux_ampdu_serviced.mpdu_packets.len(),
-                    self.queue.len()
-                );
-                self.output_port.send(self.aux_ampdu_serviced.clone()).await;
-                self.aux_ampdu_serviced.reset();
-                self.packet_being_served = false;
+                self.send_ampdu(&context).await; 
             }
 
             if let Some(first_packet) = self.queue.front() {

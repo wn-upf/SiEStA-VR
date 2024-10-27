@@ -407,6 +407,26 @@ impl AmpduPacket {
             z: 0.0,
         }; // Reset coordinates to default (0.0, 0.0)
     }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            mpdu_packets: Vec::with_capacity(capacity),
+            sta_id: 0,
+            coordinates: Coords::new(),
+            size: 0,
+            total_length: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.mpdu_packets.is_empty()
+    }
+
+    fn add_packet(&mut self, packet: MpduPacket) {
+        self.total_length += packet.length_packet;
+        self.size += 1;
+        self.mpdu_packets.push(packet);
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
