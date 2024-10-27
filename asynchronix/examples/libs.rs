@@ -6,6 +6,8 @@ use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
 use std::time::{Duration, Instant};
+use rand::thread_rng;
+use rand_distr::{Distribution, Exp};
 
 #[derive(Clone)]
 pub struct CsvType {
@@ -35,6 +37,13 @@ macro_rules! format_timestamp {
             $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
         format!("{:.9}", total_seconds)
     }};
+}
+
+pub fn exponential(mean: f64) -> f64 {
+    let mut rng = thread_rng();
+    let exp = Exp::new(1.0 / mean).unwrap();
+    let value = exp.sample(&mut rng);
+    value
 }
 
 impl CsvType {

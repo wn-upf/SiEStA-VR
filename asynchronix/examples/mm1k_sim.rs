@@ -6,18 +6,20 @@ use asynchronix::ports::Output;
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
 
-use rand::thread_rng;
-use rand_distr::{Distribution, Exp};
+
 use std::cmp::{self};
 
 use std::time::{Duration, Instant};
 
 use std::cmp::{max, min};
 use std::collections::VecDeque;
-mod libs; // for callign local library
+
+mod libs; // for calling m own local library
 use crate::libs::{
-    compute_mm1k_metrics, frametransmission_delay, Coords, CsvType, ResultsFrameTXDelay,
+    compute_mm1k_metrics, frametransmission_delay, Coords, CsvType, ResultsFrameTXDelay, exponential,
 };
+
+use std::env; // for input args
 
 use crate::libs::{AmpduPacket, MpduPacket};
 
@@ -26,6 +28,19 @@ use colored::*;
 const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 const MAX_AMPDU_SIZE: i32 = 64;
 
+// Define a constant to control debugging
+const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+
+#[macro_export]
+macro_rules! debug_print {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // Check if debugging is enabled
+        if DEBUG_PRINT_ENABLED {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_color_fn()(msg));
+        }
+    };
+}
 #[macro_export]
 macro_rules! format_elapsed {
     ($elapsed:expr) => {{
@@ -55,13 +70,8 @@ impl DebugColor {
     }
 }
 
-#[macro_export]
-macro_rules! debug_print {
-    ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        let msg = format!($fmt, $($arg)*);
-        println!("{}", $color.to_color_fn()(msg));
-    };
-}
+
+
 
 pub trait DebugPrint {
     fn print_debug(&self, color: DebugColor, prefix: &str);
@@ -78,14 +88,6 @@ impl DebugPrint for MpduPacket {
         );
     }
 }
-
-pub fn exponential(mean: f64) -> f64 {
-    let mut rng = thread_rng();
-    let exp = Exp::new(1.0 / mean).unwrap();
-    let value = exp.sample(&mut rng);
-    value
-}
-
 pub struct PoissonSource {
     pub arrival_rate: f64,
     pub mean_length_packets: f64,
@@ -389,13 +391,27 @@ impl Sink {
 impl Model for Sink {}
 
 fn main() {
+
+
+     // READ COMMAND-LINE ARGUMENTS
+     let args: Vec<String> = env::args().collect();
+     if args.len() != 5 {
+         eprintln!("Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps>", args[0]);
+         return;
+     }
+ 
+     let mean_length: f64 = args[1].parse().expect("Invalid mean_length");
+     let k_queue: usize = args[2].parse().expect("Invalid k_queue");
+     let rate_bps: f64 = args[3].parse().expect("Invalid rate_bps");
+     let rate_queue_bps: f64 = args[4].parse().expect("Invalid rate_queue_bps");
+
     // DEFINE SIM PARAMS
-    let mean_length: f64 = 1000.0;
+    // let mean_length: f64 = 1000.0;
 
-    let k_queue: usize = 100;
-    let rate_bps = 2000.0;
+    // let k_queue: usize = 100;
+    // let rate_bps = 2000.0;
 
-    let rate_queue_bps: f64 = 20000.0;
+    // let rate_queue_bps: f64 = 20000.0;
 
     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
 
@@ -421,7 +437,7 @@ fn main() {
 
     let t0 = MonotonicTime::EPOCH;
 
-    let mut simu = SimInit::with_num_threads(1)
+    let mut simu = SimInit::new()
         .add_model(source, mbox_src, "Poisson")
         .add_model(queue, mbox_queue, "Queue")
         .add_model(sink, sink_mbox, "Sink")
