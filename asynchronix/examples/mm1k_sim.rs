@@ -395,15 +395,15 @@ fn main() {
 
      // READ COMMAND-LINE ARGUMENTS
      let args: Vec<String> = env::args().collect();
-     if args.len() != 5 {
+     if args.len() != 6 {
          eprintln!("Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps>", args[0]);
          return;
      }
- 
-     let mean_length: f64 = args[1].parse().expect("Invalid mean_length");
-     let k_queue: usize = args[2].parse().expect("Invalid k_queue");
-     let rate_bps: f64 = args[3].parse().expect("Invalid rate_bps");
-     let rate_queue_bps: f64 = args[4].parse().expect("Invalid rate_queue_bps");
+     let stoptime: f64 = args[1].parse().expect("Invalid T_END"); 
+     let mean_length: f64 = args[2].parse().expect("Invalid mean_length");
+     let k_queue: usize = args[3].parse().expect("Invalid k_queue");
+     let rate_bps: f64 = args[4].parse().expect("Invalid rate_bps");
+     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
 
     // DEFINE SIM PARAMS
     // let mean_length: f64 = 1000.0;
@@ -419,6 +419,8 @@ fn main() {
     let mut source = PoissonSource::new(rate_bps, mean_length);
     let mut queue: QueueModule = QueueModule::new(k_queue - 1 as usize, rate_queue_bps);
     let mut sink = Sink::new();
+
+    let csv_data_handle = queue.csv_metrics.get_data_handle(); 
 
     let mbox_src = Mailbox::new();
     let mbox_src_address = mbox_src.address();
@@ -457,19 +459,21 @@ fn main() {
     // START WITH FIRST EVENT
     scheduler
         .schedule_event(
-            Duration::from_secs(1),
+            Duration::from_millis(1),
             PoissonSource::send_packet,
             (),
             &mbox_src_address,
         )
         .unwrap();
 
-    let stoptime = 1E3;
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
-    // // for i in 0..stoptime{                          //also works
-    // //     simu.step();
-    // // }
+    // After simulation, write the CSV data
+    if let Ok(data) = csv_data_handle.lock() {
+        if let Err(e) = data.write_to_csv() {
+            eprintln!("Failed to write CSV file: {}", e);
+        }
+    }
 
     println!("************ END RESULTS ***********\n LT: {:#?}", LT);
 }

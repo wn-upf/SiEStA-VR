@@ -9,17 +9,9 @@ use std::time::{Duration, Instant};
 use rand::thread_rng;
 use rand_distr::{Distribution, Exp};
 
-#[derive(Clone)]
-pub struct CsvType {
-    pub first_t: bool,
-    pub v_timestamp: Vec<f64>,
-    pub v_packet_id: Vec<usize>,
-    pub v_queue_size: Vec<usize>,
-    pub v_queue_ts: Vec<f64>,
-    pub v_queue_tq: Vec<f64>,
-    pub v_packet_l: Vec<usize>,
-    // v_queue_ts_sliding_avg_mcs: Vec<f64>, // Uncomment if needed
-}
+use std::sync::Arc;
+use std::sync::Mutex;
+
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -46,6 +38,78 @@ pub fn exponential(mean: f64) -> f64 {
     value
 }
 
+
+#[derive(Clone)]
+
+pub struct CsvType {
+    first_t: bool,
+    v_timestamp: Vec<String>,
+    v_packet_id: Vec<usize>,
+    v_queue_size: Vec<usize>,
+    v_queue_ts: Vec<f64>,
+    v_queue_tq: Vec<f64>,
+    v_packet_l: Vec<usize>,
+    csv_data: Arc<Mutex<CsvData>>,
+}
+
+// Separate struct to hold the data that will be shared
+pub struct CsvData {
+    v_timestamp: Vec<String>,
+    v_packet_id: Vec<usize>,
+    v_queue_size: Vec<usize>,
+    v_queue_ts: Vec<f64>,
+    v_queue_tq: Vec<f64>,
+    v_packet_l: Vec<usize>,
+}
+
+impl CsvData {
+    pub fn new() -> Self {
+        Self {
+            v_timestamp: Vec::new(),
+            v_packet_id: Vec::new(),
+            v_queue_size: Vec::new(),
+            v_queue_ts: Vec::new(),
+            v_queue_tq: Vec::new(),
+            v_packet_l: Vec::new(),
+        }
+    }
+
+    pub fn write_to_csv(&self) -> std::io::Result<()> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open("stats.csv")?;
+
+        let mut writer = Writer::from_writer(file);
+
+        // Write header
+        writer.write_record(&[
+            "timestamp",
+            "packet_id",
+            "queue_size",
+            "Ts",
+            "Tq",
+            "packet_length",
+        ])?;
+
+        // Write all stored data at once
+        for i in 0..self.v_timestamp.len() {
+            writer.write_record(&[
+                &self.v_timestamp[i],
+                &self.v_packet_id[i].to_string(),
+                &self.v_queue_size[i].to_string(),
+                &self.v_queue_ts[i].to_string(),
+                &self.v_queue_tq[i].to_string(),
+                &self.v_packet_l[i].to_string(),
+            ])?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+}
+
 impl CsvType {
     pub fn new() -> Self {
         Self {
@@ -56,62 +120,33 @@ impl CsvType {
             v_queue_ts: Vec::new(),
             v_queue_tq: Vec::new(),
             v_packet_l: Vec::new(),
-            // v_queue_ts_sliding_avg_mcs: Vec::new(), // Uncomment if needed
+            csv_data: Arc::new(Mutex::new(CsvData::new())),
         }
+    }
+
+    pub fn get_data_handle(&self) -> Arc<Mutex<CsvData>> {
+        Arc::clone(&self.csv_data)
     }
 
     pub fn update_stats(
         &mut self,
-        now: tai_time::TaiTime<0>,
+        now: TaiTime<0>,
         id_packet: usize,
         queue_size: usize,
         Ts: f64,
         Tq: f64,
         length_packet: usize,
     ) {
-        // println!("[DBG STATS]");
-
-        // Open or create the CSV file in append mode
-        let file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .create(true)
-            .open("stats.csv")
-            .expect("Failed to open or create CSV file");
-
-        // Create a new CSV writer using the file
-        let mut writer = Writer::from_writer(file);
-
-        // Write the header if this is the first entry
-        if self.first_t {
-            writer
-                .write_record(&[
-                    "timestamp",
-                    "packet_id",
-                    "queue_size",
-                    "Ts",
-                    "Tq",
-                    "packet_length",
-                ])
-                .expect("Failed to write header to CSV");
-            self.first_t = false; // Set to false to avoid writing the header again
-        }
         let formatted_timestamp = format_timestamp!(now);
-
-        // Write data as a new row to the CSV
-        writer
-            .write_record(&[
-                formatted_timestamp.to_string(),
-                id_packet.to_string(),
-                queue_size.to_string(),
-                Ts.to_string(),
-                Tq.to_string(),
-                length_packet.to_string(),
-            ])
-            .expect("Failed to write record to CSV");
-
-        // Ensure the writer flushes to file
-        writer.flush().expect("Failed to flush CSV writer");
+        
+        if let Ok(mut data) = self.csv_data.lock() {
+            data.v_timestamp.push(formatted_timestamp);
+            data.v_packet_id.push(id_packet);
+            data.v_queue_size.push(queue_size);
+            data.v_queue_ts.push(Ts);
+            data.v_queue_tq.push(Tq);
+            data.v_packet_l.push(length_packet);
+        }
     }
 }
 
