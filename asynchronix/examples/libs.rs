@@ -487,9 +487,6 @@ pub fn frametransmission_delay(
     let T =
         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
 
-    // printf("DBG T = %.6f, T_DATA = %.6f, T_backoff = %.6f\n", T, T_DATA,  T_DETERMINISTIC_BACKOFF);
-
-    // printf("[DBG] T = %.6f, T_DATA = %.6f\n", T, T_DATA);
     ResultsFrameTXDelay {
         pathloss: PL,
         p_rx: Pr,
