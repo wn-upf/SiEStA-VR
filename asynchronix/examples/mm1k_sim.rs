@@ -251,7 +251,7 @@ impl QueueModule {
             if let Some(packet) = self.queue.pop_front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
-                let mut serviced_packet = packet;
+                let mut serviced_packet = packet.clone();
                 serviced_packet.queue_out_instant = now;
                 serviced_packet.T_q = now.duration_since(serviced_packet.queue_in_instant);
                 let elapsed: tai_time::TaiTime<0> = context.scheduler.time();
@@ -410,7 +410,7 @@ fn main() {
         )
         .unwrap();
 
-    let stoptime = 1E7;
+    let stoptime = 1E3;
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
     // // for i in 0..stoptime{                          //also works

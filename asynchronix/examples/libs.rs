@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 
 #[derive(Clone)]
 pub struct CsvType {
+    pub first_t: bool, 
     pub v_timestamp: Vec<f64>,
     pub v_packet_id: Vec<usize>,
     pub v_queue_size: Vec<usize>,
@@ -15,9 +16,21 @@ pub struct CsvType {
     // v_queue_ts_sliding_avg_mcs: Vec<f64>, // Uncomment if needed
 }
 
+
+
+#[macro_export]
+macro_rules! format_timestamp {
+    ($elapsed:expr) => {{
+        let total_seconds =
+            $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
+        format!("{:.9}", total_seconds)
+    }};
+}
+
 impl CsvType {
     pub fn new() -> Self {
         Self {
+            first_t : true, 
             v_timestamp: Vec::new(),
             v_packet_id: Vec::new(),
             v_queue_size: Vec::new(),
@@ -27,19 +40,9 @@ impl CsvType {
             // v_queue_ts_sliding_avg_mcs: Vec::new(), // Uncomment if needed
         }
     }
-    // pub fn update_stats(&mut self, now: f64, ID_packet: usize, queue_size: usize, Ts: f64,
-    //                     Tq: f64, length_packet: usize )
-    //     {
-    //         println!("[DBG STATS]");
-    //         self.v_timestamp.push(now);
-    //         self.v_packet_id.push(ID_packet);
-    //         self.v_queue_size.push(queue_size);
-    //         self.v_queue_ts.push(Ts);
-    //         self.v_queue_tq.push(Tq);
-    //         self.v_packet_l.push(length_packet);
-    // }
+
     pub fn update_stats(
-        &self,
+        &mut self,
         now: tai_time::TaiTime<0>,
         id_packet: usize,
         queue_size: usize,
@@ -47,7 +50,7 @@ impl CsvType {
         Tq: f64,
         length_packet: usize,
     ) {
-        println!("[DBG STATS]");
+        // println!("[DBG STATS]");
 
         // Open or create the CSV file in append mode
         let file = OpenOptions::new()
@@ -60,10 +63,20 @@ impl CsvType {
         // Create a new CSV writer using the file
         let mut writer = Writer::from_writer(file);
 
+
+        // Write the header if this is the first entry
+        if self.first_t {
+            writer
+            .write_record(&["timestamp", "packet_id", "queue_size", "Ts", "Tq", "packet_length"])
+            .expect("Failed to write header to CSV");
+            self.first_t = false;  // Set to false to avoid writing the header again
+        }
+        let formatted_timestamp = format_timestamp!(now);
+
         // Write data as a new row to the CSV
         writer
             .write_record(&[
-                now.to_string(),
+                formatted_timestamp.to_string(),
                 id_packet.to_string(),
                 queue_size.to_string(),
                 Ts.to_string(),
