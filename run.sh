@@ -1,17 +1,17 @@
 #!/bin/bash
 
 
-simTime=100
+simTime=10
 
 k_queue=100
 mean_length=1000.0
 
 
-rate_bps_src=2000.0
+rate_bps_src=20000.0
 rate_bps_queue=20000.0
 
 
-distance=1.0
+distance=25.0
 
 
 # rm out_log.ans

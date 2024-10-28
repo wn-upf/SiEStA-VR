@@ -22,6 +22,14 @@ const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
 const DIFS: f64 = 31E-6;
 
+
+
+pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
+pub const MAX_AMPDU_SIZE: i32 = 64;
+pub const P_TX:     f64 = 20.0; 
+
+pub const MAX_STAS : usize = 100; 
+
 #[macro_export]
 macro_rules! format_timestamp {
     ($elapsed:expr) => {{
@@ -323,8 +331,10 @@ pub fn compute_mm1k_metrics(
 //     pub t_residual: f64,
 // }
 
+
 #[derive(Debug, Clone, Copy)]
 pub struct MpduPacket {
+
     pub packet_id: usize,
     pub length_packet: usize,
     pub queue_in_instant: TaiTime<0>,
@@ -334,8 +344,9 @@ pub struct MpduPacket {
     pub T_s: Duration,
     pub expected_T_s: Duration,
 
+    pub sta_src_id: i32, 
     pub sta_dest_id: i32,
-    pub sta_coords: Coords,
+    pub sta_dest_coords: Coords,
 }
 
 impl MpduPacket {
@@ -349,8 +360,10 @@ impl MpduPacket {
             T_q: Duration::ZERO,
             T_s: Duration::ZERO,
             expected_T_s: Duration::ZERO,
+            
+            sta_src_id: 0, 
             sta_dest_id: 0,
-            sta_coords: Coords::new(),
+            sta_dest_coords: Coords::new(),
         }
     }
 
@@ -398,6 +411,7 @@ impl AmpduPacket {
     // Method to reinitialize all values
     pub fn reset(&mut self) {
         self.mpdu_packets.clear(); // Clear the vector of MPDU packets
+        // self.mpdu_packets.reserve(MAX_AMPDU_SIZE as usize); 
         self.total_length = 0; // Reset total length
         self.size = 0; // Reset size
         self.sta_id = -1; // Reset STA_ID (assuming -1 is an uninitialized value)

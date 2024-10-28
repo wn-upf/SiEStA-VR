@@ -1,33 +1,27 @@
 use std::fmt::Debug;
 use std::future::Future;
+use std::i32::MAX;
 
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
-
-
 use std::cmp::{self};
-
+use std::env;
 use std::time::{Duration, Instant};
-
+use colored::*;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
+use std::f64::consts::PI;
+use rand::Rng; 
 
 mod libs; // for calling m own local library
 use crate::libs::{
-    compute_mm1k_metrics, frametransmission_delay, Coords, CsvType, ResultsFrameTXDelay, exponential,
+    compute_mm1k_metrics, frametransmission_delay, Coords, CsvType, ResultsFrameTXDelay, exponential, DEFAULT_TMAX_AGG, P_TX, MAX_AMPDU_SIZE
 };
-
-use std::env; // for input args
 
 use crate::libs::{AmpduPacket, MpduPacket};
 
-use colored::*;
-
-const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
-const MAX_AMPDU_SIZE: i32 = 64;
-const P_TX:     f64 = 20.0; 
 
 // Define a constant to control debugging
 const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
@@ -137,6 +131,119 @@ impl PoissonSource {
 
 impl Model for PoissonSource {}
 
+
+
+
+pub struct STA_source { // extended class to PoissonGen
+    
+    pub output_port: Output<MpduPacket>,
+
+    pub sta_id: i32,
+    pub destination_id: i32, 
+    
+    pub arrival_rate: f64,
+    pub mean_length_packets: f64,
+    pub num_packets_sent: usize,
+    pub received_packet_counter: usize, 
+
+    pub sta_coordinates: Coords, 
+    pub does_sta_tx: bool, 
+}
+
+impl STA_source {
+    pub fn new(arrival_rate: f64, mean_length: f64, src: i32, dest: i32, coordinates: Coords, does_STA_transmit: bool ) -> Self {
+        Self {
+            output_port: Default::default(),
+
+            sta_id: src, 
+            destination_id: dest, 
+            arrival_rate: arrival_rate,
+            mean_length_packets: mean_length,
+            num_packets_sent: 0,
+            sta_coordinates: coordinates, 
+
+            received_packet_counter: 0, 
+            does_sta_tx: does_STA_transmit, 
+        }
+    }
+
+    pub fn move_coordinates(&mut self, distance_to_move: f64) { // brownian movement for STA
+        let mut rng = rand::thread_rng();
+
+        // Generate a random angle in spherical coordinates to determine the direction of movement
+        let theta = rng.gen_range(0.0..2.0 * PI); // azimuthal angle for x and y
+        let phi = rng.gen_range(0.0..PI);         // polar angle for z-axis
+
+        // Decompose the distance into x, y, and z components
+        let dx = distance_to_move * theta.cos() * phi.sin();
+        let dy = distance_to_move * theta.sin() * phi.sin();
+        let dz = distance_to_move * phi.cos();
+
+
+        println!("[MOVE STA COORDS] Before: {:?}", self.sta_coordinates); 
+
+        // Update the coordinates
+        self.sta_coordinates.x += dx;
+        self.sta_coordinates.y += dy;
+        self.sta_coordinates.z += dz;
+        println!("                  After: {:?}", self.sta_coordinates); 
+    }
+
+    pub async fn input(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
+        let elapsed = context.scheduler.time();
+        for packet in ampdu_packet.mpdu_packets {
+            debug_print!(
+                DebugColor::Red,
+                "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
+                format_elapsed!(elapsed),
+                self.sta_id, 
+                packet.packet_id,
+                packet.sta_src_id, 
+                packet.sta_dest_id, 
+            );
+
+            self.received_packet_counter += 1;
+        }
+    }
+
+    fn send_packet<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+
+            if self.does_sta_tx{ // if STA is "TX type"         (and not "RX only")
+
+                let mut packet = MpduPacket::new();
+
+                let mut time_interarrival =
+                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
+                time_interarrival = max(time_interarrival, Duration::from_nanos(10));
+
+                let len_random = exponential(self.mean_length_packets as f64) as usize;
+                packet.length_packet = cmp::max(1, len_random);
+                packet.packet_id = self.num_packets_sent;
+
+                packet.sta_src_id = self.sta_id; 
+                packet.sta_dest_id = self.destination_id; 
+                                
+
+                self.output_port.send(packet.clone()).await;
+                self.num_packets_sent += 1;
+
+                context // reschedule this function
+                    .scheduler
+                    .schedule_event(time_interarrival, Self::send_packet, ())
+                    .unwrap();
+            }
+            
+        }
+    }
+}
+impl Model for STA_source {}
+
+
 #[derive(Clone)]
 pub struct QueueModule {
     pub output_port: Output<AmpduPacket>,
@@ -161,6 +268,8 @@ pub struct QueueModule {
 
     pub coords_queue: Coords,
     pub p_tx: f64,
+
+    pub STA_coords_grid: Vec<Coords>, 
 }
 
 impl QueueModule {
@@ -184,6 +293,7 @@ impl QueueModule {
 
             coords_queue: Coords::new(),
             p_tx: 20.0,
+            STA_coords_grid: Vec::new(), 
         }
     }
 
@@ -198,9 +308,11 @@ impl QueueModule {
 
             debug_print!(
                 DebugColor::Blue,
-                "{} [DBG QUEUE] Packet {} arrives, Q_size = {}",
+                "{} [DBG QUEUE] Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
                 format_elapsed!(elapsed),
                 packet.packet_id,
+                packet.sta_src_id,
+                packet.sta_dest_id, 
                 self.queue.len()
             );
 
@@ -221,17 +333,17 @@ impl QueueModule {
     }
 
 
-    pub async fn send_ampdu(&mut self, context: &Context<Self>){
+    pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket , context: &Context<Self>){
         let elapsed = context.scheduler.time();
         debug_print!(
             DebugColor::Magenta,
             "{} [DBG SERVE] --AMPDU sent to STA {} with {} packets inside, Q_size = {}",
             format_elapsed!(elapsed),
-            self.aux_ampdu_serviced.sta_id,
-            self.aux_ampdu_serviced.mpdu_packets.len(),
+            AMPDU_sent.sta_id,
+            AMPDU_sent.mpdu_packets.len(),
             self.queue.len()
         );
-        self.output_port.send(self.aux_ampdu_serviced.clone()).await;
+        self.output_port.send(AMPDU_sent).await;
         self.aux_ampdu_serviced.reset();
         self.packet_being_served = false;
     }
@@ -244,7 +356,7 @@ impl QueueModule {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             if self.packet_being_served == true {
-                self.send_ampdu(&context).await; 
+                self.send_ampdu( self.aux_ampdu_serviced.clone(), &context).await; 
             }
 
             if let Some(first_packet) = self.queue.front() {
@@ -253,7 +365,8 @@ impl QueueModule {
                 // Initialize AMPDU with first packet's info (but don't remove it yet)
                 self.aux_ampdu_serviced.reset();
                 self.aux_ampdu_serviced.sta_id = first_packet.sta_dest_id;
-                self.aux_ampdu_serviced.coordinates = first_packet.sta_coords.clone();
+                self.aux_ampdu_serviced.coordinates = first_packet.sta_dest_coords.clone();
+                self.aux_ampdu_serviced.size = 1; // start at 1
 
                 let mut index = 0;
                 let mut last_service_duration = Duration::default();
@@ -280,7 +393,7 @@ impl QueueModule {
                     // Check AMPDU constraints before adding packet
                     let resulting_delays = frametransmission_delay(
                         self.aux_ampdu_serviced.total_length as f64,
-                        MAX_AMPDU_SIZE,
+                        self.aux_ampdu_serviced.size,
                         self.coords_queue,
                         self.aux_ampdu_serviced.coordinates,
                         self.p_tx,
@@ -366,7 +479,7 @@ impl QueueModule {
 
 impl Model for QueueModule {}
 
-// #[derive(Default)]
+#[derive(Default)]
 pub struct Sink {
     // pub input: Input <MpduPacket>,
     pub received_packet_counter: usize,
@@ -399,97 +512,215 @@ impl Sink {
 impl Model for Sink {}
 
 fn main() {
+    env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
 
 
      // READ COMMAND-LINE ARGUMENTS
      let args: Vec<String> = env::args().collect();
-     if args.len() != 6 {
+     if args.len() != 7 {
          eprintln!("Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance>", args[0]);
          return;
      }
      let stoptime: f64 = args[1].parse().expect("Invalid T_END"); 
      let mean_length: f64 = args[2].parse().expect("Invalid mean_length");
      let k_queue: usize = args[3].parse().expect("Invalid k_queue");
-     let rate_bps: f64 = args[4].parse().expect("Invalid rate_bps");
+     let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
      let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
-
      let distance: f64 = args[6].parse().expect("Invalid STA distance"); 
 
 
-     let coords_sta = Coords{x: distance, y:0.0, z:0.0}; 
-    // DEFINE SIM PARAMS
-    // let mean_length: f64 = 1000.0;
+        /// SCENARIO 1: MM1K WITH POISSON, QUEUE, SINK
+    fn simple_MM1K(stoptime: f64, mean_length: f64, k_queue: usize, rate_bps_in: f64, rate_queue_bps: f64, distance: f64) {
+       
+       
+       let coords_sta = Coords{x: distance, y:0.0, z:0.0}; 
+       let results = frametransmission_delay(mean_length * MAX_AMPDU_SIZE as f64, MAX_AMPDU_SIZE, Coords::new(), coords_sta, P_TX);    
+       let effective_rate = mean_length / results.service_delay;
+   
+        let LT = compute_mm1k_metrics(rate_bps_in, mean_length, effective_rate, k_queue);
 
-    // let k_queue: usize = 100;
-    // let rate_bps = 2000.0;
-
-    // let rate_queue_bps: f64 = 20000.0;
-
-    let results = frametransmission_delay(mean_length, 1, Coords::new(), coords_sta, P_TX)
-
-    let effective_rate = mean_length / results.service_delay;
-
-    let LT = compute_mm1k_metrics(rate_bps, mean_length, effective_rate, k_queue);
-
-    //// DEFINE COMPONENTS
-    let mut source = PoissonSource::new(rate_bps, mean_length);
-    let mut queue: QueueModule = QueueModule::new(k_queue - 1 as usize, rate_queue_bps);
-    let mut sink = Sink::new();
-
-    let csv_data_handle = queue.csv_metrics.get_data_handle(); 
-
-    let mbox_src = Mailbox::new();
-    let mbox_src_address = mbox_src.address();
-
-    let mbox_queue = Mailbox::new();
-    let queue_address = mbox_queue.address();
-
-    let sink_mbox = Mailbox::new();
-    let sink_mbox_address = sink_mbox.address();
-
-    // CONNECT COMPONENTS
-    // source.output_port.connect(Sink::input, &sink_mbox);
-
-    source.output_port.connect(QueueModule::input, &mbox_queue);
-    queue.output_port.connect(Sink::input, &sink_mbox);
-
-    let t0 = MonotonicTime::EPOCH;
-
-    let mut simu = SimInit::new()
-        .add_model(source, mbox_src, "Poisson")
-        .add_model(queue, mbox_queue, "Queue")
-        .add_model(sink, sink_mbox, "Sink")
-        .init(t0);
-
-    let scheduler = simu.scheduler();
-    // ----------
-    // Simulation.
-    // ----------
-
-    // Check initial conditions.
-
-    let t = t0;
-
-    assert_eq!(simu.time(), t);
-
-    // START WITH FIRST EVENT
-    scheduler
-        .schedule_event(
-            Duration::from_millis(1),
-            PoissonSource::send_packet,
-            (),
-            &mbox_src_address,
-        )
-        .unwrap();
-
-    simu.step_by(Duration::from_secs_f64(stoptime)); //works
-
-    // After simulation, write the CSV data
-    if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv() {
-            eprintln!("Failed to write CSV file: {}", e);
+        let mut source = PoissonSource::new(rate_bps_in, mean_length);
+        let mut queue: QueueModule = QueueModule::new(k_queue - 1 as usize, rate_queue_bps);
+        let mut sink = Sink::new();
+    
+        let csv_data_handle = queue.csv_metrics.get_data_handle(); 
+    
+        let mbox_src = Mailbox::new();
+        let mbox_src_address = mbox_src.address();
+    
+        let mbox_queue = Mailbox::new();
+        let queue_address = mbox_queue.address();
+    
+        let sink_mbox = Mailbox::new();
+        let sink_mbox_address = sink_mbox.address();
+    
+        // CONNECT COMPONENTS
+        // source.output_port.connect(Sink::input, &sink_mbox);
+    
+        source.output_port.connect(QueueModule::input, &mbox_queue);
+        queue.output_port.connect(Sink::input, &sink_mbox);
+    
+        let t0 = MonotonicTime::EPOCH;
+    
+        let mut simu = SimInit::new()
+            .add_model(source, mbox_src, "Poisson")
+            .add_model(queue, mbox_queue, "Queue")
+            .add_model(sink, sink_mbox, "Sink")
+            .init(t0);
+    
+        let scheduler = simu.scheduler();
+        // ----------
+        // Simulation.
+        // ----------
+    
+        // Check initial conditions.
+    
+        let t = t0;
+    
+        assert_eq!(simu.time(), t);
+    
+        // START WITH FIRST EVENT
+        scheduler
+            .schedule_event(
+                Duration::from_millis(1),
+                PoissonSource::send_packet,
+                (),
+                &mbox_src_address,
+            )
+            .unwrap();
+    
+        simu.step_by(Duration::from_secs_f64(stoptime)); //works
+    
+        // After simulation, write the CSV data
+        if let Ok(data) = csv_data_handle.lock() {
+            if let Err(e) = data.write_to_csv() {
+                eprintln!("Failed to write CSV file: {}", e);
+            }
         }
+    
+        println!("************ END RESULTS ***********\n LT: {:#?}", LT);
+
     }
 
-    println!("************ END RESULTS ***********\n LT: {:#?}", LT);
+    
+    // SCENARIO 2: TWO STAS AS BG TRAFFIC, 1 STA AS SINK
+    fn multiple_STA_sim(num_STAs: usize, stoptime: f64, mean_length: f64, k_queue: usize, rate_bps_in: f64, rate_queue_bps: f64, distance: f64){
+
+
+        let v_distance = vec![1.0, distance, 20.0]; // just some random values
+        
+        let coords_sta1 = Coords{x: v_distance[0], y:0.0, z:0.0}; 
+        let coords_sta2 = Coords{x: v_distance[1], y:0.0, z:0.0}; 
+        let coords_sta3 = Coords{x: v_distance[2], y: 0.0, z: 0.0}; 
+
+        let vec_coords = vec![coords_sta1, coords_sta2, coords_sta3]; 
+        println!("vec_coords: {:?}", vec_coords); 
+
+
+        
+
+        let results1 = frametransmission_delay(mean_length * MAX_AMPDU_SIZE as f64, MAX_AMPDU_SIZE, Coords::new(), coords_sta1, P_TX);  
+        let results2 = frametransmission_delay(mean_length * MAX_AMPDU_SIZE as f64, MAX_AMPDU_SIZE, Coords::new(), coords_sta2, P_TX);         
+
+        let effective_rate1 = mean_length / results1.service_delay;
+        let effective_rate2 = mean_length/results2.service_delay; 
+        let effective_rate = (effective_rate1 + effective_rate2) / 2.0; 
+        let LT = compute_mm1k_metrics(rate_bps_in, mean_length, effective_rate, k_queue);
+
+
+
+        let mut sta1_bg: STA_source = STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta1, true); // STAs 0 and 1 send traffic to 5 through AP
+        let mut sta2_bg: STA_source = STA_source::new(rate_bps_in, mean_length, 1, 2, coords_sta2, true);         
+         
+        let mut sta5_ul: STA_source = STA_source::new(rate_bps_in, mean_length, 2, 7, coords_sta3, false); // RX STA, acts as sink with coordinates
+
+
+        let mut queue: QueueModule = QueueModule::new(k_queue - 1 as usize, rate_queue_bps);
+
+
+        queue.STA_coords_grid.resize(num_STAs, Coords::new());
+        for i in 0..num_STAs{
+            queue.STA_coords_grid[i] = vec_coords[i]; 
+        }
+
+
+        let csv_data_handle = queue.csv_metrics.get_data_handle(); 
+
+        let mbox_sta1 = Mailbox::new(); 
+        let mbox_sta2 = Mailbox::new(); 
+        let mbox_sta3 = Mailbox::new(); 
+
+        let sta1_address = mbox_sta1.address(); 
+        let sta2_address = mbox_sta2.address(); 
+        let sta3_address = mbox_sta3.address(); 
+
+        
+        let mbox_queue = Mailbox::new();
+        let queue_address = mbox_queue.address();
+
+        // let sink_mbox = Mailbox::new();
+        // let sink_mbox_address = sink_mbox.address();
+
+          // CONNECT COMPONENTS
+        // source.output_port.connect(Sink::input, &sink_mbox);
+    
+        sta1_bg.output_port.connect(QueueModule::input, &mbox_queue); // Two DL STAs send 
+        sta2_bg.output_port.connect(QueueModule::input, &mbox_queue); 
+        queue.output_port.connect(STA_source::input, &mbox_sta3);
+    
+        let t0 = MonotonicTime::EPOCH;
+    
+        let mut simu: asynchronix::simulation::Simulation = SimInit::new()
+            .add_model(sta1_bg, mbox_sta1, "STA1 (BG)")
+            .add_model(sta2_bg, mbox_sta2, "STA2 (BG)")
+            .add_model(queue, mbox_queue, "Queue")
+            .add_model(sta5_ul, mbox_sta3, "STA3 (Rx)")
+            .init(t0);
+    
+        let scheduler = simu.scheduler();
+        // ----------
+        // Simulation.
+        // ----------
+        // Check initial conditions.
+    
+        let t = t0;
+    
+        assert_eq!(simu.time(), t);
+    
+        // START WITH FIRST EVENT
+        scheduler
+            .schedule_event(
+                Duration::from_millis(1),   //STA 1 starts in 1 millisecond
+                STA_source::send_packet,
+                (),
+                &sta1_address,
+            )
+            .unwrap();
+        
+        scheduler
+        .schedule_event(
+            Duration::from_secs(5), // STA 2 will start in 5 seconds
+            STA_source::send_packet,
+            (),
+            &sta2_address,
+        )
+        .unwrap();
+        
+        simu.step_by(Duration::from_secs_f64(stoptime)); //works
+    
+        // After simulation, write the CSV data
+        if let Ok(data) = csv_data_handle.lock() {
+            if let Err(e) = data.write_to_csv() {
+                eprintln!("Failed to write CSV file: {}", e);
+            }
+        }
+
+        println!("************ END RESULTS STAS***********\n LT: {:#?}", LT);
+
+    }
+
+    // simple_MM1K(stoptime, mean_length, k_queue, rate_bps_in, rate_queue_bps, distance);
+
+    multiple_STA_sim(3, stoptime, mean_length, k_queue, rate_bps_in, rate_queue_bps, distance);
+
 }
