@@ -27,6 +27,7 @@ use colored::*;
 
 const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 const MAX_AMPDU_SIZE: i32 = 64;
+const P_TX:     f64 = 20.0; 
 
 // Define a constant to control debugging
 const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
@@ -271,6 +272,7 @@ impl QueueModule {
 
                     if !matches_sta_id {
                         // Skip packets not matching AMPDU's STA_ID
+                        println!("skip {}", index ); 
                         index += 1;
                         continue;
                     }
@@ -402,7 +404,7 @@ fn main() {
      // READ COMMAND-LINE ARGUMENTS
      let args: Vec<String> = env::args().collect();
      if args.len() != 6 {
-         eprintln!("Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps>", args[0]);
+         eprintln!("Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance>", args[0]);
          return;
      }
      let stoptime: f64 = args[1].parse().expect("Invalid T_END"); 
@@ -411,6 +413,10 @@ fn main() {
      let rate_bps: f64 = args[4].parse().expect("Invalid rate_bps");
      let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
 
+     let distance: f64 = args[6].parse().expect("Invalid STA distance"); 
+
+
+     let coords_sta = Coords{x: distance, y:0.0, z:0.0}; 
     // DEFINE SIM PARAMS
     // let mean_length: f64 = 1000.0;
 
@@ -419,7 +425,11 @@ fn main() {
 
     // let rate_queue_bps: f64 = 20000.0;
 
-    let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
+    let results = frametransmission_delay(mean_length, 1, Coords::new(), coords_sta, P_TX)
+
+    let effective_rate = mean_length / results.service_delay;
+
+    let LT = compute_mm1k_metrics(rate_bps, mean_length, effective_rate, k_queue);
 
     //// DEFINE COMPONENTS
     let mut source = PoissonSource::new(rate_bps, mean_length);
