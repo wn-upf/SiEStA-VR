@@ -317,8 +317,21 @@ impl QueueModule {
             );
 
             if self.queue.len() == 1 && !self.packet_being_served {
-                self.deque_schedule_service((), context).await;
+
+                self.packet_being_served = true; 
+
+                self.aux_ampdu_serviced.mpdu_packets.push(packet); 
+                self.queue.remove(0); // remove packet from queue
+                
+                let servs = frametransmission_delay(packet.length_packet as f64, 1, packet.sta_dest_coords, self.coords_queue, self.p_tx); 
+                let service_duration = Duration::from_secs_f64(servs.service_delay) ; 
+
+                context
+                .scheduler
+                .schedule_event(service_duration, Self::send_ampdu,  (self.aux_ampdu_serviced.clone()))
+                .unwrap();
             }
+
         } else {
             self.blocked_packet_counter += 1;
             let elapsed = context.scheduler.time();
@@ -343,11 +356,14 @@ impl QueueModule {
             AMPDU_sent.mpdu_packets.len(),
             self.queue.len()
         );
+        self.packet_being_served = false; 
         self.output_port.send(AMPDU_sent).await;
         self.aux_ampdu_serviced.reset();
-        self.packet_being_served = false;
-    }
 
+        if self.queue.len() > 0{
+            self.deque_schedule_service(() , context).await; 
+        }
+    }
 
     fn deque_schedule_service<'a>(
         &'a mut self,
@@ -355,10 +371,7 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            if self.packet_being_served == true {
-                self.send_ampdu( self.aux_ampdu_serviced.clone(), &context).await; 
-            }
-
+  
             if let Some(first_packet) = self.queue.front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
@@ -466,11 +479,16 @@ impl QueueModule {
                         format_elapsed!(now),
                         format_elapsed!(now + last_service_duration),
                     );
-                    self.packet_being_served = true;
+                    self.packet_being_served = true; 
+                
                     context
                         .scheduler
-                        .schedule_event(last_service_duration, Self::deque_schedule_service, ())
+                        .schedule_event(last_service_duration, Self::send_ampdu,  (self.aux_ampdu_serviced.clone()))
                         .unwrap();
+                }
+
+                else{
+                    println!("?????????"); 
                 }
             }
         }
