@@ -52,13 +52,7 @@ pub fn exponential(mean: f64) -> f64 {
 #[derive(Clone)]
 
 pub struct CsvType {
-    first_t: bool,
-    v_timestamp: Vec<String>,
-    v_packet_id: Vec<usize>,
-    v_queue_size: Vec<usize>,
-    v_queue_ts: Vec<f64>,
-    v_queue_tq: Vec<f64>,
-    v_packet_l: Vec<usize>,
+
     csv_data: Arc<Mutex<CsvData>>,
 }
 
@@ -123,13 +117,12 @@ impl CsvData {
 impl CsvType {
     pub fn new() -> Self {
         Self {
-            first_t: true,
-            v_timestamp: Vec::new(),
-            v_packet_id: Vec::new(),
-            v_queue_size: Vec::new(),
-            v_queue_ts: Vec::new(),
-            v_queue_tq: Vec::new(),
-            v_packet_l: Vec::new(),
+            // v_timestamp: Vec::new(),
+            // v_packet_id: Vec::new(),
+            // v_queue_size: Vec::new(),
+            // v_queue_ts: Vec::new(),
+            // v_queue_tq: Vec::new(),
+            // v_packet_l: Vec::new(),
             csv_data: Arc::new(Mutex::new(CsvData::new())),
         }
     }
@@ -240,6 +233,14 @@ impl CumulativeStats {
             None
         }
     }
+}
+#[derive(Clone)]
+pub struct perStaStats{
+    pub sta_id: i32, 
+    pub q_time_sta_cum: CumulativeStats,
+    pub s_time_sta_cum: CumulativeStats,   
+    
+    pub csv_data: CsvType, 
 }
 
 pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {

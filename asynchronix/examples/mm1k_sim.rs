@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 mod libs; // for calling m own local library
 use crate::libs::{
     compute_mm1k_metrics, exponential, frametransmission_delay, Coords, CsvType, CumulativeStats,
-    ResultsFrameTXDelay, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
+    ResultsFrameTXDelay, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX, perStaStats
 };
 
 use crate::libs::{AmpduPacket, MpduPacket};
@@ -303,6 +303,8 @@ pub struct QueueModule {
     pub STA_coords_grid: Vec<Coords>,
 
     pub cumulative_stats_queue: Arc<Mutex<QueueStats>>,
+    pub array_stas_stats: Vec<perStaStats>
+
 }
 
 impl QueueModule {
@@ -333,6 +335,7 @@ impl QueueModule {
             p_tx: 20.0,
             STA_coords_grid: Vec::new(),
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
+            array_stas_stats: Vec::new() ,
         }
     }
 
@@ -667,10 +670,6 @@ fn simple_MM1K(
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
-
-
-
-
 
     // println!("************ END RESULTS ***********\n LT: {:#?}", LT);
     LT.print_results();

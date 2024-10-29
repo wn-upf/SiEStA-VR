@@ -1,13 +1,13 @@
 #!/bin/bash
 
 
-simTime=1000
+simTime=3
 
-k_queue=100
+k_queue=1000
 mean_length=12000.0
 
-rate_bps_src=5E7
-rate_bps_queue=6E8 ## does nothing theoretically 
+rate_bps_src=6.5E8
+rate_bps_queue=6E5 ## does nothing theoretically 
 
 
 distance=10.0
