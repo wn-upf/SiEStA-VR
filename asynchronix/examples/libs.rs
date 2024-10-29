@@ -5,13 +5,12 @@ use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
-use std::time::{Duration, Instant};
 use rand::{thread_rng, Rng};
 use rand_distr::{Distribution, Exp};
+use std::time::{Duration, Instant};
 
 use std::sync::Arc;
 use std::sync::Mutex;
-
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -22,13 +21,11 @@ const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
 const DIFS: f64 = 31E-6;
 
-
-
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
-pub const P_TX:     f64 = 20.0; 
+pub const P_TX: f64 = 20.0;
 
-pub const MAX_STAS : usize = 100; 
+pub const MAX_STAS: usize = 100;
 
 #[macro_export]
 macro_rules! format_timestamp {
@@ -51,7 +48,6 @@ pub fn exponential(mean: f64) -> f64 {
     let u: f64 = rng.gen_range(0.0..=1.0); // Generate a random value in the range (0, 1]
     -mean * u.ln()
 }
-
 
 #[derive(Clone)]
 
@@ -152,7 +148,7 @@ impl CsvType {
         length_packet: usize,
     ) {
         let formatted_timestamp = format_timestamp!(now);
-        
+
         if let Ok(mut data) = self.csv_data.lock() {
             data.v_timestamp.push(formatted_timestamp);
             data.v_packet_id.push(id_packet);
@@ -286,17 +282,60 @@ impl LittleTheoremMM1K {
         println!("{}", separator);
 
         // Print each field in the desired format
-        println!("| {:<27} | {:>15} |", "λ (average arrival rate)", format!("{:.6}", self.lambda));
-        println!("| {:<27} | {:>15} |", "µ (service rate)", format!("{:.6}", self.mu));
-        println!("| {:<27} | {:>15} |", "ρ (utilization factor)", format!("{:.6}", self.rho));
-        println!("| {:<27} | {:>15} |", "P_0 (Prob. of 0 pkts)", format!("{:.6}", self.p_0));
-        println!("| {:<27} | {:>15} |", "P_K (Blocking prob.)", format!("{:.6}", self.p_k));
-        println!("| {:<27} | {:>15} |", "N (Avg. pkts in system)", format!("{:.6}", self.n));
-        println!("| {:<27} | {:>15} |", "N_q (Avg. pkts in queue)", format!("{:.6}", self.n_q));
-        println!("| {:<27} | {:>15} |", "-----------------------------", "-----------------"); // Just for formatting
-        println!("| {:<27} | {:>15} |", "T (Avg. time in system)", format!("{:.6}", self.t));
-        println!("| {:<27} | {:>15} |", "T_q (Avg. time in queue)", format!("{:.6}", self.t_q));
-        println!("| {:<27} | {:>15} |", "T_s (Avg. service time)", format!("{:.6}", self.t_s));
+        println!(
+            "| {:<27} | {:>15} |",
+            "λ (average arrival rate)",
+            format!("{:.6}", self.lambda)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "µ (service rate)",
+            format!("{:.6}", self.mu)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "ρ (utilization factor)",
+            format!("{:.6}", self.rho)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "P_0 (Prob. of 0 pkts)",
+            format!("{:.6}", self.p_0)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "P_K (Blocking prob.)",
+            format!("{:.6}", self.p_k)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "N (Avg. pkts in system)",
+            format!("{:.6}", self.n)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "N_q (Avg. pkts in queue)",
+            format!("{:.6}", self.n_q)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "-----------------------------", "-----------------"
+        ); // Just for formatting
+        println!(
+            "| {:<27} | {:>15} |",
+            "T (Avg. time in system)",
+            format!("{:.6}", self.t)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "T_q (Avg. time in queue)",
+            format!("{:.6}", self.t_q)
+        );
+        println!(
+            "| {:<27} | {:>15} |",
+            "T_s (Avg. service time)",
+            format!("{:.6}", self.t_s)
+        );
         println!("{}", separator);
     }
 }
@@ -360,10 +399,8 @@ pub fn compute_mm1k_metrics(
 //     pub t_residual: f64,
 // }
 
-
 #[derive(Debug, Clone, Copy)]
 pub struct MpduPacket {
-
     pub packet_id: usize,
     pub length_packet: usize,
     pub queue_in_instant: TaiTime<0>,
@@ -373,7 +410,7 @@ pub struct MpduPacket {
     pub T_s: Duration,
     pub expected_T_s: Duration,
 
-    pub sta_src_id: i32, 
+    pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_dest_coords: Coords,
 }
@@ -389,8 +426,8 @@ impl MpduPacket {
             T_q: Duration::ZERO,
             T_s: Duration::ZERO,
             expected_T_s: Duration::ZERO,
-            
-            sta_src_id: 0, 
+
+            sta_src_id: 0,
             sta_dest_id: 0,
             sta_dest_coords: Coords::new(),
         }
@@ -440,7 +477,7 @@ impl AmpduPacket {
     // Method to reinitialize all values
     pub fn reset(&mut self) {
         self.mpdu_packets.clear(); // Clear the vector of MPDU packets
-        // self.mpdu_packets.reserve(MAX_AMPDU_SIZE as usize); 
+                                   // self.mpdu_packets.reserve(MAX_AMPDU_SIZE as usize);
         self.total_length = 0; // Reset total length
         self.size = 0; // Reset size
         self.sta_id = -1; // Reset STA_ID (assuming -1 is an uninitialized value)
@@ -527,7 +564,6 @@ pub fn frametransmission_delay(
     coords_dest: Coords,
     p_tx: f64,
 ) -> ResultsFrameTXDelay {
-   
     let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
@@ -606,12 +642,11 @@ pub fn frametransmission_delay(
 
 // pub fn simpler_frametx_delay(bandwidth_dep:f64, mean_l: f64 )->ResultsFrameTXDelay {
 //     ResultsFrameTXDelay{
-//         pathloss: 0., 
-//         p_rx: 0.0, 
+//         pathloss: 0.,
+//         p_rx: 0.0,
 //         o_rate: bandwidth_dep,
 //         service_delay: mean_l / bandwidth_dep,
-//         data_service_delay: mean_l / bandwidth_dep, 
+//         data_service_delay: mean_l / bandwidth_dep,
 //     }
 
 // }  unused
-

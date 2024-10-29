@@ -11,8 +11,8 @@ use std::cmp::{self};
 
 use std::time::{Duration, Instant};
 
+use std::cmp::{max, min};
 use std::collections::VecDeque;
-use std::cmp::{min, max}; 
 mod libs; // for callign local library
 use crate::libs::{
     compute_mm1k_metrics, frametransmission_delay, Coords, CsvType, ResultsFrameTXDelay,
@@ -21,7 +21,6 @@ use crate::libs::{
 use crate::libs::{AmpduPacket, MpduPacket};
 
 use colored::*;
-
 
 const DEBUG: bool = false; // Set to `false` to disable `debug_print!`
 
@@ -34,7 +33,6 @@ macro_rules! debug_print {
         }
     };
 }
-
 
 const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 const MAX_AMPDU_SIZE: i32 = 64;
@@ -67,9 +65,6 @@ impl DebugColor {
         }
     }
 }
-
-
-
 
 pub trait DebugPrint {
     fn print_debug(&self, color: DebugColor, prefix: &str);
@@ -105,9 +100,8 @@ pub struct PoissonSource {
 
 impl PoissonSource {
     pub fn new(arrival_rate_bps: f64, mean_length: f64) -> Self {
-        
-        let arrival_rate = arrival_rate_bps / mean_length;  
-        
+        let arrival_rate = arrival_rate_bps / mean_length;
+
         Self {
             arrival_rate: arrival_rate,
             mean_length_packets: mean_length,
@@ -124,9 +118,10 @@ impl PoissonSource {
         async move {
             let mut packet = MpduPacket::new();
 
-            let mut time_interarrival = Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
-            time_interarrival = max(time_interarrival, Duration::from_nanos(10)); 
-            
+            let mut time_interarrival =
+                Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
+            time_interarrival = max(time_interarrival, Duration::from_nanos(10));
+
             let len_random = exponential(self.mean_length_packets as f64) as usize;
             packet.length_packet = cmp::max(1, len_random);
 
@@ -155,7 +150,6 @@ pub struct QueueModule {
     pub aux_ampdu_serviced: AmpduPacket,
 
     pub packet_being_served: bool,
-
 
     pub blocked_packet_counter: usize,
     pub arrived_packet_counter: usize,
@@ -250,7 +244,7 @@ impl QueueModule {
             }
 
             if let Some(first_packet) = self.queue.pop_front() {
-                // DEQUE PACKET IF ANY IN QUEUE                
+                // DEQUE PACKET IF ANY IN QUEUE
                 let mut first_packet_mut = first_packet.clone();
                 //ampdu code
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
@@ -259,13 +253,19 @@ impl QueueModule {
 
                 first_packet_mut.queue_out_instant = now;
 
-                self.aux_ampdu_serviced.mpdu_packets.push(first_packet_mut); // put packet in AMPDU 
+                self.aux_ampdu_serviced.mpdu_packets.push(first_packet_mut); // put packet in AMPDU
                 self.aux_ampdu_serviced.total_length += first_packet_mut.length_packet;
                 self.aux_ampdu_serviced.size += 1;
 
                 let mut packets_to_remove = Vec::new();
-                let mut resulting_delays = frametransmission_delay(first_packet_mut.length_packet as f64, MAX_AMPDU_SIZE, self.coords_queue, first_packet_mut.sta_dest_coords, self.p_tx); 
-                let mut service_duration =  Duration::from_secs_f64(resulting_delays.service_delay) ; 
+                let mut resulting_delays = frametransmission_delay(
+                    first_packet_mut.length_packet as f64,
+                    MAX_AMPDU_SIZE,
+                    self.coords_queue,
+                    first_packet_mut.sta_dest_coords,
+                    self.p_tx,
+                );
+                let mut service_duration = Duration::from_secs_f64(resulting_delays.service_delay);
 
                 for (index, packet) in self.queue.iter().enumerate() {
                     if packet.sta_dest_id != self.aux_ampdu_serviced.sta_id {
@@ -335,7 +335,7 @@ impl QueueModule {
                     format_elapsed!(now),
                     format_elapsed!(now + service_duration),
                 );
-                self.packet_being_served = true; 
+                self.packet_being_served = true;
                 context
                     .scheduler
                     .schedule_event(service_duration, Self::deque_schedule_service, ())
@@ -393,14 +393,12 @@ impl Model for Sink {}
 fn main() {
     // DEFINE SIM PARAMS
     // DEFINE SIM PARAMS
-    let mean_length: f64 = 12000.0; 
+    let mean_length: f64 = 12000.0;
     let k_queue: usize = 100;
     let rate_bps = 5E4;
     let rate_queue_bps: f64 = 6E8;
     let stoptime = 1E3;
 
-
-    
     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
 
     //// DEFINE COMPONENTS
@@ -459,6 +457,4 @@ fn main() {
     // // }
 
     println!("************ END RESULTS ***********\n LT: {:#?}", LT);
-
-
 }

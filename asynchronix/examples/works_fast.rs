@@ -18,9 +18,7 @@ mod libs; // for callign local library
 use crate::libs::{compute_mm1k_metrics, CsvType};
 use colored::*;
 
-use std::cmp::max; 
-
-
+use std::cmp::max;
 
 const DEBUG: bool = true; // Set to `false` to disable `debug_print!`
 
@@ -34,7 +32,6 @@ macro_rules! debug_print {
     };
 }
 
-
 #[macro_export]
 macro_rules! format_elapsed {
     ($elapsed:expr) => {{
@@ -43,7 +40,6 @@ macro_rules! format_elapsed {
         format!("{:.9}", total_seconds)
     }};
 }
-
 
 pub enum DebugColor {
     Red,
@@ -130,8 +126,8 @@ pub struct PoissonSource {
 
 impl PoissonSource {
     pub fn new(arrival_rate_bps: f64, mean_length: f64) -> Self {
-        let arrival_rate = arrival_rate_bps / mean_length;  
-        
+        let arrival_rate = arrival_rate_bps / mean_length;
+
         Self {
             arrival_rate: arrival_rate,
             mean_length_packets: mean_length,
@@ -147,11 +143,15 @@ impl PoissonSource {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let mut packet = MpduPacket::new();
-            let mut time_interarrival_bf = Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
-            let time_interarrival = max(time_interarrival_bf, Duration::from_nanos(10)); 
+            let mut time_interarrival_bf =
+                Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
+            let time_interarrival = max(time_interarrival_bf, Duration::from_nanos(10));
 
-            println!("[SUPERDEBUG] Time_inter : {} , max: {} ", time_interarrival_bf.as_secs_f64(), time_interarrival.as_secs_f64());
-
+            println!(
+                "[SUPERDEBUG] Time_inter : {} , max: {} ",
+                time_interarrival_bf.as_secs_f64(),
+                time_interarrival.as_secs_f64()
+            );
 
             let len_random = exponential(self.mean_length_packets as f64) as usize;
             packet.length_packet = cmp::max(1, len_random);
@@ -355,11 +355,10 @@ impl Model for Sink {}
 fn main() {
     // DEFINE SIM PARAMS
 
-    let mean_length: f64 = 12000.0; 
+    let mean_length: f64 = 12000.0;
     let k_queue: usize = 100;
     let rate_bps = 5E4;
     let rate_queue_bps: f64 = 6E8;
-
 
     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
 
