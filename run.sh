@@ -6,7 +6,7 @@ simTime=1000
 k_queue=100
 mean_length=12000.0
 
-rate_bps_src=5E4
+rate_bps_src=5E7
 rate_bps_queue=6E8 ## does nothing theoretically 
 
 

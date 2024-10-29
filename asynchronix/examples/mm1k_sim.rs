@@ -340,15 +340,15 @@ impl QueueModule {
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
 
+        let now = context.scheduler.time(); 
         if self.queue.len() < self.queue_maxsize {
-            packet.queue_in_instant = context.scheduler.time();
+            packet.queue_in_instant = now;
             self.queue.push_back(packet);
-            let elapsed = context.scheduler.time();
 
             debug_print!(
                 DebugColor::Blue,
-                "{} [DBG QUEUE] Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
-                format_elapsed!(elapsed),
+                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
+                format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
                 packet.sta_dest_id,
@@ -356,28 +356,7 @@ impl QueueModule {
             );
 
             if self.queue.len() == 1 && !self.packet_being_served {
-                self.packet_being_served = true;
-
-                self.aux_ampdu_serviced.mpdu_packets.push(packet);
-                self.queue.remove(0); // remove packet from queue
-
-                let servs: ResultsFrameTXDelay = frametransmission_delay(
-                    packet.length_packet as f64,
-                    1,
-                    packet.sta_dest_coords,
-                    self.coords_queue,
-                    self.p_tx,
-                );
-                let service_duration = Duration::from_secs_f64(servs.service_delay);
-
-                context
-                    .scheduler
-                    .schedule_event(
-                        service_duration,
-                        Self::send_ampdu,
-                        (self.aux_ampdu_serviced.clone()),
-                    )
-                    .unwrap();
+                self.deque_schedule_service((), context).await;
             }
         } else {
             self.blocked_packet_counter += 1;
@@ -402,7 +381,7 @@ impl QueueModule {
             AMPDU_sent.mpdu_packets.len(),
             self.queue.len()
         );
-        AMPDU_sent.print();
+        // AMPDU_sent.print();
         self.packet_being_served = false;
         self.output_port.send(AMPDU_sent).await;
         self.aux_ampdu_serviced.reset();
@@ -502,16 +481,6 @@ impl QueueModule {
                     }
                 }
 
-            // Update cumulative statistics
-            if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
-                for packet in self.aux_ampdu_serviced.mpdu_packets.clone() {
-                    let packet_queue_time = packet.queue_out_instant.duration_since(packet.queue_in_instant);
-                    queue_stats.update_cumstats(
-                        packet.expected_T_s.as_secs_f64(),
-                        packet_queue_time.as_secs_f64(),
-                    );
-                }
-            }
 
                 // Update all packets with the final service duration
                 for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
@@ -523,7 +492,16 @@ impl QueueModule {
                     packet.T_q = packet_queue_time; 
                     packet.expected_T_s = last_service_duration;
 
-        
+
+                    // UPDATE STATS
+                    if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
+                        println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", packet.expected_T_s.as_secs_f32(), packet_queue_time.as_secs_f32()); 
+                    
+                        queue_stats.update_cumstats(
+                            packet.expected_T_s.as_secs_f64(),
+                            packet_queue_time.as_secs_f64(),
+                        );
+                    }       
                     
                     self.csv_metrics.update_stats(
                         now,
