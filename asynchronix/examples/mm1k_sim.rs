@@ -9,7 +9,6 @@
 // !                     │                                                    │
 // !                     └────────────────────────────────────────────────────┘
 // !```
-use std::future::Future;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use asynchronix::simulation::{Mailbox, SimInit};
@@ -21,14 +20,16 @@ use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::env;
 use std::f64::consts::PI;
+use std::future::Future;
 use std::time::{Duration, Instant};
 
-use std::sync::{Arc, Mutex}; 
+use std::sync::{Arc, Mutex};
 
 mod libs; // for calling m own local library
 use crate::libs::{
-    compute_mm1k_metrics, exponential, frametransmission_delay, Coords, CsvType, CumulativeStats,
-    ResultsFrameTXDelay, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX, perStaStats, perStaLockStats, write_all_sta_csvs
+    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats, perStaStats,
+    write_all_sta_csvs, Coords, CsvType, CumulativeStats, ResultsFrameTXDelay, DEFAULT_TMAX_AGG,
+    MAX_AMPDU_SIZE, P_TX,
 };
 
 use crate::libs::{AmpduPacket, MpduPacket};
@@ -259,20 +260,74 @@ impl Model for STA_source {}
 pub struct QueueStats {
     waiting_time_cum: CumulativeStats,
     service_time_cum: CumulativeStats,
+
+    num_packets_dropped: i32,
+    num_packets_rx: i32, 
 }
 impl QueueStats {
     pub fn new() -> Self {
         Self {
             waiting_time_cum: CumulativeStats::new(),
             service_time_cum: CumulativeStats::new(),
+            num_packets_dropped: 0,
+            num_packets_rx: 0, 
         }
     }
-    pub fn update_cumstats(&mut self, ts: f64, tq: f64) {
+    pub fn update_cumstats(&mut self, ts: f64, tq: f64, packet_drops: i32, packets_rx: i32) {
         self.waiting_time_cum.add(tq);
         self.service_time_cum.add(ts);
+        self.num_packets_dropped = packet_drops; 
+        self.num_packets_rx = packets_rx; 
     }
 
-   
+    pub fn print_nicely(&self) {
+        let width = 48;  // Total width of the table
+        let separator = format!("+{}+", "-".repeat(width));
+        
+        // Calculate blocking probability
+        let p_k = if self.num_packets_rx > 0 {
+            self.num_packets_dropped as f64 / self.num_packets_rx as f64
+        } else {
+            0.0
+        };
+        
+        // Helper closure to format a row
+        let format_row = |label: &str, value: f64| {
+            format!("| {:<30} | {:>14.6} |", label, value)
+        };
+        
+        // Print the header
+        println!("{}", separator);
+        println!("{:^2}", "| QUEUE MODULE                                   |");
+        println!("{}", separator);
+        
+        // Print statistics
+        println!("{}", format_row("P_k (Blocking Probability)", p_k));
+        println!("{}", format_row("E[N_q]", 0.0));  // Placeholder - needs implementation
+        println!("{}", format_row(
+            "E[T] (queue + tx)", 
+            self.waiting_time_cum.get_average() + self.service_time_cum.get_average()
+        ));
+        println!("{}", format_row(
+            "E[T_q]", 
+            self.waiting_time_cum.get_average()
+        ));
+        println!("{}", format_row(
+            "E[T_s]", 
+            self.service_time_cum.get_average()
+        ));
+        println!("{}", format_row(
+            "CV of T_s", 
+            self.service_time_cum.get_coefficient_variation()
+        ));
+        println!("{}", format_row(
+            "2nd Moment of T_s", 
+            self.service_time_cum.get_2nd_moment()
+        ));
+        
+        // Print the footer
+        println!("{}", separator);
+    }
 }
 
 #[derive(Clone)]
@@ -307,18 +362,16 @@ pub struct QueueModule {
 }
 
 impl QueueModule {
-
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
         self.cumulative_stats_queue.clone()
     }
 
-    pub fn get_stas_stats_handle(&self) -> Arc<Mutex<Vec<perStaLockStats>>>{
-        self.array_stas_stats.clone() 
+    pub fn get_stas_stats_handle(&self) -> Arc<Mutex<Vec<perStaLockStats>>> {
+        self.array_stas_stats.clone()
     }
 
 
     pub fn new(num_stas: usize, queue_size: usize, rate_departures_bps: f64) -> Self {
-        
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = Vec::with_capacity(num_stas);
         for i in 0..num_stas {
@@ -329,7 +382,7 @@ impl QueueModule {
             }
             stats_vec.push(sta_stats);
         }
-        
+
         Self {
             queue: VecDeque::new(),
             queue_maxsize: queue_size,
@@ -350,7 +403,7 @@ impl QueueModule {
             p_tx: 20.0,
             STA_coords_grid: Vec::new(),
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
-            array_stas_stats: Arc::new(Mutex::new( stats_vec )),
+            array_stas_stats: Arc::new(Mutex::new(stats_vec)),
         }
     }
 
@@ -358,7 +411,7 @@ impl QueueModule {
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
 
-        let now = context.scheduler.time(); 
+        let now = context.scheduler.time();
         if self.queue.len() < self.queue_maxsize {
             packet.queue_in_instant = now;
             self.queue.push_back(packet);
@@ -415,8 +468,6 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
-
             if let Some(first_packet) = self.queue.front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
@@ -499,41 +550,39 @@ impl QueueModule {
                     }
                 }
 
-
                 // Update all packets with the final service duration
                 for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
-
                     let packet_queue_time = packet
                         .queue_out_instant
                         .duration_since(packet.queue_in_instant);
 
-                    packet.T_q = packet_queue_time; 
+                    packet.T_q = packet_queue_time;
                     packet.expected_T_s = last_service_duration;
 
-
-                    let T_s_f64 = packet.expected_T_s.as_secs_f64(); 
+                    let T_s_f64 = packet.expected_T_s.as_secs_f64();
                     let T_q_f64 = packet.T_q.as_secs_f64();
 
                     // UPDATE STATS
                     if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
-                        // println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", T_s_f64, T_q_f64); 
-                    
-                        queue_stats.update_cumstats(
-                            T_s_f64,
-                            T_q_f64,
-                        );
-                    } 
+                        // println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", T_s_f64, T_q_f64);
+                        queue_stats.update_cumstats(T_s_f64, T_q_f64, self.blocked_packet_counter as i32, self.arrived_packet_counter as i32);
+                    }
 
-                    if let Ok(array_STAs_stats) = self.array_stas_stats.lock(){
+                    if let Ok(array_STAs_stats) = self.array_stas_stats.lock() {
                         if let Some(stats) = array_STAs_stats.get(packet.sta_src_id as usize) {
                             if let Ok(mut stats_data) = stats.data.lock() {
                                 // println!("DEBUG STA{} ", packet.sta_src_id);
-                                stats_data.update_stats_per_sta( now, packet.packet_id, self.queue.len(), T_s_f64, T_q_f64, packet.length_packet);                             
+                                stats_data.update_stats_per_sta(
+                                    now,
+                                    packet.packet_id,
+                                    self.queue.len(),
+                                    T_s_f64,
+                                    T_q_f64,
+                                    packet.length_packet,
+                                );
                             }
                         }
-
                     }
-                    
 
                     self.csv_metrics.update_stats(
                         now,
@@ -606,125 +655,120 @@ impl Sink {
 
 impl Model for Sink {}
 
-
-
-
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////// SIMULATION ////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// fn simple_MM1K(
+//     stoptime: f64,
+//     mean_length: f64,
+//     k_queue: usize,
+//     rate_bps_in: f64,
+//     rate_queue_bps: f64,
+//     distance: f64,
+// ) {
 
-fn simple_MM1K(
-    stoptime: f64,
-    mean_length: f64,
-    k_queue: usize,
-    rate_bps_in: f64,
-    rate_queue_bps: f64,
-    distance: f64,
-) {
+//     let num_STAs = 1;
+//     let coords_sta = Coords {
+//         x: distance,
+//         y: 0.0,
+//         z: 0.0,
+//     };
+//     let results = frametransmission_delay(
+//         mean_length as f64,
+//         MAX_AMPDU_SIZE,
+//         Coords::new(),
+//         coords_sta,
+//         P_TX,
+//     );
 
-    let num_STAs = 1; 
-    let coords_sta = Coords {
-        x: distance,
-        y: 0.0,
-        z: 0.0,
-    };
-    let results = frametransmission_delay(
-        mean_length as f64,
-        MAX_AMPDU_SIZE,
-        Coords::new(),
-        coords_sta,
-        P_TX,
-    );
+//     let effective_rate = mean_length / results.service_delay;
 
-    let effective_rate = mean_length / results.service_delay;
+//     let LT = compute_mm1k_metrics(rate_bps_in, mean_length, effective_rate, k_queue);
 
-    let LT = compute_mm1k_metrics(rate_bps_in, mean_length, effective_rate, k_queue);
+//     let mut source: STA_source = STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta, true); // STAs 0
+//     let mut queue: QueueModule = QueueModule::new(num_STAs ,k_queue - 1 as usize, rate_queue_bps);
+//     let sink = Sink::new();
 
-    let mut source: STA_source = STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta, true); // STAs 0
-    let mut queue: QueueModule = QueueModule::new(num_STAs ,k_queue - 1 as usize, rate_queue_bps);
-    let sink = Sink::new();
+//     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
+//     let csv_data_handle: Arc<Mutex<libs::CsvData>> = queue.csv_metrics.get_data_handle();
+//     let queuestats_data_handle= queue.get_queue_stats_handle();
+//     let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
 
+//     let mbox_src = Mailbox::new();
+//     let mbox_src_address = mbox_src.address();
 
-    // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
-    let csv_data_handle: Arc<Mutex<libs::CsvData>> = queue.csv_metrics.get_data_handle();
-    let queuestats_data_handle= queue.get_queue_stats_handle(); 
-    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle(); 
+//     let mbox_queue = Mailbox::new();
+//     let queue_address = mbox_queue.address();
 
-    
-    let mbox_src = Mailbox::new();
-    let mbox_src_address = mbox_src.address();
+//     let sink_mbox = Mailbox::new();
+//     let sink_mbox_address = sink_mbox.address();
 
-    let mbox_queue = Mailbox::new();
-    let queue_address = mbox_queue.address();
+//     // CONNECT COMPONENTS
+//     // source.output_port.connect(Sink::input, &sink_mbox);
 
-    let sink_mbox = Mailbox::new();
-    let sink_mbox_address = sink_mbox.address();
+//     source.output_port.connect(QueueModule::input, &mbox_queue);
+//     queue.output_port.connect(Sink::input, &sink_mbox);
 
-    // CONNECT COMPONENTS
-    // source.output_port.connect(Sink::input, &sink_mbox);
+//     let t0 = MonotonicTime::EPOCH;
 
-    source.output_port.connect(QueueModule::input, &mbox_queue);
-    queue.output_port.connect(Sink::input, &sink_mbox);
+//     let mut simu = SimInit::new()
+//         .add_model(source, mbox_src, "STA BG")
+//         .add_model(queue, mbox_queue, "Queue")
+//         .add_model(sink, sink_mbox, "Sink")
+//         .init(t0);
 
-    let t0 = MonotonicTime::EPOCH;
+//     let scheduler = simu.scheduler();
 
-    let mut simu = SimInit::new()
-        .add_model(source, mbox_src, "STA BG")
-        .add_model(queue, mbox_queue, "Queue")
-        .add_model(sink, sink_mbox, "Sink")
-        .init(t0);
+//     // ----------
+//     // Simulation.
+//     // ----------
 
-    let scheduler = simu.scheduler();
+//     // Check initial conditions.
 
-    // ----------
-    // Simulation.
-    // ----------
+//     let t = t0;
 
-    // Check initial conditions.
+//     assert_eq!(simu.time(), t);
 
-    let t = t0;
+//     // START WITH FIRST EVENT
+//     scheduler
+//         .schedule_event(
+//             Duration::from_millis(1),
+//             STA_source::send_packet,
+//             (),
+//             &mbox_src_address,
+//         )
+//         .unwrap();
 
-    assert_eq!(simu.time(), t);
+//     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
-    // START WITH FIRST EVENT
-    scheduler
-        .schedule_event(
-            Duration::from_millis(1),
-            STA_source::send_packet,
-            (),
-            &mbox_src_address,
-        )
-        .unwrap();
+//     // After simulation, write the CSV data
+//     if let Ok(data) = csv_data_handle.lock() {
+//         if let Err(e) = data.write_to_csv() {
+//             eprintln!("Failed to write CSV file: {}", e);
+//         }
+//     }
 
-    simu.step_by(Duration::from_secs_f64(stoptime)); //works
+//     if let Ok(data) = stats_sta_data_handle.lock() {
 
-    // After simulation, write the CSV data
-    if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv() {
-            eprintln!("Failed to write CSV file: {}", e);
-        }
-    }
+//         if let Err(e) = write_all_sta_csvs(&data) {
+//             eprintln!("Error writing STA CSV files: {}", e);
+//         }
+//     }
 
-    if let Ok(data) = stats_sta_data_handle.lock() {
-        if let Err(e) = write_all_sta_csvs(&data) {
-            eprintln!("Error writing STA CSV files: {}", e);
-        }
-    }
+//     // println!("************ END RESULTS ***********\n LT: {:#?}", LT);
+//     LT.print_results();
 
-    // println!("************ END RESULTS ***********\n LT: {:#?}", LT);
-    LT.print_results();
+//     if let Ok(queue_stats) = queuestats_data_handle.lock() {
+//         println!("Waiting time mean: {}", queue_stats.waiting_time_cum.get_average());
+//         println!("Waiting time std dev: {}", queue_stats.waiting_time_cum.get_std_dev());
+//         println!("Service time mean: {}", queue_stats.service_time_cum.get_average());
+//         println!("Service time std dev: {}", queue_stats.service_time_cum.get_std_dev());
+//     } else {
+//         eprintln!("Failed to lock queue stats");
+//     };
 
-    if let Ok(queue_stats) = queuestats_data_handle.lock() {
-        println!("Waiting time mean: {}", queue_stats.waiting_time_cum.get_average());
-        println!("Waiting time std dev: {}", queue_stats.waiting_time_cum.get_std_dev());
-        println!("Service time mean: {}", queue_stats.service_time_cum.get_average());
-        println!("Service time std dev: {}", queue_stats.service_time_cum.get_std_dev());
-    } else {
-        eprintln!("Failed to lock queue stats");
-    }; 
-
-}
+// }
 
 // SCENARIO 2: TWO STAS AS BG TRAFFIC, 1 STA AS SINK
 fn multiple_STA_sim(
@@ -782,16 +826,12 @@ fn multiple_STA_sim(
     let mut sta2_bg: STA_source =
         STA_source::new(rate_bps_in, mean_length, 1, 2, coords_sta2, true);
 
-    let sta5_ul: STA_source =
-        STA_source::new(rate_bps_in, mean_length, 2, 7, coords_sta3, false); // RX STA, acts as sink with coordinates
+    let sta5_ul: STA_source = STA_source::new(rate_bps_in, mean_length, 2, 7, coords_sta3, false); // RX STA, acts as sink with coordinates
 
     let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
-    let csv_data_handle: Arc<Mutex<libs::CsvData>> = queue.csv_metrics.get_data_handle();
-    let queuestats_data_handle= queue.get_queue_stats_handle();    
-    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle(); 
-
+    
 
     queue.STA_coords_grid.resize(num_STAs, Coords::new());
     for i in 0..num_STAs {
@@ -799,6 +839,8 @@ fn multiple_STA_sim(
     }
 
     let csv_data_handle = queue.csv_metrics.get_data_handle();
+    let queuestats_data_handle = queue.get_queue_stats_handle();
+    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
 
     let mbox_sta1 = Mailbox::new();
     let mbox_sta2 = Mailbox::new();
@@ -860,21 +902,34 @@ fn multiple_STA_sim(
         .unwrap();
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
-
+    
+    
     // After simulation, write the CSV data
     if let Ok(data) = csv_data_handle.lock() {
         if let Err(e) = data.write_to_csv() {
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
-
-    if let Ok(data) = stats_sta_data_handle.lock() {
-        if let Err(e) = write_all_sta_csvs(&data) {
+    if let Ok(stats_vec) = stats_sta_data_handle.lock() {
+        // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
+        for sta_stats in stats_vec.iter() {
+            if let Ok(sta_data) = sta_stats.data.lock() {
+                sta_data.print_nicely();
+            }
+        }
+    
+        if let Err(e) = write_all_sta_csvs(&stats_vec) {
             eprintln!("Error writing STA CSV files: {}", e);
         }
     }
 
-    println!("************ END RESULTS STAS***********\n LT: {:#?}", LT);
+    if let Ok(mut queue_stats) = queuestats_data_handle.lock() {
+        // println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", T_s_f64, T_q_f64);
+        queue_stats.print_nicely();
+    }
+
+    // println!("************ END RESULTS STAS***********\n LT: ");
+    LT.print_results();
 }
 
 fn main() {
@@ -906,5 +961,13 @@ fn main() {
     //     distance,
     // );
 
-    multiple_STA_sim(3, stoptime, mean_length, k_queue, rate_bps_in, rate_queue_bps, distance);
+    multiple_STA_sim(
+        3,
+        stoptime,
+        mean_length,
+        k_queue,
+        rate_bps_in,
+        rate_queue_bps,
+        distance,
+    );
 }

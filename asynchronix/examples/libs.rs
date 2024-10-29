@@ -51,7 +51,6 @@ pub fn exponential(mean: f64) -> f64 {
 
 #[derive(Clone)]
 pub struct CsvType {
-
     csv_data: Arc<Mutex<CsvData>>,
 }
 
@@ -83,7 +82,7 @@ impl CsvData {
             .write(true)
             .create(true)
             .truncate(true)
-            .open("stats.csv")?;
+            .open("Results/QUEUE_stats.csv")?;
 
         let mut writer = Writer::from_writer(file);
 
@@ -235,17 +234,55 @@ impl CumulativeStats {
     }
 }
 #[derive(Clone)]
-pub struct perStaStats{
-    pub sta_id: i32, 
+pub struct perStaStats {
+    pub sta_id: i32,
+    pub rx_packets_counter: i32,
     pub q_time_sta_cum: CumulativeStats,
-    pub s_time_sta_cum: CumulativeStats,   
-    pub csv_data: CsvData, 
+    pub s_time_sta_cum: CumulativeStats,
+    pub csv_data: CsvData,
 }
-impl perStaStats{
-    pub fn new() -> Self{
-        Self { sta_id: -1, q_time_sta_cum: CumulativeStats::new(), s_time_sta_cum: CumulativeStats::new(), csv_data: CsvData::new()
+impl perStaStats {
+    pub fn new() -> Self {
+        Self {
+            sta_id: -1,
+            q_time_sta_cum: CumulativeStats::new(),
+            s_time_sta_cum: CumulativeStats::new(),
+            csv_data: CsvData::new(),
+            rx_packets_counter: 0,
         }
     }
+    pub fn print_nicely(&self) {
+        let title = format!("STA {}", self.sta_id);
+    
+        // Define table rows with `let` bindings to extend the lifetime of the formatted strings
+        let tq_label = format!("E[T_q]");
+        let ts_label = format!("E[T_s]");
+    
+        let rows = vec![
+            (
+                "Packets received from STA:",
+                format!("{:>10}", self.rx_packets_counter),
+            ),
+            (
+                &tq_label,
+                format!("{:>10.6}", self.q_time_sta_cum.get_average()),
+            ),
+            (
+                &ts_label,
+                format!("{:>10.6}", self.s_time_sta_cum.get_average()),
+            ),
+        ];
+    
+        // Print the table
+        println!("+---------------------------------------------------+");
+        println!("| {}                                              |", title);
+        println!("+---------------------------------------------------+");
+        for (label, value) in rows {
+            println!("| {:<35} | {:>12} |", label, value);
+        }
+        println!("+------------------------------------------------+\n");
+    }
+    
     pub fn update_stats_per_sta(
         &mut self,
         now: TaiTime<0>,
@@ -255,29 +292,29 @@ impl perStaStats{
         Tq: f64,
         length_packet: usize,
     ) {
+        self.q_time_sta_cum.add(Tq);
+        self.s_time_sta_cum.add(Ts);
+        self.rx_packets_counter += 1;
 
-    self.q_time_sta_cum.add(Tq); 
-    self.s_time_sta_cum.add(Ts); 
+        let formatted_timestamp = format_timestamp!(now);
 
-    let formatted_timestamp = format_timestamp!(now);
-
-    self.csv_data.v_timestamp.push(formatted_timestamp);
-    self.csv_data.v_packet_id.push(id_packet);
-    self.csv_data.v_queue_size.push(queue_size);
-    self.csv_data.v_queue_ts.push(Ts);
-    self.csv_data.v_queue_tq.push(Tq);
-    self.csv_data.v_packet_l.push(length_packet);
-    
+        self.csv_data.v_timestamp.push(formatted_timestamp);
+        self.csv_data.v_packet_id.push(id_packet);
+        self.csv_data.v_queue_size.push(queue_size);
+        self.csv_data.v_queue_ts.push(Ts);
+        self.csv_data.v_queue_tq.push(Tq);
+        self.csv_data.v_packet_l.push(length_packet);
+        
     }
 }
 
 #[derive(Clone)]
-pub struct perStaLockStats{
+pub struct perStaLockStats {
     pub data: Arc<Mutex<perStaStats>>,
 }
-impl perStaLockStats{
-    pub fn new() -> Self{
-        Self{
+impl perStaLockStats {
+    pub fn new() -> Self {
+        Self {
             data: Arc::new(Mutex::new(perStaStats::new())),
         }
     }
@@ -685,8 +722,8 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
-            let filename = format!("stats_sta_{}.csv", stats.sta_id);
-            
+            let filename = format!("Results/stats_sta_{}.csv", stats.sta_id);
+
             // Open file with write permissions
             let file = OpenOptions::new()
                 .write(true)
@@ -722,14 +759,19 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
 
             // Optionally, print summary statistics for this station
             println!("Station {} Statistics:", stats.sta_id);
-            println!("  Average queue time: {:.6}", stats.q_time_sta_cum.get_average());
-            println!("  Average service time: {:.6}", stats.s_time_sta_cum.get_average());
+            println!(
+                "  Average queue time: {:.6}",
+                stats.q_time_sta_cum.get_average()
+            );
+            println!(
+                "  Average service time: {:.6}",
+                stats.s_time_sta_cum.get_average()
+            );
             println!("  CSV written to: {}", filename);
         }
     }
     Ok(())
 }
-
 
 // pub fn simpler_frametx_delay(bandwidth_dep:f64, mean_l: f64 )->ResultsFrameTXDelay {
 //     ResultsFrameTXDelay{
