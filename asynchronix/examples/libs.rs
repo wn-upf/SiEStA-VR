@@ -50,13 +50,13 @@ pub fn exponential(mean: f64) -> f64 {
 }
 
 #[derive(Clone)]
-
 pub struct CsvType {
 
     csv_data: Arc<Mutex<CsvData>>,
 }
 
 // Separate struct to hold the data that will be shared
+#[derive(Clone)]
 pub struct CsvData {
     v_timestamp: Vec<String>,
     v_packet_id: Vec<usize>,
@@ -239,10 +239,49 @@ pub struct perStaStats{
     pub sta_id: i32, 
     pub q_time_sta_cum: CumulativeStats,
     pub s_time_sta_cum: CumulativeStats,   
+    pub csv_data: CsvData, 
+}
+impl perStaStats{
+    pub fn new() -> Self{
+        Self { sta_id: -1, q_time_sta_cum: CumulativeStats::new(), s_time_sta_cum: CumulativeStats::new(), csv_data: CsvData::new()
+        }
+    }
+    pub fn update_stats_per_sta(
+        &mut self,
+        now: TaiTime<0>,
+        id_packet: usize,
+        queue_size: usize,
+        Ts: f64,
+        Tq: f64,
+        length_packet: usize,
+    ) {
+
+    self.q_time_sta_cum.add(Tq); 
+    self.s_time_sta_cum.add(Ts); 
+
+    let formatted_timestamp = format_timestamp!(now);
+
+    self.csv_data.v_timestamp.push(formatted_timestamp);
+    self.csv_data.v_packet_id.push(id_packet);
+    self.csv_data.v_queue_size.push(queue_size);
+    self.csv_data.v_queue_ts.push(Ts);
+    self.csv_data.v_queue_tq.push(Tq);
+    self.csv_data.v_packet_l.push(length_packet);
     
-    pub csv_data: CsvType, 
+    }
 }
 
+#[derive(Clone)]
+pub struct perStaLockStats{
+    pub data: Arc<Mutex<perStaStats>>,
+}
+impl perStaLockStats{
+    pub fn new() -> Self{
+        Self{
+            data: Arc::new(Mutex::new(perStaStats::new())),
+        }
+    }
+}
 pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
     let mut probabilities = Vec::new();
 
@@ -640,6 +679,57 @@ pub fn frametransmission_delay(
         data_service_delay: T_DATA,
     }
 }
+
+pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Result<()> {
+    for (index, sta_stats) in sta_stats_vec.iter().enumerate() {
+        // Lock the mutex to access the data
+        if let Ok(stats) = sta_stats.data.lock() {
+            // Create a filename with the station ID
+            let filename = format!("stats_sta_{}.csv", stats.sta_id);
+            
+            // Open file with write permissions
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&filename)?;
+
+            let mut writer = Writer::from_writer(file);
+
+            // Write header
+            writer.write_record(&[
+                "timestamp",
+                "packet_id",
+                "queue_size",
+                "Ts",
+                "Tq",
+                "packet_length",
+            ])?;
+
+            // Write all stored data for this station
+            for i in 0..stats.csv_data.v_timestamp.len() {
+                writer.write_record(&[
+                    &stats.csv_data.v_timestamp[i],
+                    &stats.csv_data.v_packet_id[i].to_string(),
+                    &stats.csv_data.v_queue_size[i].to_string(),
+                    &stats.csv_data.v_queue_ts[i].to_string(),
+                    &stats.csv_data.v_queue_tq[i].to_string(),
+                    &stats.csv_data.v_packet_l[i].to_string(),
+                ])?;
+            }
+
+            writer.flush()?;
+
+            // Optionally, print summary statistics for this station
+            println!("Station {} Statistics:", stats.sta_id);
+            println!("  Average queue time: {:.6}", stats.q_time_sta_cum.get_average());
+            println!("  Average service time: {:.6}", stats.s_time_sta_cum.get_average());
+            println!("  CSV written to: {}", filename);
+        }
+    }
+    Ok(())
+}
+
 
 // pub fn simpler_frametx_delay(bandwidth_dep:f64, mean_l: f64 )->ResultsFrameTXDelay {
 //     ResultsFrameTXDelay{
