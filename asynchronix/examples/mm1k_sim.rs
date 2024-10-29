@@ -22,6 +22,7 @@ use std::env;
 use std::f64::consts::PI;
 use std::future::Future;
 use std::time::{Duration, Instant};
+use tracing_subscriber::registry::Data;
 
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +54,14 @@ macro_rules! format_elapsed {
         let total_seconds =
             $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
         format!("{:.9}", total_seconds)
+    }};
+}
+#[macro_export]
+macro_rules! taitime_to_f64 {
+    ($tai:expr) => {{
+        let secs = $tai.as_secs() as f64;
+        let nanos = $tai.subsec_nanos() as f64;
+        secs + (nanos / 1_000_000_000.0)
     }};
 }
 
@@ -262,7 +271,7 @@ pub struct QueueStats {
     service_time_cum: CumulativeStats,
 
     num_packets_dropped: i32,
-    num_packets_rx: i32, 
+    num_packets_rx: i32,
 }
 impl QueueStats {
     pub fn new() -> Self {
@@ -270,61 +279,68 @@ impl QueueStats {
             waiting_time_cum: CumulativeStats::new(),
             service_time_cum: CumulativeStats::new(),
             num_packets_dropped: 0,
-            num_packets_rx: 0, 
+            num_packets_rx: 0,
         }
     }
     pub fn update_cumstats(&mut self, ts: f64, tq: f64, packet_drops: i32, packets_rx: i32) {
         self.waiting_time_cum.add(tq);
         self.service_time_cum.add(ts);
-        self.num_packets_dropped = packet_drops; 
-        self.num_packets_rx = packets_rx; 
+        self.num_packets_dropped = packet_drops;
+        self.num_packets_rx = packets_rx;
     }
 
     pub fn print_nicely(&self) {
-        let width = 48;  // Total width of the table
+        let width = 48; // Total width of the table
         let separator = format!("+{}+", "-".repeat(width));
-        
+
         // Calculate blocking probability
         let p_k = if self.num_packets_rx > 0 {
             self.num_packets_dropped as f64 / self.num_packets_rx as f64
         } else {
             0.0
         };
-        
+
         // Helper closure to format a row
-        let format_row = |label: &str, value: f64| {
-            format!("| {:<30} | {:>14.6} |", label, value)
-        };
-        
+        let format_row = |label: &str, value: f64| format!("| {:<30} | {:>14.6} |", label, value);
+
         // Print the header
         println!("{}", separator);
-        println!("{:^2}", "| QUEUE MODULE                                   |");
+        println!(
+            "{:^2}",
+            "| QUEUE MODULE                                   |"
+        );
         println!("{}", separator);
-        
+
         // Print statistics
         println!("{}", format_row("P_k (Blocking Probability)", p_k));
-        println!("{}", format_row("E[N_q]", 0.0));  // Placeholder - needs implementation
-        println!("{}", format_row(
-            "E[T] (queue + tx)", 
-            self.waiting_time_cum.get_average() + self.service_time_cum.get_average()
-        ));
-        println!("{}", format_row(
-            "E[T_q]", 
-            self.waiting_time_cum.get_average()
-        ));
-        println!("{}", format_row(
-            "E[T_s]", 
-            self.service_time_cum.get_average()
-        ));
-        println!("{}", format_row(
-            "CV of T_s", 
-            self.service_time_cum.get_coefficient_variation()
-        ));
-        println!("{}", format_row(
-            "2nd Moment of T_s", 
-            self.service_time_cum.get_2nd_moment()
-        ));
-        
+        println!("{}", format_row("E[N_q]", 0.0)); // Placeholder - needs implementation
+        println!(
+            "{}",
+            format_row(
+                "E[T] (queue + tx)",
+                self.waiting_time_cum.get_average() + self.service_time_cum.get_average()
+            )
+        );
+        println!(
+            "{}",
+            format_row("E[T_q]", self.waiting_time_cum.get_average())
+        );
+        println!(
+            "{}",
+            format_row("E[T_s]", self.service_time_cum.get_average())
+        );
+        println!(
+            "{}",
+            format_row(
+                "CV of T_s",
+                self.service_time_cum.get_coefficient_variation()
+            )
+        );
+        println!(
+            "{}",
+            format_row("2nd Moment of T_s", self.service_time_cum.get_2nd_moment())
+        );
+
         // Print the footer
         println!("{}", separator);
     }
@@ -369,7 +385,6 @@ impl QueueModule {
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<Vec<perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
-
 
     pub fn new(num_stas: usize, queue_size: usize, rate_departures_bps: f64) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
@@ -565,7 +580,12 @@ impl QueueModule {
                     // UPDATE STATS
                     if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
                         // println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", T_s_f64, T_q_f64);
-                        queue_stats.update_cumstats(T_s_f64, T_q_f64, self.blocked_packet_counter as i32, self.arrived_packet_counter as i32);
+                        queue_stats.update_cumstats(
+                            T_s_f64,
+                            T_q_f64,
+                            self.blocked_packet_counter as i32,
+                            self.arrived_packet_counter as i32,
+                        );
                     }
 
                     if let Ok(array_STAs_stats) = self.array_stas_stats.lock() {
@@ -621,33 +641,105 @@ impl QueueModule {
 
 impl Model for QueueModule {}
 
+#[derive(Clone, Default)]
+pub struct DataSink {
+    pub system_time: f64,
+    pub av_l: f64,
+    pub last_time: f64,
+    pub rx_packets_counter: usize,
+}
+impl DataSink {
+    pub fn new() -> Self {
+        Self {
+            system_time: 0.0,
+            av_l: 0.0,
+            last_time: 0.0,
+            rx_packets_counter: 0,
+        }
+    }
+    pub fn print_nicely(&self) {
+            let width = 48; // Total width of the table
+            let separator = format!("+{}+", "-".repeat(width));
+
+            // Helper closure to format a row
+            let format_row =
+                |label: &str, value: f64| format!("| {:<30} | {:>14.6} |", label, value);
+
+            // Print the header
+            println!("{}", separator);
+            println!(
+                "{:^50}",
+                "| SINK                                           |"
+            );
+            println!("{}", separator);
+
+            // Print statistics
+            println!(
+                "{}",
+                format_row(
+                    "Average System Time",
+                    self.system_time / self.rx_packets_counter as f64
+                )
+            );
+            println!(
+                "{}",
+                format_row("Avg Received Throughput[Mbps]", self.av_l / self.last_time)
+            );
+
+            // Print the footer
+            println!("{}", separator);
+        }
+}
+
 #[derive(Default)]
 pub struct Sink {
     // pub input: Input <MpduPacket>,
     pub received_packet_counter: usize,
+    pub mutex_data: Arc<Mutex<DataSink>>,
 }
 
 impl Sink {
     pub fn new() -> Self {
         Self {
             received_packet_counter: 0,
+            mutex_data: Arc::new(Mutex::new(DataSink::new())),
         }
     }
 
+    pub fn get_data_handle(&self) -> Arc<Mutex<DataSink>>{
+        Arc::clone(&self.mutex_data)
+    }
+
+
     pub async fn input(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
-        let elapsed = context.scheduler.time();
+        let now = context.scheduler.time();
 
         for packet in ampdu_packet.mpdu_packets {
             debug_print!(
                 DebugColor::Red,
                 "{} [DBG SINK IN]  ---Packet {} arrived from STA{} into STA{}",
-                format_elapsed!(elapsed),
+                format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
                 packet.sta_dest_id,
             );
             // println!("{} - Packet received!!", format_duration(elapsed));
             // packet.print();
+
+            let packet_total_time = now.duration_since(packet.queue_in_instant);
+
+            if let Ok(mut data) = self.mutex_data.lock() {
+                data.system_time += packet_total_time.as_secs_f64();
+                data.av_l += packet.length_packet as f64;
+                data.rx_packets_counter += 1; 
+                data.last_time = taitime_to_f64!(context.scheduler.time()); 
+
+                // println!(
+                //     "dbgggggggggggg st: {}, av_l : {}, rx_c: {}, last_t: {}",
+                //     data.system_time, data.av_l, data.rx_packets_counter, data.last_time
+                // );
+            }
+
             self.received_packet_counter += 1;
         }
     }
@@ -780,7 +872,7 @@ fn multiple_STA_sim(
     rate_queue_bps: f64,
     distance: f64,
 ) {
-    let v_distance = vec![1.0, distance, 20.0]; // just some random values
+    let v_distance = vec![1.0, distance, distance]; // just some random values
 
     let coords_sta1 = Coords {
         x: v_distance[0],
@@ -819,6 +911,10 @@ fn multiple_STA_sim(
     let effective_rate1 = mean_length / results1.service_delay;
     let effective_rate2 = mean_length / results2.service_delay;
     let effective_rate = (effective_rate1 + effective_rate2) / 2.0;
+
+    println!("*******************************************************************"); 
+    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", rate_bps_in, mean_length, effective_rate, k_queue); 
+
     let LT = compute_mm1k_metrics(rate_bps_in, mean_length as f64, effective_rate, k_queue);
 
     let mut sta1_bg: STA_source =
@@ -826,12 +922,13 @@ fn multiple_STA_sim(
     let mut sta2_bg: STA_source =
         STA_source::new(rate_bps_in, mean_length, 1, 2, coords_sta2, true);
 
-    let sta5_ul: STA_source = STA_source::new(rate_bps_in, mean_length, 2, 7, coords_sta3, false); // RX STA, acts as sink with coordinates
+    // let sta5_ul: STA_source = STA_source::new(rate_bps_in, mean_length, 2, 7, coords_sta3, false); // RX STA, acts as sink with coordinates
+    let sink: Sink = Sink::new();
+    let mbox_sink: Mailbox<Sink> = Mailbox::new();
 
     let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
-    
 
     queue.STA_coords_grid.resize(num_STAs, Coords::new());
     for i in 0..num_STAs {
@@ -839,16 +936,18 @@ fn multiple_STA_sim(
     }
 
     let csv_data_handle = queue.csv_metrics.get_data_handle();
-    let queuestats_data_handle = queue.get_queue_stats_handle();
+    let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle();
     let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
+    let sinkstats_data_handle = sink.get_data_handle(); 
+
+
 
     let mbox_sta1 = Mailbox::new();
     let mbox_sta2 = Mailbox::new();
-    let mbox_sta3 = Mailbox::new();
 
     let sta1_address = mbox_sta1.address();
     let sta2_address = mbox_sta2.address();
-    // let sta3_address = mbox_sta3.address();
+    let sta3_address = mbox_sink.address();
 
     let mbox_queue = Mailbox::new();
     // let queue_address = mbox_queue.address();
@@ -861,7 +960,7 @@ fn multiple_STA_sim(
 
     sta1_bg.output_port.connect(QueueModule::input, &mbox_queue); // Two DL STAs send
     sta2_bg.output_port.connect(QueueModule::input, &mbox_queue);
-    queue.output_port.connect(STA_source::input, &mbox_sta3);
+    queue.output_port.connect(Sink::input, &mbox_sink);
 
     let t0 = MonotonicTime::EPOCH;
 
@@ -869,7 +968,7 @@ fn multiple_STA_sim(
         .add_model(sta1_bg, mbox_sta1, "STA1 (BG)")
         .add_model(sta2_bg, mbox_sta2, "STA2 (BG)")
         .add_model(queue, mbox_queue, "Queue")
-        .add_model(sta5_ul, mbox_sta3, "STA3 (Rx)")
+        .add_model(sink, mbox_sink, "SINK")
         .init(t0);
 
     let scheduler = simu.scheduler();
@@ -902,8 +1001,7 @@ fn multiple_STA_sim(
         .unwrap();
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
-    
-    
+
     // After simulation, write the CSV data
     if let Ok(data) = csv_data_handle.lock() {
         if let Err(e) = data.write_to_csv() {
@@ -917,18 +1015,26 @@ fn multiple_STA_sim(
                 sta_data.print_nicely();
             }
         }
-    
+
         if let Err(e) = write_all_sta_csvs(&stats_vec) {
             eprintln!("Error writing STA CSV files: {}", e);
         }
     }
 
-    if let Ok(mut queue_stats) = queuestats_data_handle.lock() {
+    if let Ok(queue_stats) = queuestats_data_handle.lock() {
         // println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", T_s_f64, T_q_f64);
         queue_stats.print_nicely();
     }
 
+    if let Ok(sink_stats) = sinkstats_data_handle.lock(){
+        sink_stats.print_nicely(); 
+    }
+
     // println!("************ END RESULTS STAS***********\n LT: ");
+
+    println!("*******************************************************************"); 
+    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", rate_bps_in, mean_length, effective_rate, k_queue); 
+
     LT.print_results();
 }
 

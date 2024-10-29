@@ -188,6 +188,7 @@ impl CumulativeStats {
     // Get standard deviation
     pub fn get_std_dev(&self) -> f64 {
         if self.values.len() < 2 {
+            println!("LESS THAN TWO???"); 
             return 0.0;
         }
 
@@ -201,6 +202,7 @@ impl CumulativeStats {
             })
             .sum();
 
+        let std = (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt(); 
         (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt()
     }
 
@@ -208,6 +210,7 @@ impl CumulativeStats {
     pub fn get_coefficient_variation(&self) -> f64 {
         let mean = self.get_average();
         if mean == 0.0 {
+            println!("ZEROOOOOOOOOOOOOOOo"); 
             0.0
         } else {
             self.get_std_dev() / mean
@@ -252,12 +255,12 @@ impl perStaStats {
         }
     }
     pub fn print_nicely(&self) {
-        let title = format!("STA {}", self.sta_id);
-    
+        let title = format!("STA {}", self.sta_id + 1);
+
         // Define table rows with `let` bindings to extend the lifetime of the formatted strings
         let tq_label = format!("E[T_q]");
         let ts_label = format!("E[T_s]");
-    
+
         let rows = vec![
             (
                 "Packets received from STA:",
@@ -272,7 +275,7 @@ impl perStaStats {
                 format!("{:>10.6}", self.s_time_sta_cum.get_average()),
             ),
         ];
-    
+
         // Print the table
         println!("+---------------------------------------------------+");
         println!("| {}                                              |", title);
@@ -282,7 +285,7 @@ impl perStaStats {
         }
         println!("+------------------------------------------------+\n");
     }
-    
+
     pub fn update_stats_per_sta(
         &mut self,
         now: TaiTime<0>,
@@ -304,7 +307,6 @@ impl perStaStats {
         self.csv_data.v_queue_ts.push(Ts);
         self.csv_data.v_queue_tq.push(Tq);
         self.csv_data.v_packet_l.push(length_packet);
-        
     }
 }
 
@@ -758,15 +760,15 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
             writer.flush()?;
 
             // Optionally, print summary statistics for this station
-            println!("Station {} Statistics:", stats.sta_id);
-            println!(
-                "  Average queue time: {:.6}",
-                stats.q_time_sta_cum.get_average()
-            );
-            println!(
-                "  Average service time: {:.6}",
-                stats.s_time_sta_cum.get_average()
-            );
+            // println!("Station {} Statistics:", stats.sta_id);
+            // println!(
+            //     "  Average queue time: {:.6}",
+            //     stats.q_time_sta_cum.get_average()
+            // );
+            // println!(
+            //     "  Average service time: {:.6}",
+            //     stats.s_time_sta_cum.get_average()
+            // );
             println!("  CSV written to: {}", filename);
         }
     }
