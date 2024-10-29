@@ -1,0 +1,2077 @@
+Starting works_fast example
+Starting works_fast example...
+warning: unused variable: `queue_address`
+   --> asynchronix/examples/works_fast.rs:361:9
+    |
+361 |     let queue_address = mbox_queue.address();
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_queue_address`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `sink_mbox_address`
+   --> asynchronix/examples/works_fast.rs:364:9
+    |
+364 |     let sink_mbox_address = sink_mbox.address();
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sink_mbox_address`
+
+warning: variable does not need to be mutable
+   --> asynchronix/examples/works_fast.rs:355:9
+    |
+355 |     let mut sink = Sink::new();
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: constant `CW_MIN` is never used
+  --> asynchronix/examples/libs.rs:22:7
+   |
+22 | const CW_MIN: i32 = 15;
+   |       ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `CHANNEL_WIDTH` is never used
+  --> asynchronix/examples/libs.rs:23:7
+   |
+23 | const CHANNEL_WIDTH: usize = 80; //MHz
+   |       ^^^^^^^^^^^^^
+
+warning: constant `LEGACY_PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:25:7
+   |
+25 | const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:26:7
+   |
+26 | const PHY_DURATION: f64 = 100E-6;
+   |       ^^^^^^^^^^^^
+
+warning: constant `SLOT` is never used
+  --> asynchronix/examples/libs.rs:27:7
+   |
+27 | const SLOT: f64 = 9E-6;
+   |       ^^^^
+
+warning: constant `SIFS` is never used
+  --> asynchronix/examples/libs.rs:28:7
+   |
+28 | const SIFS: f64 = 16E-6;
+   |       ^^^^
+
+warning: constant `DIFS` is never used
+  --> asynchronix/examples/libs.rs:29:7
+   |
+29 | const DIFS: f64 = 31E-6;
+   |       ^^^^
+
+warning: struct `CumulativeStats` is never constructed
+   --> asynchronix/examples/libs.rs:110:12
+    |
+110 | pub struct CumulativeStats {
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `CumulativeStats` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> asynchronix/examples/libs.rs:119:12
+    |
+117 | impl CumulativeStats {
+    | -------------------- associated items in this implementation
+118 |     // Constructor
+119 |     pub fn new(sta_id: i32) -> Self {
+    |            ^^^
+...
+129 |     fn add(&mut self, value: f64) {
+    |        ^^^
+...
+136 |     fn get_average(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+145 |     fn get_std_dev(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+164 |     fn get_coefficient_variation(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     fn get_2nd_moment(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^
+...
+183 |     fn get_last_value(&self) -> Option<f64> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `compute_steady_state_probabilities` is never used
+   --> asynchronix/examples/libs.rs:193:8
+    |
+193 | pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> asynchronix/examples/libs.rs:210:9
+    |
+209 | pub struct LittleTheoremMM1K {
+    |            ----------------- fields in this struct
+210 |     pub k: i32,      // Max capacity of system (u)
+    |         ^
+211 |     pub lambda: f64, // Arrival rate
+    |         ^^^^^^
+212 |     pub mu: f64,     // Service rate
+    |         ^^
+213 |     pub rho: f64,    // Utilization factor
+    |         ^^^
+214 |     pub n: f64,      // Average number of packets in the system
+    |         ^
+215 |     pub n_q: f64,    // Average number of packets in queue
+    |         ^^^
+216 |     pub p_0: f64,    // Probability of 0 packets in the system
+    |         ^^^
+217 |     pub p_k: f64,    // Blocking probability
+    |         ^^^
+218 |     pub t: f64,      // Average time in the system
+    |         ^
+219 |     pub t_q: f64,    // avg. Waiting time in queue
+    |         ^^^
+220 |     pub t_s: f64,    // avg. Service time
+    |         ^^^
+    |
+    = note: `LittleTheoremMM1K` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `MpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:283:12
+    |
+283 | pub struct MpduPacket {
+    |            ^^^^^^^^^^
+    |
+    = note: `MpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new` and `print` are never used
+   --> asynchronix/examples/libs.rs:298:12
+    |
+297 | impl MpduPacket {
+    | --------------- associated items in this implementation
+298 |     pub fn new() -> Self {
+    |            ^^^
+...
+313 |     pub fn print(&self) {
+    |            ^^^^^
+
+warning: struct `AmpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:318:12
+    |
+318 | pub struct AmpduPacket {
+    |            ^^^^^^^^^^^
+    |
+    = note: `AmpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new`, `print`, and `reset` are never used
+   --> asynchronix/examples/libs.rs:327:12
+    |
+326 | impl AmpduPacket {
+    | ---------------- associated items in this implementation
+327 |     pub fn new() -> Self {
+    |            ^^^
+...
+341 |     pub fn print(&self) {
+    |            ^^^^^
+...
+355 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: fields `x`, `y`, and `z` are never read
+   --> asynchronix/examples/libs.rs:370:9
+    |
+369 | pub struct Coords {
+    |            ------ fields in this struct
+370 |     pub x: f64,
+    |         ^
+371 |     pub y: f64,
+    |         ^
+372 |     pub z: f64,
+    |         ^
+    |
+    = note: `Coords` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> asynchronix/examples/libs.rs:376:12
+    |
+375 | impl Coords {
+    | ----------- associated function in this implementation
+376 |     pub fn new() -> Self {
+    |            ^^^
+
+warning: fields `service_delay`, `data_service_delay`, `pathloss`, `p_rx`, and `o_rate` are never read
+   --> asynchronix/examples/libs.rs:387:9
+    |
+386 | pub struct ResultsFrameTXDelay {
+    |            ------------------- fields in this struct
+387 |     pub service_delay: f64,
+    |         ^^^^^^^^^^^^^
+388 |     pub data_service_delay: f64,
+    |         ^^^^^^^^^^^^^^^^^^
+389 |     pub pathloss: f64,
+    |         ^^^^^^^^
+390 |     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
+    |         ^^^^
+391 |     pub o_rate: f64,
+    |         ^^^^^^
+    |
+    = note: `ResultsFrameTXDelay` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+   --> asynchronix/examples/libs.rs:395:12
+    |
+394 | impl ResultsFrameTXDelay {
+    | ------------------------ method in this implementation
+395 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `calculate_distance` is never used
+   --> asynchronix/examples/libs.rs:404:8
+    |
+404 | pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `path_loss` is never used
+   --> asynchronix/examples/libs.rs:412:8
+    |
+412 | pub fn path_loss(d: f64) -> f64 {
+    |        ^^^^^^^^^
+
+warning: function `frametransmission_delay` is never used
+   --> asynchronix/examples/libs.rs:416:8
+    |
+416 | pub fn frametransmission_delay(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `T_q` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:90:9
+   |
+90 |     pub T_q: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_q`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: structure field `T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:91:9
+   |
+91 |     pub T_s: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:92:9
+   |
+92 |     pub expected_T_s: Duration,
+   |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `LT` should have a snake case name
+   --> asynchronix/examples/works_fast.rs:350:9
+    |
+350 |     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
+    |         ^^ help: convert the identifier to snake case: `lt`
+
+warning: variable `Ts` should have a snake case name
+  --> asynchronix/examples/libs.rs:59:9
+   |
+59 |         Ts: f64,
+   |         ^^ help: convert the identifier to snake case: `ts`
+
+warning: variable `Tq` should have a snake case name
+  --> asynchronix/examples/libs.rs:60:9
+   |
+60 |         Tq: f64,
+   |         ^^ help: convert the identifier to snake case: `tq`
+
+warning: structure field `T_q` should have a snake case name
+   --> asynchronix/examples/libs.rs:289:9
+    |
+289 |     pub T_q: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_q`
+
+warning: structure field `T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:290:9
+    |
+290 |     pub T_s: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:291:9
+    |
+291 |     pub expected_T_s: Duration,
+    |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `effPt` should have a snake case name
+   --> asynchronix/examples/libs.rs:426:13
+    |
+426 |     let mut effPt = p_tx;
+    |             ^^^^^ help: convert the identifier to snake case: `eff_pt`
+
+warning: variable `PL` should have a snake case name
+   --> asynchronix/examples/libs.rs:439:9
+    |
+439 |     let PL = path_loss(distance);
+    |         ^^ help: convert the identifier to snake case: `pl`
+
+warning: variable `Pr` should have a snake case name
+   --> asynchronix/examples/libs.rs:440:9
+    |
+440 |     let Pr = effPt - PL;
+    |         ^^ help: convert the identifier to snake case: `pr`
+
+warning: variable `Subcarriers` should have a snake case name
+   --> asynchronix/examples/libs.rs:459:9
+    |
+459 |     let Subcarriers = match channel_width {
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `subcarriers`
+
+warning: variable `SU_spatial_streams` should have a snake case name
+   --> asynchronix/examples/libs.rs:467:9
+    |
+467 |     let SU_spatial_streams = 2.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `su_spatial_streams`
+
+warning: variable `ORate` should have a snake case name
+   --> asynchronix/examples/libs.rs:468:9
+    |
+468 |     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    |         ^^^^^ help: convert the identifier to snake case: `orate`
+
+warning: variable `OBasicRate` should have a snake case name
+   --> asynchronix/examples/libs.rs:470:9
+    |
+470 |     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `obasic_rate`
+
+warning: variable `L` should have a snake case name
+   --> asynchronix/examples/libs.rs:472:9
+    |
+472 |     let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    |         ^ help: convert the identifier to snake case: `l`
+
+warning: variable `SF` should have a snake case name
+   --> asynchronix/examples/libs.rs:474:9
+    |
+474 |     let SF = 16.0;
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `sf`
+
+warning: variable `TB` should have a snake case name
+   --> asynchronix/examples/libs.rs:475:9
+    |
+475 |     let TB = 18.0;
+    |         ^^ help: convert the identifier to snake case: `tb`
+
+warning: variable `MD` should have a snake case name
+   --> asynchronix/examples/libs.rs:476:9
+    |
+476 |     let MD = 32.0;
+    |         ^^ help: convert the identifier to snake case: `md`
+
+warning: variable `MAC_H_size` should have a snake case name
+   --> asynchronix/examples/libs.rs:477:9
+    |
+477 |     let MAC_H_size = 240.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `mac_h_size`
+
+warning: variable `T_RTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:479:9
+    |
+479 |     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
+    |         ^^^^^ help: convert the identifier to snake case: `t_rts`
+
+warning: variable `T_CTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:480:9
+    |
+480 |     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_cts`
+
+warning: variable `T_DATA` should have a snake case name
+   --> asynchronix/examples/libs.rs:481:9
+    |
+481 |     let T_DATA: f64 =
+    |         ^^^^^^ help: convert the identifier to snake case: `t_data`
+
+warning: variable `T_ACK` should have a snake case name
+   --> asynchronix/examples/libs.rs:483:9
+    |
+483 |     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_ack`
+
+warning: variable `T_DETERMINISTIC_BACKOFF` should have a snake case name
+   --> asynchronix/examples/libs.rs:485:9
+    |
+485 |     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `t_deterministic_backoff`
+
+warning: variable `T` should have a snake case name
+   --> asynchronix/examples/libs.rs:487:9
+    |
+487 |     let T =
+    |         ^ help: convert the identifier to snake case: `t`
+
+warning: `asynchronix` (example "works_fast") generated 52 warnings (run `cargo fix --example "works_fast"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running `target/debug/examples/works_fast`
+thread 'main' panicked at std/src/io/stdio.rs:1117:9:
+failed printing to stdout: Input/output error (os error 5)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Starting works_fast example...
+warning: unused variable: `queue_address`
+   --> asynchronix/examples/works_fast.rs:361:9
+    |
+361 |     let queue_address = mbox_queue.address();
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_queue_address`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `sink_mbox_address`
+   --> asynchronix/examples/works_fast.rs:364:9
+    |
+364 |     let sink_mbox_address = sink_mbox.address();
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sink_mbox_address`
+
+warning: variable does not need to be mutable
+   --> asynchronix/examples/works_fast.rs:355:9
+    |
+355 |     let mut sink = Sink::new();
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: constant `CW_MIN` is never used
+  --> asynchronix/examples/libs.rs:22:7
+   |
+22 | const CW_MIN: i32 = 15;
+   |       ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `CHANNEL_WIDTH` is never used
+  --> asynchronix/examples/libs.rs:23:7
+   |
+23 | const CHANNEL_WIDTH: usize = 80; //MHz
+   |       ^^^^^^^^^^^^^
+
+warning: constant `LEGACY_PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:25:7
+   |
+25 | const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:26:7
+   |
+26 | const PHY_DURATION: f64 = 100E-6;
+   |       ^^^^^^^^^^^^
+
+warning: constant `SLOT` is never used
+  --> asynchronix/examples/libs.rs:27:7
+   |
+27 | const SLOT: f64 = 9E-6;
+   |       ^^^^
+
+warning: constant `SIFS` is never used
+  --> asynchronix/examples/libs.rs:28:7
+   |
+28 | const SIFS: f64 = 16E-6;
+   |       ^^^^
+
+warning: constant `DIFS` is never used
+  --> asynchronix/examples/libs.rs:29:7
+   |
+29 | const DIFS: f64 = 31E-6;
+   |       ^^^^
+
+warning: struct `CumulativeStats` is never constructed
+   --> asynchronix/examples/libs.rs:110:12
+    |
+110 | pub struct CumulativeStats {
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `CumulativeStats` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> asynchronix/examples/libs.rs:119:12
+    |
+117 | impl CumulativeStats {
+    | -------------------- associated items in this implementation
+118 |     // Constructor
+119 |     pub fn new(sta_id: i32) -> Self {
+    |            ^^^
+...
+129 |     fn add(&mut self, value: f64) {
+    |        ^^^
+...
+136 |     fn get_average(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+145 |     fn get_std_dev(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+164 |     fn get_coefficient_variation(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     fn get_2nd_moment(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^
+...
+183 |     fn get_last_value(&self) -> Option<f64> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `compute_steady_state_probabilities` is never used
+   --> asynchronix/examples/libs.rs:193:8
+    |
+193 | pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> asynchronix/examples/libs.rs:210:9
+    |
+209 | pub struct LittleTheoremMM1K {
+    |            ----------------- fields in this struct
+210 |     pub k: i32,      // Max capacity of system (u)
+    |         ^
+211 |     pub lambda: f64, // Arrival rate
+    |         ^^^^^^
+212 |     pub mu: f64,     // Service rate
+    |         ^^
+213 |     pub rho: f64,    // Utilization factor
+    |         ^^^
+214 |     pub n: f64,      // Average number of packets in the system
+    |         ^
+215 |     pub n_q: f64,    // Average number of packets in queue
+    |         ^^^
+216 |     pub p_0: f64,    // Probability of 0 packets in the system
+    |         ^^^
+217 |     pub p_k: f64,    // Blocking probability
+    |         ^^^
+218 |     pub t: f64,      // Average time in the system
+    |         ^
+219 |     pub t_q: f64,    // avg. Waiting time in queue
+    |         ^^^
+220 |     pub t_s: f64,    // avg. Service time
+    |         ^^^
+    |
+    = note: `LittleTheoremMM1K` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `MpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:283:12
+    |
+283 | pub struct MpduPacket {
+    |            ^^^^^^^^^^
+    |
+    = note: `MpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new` and `print` are never used
+   --> asynchronix/examples/libs.rs:298:12
+    |
+297 | impl MpduPacket {
+    | --------------- associated items in this implementation
+298 |     pub fn new() -> Self {
+    |            ^^^
+...
+313 |     pub fn print(&self) {
+    |            ^^^^^
+
+warning: struct `AmpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:318:12
+    |
+318 | pub struct AmpduPacket {
+    |            ^^^^^^^^^^^
+    |
+    = note: `AmpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new`, `print`, and `reset` are never used
+   --> asynchronix/examples/libs.rs:327:12
+    |
+326 | impl AmpduPacket {
+    | ---------------- associated items in this implementation
+327 |     pub fn new() -> Self {
+    |            ^^^
+...
+341 |     pub fn print(&self) {
+    |            ^^^^^
+...
+355 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: fields `x`, `y`, and `z` are never read
+   --> asynchronix/examples/libs.rs:370:9
+    |
+369 | pub struct Coords {
+    |            ------ fields in this struct
+370 |     pub x: f64,
+    |         ^
+371 |     pub y: f64,
+    |         ^
+372 |     pub z: f64,
+    |         ^
+    |
+    = note: `Coords` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> asynchronix/examples/libs.rs:376:12
+    |
+375 | impl Coords {
+    | ----------- associated function in this implementation
+376 |     pub fn new() -> Self {
+    |            ^^^
+
+warning: fields `service_delay`, `data_service_delay`, `pathloss`, `p_rx`, and `o_rate` are never read
+   --> asynchronix/examples/libs.rs:387:9
+    |
+386 | pub struct ResultsFrameTXDelay {
+    |            ------------------- fields in this struct
+387 |     pub service_delay: f64,
+    |         ^^^^^^^^^^^^^
+388 |     pub data_service_delay: f64,
+    |         ^^^^^^^^^^^^^^^^^^
+389 |     pub pathloss: f64,
+    |         ^^^^^^^^
+390 |     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
+    |         ^^^^
+391 |     pub o_rate: f64,
+    |         ^^^^^^
+    |
+    = note: `ResultsFrameTXDelay` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+   --> asynchronix/examples/libs.rs:395:12
+    |
+394 | impl ResultsFrameTXDelay {
+    | ------------------------ method in this implementation
+395 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `calculate_distance` is never used
+   --> asynchronix/examples/libs.rs:404:8
+    |
+404 | pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `path_loss` is never used
+   --> asynchronix/examples/libs.rs:412:8
+    |
+412 | pub fn path_loss(d: f64) -> f64 {
+    |        ^^^^^^^^^
+
+warning: function `frametransmission_delay` is never used
+   --> asynchronix/examples/libs.rs:416:8
+    |
+416 | pub fn frametransmission_delay(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `T_q` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:90:9
+   |
+90 |     pub T_q: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_q`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: structure field `T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:91:9
+   |
+91 |     pub T_s: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:92:9
+   |
+92 |     pub expected_T_s: Duration,
+   |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `LT` should have a snake case name
+   --> asynchronix/examples/works_fast.rs:350:9
+    |
+350 |     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
+    |         ^^ help: convert the identifier to snake case: `lt`
+
+warning: variable `Ts` should have a snake case name
+  --> asynchronix/examples/libs.rs:59:9
+   |
+59 |         Ts: f64,
+   |         ^^ help: convert the identifier to snake case: `ts`
+
+warning: variable `Tq` should have a snake case name
+  --> asynchronix/examples/libs.rs:60:9
+   |
+60 |         Tq: f64,
+   |         ^^ help: convert the identifier to snake case: `tq`
+
+warning: structure field `T_q` should have a snake case name
+   --> asynchronix/examples/libs.rs:289:9
+    |
+289 |     pub T_q: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_q`
+
+warning: structure field `T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:290:9
+    |
+290 |     pub T_s: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:291:9
+    |
+291 |     pub expected_T_s: Duration,
+    |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `effPt` should have a snake case name
+   --> asynchronix/examples/libs.rs:426:13
+    |
+426 |     let mut effPt = p_tx;
+    |             ^^^^^ help: convert the identifier to snake case: `eff_pt`
+
+warning: variable `PL` should have a snake case name
+   --> asynchronix/examples/libs.rs:439:9
+    |
+439 |     let PL = path_loss(distance);
+    |         ^^ help: convert the identifier to snake case: `pl`
+
+warning: variable `Pr` should have a snake case name
+   --> asynchronix/examples/libs.rs:440:9
+    |
+440 |     let Pr = effPt - PL;
+    |         ^^ help: convert the identifier to snake case: `pr`
+
+warning: variable `Subcarriers` should have a snake case name
+   --> asynchronix/examples/libs.rs:459:9
+    |
+459 |     let Subcarriers = match channel_width {
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `subcarriers`
+
+warning: variable `SU_spatial_streams` should have a snake case name
+   --> asynchronix/examples/libs.rs:467:9
+    |
+467 |     let SU_spatial_streams = 2.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `su_spatial_streams`
+
+warning: variable `ORate` should have a snake case name
+   --> asynchronix/examples/libs.rs:468:9
+    |
+468 |     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    |         ^^^^^ help: convert the identifier to snake case: `orate`
+
+warning: variable `OBasicRate` should have a snake case name
+   --> asynchronix/examples/libs.rs:470:9
+    |
+470 |     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `obasic_rate`
+
+warning: variable `L` should have a snake case name
+   --> asynchronix/examples/libs.rs:472:9
+    |
+472 |     let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    |         ^ help: convert the identifier to snake case: `l`
+
+warning: variable `SF` should have a snake case name
+   --> asynchronix/examples/libs.rs:474:9
+    |
+474 |     let SF = 16.0;
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `sf`
+
+warning: variable `TB` should have a snake case name
+   --> asynchronix/examples/libs.rs:475:9
+    |
+475 |     let TB = 18.0;
+    |         ^^ help: convert the identifier to snake case: `tb`
+
+warning: variable `MD` should have a snake case name
+   --> asynchronix/examples/libs.rs:476:9
+    |
+476 |     let MD = 32.0;
+    |         ^^ help: convert the identifier to snake case: `md`
+
+warning: variable `MAC_H_size` should have a snake case name
+   --> asynchronix/examples/libs.rs:477:9
+    |
+477 |     let MAC_H_size = 240.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `mac_h_size`
+
+warning: variable `T_RTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:479:9
+    |
+479 |     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
+    |         ^^^^^ help: convert the identifier to snake case: `t_rts`
+
+warning: variable `T_CTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:480:9
+    |
+480 |     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_cts`
+
+warning: variable `T_DATA` should have a snake case name
+   --> asynchronix/examples/libs.rs:481:9
+    |
+481 |     let T_DATA: f64 =
+    |         ^^^^^^ help: convert the identifier to snake case: `t_data`
+
+warning: variable `T_ACK` should have a snake case name
+   --> asynchronix/examples/libs.rs:483:9
+    |
+483 |     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_ack`
+
+warning: variable `T_DETERMINISTIC_BACKOFF` should have a snake case name
+   --> asynchronix/examples/libs.rs:485:9
+    |
+485 |     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `t_deterministic_backoff`
+
+warning: variable `T` should have a snake case name
+   --> asynchronix/examples/libs.rs:487:9
+    |
+487 |     let T =
+    |         ^ help: convert the identifier to snake case: `t`
+
+warning: `asynchronix` (example "works_fast") generated 52 warnings (run `cargo fix --example "works_fast"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/examples/works_fast`
+Starting works_fast example...
+   Compiling asynchronix v0.2.2 (/home/boris/Desktop/Rust_MG1/asynchronix/asynchronix)
+warning: unused variable: `queue_address`
+   --> asynchronix/examples/works_fast.rs:361:9
+    |
+361 |     let queue_address = mbox_queue.address();
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_queue_address`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `sink_mbox_address`
+   --> asynchronix/examples/works_fast.rs:364:9
+    |
+364 |     let sink_mbox_address = sink_mbox.address();
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sink_mbox_address`
+
+warning: variable does not need to be mutable
+   --> asynchronix/examples/works_fast.rs:355:9
+    |
+355 |     let mut sink = Sink::new();
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: constant `CW_MIN` is never used
+  --> asynchronix/examples/libs.rs:22:7
+   |
+22 | const CW_MIN: i32 = 15;
+   |       ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `CHANNEL_WIDTH` is never used
+  --> asynchronix/examples/libs.rs:23:7
+   |
+23 | const CHANNEL_WIDTH: usize = 80; //MHz
+   |       ^^^^^^^^^^^^^
+
+warning: constant `LEGACY_PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:25:7
+   |
+25 | const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:26:7
+   |
+26 | const PHY_DURATION: f64 = 100E-6;
+   |       ^^^^^^^^^^^^
+
+warning: constant `SLOT` is never used
+  --> asynchronix/examples/libs.rs:27:7
+   |
+27 | const SLOT: f64 = 9E-6;
+   |       ^^^^
+
+warning: constant `SIFS` is never used
+  --> asynchronix/examples/libs.rs:28:7
+   |
+28 | const SIFS: f64 = 16E-6;
+   |       ^^^^
+
+warning: constant `DIFS` is never used
+  --> asynchronix/examples/libs.rs:29:7
+   |
+29 | const DIFS: f64 = 31E-6;
+   |       ^^^^
+
+warning: struct `CumulativeStats` is never constructed
+   --> asynchronix/examples/libs.rs:110:12
+    |
+110 | pub struct CumulativeStats {
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `CumulativeStats` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> asynchronix/examples/libs.rs:119:12
+    |
+117 | impl CumulativeStats {
+    | -------------------- associated items in this implementation
+118 |     // Constructor
+119 |     pub fn new(sta_id: i32) -> Self {
+    |            ^^^
+...
+129 |     fn add(&mut self, value: f64) {
+    |        ^^^
+...
+136 |     fn get_average(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+145 |     fn get_std_dev(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+164 |     fn get_coefficient_variation(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     fn get_2nd_moment(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^
+...
+183 |     fn get_last_value(&self) -> Option<f64> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `compute_steady_state_probabilities` is never used
+   --> asynchronix/examples/libs.rs:193:8
+    |
+193 | pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> asynchronix/examples/libs.rs:210:9
+    |
+209 | pub struct LittleTheoremMM1K {
+    |            ----------------- fields in this struct
+210 |     pub k: i32,      // Max capacity of system (u)
+    |         ^
+211 |     pub lambda: f64, // Arrival rate
+    |         ^^^^^^
+212 |     pub mu: f64,     // Service rate
+    |         ^^
+213 |     pub rho: f64,    // Utilization factor
+    |         ^^^
+214 |     pub n: f64,      // Average number of packets in the system
+    |         ^
+215 |     pub n_q: f64,    // Average number of packets in queue
+    |         ^^^
+216 |     pub p_0: f64,    // Probability of 0 packets in the system
+    |         ^^^
+217 |     pub p_k: f64,    // Blocking probability
+    |         ^^^
+218 |     pub t: f64,      // Average time in the system
+    |         ^
+219 |     pub t_q: f64,    // avg. Waiting time in queue
+    |         ^^^
+220 |     pub t_s: f64,    // avg. Service time
+    |         ^^^
+    |
+    = note: `LittleTheoremMM1K` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `MpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:283:12
+    |
+283 | pub struct MpduPacket {
+    |            ^^^^^^^^^^
+    |
+    = note: `MpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new` and `print` are never used
+   --> asynchronix/examples/libs.rs:298:12
+    |
+297 | impl MpduPacket {
+    | --------------- associated items in this implementation
+298 |     pub fn new() -> Self {
+    |            ^^^
+...
+313 |     pub fn print(&self) {
+    |            ^^^^^
+
+warning: struct `AmpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:318:12
+    |
+318 | pub struct AmpduPacket {
+    |            ^^^^^^^^^^^
+    |
+    = note: `AmpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new`, `print`, and `reset` are never used
+   --> asynchronix/examples/libs.rs:327:12
+    |
+326 | impl AmpduPacket {
+    | ---------------- associated items in this implementation
+327 |     pub fn new() -> Self {
+    |            ^^^
+...
+341 |     pub fn print(&self) {
+    |            ^^^^^
+...
+355 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: fields `x`, `y`, and `z` are never read
+   --> asynchronix/examples/libs.rs:370:9
+    |
+369 | pub struct Coords {
+    |            ------ fields in this struct
+370 |     pub x: f64,
+    |         ^
+371 |     pub y: f64,
+    |         ^
+372 |     pub z: f64,
+    |         ^
+    |
+    = note: `Coords` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> asynchronix/examples/libs.rs:376:12
+    |
+375 | impl Coords {
+    | ----------- associated function in this implementation
+376 |     pub fn new() -> Self {
+    |            ^^^
+
+warning: fields `service_delay`, `data_service_delay`, `pathloss`, `p_rx`, and `o_rate` are never read
+   --> asynchronix/examples/libs.rs:387:9
+    |
+386 | pub struct ResultsFrameTXDelay {
+    |            ------------------- fields in this struct
+387 |     pub service_delay: f64,
+    |         ^^^^^^^^^^^^^
+388 |     pub data_service_delay: f64,
+    |         ^^^^^^^^^^^^^^^^^^
+389 |     pub pathloss: f64,
+    |         ^^^^^^^^
+390 |     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
+    |         ^^^^
+391 |     pub o_rate: f64,
+    |         ^^^^^^
+    |
+    = note: `ResultsFrameTXDelay` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+   --> asynchronix/examples/libs.rs:395:12
+    |
+394 | impl ResultsFrameTXDelay {
+    | ------------------------ method in this implementation
+395 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `calculate_distance` is never used
+   --> asynchronix/examples/libs.rs:404:8
+    |
+404 | pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `path_loss` is never used
+   --> asynchronix/examples/libs.rs:412:8
+    |
+412 | pub fn path_loss(d: f64) -> f64 {
+    |        ^^^^^^^^^
+
+warning: function `frametransmission_delay` is never used
+   --> asynchronix/examples/libs.rs:416:8
+    |
+416 | pub fn frametransmission_delay(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `T_q` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:90:9
+   |
+90 |     pub T_q: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_q`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: structure field `T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:91:9
+   |
+91 |     pub T_s: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:92:9
+   |
+92 |     pub expected_T_s: Duration,
+   |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `LT` should have a snake case name
+   --> asynchronix/examples/works_fast.rs:350:9
+    |
+350 |     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
+    |         ^^ help: convert the identifier to snake case: `lt`
+
+warning: variable `Ts` should have a snake case name
+  --> asynchronix/examples/libs.rs:59:9
+   |
+59 |         Ts: f64,
+   |         ^^ help: convert the identifier to snake case: `ts`
+
+warning: variable `Tq` should have a snake case name
+  --> asynchronix/examples/libs.rs:60:9
+   |
+60 |         Tq: f64,
+   |         ^^ help: convert the identifier to snake case: `tq`
+
+warning: structure field `T_q` should have a snake case name
+   --> asynchronix/examples/libs.rs:289:9
+    |
+289 |     pub T_q: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_q`
+
+warning: structure field `T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:290:9
+    |
+290 |     pub T_s: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:291:9
+    |
+291 |     pub expected_T_s: Duration,
+    |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `effPt` should have a snake case name
+   --> asynchronix/examples/libs.rs:426:13
+    |
+426 |     let mut effPt = p_tx;
+    |             ^^^^^ help: convert the identifier to snake case: `eff_pt`
+
+warning: variable `PL` should have a snake case name
+   --> asynchronix/examples/libs.rs:439:9
+    |
+439 |     let PL = path_loss(distance);
+    |         ^^ help: convert the identifier to snake case: `pl`
+
+warning: variable `Pr` should have a snake case name
+   --> asynchronix/examples/libs.rs:440:9
+    |
+440 |     let Pr = effPt - PL;
+    |         ^^ help: convert the identifier to snake case: `pr`
+
+warning: variable `Subcarriers` should have a snake case name
+   --> asynchronix/examples/libs.rs:459:9
+    |
+459 |     let Subcarriers = match channel_width {
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `subcarriers`
+
+warning: variable `SU_spatial_streams` should have a snake case name
+   --> asynchronix/examples/libs.rs:467:9
+    |
+467 |     let SU_spatial_streams = 2.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `su_spatial_streams`
+
+warning: variable `ORate` should have a snake case name
+   --> asynchronix/examples/libs.rs:468:9
+    |
+468 |     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    |         ^^^^^ help: convert the identifier to snake case: `orate`
+
+warning: variable `OBasicRate` should have a snake case name
+   --> asynchronix/examples/libs.rs:470:9
+    |
+470 |     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `obasic_rate`
+
+warning: variable `L` should have a snake case name
+   --> asynchronix/examples/libs.rs:472:9
+    |
+472 |     let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    |         ^ help: convert the identifier to snake case: `l`
+
+warning: variable `SF` should have a snake case name
+   --> asynchronix/examples/libs.rs:474:9
+    |
+474 |     let SF = 16.0;
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `sf`
+
+warning: variable `TB` should have a snake case name
+   --> asynchronix/examples/libs.rs:475:9
+    |
+475 |     let TB = 18.0;
+    |         ^^ help: convert the identifier to snake case: `tb`
+
+warning: variable `MD` should have a snake case name
+   --> asynchronix/examples/libs.rs:476:9
+    |
+476 |     let MD = 32.0;
+    |         ^^ help: convert the identifier to snake case: `md`
+
+warning: variable `MAC_H_size` should have a snake case name
+   --> asynchronix/examples/libs.rs:477:9
+    |
+477 |     let MAC_H_size = 240.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `mac_h_size`
+
+warning: variable `T_RTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:479:9
+    |
+479 |     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
+    |         ^^^^^ help: convert the identifier to snake case: `t_rts`
+
+warning: variable `T_CTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:480:9
+    |
+480 |     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_cts`
+
+warning: variable `T_DATA` should have a snake case name
+   --> asynchronix/examples/libs.rs:481:9
+    |
+481 |     let T_DATA: f64 =
+    |         ^^^^^^ help: convert the identifier to snake case: `t_data`
+
+warning: variable `T_ACK` should have a snake case name
+   --> asynchronix/examples/libs.rs:483:9
+    |
+483 |     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_ack`
+
+warning: variable `T_DETERMINISTIC_BACKOFF` should have a snake case name
+   --> asynchronix/examples/libs.rs:485:9
+    |
+485 |     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `t_deterministic_backoff`
+
+warning: variable `T` should have a snake case name
+   --> asynchronix/examples/libs.rs:487:9
+    |
+487 |     let T =
+    |         ^ help: convert the identifier to snake case: `t`
+
+warning: `asynchronix` (example "works_fast") generated 52 warnings (run `cargo fix --example "works_fast"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.92s
+     Running `target/debug/examples/works_fast`
+Starting works_fast example...
+   Compiling asynchronix v0.2.2 (/home/boris/Desktop/Rust_MG1/asynchronix/asynchronix)
+warning: unused variable: `queue_address`
+   --> asynchronix/examples/works_fast.rs:361:9
+    |
+361 |     let queue_address = mbox_queue.address();
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_queue_address`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `sink_mbox_address`
+   --> asynchronix/examples/works_fast.rs:364:9
+    |
+364 |     let sink_mbox_address = sink_mbox.address();
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sink_mbox_address`
+
+warning: variable does not need to be mutable
+   --> asynchronix/examples/works_fast.rs:355:9
+    |
+355 |     let mut sink = Sink::new();
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: constant `CW_MIN` is never used
+  --> asynchronix/examples/libs.rs:22:7
+   |
+22 | const CW_MIN: i32 = 15;
+   |       ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `CHANNEL_WIDTH` is never used
+  --> asynchronix/examples/libs.rs:23:7
+   |
+23 | const CHANNEL_WIDTH: usize = 80; //MHz
+   |       ^^^^^^^^^^^^^
+
+warning: constant `LEGACY_PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:25:7
+   |
+25 | const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:26:7
+   |
+26 | const PHY_DURATION: f64 = 100E-6;
+   |       ^^^^^^^^^^^^
+
+warning: constant `SLOT` is never used
+  --> asynchronix/examples/libs.rs:27:7
+   |
+27 | const SLOT: f64 = 9E-6;
+   |       ^^^^
+
+warning: constant `SIFS` is never used
+  --> asynchronix/examples/libs.rs:28:7
+   |
+28 | const SIFS: f64 = 16E-6;
+   |       ^^^^
+
+warning: constant `DIFS` is never used
+  --> asynchronix/examples/libs.rs:29:7
+   |
+29 | const DIFS: f64 = 31E-6;
+   |       ^^^^
+
+warning: struct `CumulativeStats` is never constructed
+   --> asynchronix/examples/libs.rs:110:12
+    |
+110 | pub struct CumulativeStats {
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `CumulativeStats` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> asynchronix/examples/libs.rs:119:12
+    |
+117 | impl CumulativeStats {
+    | -------------------- associated items in this implementation
+118 |     // Constructor
+119 |     pub fn new(sta_id: i32) -> Self {
+    |            ^^^
+...
+129 |     fn add(&mut self, value: f64) {
+    |        ^^^
+...
+136 |     fn get_average(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+145 |     fn get_std_dev(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+164 |     fn get_coefficient_variation(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     fn get_2nd_moment(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^
+...
+183 |     fn get_last_value(&self) -> Option<f64> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `compute_steady_state_probabilities` is never used
+   --> asynchronix/examples/libs.rs:193:8
+    |
+193 | pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> asynchronix/examples/libs.rs:210:9
+    |
+209 | pub struct LittleTheoremMM1K {
+    |            ----------------- fields in this struct
+210 |     pub k: i32,      // Max capacity of system (u)
+    |         ^
+211 |     pub lambda: f64, // Arrival rate
+    |         ^^^^^^
+212 |     pub mu: f64,     // Service rate
+    |         ^^
+213 |     pub rho: f64,    // Utilization factor
+    |         ^^^
+214 |     pub n: f64,      // Average number of packets in the system
+    |         ^
+215 |     pub n_q: f64,    // Average number of packets in queue
+    |         ^^^
+216 |     pub p_0: f64,    // Probability of 0 packets in the system
+    |         ^^^
+217 |     pub p_k: f64,    // Blocking probability
+    |         ^^^
+218 |     pub t: f64,      // Average time in the system
+    |         ^
+219 |     pub t_q: f64,    // avg. Waiting time in queue
+    |         ^^^
+220 |     pub t_s: f64,    // avg. Service time
+    |         ^^^
+    |
+    = note: `LittleTheoremMM1K` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `MpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:283:12
+    |
+283 | pub struct MpduPacket {
+    |            ^^^^^^^^^^
+    |
+    = note: `MpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new` and `print` are never used
+   --> asynchronix/examples/libs.rs:298:12
+    |
+297 | impl MpduPacket {
+    | --------------- associated items in this implementation
+298 |     pub fn new() -> Self {
+    |            ^^^
+...
+313 |     pub fn print(&self) {
+    |            ^^^^^
+
+warning: struct `AmpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:318:12
+    |
+318 | pub struct AmpduPacket {
+    |            ^^^^^^^^^^^
+    |
+    = note: `AmpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new`, `print`, and `reset` are never used
+   --> asynchronix/examples/libs.rs:327:12
+    |
+326 | impl AmpduPacket {
+    | ---------------- associated items in this implementation
+327 |     pub fn new() -> Self {
+    |            ^^^
+...
+341 |     pub fn print(&self) {
+    |            ^^^^^
+...
+355 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: fields `x`, `y`, and `z` are never read
+   --> asynchronix/examples/libs.rs:370:9
+    |
+369 | pub struct Coords {
+    |            ------ fields in this struct
+370 |     pub x: f64,
+    |         ^
+371 |     pub y: f64,
+    |         ^
+372 |     pub z: f64,
+    |         ^
+    |
+    = note: `Coords` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> asynchronix/examples/libs.rs:376:12
+    |
+375 | impl Coords {
+    | ----------- associated function in this implementation
+376 |     pub fn new() -> Self {
+    |            ^^^
+
+warning: fields `service_delay`, `data_service_delay`, `pathloss`, `p_rx`, and `o_rate` are never read
+   --> asynchronix/examples/libs.rs:387:9
+    |
+386 | pub struct ResultsFrameTXDelay {
+    |            ------------------- fields in this struct
+387 |     pub service_delay: f64,
+    |         ^^^^^^^^^^^^^
+388 |     pub data_service_delay: f64,
+    |         ^^^^^^^^^^^^^^^^^^
+389 |     pub pathloss: f64,
+    |         ^^^^^^^^
+390 |     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
+    |         ^^^^
+391 |     pub o_rate: f64,
+    |         ^^^^^^
+    |
+    = note: `ResultsFrameTXDelay` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+   --> asynchronix/examples/libs.rs:395:12
+    |
+394 | impl ResultsFrameTXDelay {
+    | ------------------------ method in this implementation
+395 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `calculate_distance` is never used
+   --> asynchronix/examples/libs.rs:404:8
+    |
+404 | pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `path_loss` is never used
+   --> asynchronix/examples/libs.rs:412:8
+    |
+412 | pub fn path_loss(d: f64) -> f64 {
+    |        ^^^^^^^^^
+
+warning: function `frametransmission_delay` is never used
+   --> asynchronix/examples/libs.rs:416:8
+    |
+416 | pub fn frametransmission_delay(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `T_q` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:90:9
+   |
+90 |     pub T_q: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_q`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: structure field `T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:91:9
+   |
+91 |     pub T_s: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:92:9
+   |
+92 |     pub expected_T_s: Duration,
+   |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `LT` should have a snake case name
+   --> asynchronix/examples/works_fast.rs:350:9
+    |
+350 |     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
+    |         ^^ help: convert the identifier to snake case: `lt`
+
+warning: variable `Ts` should have a snake case name
+  --> asynchronix/examples/libs.rs:59:9
+   |
+59 |         Ts: f64,
+   |         ^^ help: convert the identifier to snake case: `ts`
+
+warning: variable `Tq` should have a snake case name
+  --> asynchronix/examples/libs.rs:60:9
+   |
+60 |         Tq: f64,
+   |         ^^ help: convert the identifier to snake case: `tq`
+
+warning: structure field `T_q` should have a snake case name
+   --> asynchronix/examples/libs.rs:289:9
+    |
+289 |     pub T_q: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_q`
+
+warning: structure field `T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:290:9
+    |
+290 |     pub T_s: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:291:9
+    |
+291 |     pub expected_T_s: Duration,
+    |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `effPt` should have a snake case name
+   --> asynchronix/examples/libs.rs:426:13
+    |
+426 |     let mut effPt = p_tx;
+    |             ^^^^^ help: convert the identifier to snake case: `eff_pt`
+
+warning: variable `PL` should have a snake case name
+   --> asynchronix/examples/libs.rs:439:9
+    |
+439 |     let PL = path_loss(distance);
+    |         ^^ help: convert the identifier to snake case: `pl`
+
+warning: variable `Pr` should have a snake case name
+   --> asynchronix/examples/libs.rs:440:9
+    |
+440 |     let Pr = effPt - PL;
+    |         ^^ help: convert the identifier to snake case: `pr`
+
+warning: variable `Subcarriers` should have a snake case name
+   --> asynchronix/examples/libs.rs:459:9
+    |
+459 |     let Subcarriers = match channel_width {
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `subcarriers`
+
+warning: variable `SU_spatial_streams` should have a snake case name
+   --> asynchronix/examples/libs.rs:467:9
+    |
+467 |     let SU_spatial_streams = 2.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `su_spatial_streams`
+
+warning: variable `ORate` should have a snake case name
+   --> asynchronix/examples/libs.rs:468:9
+    |
+468 |     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    |         ^^^^^ help: convert the identifier to snake case: `orate`
+
+warning: variable `OBasicRate` should have a snake case name
+   --> asynchronix/examples/libs.rs:470:9
+    |
+470 |     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `obasic_rate`
+
+warning: variable `L` should have a snake case name
+   --> asynchronix/examples/libs.rs:472:9
+    |
+472 |     let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    |         ^ help: convert the identifier to snake case: `l`
+
+warning: variable `SF` should have a snake case name
+   --> asynchronix/examples/libs.rs:474:9
+    |
+474 |     let SF = 16.0;
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `sf`
+
+warning: variable `TB` should have a snake case name
+   --> asynchronix/examples/libs.rs:475:9
+    |
+475 |     let TB = 18.0;
+    |         ^^ help: convert the identifier to snake case: `tb`
+
+warning: variable `MD` should have a snake case name
+   --> asynchronix/examples/libs.rs:476:9
+    |
+476 |     let MD = 32.0;
+    |         ^^ help: convert the identifier to snake case: `md`
+
+warning: variable `MAC_H_size` should have a snake case name
+   --> asynchronix/examples/libs.rs:477:9
+    |
+477 |     let MAC_H_size = 240.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `mac_h_size`
+
+warning: variable `T_RTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:479:9
+    |
+479 |     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
+    |         ^^^^^ help: convert the identifier to snake case: `t_rts`
+
+warning: variable `T_CTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:480:9
+    |
+480 |     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_cts`
+
+warning: variable `T_DATA` should have a snake case name
+   --> asynchronix/examples/libs.rs:481:9
+    |
+481 |     let T_DATA: f64 =
+    |         ^^^^^^ help: convert the identifier to snake case: `t_data`
+
+warning: variable `T_ACK` should have a snake case name
+   --> asynchronix/examples/libs.rs:483:9
+    |
+483 |     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_ack`
+
+warning: variable `T_DETERMINISTIC_BACKOFF` should have a snake case name
+   --> asynchronix/examples/libs.rs:485:9
+    |
+485 |     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `t_deterministic_backoff`
+
+warning: variable `T` should have a snake case name
+   --> asynchronix/examples/libs.rs:487:9
+    |
+487 |     let T =
+    |         ^ help: convert the identifier to snake case: `t`
+
+warning: `asynchronix` (example "works_fast") generated 52 warnings (run `cargo fix --example "works_fast"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.78s
+     Running `target/debug/examples/works_fast`
+Starting works_fast example...
+   Compiling asynchronix v0.2.2 (/home/boris/Desktop/Rust_MG1/asynchronix/asynchronix)
+warning: unused variable: `queue_address`
+   --> asynchronix/examples/works_fast.rs:366:9
+    |
+366 |     let queue_address = mbox_queue.address();
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_queue_address`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `sink_mbox_address`
+   --> asynchronix/examples/works_fast.rs:369:9
+    |
+369 |     let sink_mbox_address = sink_mbox.address();
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sink_mbox_address`
+
+warning: variable does not need to be mutable
+   --> asynchronix/examples/works_fast.rs:360:9
+    |
+360 |     let mut sink = Sink::new();
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: constant `CW_MIN` is never used
+  --> asynchronix/examples/libs.rs:22:7
+   |
+22 | const CW_MIN: i32 = 15;
+   |       ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `CHANNEL_WIDTH` is never used
+  --> asynchronix/examples/libs.rs:23:7
+   |
+23 | const CHANNEL_WIDTH: usize = 80; //MHz
+   |       ^^^^^^^^^^^^^
+
+warning: constant `LEGACY_PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:25:7
+   |
+25 | const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PHY_DURATION` is never used
+  --> asynchronix/examples/libs.rs:26:7
+   |
+26 | const PHY_DURATION: f64 = 100E-6;
+   |       ^^^^^^^^^^^^
+
+warning: constant `SLOT` is never used
+  --> asynchronix/examples/libs.rs:27:7
+   |
+27 | const SLOT: f64 = 9E-6;
+   |       ^^^^
+
+warning: constant `SIFS` is never used
+  --> asynchronix/examples/libs.rs:28:7
+   |
+28 | const SIFS: f64 = 16E-6;
+   |       ^^^^
+
+warning: constant `DIFS` is never used
+  --> asynchronix/examples/libs.rs:29:7
+   |
+29 | const DIFS: f64 = 31E-6;
+   |       ^^^^
+
+warning: struct `CumulativeStats` is never constructed
+   --> asynchronix/examples/libs.rs:110:12
+    |
+110 | pub struct CumulativeStats {
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `CumulativeStats` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> asynchronix/examples/libs.rs:119:12
+    |
+117 | impl CumulativeStats {
+    | -------------------- associated items in this implementation
+118 |     // Constructor
+119 |     pub fn new(sta_id: i32) -> Self {
+    |            ^^^
+...
+129 |     fn add(&mut self, value: f64) {
+    |        ^^^
+...
+136 |     fn get_average(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+145 |     fn get_std_dev(&self) -> f64 {
+    |        ^^^^^^^^^^^
+...
+164 |     fn get_coefficient_variation(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+174 |     fn get_2nd_moment(&self) -> f64 {
+    |        ^^^^^^^^^^^^^^
+...
+183 |     fn get_last_value(&self) -> Option<f64> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `compute_steady_state_probabilities` is never used
+   --> asynchronix/examples/libs.rs:193:8
+    |
+193 | pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> asynchronix/examples/libs.rs:210:9
+    |
+209 | pub struct LittleTheoremMM1K {
+    |            ----------------- fields in this struct
+210 |     pub k: i32,      // Max capacity of system (u)
+    |         ^
+211 |     pub lambda: f64, // Arrival rate
+    |         ^^^^^^
+212 |     pub mu: f64,     // Service rate
+    |         ^^
+213 |     pub rho: f64,    // Utilization factor
+    |         ^^^
+214 |     pub n: f64,      // Average number of packets in the system
+    |         ^
+215 |     pub n_q: f64,    // Average number of packets in queue
+    |         ^^^
+216 |     pub p_0: f64,    // Probability of 0 packets in the system
+    |         ^^^
+217 |     pub p_k: f64,    // Blocking probability
+    |         ^^^
+218 |     pub t: f64,      // Average time in the system
+    |         ^
+219 |     pub t_q: f64,    // avg. Waiting time in queue
+    |         ^^^
+220 |     pub t_s: f64,    // avg. Service time
+    |         ^^^
+    |
+    = note: `LittleTheoremMM1K` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `MpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:283:12
+    |
+283 | pub struct MpduPacket {
+    |            ^^^^^^^^^^
+    |
+    = note: `MpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new` and `print` are never used
+   --> asynchronix/examples/libs.rs:298:12
+    |
+297 | impl MpduPacket {
+    | --------------- associated items in this implementation
+298 |     pub fn new() -> Self {
+    |            ^^^
+...
+313 |     pub fn print(&self) {
+    |            ^^^^^
+
+warning: struct `AmpduPacket` is never constructed
+   --> asynchronix/examples/libs.rs:318:12
+    |
+318 | pub struct AmpduPacket {
+    |            ^^^^^^^^^^^
+    |
+    = note: `AmpduPacket` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `new`, `print`, and `reset` are never used
+   --> asynchronix/examples/libs.rs:327:12
+    |
+326 | impl AmpduPacket {
+    | ---------------- associated items in this implementation
+327 |     pub fn new() -> Self {
+    |            ^^^
+...
+341 |     pub fn print(&self) {
+    |            ^^^^^
+...
+355 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: fields `x`, `y`, and `z` are never read
+   --> asynchronix/examples/libs.rs:370:9
+    |
+369 | pub struct Coords {
+    |            ------ fields in this struct
+370 |     pub x: f64,
+    |         ^
+371 |     pub y: f64,
+    |         ^
+372 |     pub z: f64,
+    |         ^
+    |
+    = note: `Coords` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> asynchronix/examples/libs.rs:376:12
+    |
+375 | impl Coords {
+    | ----------- associated function in this implementation
+376 |     pub fn new() -> Self {
+    |            ^^^
+
+warning: fields `service_delay`, `data_service_delay`, `pathloss`, `p_rx`, and `o_rate` are never read
+   --> asynchronix/examples/libs.rs:387:9
+    |
+386 | pub struct ResultsFrameTXDelay {
+    |            ------------------- fields in this struct
+387 |     pub service_delay: f64,
+    |         ^^^^^^^^^^^^^
+388 |     pub data_service_delay: f64,
+    |         ^^^^^^^^^^^^^^^^^^
+389 |     pub pathloss: f64,
+    |         ^^^^^^^^
+390 |     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
+    |         ^^^^
+391 |     pub o_rate: f64,
+    |         ^^^^^^
+    |
+    = note: `ResultsFrameTXDelay` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+   --> asynchronix/examples/libs.rs:395:12
+    |
+394 | impl ResultsFrameTXDelay {
+    | ------------------------ method in this implementation
+395 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `calculate_distance` is never used
+   --> asynchronix/examples/libs.rs:404:8
+    |
+404 | pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `path_loss` is never used
+   --> asynchronix/examples/libs.rs:412:8
+    |
+412 | pub fn path_loss(d: f64) -> f64 {
+    |        ^^^^^^^^^
+
+warning: function `frametransmission_delay` is never used
+   --> asynchronix/examples/libs.rs:416:8
+    |
+416 | pub fn frametransmission_delay(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: structure field `T_q` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:95:9
+   |
+95 |     pub T_q: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_q`
+   |
+   = note: `#[warn(non_snake_case)]` on by default
+
+warning: structure field `T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:96:9
+   |
+96 |     pub T_s: Duration,
+   |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+  --> asynchronix/examples/works_fast.rs:97:9
+   |
+97 |     pub expected_T_s: Duration,
+   |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `LT` should have a snake case name
+   --> asynchronix/examples/works_fast.rs:355:9
+    |
+355 |     let LT = compute_mm1k_metrics(rate_bps, mean_length, rate_queue_bps, k_queue);
+    |         ^^ help: convert the identifier to snake case: `lt`
+
+warning: variable `Ts` should have a snake case name
+  --> asynchronix/examples/libs.rs:59:9
+   |
+59 |         Ts: f64,
+   |         ^^ help: convert the identifier to snake case: `ts`
+
+warning: variable `Tq` should have a snake case name
+  --> asynchronix/examples/libs.rs:60:9
+   |
+60 |         Tq: f64,
+   |         ^^ help: convert the identifier to snake case: `tq`
+
+warning: structure field `T_q` should have a snake case name
+   --> asynchronix/examples/libs.rs:289:9
+    |
+289 |     pub T_q: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_q`
+
+warning: structure field `T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:290:9
+    |
+290 |     pub T_s: Duration,
+    |         ^^^ help: convert the identifier to snake case: `t_s`
+
+warning: structure field `expected_T_s` should have a snake case name
+   --> asynchronix/examples/libs.rs:291:9
+    |
+291 |     pub expected_T_s: Duration,
+    |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `expected_t_s`
+
+warning: variable `effPt` should have a snake case name
+   --> asynchronix/examples/libs.rs:426:13
+    |
+426 |     let mut effPt = p_tx;
+    |             ^^^^^ help: convert the identifier to snake case: `eff_pt`
+
+warning: variable `PL` should have a snake case name
+   --> asynchronix/examples/libs.rs:439:9
+    |
+439 |     let PL = path_loss(distance);
+    |         ^^ help: convert the identifier to snake case: `pl`
+
+warning: variable `Pr` should have a snake case name
+   --> asynchronix/examples/libs.rs:440:9
+    |
+440 |     let Pr = effPt - PL;
+    |         ^^ help: convert the identifier to snake case: `pr`
+
+warning: variable `Subcarriers` should have a snake case name
+   --> asynchronix/examples/libs.rs:459:9
+    |
+459 |     let Subcarriers = match channel_width {
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `subcarriers`
+
+warning: variable `SU_spatial_streams` should have a snake case name
+   --> asynchronix/examples/libs.rs:467:9
+    |
+467 |     let SU_spatial_streams = 2.0;
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case (notice the capitalization): `su_spatial_streams`
+
+warning: variable `ORate` should have a snake case name
+   --> asynchronix/examples/libs.rs:468:9
+    |
+468 |     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    |         ^^^^^ help: convert the identifier to snake case: `orate`
+
+warning: variable `OBasicRate` should have a snake case name
+   --> asynchronix/examples/libs.rs:470:9
+    |
+470 |     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `obasic_rate`
+
+warning: variable `L` should have a snake case name
+   --> asynchronix/examples/libs.rs:472:9
+    |
+472 |     let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    |         ^ help: convert the identifier to snake case: `l`
+
+warning: variable `SF` should have a snake case name
+   --> asynchronix/examples/libs.rs:474:9
+    |
+474 |     let SF = 16.0;
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `sf`
+
+warning: variable `TB` should have a snake case name
+   --> asynchronix/examples/libs.rs:475:9
+    |
+475 |     let TB = 18.0;
+    |         ^^ help: convert the identifier to snake case: `tb`
+
+warning: variable `MD` should have a snake case name
+   --> asynchronix/examples/libs.rs:476:9
+    |
+476 |     let MD = 32.0;
+    |         ^^ help: convert the identifier to snake case: `md`
+
+warning: variable `MAC_H_size` should have a snake case name
+   --> asynchronix/examples/libs.rs:477:9
+    |
+477 |     let MAC_H_size = 240.0;
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `mac_h_size`
+
+warning: variable `T_RTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:479:9
+    |
+479 |     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
+    |         ^^^^^ help: convert the identifier to snake case: `t_rts`
+
+warning: variable `T_CTS` should have a snake case name
+   --> asynchronix/examples/libs.rs:480:9
+    |
+480 |     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_cts`
+
+warning: variable `T_DATA` should have a snake case name
+   --> asynchronix/examples/libs.rs:481:9
+    |
+481 |     let T_DATA: f64 =
+    |         ^^^^^^ help: convert the identifier to snake case: `t_data`
+
+warning: variable `T_ACK` should have a snake case name
+   --> asynchronix/examples/libs.rs:483:9
+    |
+483 |     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    |         ^^^^^ help: convert the identifier to snake case: `t_ack`
+
+warning: variable `T_DETERMINISTIC_BACKOFF` should have a snake case name
+   --> asynchronix/examples/libs.rs:485:9
+    |
+485 |     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `t_deterministic_backoff`
+
+warning: variable `T` should have a snake case name
+   --> asynchronix/examples/libs.rs:487:9
+    |
+487 |     let T =
+    |         ^ help: convert the identifier to snake case: `t`
+
+warning: `asynchronix` (example "works_fast") generated 52 warnings (run `cargo fix --example "works_fast"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.03s
+     Running `target/debug/examples/works_fast`

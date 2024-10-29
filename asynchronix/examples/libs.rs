@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
 use std::time::{Duration, Instant};
-use rand::thread_rng;
+use rand::{thread_rng, Rng};
 use rand_distr::{Distribution, Exp};
 
 use std::sync::Arc;
@@ -39,11 +39,17 @@ macro_rules! format_timestamp {
     }};
 }
 
+// pub fn exponential(mean: f64) -> f64 {
+//     let mut rng = thread_rng();
+//     let exp = Exp::new(1.0 / mean).unwrap();
+//     let value = exp.sample(&mut rng);
+//     value
+// }
+
 pub fn exponential(mean: f64) -> f64 {
-    let mut rng = thread_rng();
-    let exp = Exp::new(1.0 / mean).unwrap();
-    let value = exp.sample(&mut rng);
-    value
+    let mut rng = rand::thread_rng();
+    let u: f64 = rng.gen_range(0.0..=1.0); // Generate a random value in the range (0, 1]
+    -mean * u.ln()
 }
 
 
@@ -163,29 +169,27 @@ pub struct CumulativeStats {
     values: VecDeque<f64>,
     sum: f64,
     sum_of_squares: f64,
-    sta_id: i32,
 }
 
 impl CumulativeStats {
     // Constructor
-    pub fn new(sta_id: i32) -> Self {
+    pub fn new() -> Self {
         Self {
             values: VecDeque::new(),
             sum: 0.0,
             sum_of_squares: 0.0,
-            sta_id,
         }
     }
 
     // Add a new value
-    fn add(&mut self, value: f64) {
+    pub fn add(&mut self, value: f64) {
         self.values.push_back(value);
         self.sum += value;
         self.sum_of_squares += value * value;
     }
 
     // Get average
-    fn get_average(&self) -> f64 {
+    pub fn get_average(&self) -> f64 {
         if self.values.is_empty() {
             0.0
         } else {
@@ -194,7 +198,7 @@ impl CumulativeStats {
     }
 
     // Get standard deviation
-    fn get_std_dev(&self) -> f64 {
+    pub fn get_std_dev(&self) -> f64 {
         if self.values.len() < 2 {
             return 0.0;
         }
@@ -213,7 +217,7 @@ impl CumulativeStats {
     }
 
     // Get coefficient of variation
-    fn get_coefficient_variation(&self) -> f64 {
+    pub fn get_coefficient_variation(&self) -> f64 {
         let mean = self.get_average();
         if mean == 0.0 {
             0.0
@@ -223,7 +227,7 @@ impl CumulativeStats {
     }
 
     // Get second moment
-    fn get_2nd_moment(&self) -> f64 {
+    pub fn get_2nd_moment(&self) -> f64 {
         if self.values.is_empty() {
             0.0
         } else {
@@ -232,7 +236,7 @@ impl CumulativeStats {
     }
 
     // Get last value
-    fn get_last_value(&self) -> Option<f64> {
+    pub fn get_last_value(&self) -> Option<f64> {
         if let Some(&last_value) = self.values.back() {
             Some(last_value)
         } else {
@@ -270,6 +274,31 @@ pub struct LittleTheoremMM1K {
     pub t: f64,      // Average time in the system
     pub t_q: f64,    // avg. Waiting time in queue
     pub t_s: f64,    // avg. Service time
+}
+impl LittleTheoremMM1K {
+    pub fn print_results(&self) {
+        let title = "ANALYTICAL RESULTS (M/M/1/K)";
+        let separator = "+------------------------------------------------+";
+
+        // Print title and separator
+        println!("{}", separator);
+        println!("| {:<46} |", title);
+        println!("{}", separator);
+
+        // Print each field in the desired format
+        println!("| {:<27} | {:>15} |", "λ (average arrival rate)", format!("{:.6}", self.lambda));
+        println!("| {:<27} | {:>15} |", "µ (service rate)", format!("{:.6}", self.mu));
+        println!("| {:<27} | {:>15} |", "ρ (utilization factor)", format!("{:.6}", self.rho));
+        println!("| {:<27} | {:>15} |", "P_0 (Prob. of 0 pkts)", format!("{:.6}", self.p_0));
+        println!("| {:<27} | {:>15} |", "P_K (Blocking prob.)", format!("{:.6}", self.p_k));
+        println!("| {:<27} | {:>15} |", "N (Avg. pkts in system)", format!("{:.6}", self.n));
+        println!("| {:<27} | {:>15} |", "N_q (Avg. pkts in queue)", format!("{:.6}", self.n_q));
+        println!("| {:<27} | {:>15} |", "-----------------------------", "-----------------"); // Just for formatting
+        println!("| {:<27} | {:>15} |", "T (Avg. time in system)", format!("{:.6}", self.t));
+        println!("| {:<27} | {:>15} |", "T_q (Avg. time in queue)", format!("{:.6}", self.t_q));
+        println!("| {:<27} | {:>15} |", "T_s (Avg. service time)", format!("{:.6}", self.t_s));
+        println!("{}", separator);
+    }
 }
 
 pub fn compute_mm1k_metrics(
@@ -498,6 +527,7 @@ pub fn frametransmission_delay(
     coords_dest: Coords,
     p_tx: f64,
 ) -> ResultsFrameTXDelay {
+   
     let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
@@ -573,3 +603,15 @@ pub fn frametransmission_delay(
         data_service_delay: T_DATA,
     }
 }
+
+// pub fn simpler_frametx_delay(bandwidth_dep:f64, mean_l: f64 )->ResultsFrameTXDelay {
+//     ResultsFrameTXDelay{
+//         pathloss: 0., 
+//         p_rx: 0.0, 
+//         o_rate: bandwidth_dep,
+//         service_delay: mean_l / bandwidth_dep,
+//         data_service_delay: mean_l / bandwidth_dep, 
+//     }
+
+// }  unused
+
