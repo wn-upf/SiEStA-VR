@@ -243,7 +243,7 @@ impl STA_source {
 
                 let mut time_interarrival =
                     Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
-                time_interarrival = max(time_interarrival, Duration::from_nanos(10));
+                time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
                 let len_random = exponential(self.mean_length_packets as f64) as usize;
                 packet.length_packet = cmp::max(1, len_random);
@@ -432,7 +432,7 @@ impl QueueModule {
             self.queue.push_back(packet);
 
             debug_print!(
-                DebugColor::Blue,
+                DebugColor::Green,
                 "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
                 format_elapsed!(now),
                 packet.packet_id,
@@ -460,12 +460,14 @@ impl QueueModule {
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
         debug_print!(
-            DebugColor::Magenta,
-            "{} [DBG SERVE] --AMPDU sent to STA {} with {} packets inside, Q_size = {}",
+            DebugColor::Red,
+            "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
             format_elapsed!(elapsed),
             AMPDU_sent.sta_id,
             AMPDU_sent.mpdu_packets.len(),
-            self.queue.len()
+            self.queue.len(),
+            AMPDU_sent.total_length,
+            AMPDU_sent.size - 1, 
         );
         // AMPDU_sent.print();
         self.packet_being_served = false;
@@ -543,7 +545,7 @@ impl QueueModule {
                         packet.queue_out_instant = now;
 
                         debug_print!(
-                            DebugColor::Yellow,
+                            DebugColor::Blue,
                             "{} [DBG DEQUE] --Packet {} (STA{}) dequed and put in AMPDU, Iter index: {}, Q_size = {}",
                             format_elapsed!(now),
                             packet.packet_id,
@@ -716,8 +718,8 @@ impl Sink {
 
         for packet in ampdu_packet.mpdu_packets {
             debug_print!(
-                DebugColor::Red,
-                "{} [DBG SINK IN]  ---Packet {} arrived from STA{} into STA{}",
+                DebugColor::Magenta,
+                "{} [DBG SINK ] ---Packet {} arrived from STA{} into STA{}",
                 format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
@@ -874,6 +876,8 @@ fn multiple_STA_sim(
 ) {
     let v_distance = vec![1.0, distance, distance]; // just some random values
 
+
+    const num_STAs_UL: usize = 1; //for now 
     let coords_sta1 = Coords {
         x: v_distance[0],
         y: 0.0,
@@ -912,10 +916,12 @@ fn multiple_STA_sim(
     let effective_rate2 = mean_length / results2.service_delay;
     let effective_rate = (effective_rate1 + effective_rate2) / 2.0;
 
-    println!("*******************************************************************"); 
-    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", rate_bps_in, mean_length, effective_rate, k_queue); 
+    let aggregated_rate_in = (num_STAs - num_STAs_UL) as f64 * rate_bps_in; 
 
-    let LT = compute_mm1k_metrics(rate_bps_in, mean_length as f64, effective_rate, k_queue);
+    println!("*******************************************************************"); 
+    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", aggregated_rate_in, mean_length, effective_rate, k_queue); 
+
+    let LT = compute_mm1k_metrics(aggregated_rate_in, mean_length as f64, effective_rate, k_queue);
 
     let mut sta1_bg: STA_source =
         STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta1, true); // STAs 0 and 1 send traffic to 5 through AP
@@ -1033,7 +1039,7 @@ fn multiple_STA_sim(
     // println!("************ END RESULTS STAS***********\n LT: ");
 
     println!("*******************************************************************"); 
-    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", rate_bps_in, mean_length, effective_rate, k_queue); 
+    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", aggregated_rate_in, mean_length, effective_rate, k_queue); 
 
     LT.print_results();
 }
