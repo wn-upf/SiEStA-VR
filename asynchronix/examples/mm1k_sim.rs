@@ -988,9 +988,13 @@ fn multiple_STA_sim(
     assert_eq!(simu.time(), t);
 
     // START WITH FIRST EVENT
+
+    let duration_scheduled1= Duration::from_secs(10); 
+    let duration_scheduled2 = duration_scheduled1 + Duration::from_secs_f64(exponential(0.01)); 
+
     scheduler
         .schedule_event(
-            Duration::from_millis(1), //STA 1 starts in 1 millisecond
+            duration_scheduled1,
             STA_source::send_packet,
             (),
             &sta1_address,
@@ -999,7 +1003,7 @@ fn multiple_STA_sim(
 
     scheduler
         .schedule_event(
-            Duration::from_secs(5), // STA 2 will start in 5 seconds
+            duration_scheduled2, // STA 2 will start in 5 seconds
             STA_source::send_packet,
             (),
             &sta2_address,

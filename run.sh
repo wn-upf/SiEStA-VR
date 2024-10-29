@@ -4,7 +4,7 @@
 simTime=1E3
 k_queue=100
 mean_length=12000.0
-rate_bps_src=5E4; 
+rate_bps_src=8E4; 
 # rate_bps_src=6.5E8 ## loads the queue
 rate_bps_queue=6E5 ## does nothing theoretically 
 
