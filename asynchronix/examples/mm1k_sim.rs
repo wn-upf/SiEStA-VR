@@ -40,7 +40,7 @@ use crate::libs::{
 use crate::libs::{AmpduPacket, MpduPacket};
 
 // Define a constant to control debugging
-const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 #[macro_export]
 macro_rules! debug_print {
@@ -252,11 +252,12 @@ impl STA_source {
 
                 let mut time_interarrival =
                     Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
+
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
-                // let len_random = exponential(self.mean_length_packets as f64) as usize;
+                let len_random = exponential(self.mean_length_packets as f64) as usize;
                 
-                let len_random = self.mean_length_packets as usize; 
+                // let len_random = self.mean_length_packets as usize; 
 
                 packet.length_packet = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
@@ -1062,7 +1063,7 @@ fn multiple_STA_sim(
 
     let t0 = MonotonicTime::EPOCH;
 
-    let mut simu: asynchronix::simulation::Simulation = SimInit::new()
+    let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
         .add_model(sta1_bg, mbox_sta1, "STA1 (BG)")
         .add_model(sta2_bg, mbox_sta2, "STA2 (BG)")
         .add_model(queue, mbox_queue, "Queue")

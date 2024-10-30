@@ -89,11 +89,11 @@ impl CsvData {
         // Write header
         writer.write_record(&[
             "timestamp",
-            "packet_id",
+            "packet_ID",
             "queue_size",
-            "Ts",
-            "Tq",
-            "packet_length",
+            "L_packet",
+            "T_s",
+            "T_q",
         ])?;
 
         // Write all stored data at once
@@ -102,9 +102,9 @@ impl CsvData {
                 &self.v_timestamp[i],
                 &self.v_packet_id[i].to_string(),
                 &self.v_queue_size[i].to_string(),
+                &self.v_packet_l[i].to_string(),
                 &self.v_queue_ts[i].to_string(),
                 &self.v_queue_tq[i].to_string(),
-                &self.v_packet_l[i].to_string(),
             ])?;
         }
 
@@ -722,7 +722,7 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
-            let filename = format!("Results/stats_sta_{}.csv", stats.sta_id);
+            let filename = format!("Results/STA{}.csv", stats.sta_id);
 
             // Open file with write permissions
             let file = OpenOptions::new()
@@ -736,11 +736,11 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
             // Write header
             writer.write_record(&[
                 "timestamp",
-                "packet_id",
+                "packet_ID",
                 "queue_size",
-                "Ts",
-                "Tq",
-                "packet_length",
+                "L_packet",
+                "T_s",
+                "T_q",
             ])?;
 
             // Write all stored data for this station
@@ -749,9 +749,9 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
                     &stats.csv_data.v_timestamp[i],
                     &stats.csv_data.v_packet_id[i].to_string(),
                     &stats.csv_data.v_queue_size[i].to_string(),
+                    &stats.csv_data.v_packet_l[i].to_string(),
                     &stats.csv_data.v_queue_ts[i].to_string(),
                     &stats.csv_data.v_queue_tq[i].to_string(),
-                    &stats.csv_data.v_packet_l[i].to_string(),
                 ])?;
             }
 
