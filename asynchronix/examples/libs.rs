@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::collections::VecDeque;
 use std::f64;
 
@@ -5,8 +7,7 @@ use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
-use rand::{thread_rng, Rng};
-use rand_distr::{Distribution, Exp};
+use rand::{Rng};
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
@@ -25,7 +26,6 @@ pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
-pub const MAX_STAS: usize = 100;
 
 #[macro_export]
 macro_rules! format_timestamp {
@@ -202,7 +202,7 @@ impl CumulativeStats {
             })
             .sum();
 
-        let std = (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt(); 
+        // let std = (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt(); 
         (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt()
     }
 
@@ -236,6 +236,8 @@ impl CumulativeStats {
         }
     }
 }
+
+#[allow(non_camel_case_types)]
 #[derive(Clone)]
 pub struct perStaStats {
     pub sta_id: i32,
@@ -309,7 +311,7 @@ impl perStaStats {
         self.csv_data.v_packet_l.push(length_packet);
     }
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Clone)]
 pub struct perStaLockStats {
     pub data: Arc<Mutex<perStaStats>>,
@@ -321,24 +323,11 @@ impl perStaLockStats {
         }
     }
 }
-pub fn compute_steady_state_probabilities(rho: f64, k: i32) -> Vec<f64> {
-    let mut probabilities = Vec::new();
 
-    // Compute the normalization constant
-    let p0 = 1.0 - rho; // Probability of 0 customers
-    probabilities.push(p0);
-
-    // Compute the probability for n customers (n from 1 to k)
-    for n in 1..=k {
-        let pn = p0 * rho.powi(n);
-        probabilities.push(pn);
-    }
-    probabilities
-}
 
 #[derive(Debug)]
 pub struct LittleTheoremMM1K {
-    pub k: i32,      // Max capacity of system (u)
+    // pub k: i32,      // Max capacity of system (u)
     pub lambda: f64, // Arrival rate
     pub mu: f64,     // Service rate
     pub rho: f64,    // Utilization factor
@@ -450,7 +439,7 @@ pub fn compute_mm1k_metrics(
     let t_q = t - t_s;
 
     LittleTheoremMM1K {
-        k: k_i,
+        // k: k_i,
         lambda,
         mu,
         rho,
@@ -570,25 +559,25 @@ impl AmpduPacket {
         }; // Reset coordinates to default (0.0, 0.0)
     }
 
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            mpdu_packets: Vec::with_capacity(capacity),
-            sta_id: 0,
-            coordinates: Coords::new(),
-            size: 0,
-            total_length: 0,
-        }
-    }
+    // fn with_capacity(capacity: usize) -> Self {
+    //     Self {
+    //         mpdu_packets: Vec::with_capacity(capacity),
+    //         sta_id: 0,
+    //         coordinates: Coords::new(),
+    //         size: 0,
+    //         total_length: 0,
+    //     }
+    // }
 
-    fn is_empty(&self) -> bool {
-        self.mpdu_packets.is_empty()
-    }
+    // fn is_empty(&self) -> bool {
+    //     self.mpdu_packets.is_empty()
+    // }
 
-    fn add_packet(&mut self, packet: MpduPacket) {
-        self.total_length += packet.length_packet;
-        self.size += 1;
-        self.mpdu_packets.push(packet);
-    }
+    // fn add_packet(&mut self, packet: MpduPacket) {
+    //     self.total_length += packet.length_packet;
+    //     self.size += 1;
+    //     self.mpdu_packets.push(packet);
+    // }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -614,17 +603,17 @@ pub struct ResultsFrameTXDelay {
     pub data_service_delay: f64,
     pub pathloss: f64,
     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
-    pub o_rate: f64,
+    // pub o_rate: f64,
 }
 
 impl ResultsFrameTXDelay {
-    pub fn clear(&mut self) {
-        self.service_delay = 0.0;
-        self.data_service_delay = 0.0;
-        self.pathloss = 0.0;
-        self.p_rx = 0.0;
-        self.o_rate = 0.0;
-    }
+    // pub fn clear(&mut self) {
+    //     self.service_delay = 0.0;
+    //     self.data_service_delay = 0.0;
+    //     self.pathloss = 0.0;
+    //     self.p_rx = 0.0;
+    //     self.o_rate = 0.0;
+    // }
 }
 
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
@@ -716,14 +705,14 @@ pub fn frametransmission_delay(
     ResultsFrameTXDelay {
         pathloss: PL,
         p_rx: Pr,
-        o_rate: ORate,
+        // o_rate: ORate,
         service_delay: T,
         data_service_delay: T_DATA,
     }
 }
 
 pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Result<()> {
-    for (index, sta_stats) in sta_stats_vec.iter().enumerate() {
+    for (_index, sta_stats) in sta_stats_vec.iter().enumerate() {
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID

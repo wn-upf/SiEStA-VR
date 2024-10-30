@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-simTime=50
+simTime=5000
 k_queue=1000
 mean_length=12000.0
 rate_bps_src=8.9E6; 

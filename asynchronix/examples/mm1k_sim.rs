@@ -9,6 +9,8 @@
 // !                     │                                                    │
 // !                     └────────────────────────────────────────────────────┘
 // !```
+#![allow(non_snake_case)]
+
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use asynchronix::simulation::{Mailbox, SimInit};
@@ -16,20 +18,21 @@ use asynchronix::time::MonotonicTime;
 use colored::*;
 use rand::Rng;
 use std::cmp::{self};
-use std::cmp::{max, min};
+use std::cmp::{max};
 use std::collections::VecDeque;
 use std::env;
 use std::f64::consts::PI;
 use std::future::Future;
 use std::time::{Duration, Instant};
-use tracing_subscriber::registry::Data;
 
 use std::sync::{Arc, Mutex};
 
 mod libs; // for calling m own local library
+
+
 use crate::libs::{
-    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats, perStaStats,
-    write_all_sta_csvs, Coords, CsvType, CumulativeStats, ResultsFrameTXDelay, DEFAULT_TMAX_AGG,
+    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
+    write_all_sta_csvs, Coords, CsvType, CumulativeStats, DEFAULT_TMAX_AGG,
     MAX_AMPDU_SIZE, P_TX,
 };
 
@@ -108,7 +111,7 @@ pub struct PoissonSource {
 
     pub num_packets_sent: usize,
 }
-
+#[allow(dead_code)]
 impl PoissonSource {
     pub fn new(arrival_rate_bps: f64, mean_length: f64) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
@@ -119,7 +122,6 @@ impl PoissonSource {
             num_packets_sent: 0,
         }
     }
-
     fn send_packet<'a>(
         &'a mut self,
         _: (),
@@ -149,6 +151,7 @@ impl PoissonSource {
 
 impl Model for PoissonSource {}
 
+#[allow(non_camel_case_types)]
 pub struct STA_source {
     // extended class to PoissonGen
     pub output_port: Output<MpduPacket>,
@@ -294,7 +297,7 @@ impl QueueStats {
         self.waiting_time_cum.add(tq);
         self.service_time_cum.add(ts);
         self.num_packets_dropped = packet_drops;
-        self.num_packets_rx += 1;
+        self.num_packets_rx = packets_rx;
         self.queue_length_counter += queue_length; 
     }
 
@@ -313,7 +316,7 @@ impl QueueStats {
         let format_row = |label: &str, value: f64| format!("| {:<30} | {:>14.6} |", label, value);
 
         // Print the header
-        println!("DEBUUUUG {} / {} = {}", self.queue_length_counter , self.num_packets_rx, self.queue_length_counter as f64 / self.num_packets_rx as f64  );
+        // println!("DEBUUUUG {} / {} = {}", self.queue_length_counter , self.num_packets_rx, self.queue_length_counter as f64 / self.num_packets_rx as f64  );
 
         println!("{}", separator);
         println!(
@@ -400,7 +403,7 @@ impl QueueModule {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = Vec::with_capacity(num_stas);
         for i in 0..num_stas {
-            let mut sta_stats = perStaLockStats::new();
+            let sta_stats = perStaLockStats::new();
             // We need to lock the mutex to modify the sta_id
             if let Ok(mut stats) = sta_stats.data.lock() {
                 stats.sta_id = i as i32;
@@ -644,7 +647,7 @@ impl QueueModule {
                         .schedule_event(
                             last_service_duration,
                             Self::send_ampdu,
-                            (self.aux_ampdu_serviced.clone()),
+                            self.aux_ampdu_serviced.clone(),
                         )
                         .unwrap();
                 } else {
@@ -896,7 +899,7 @@ fn multiple_STA_sim(
 ) {
     let v_distance = vec![1.0, distance, distance]; // just some random values
 
-    const num_STAs_UL: usize = 1; //for now 
+    const NUM_STAS_UL: usize = 1; //for now 
     
     let coords_sta1 = Coords {
         x: v_distance[0],
@@ -936,7 +939,7 @@ fn multiple_STA_sim(
     let effective_rate2 = mean_length / results2.service_delay;
     let effective_rate = (effective_rate1 + effective_rate2) / 2.0;
 
-    let aggregated_rate_in = (num_STAs - num_STAs_UL) as f64 * rate_bps_in; 
+    let aggregated_rate_in = (num_STAs - NUM_STAS_UL) as f64 * rate_bps_in; 
 
 
   
@@ -988,7 +991,7 @@ fn multiple_STA_sim(
 
     let sta1_address = mbox_sta1.address();
     let sta2_address = mbox_sta2.address();
-    let sta3_address = mbox_sink.address();
+    // let sta3_address = mbox_sink.address();
 
     let mbox_queue = Mailbox::new();
     // let queue_address = mbox_queue.address();
