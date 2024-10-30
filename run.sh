@@ -1,10 +1,10 @@
 #!/bin/bash
 
 
-simTime=5000
+simTime=50
 k_queue=1000
 mean_length=12000.0
-rate_bps_src=8.9E6; 
+rate_bps_src=8.5E6; 
 # rate_bps_src=6.5E8 ## loads the queue
 rate_bps_queue=6E5 ## does nothing theoretically 
 

@@ -534,7 +534,7 @@ impl AmpduPacket {
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m \t\t\t\t[AMPDU INFO]\tSize: {}, STA_ID: {}, Total Length: {}\x1b[0m",
+            "\x1b[33m \t\t\t\t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_id, self.total_length
         );
         for packet in &self.mpdu_packets {
@@ -635,6 +635,9 @@ pub fn frametransmission_delay(
     coords_dest: Coords,
     p_tx: f64,
 ) -> ResultsFrameTXDelay {
+
+
+
     let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
@@ -701,6 +704,9 @@ pub fn frametransmission_delay(
 
     let T =
         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
+
+
+    // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y ); 
 
     ResultsFrameTXDelay {
         pathloss: PL,

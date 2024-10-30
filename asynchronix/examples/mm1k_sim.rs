@@ -22,6 +22,7 @@ use std::cmp::{max};
 use std::collections::VecDeque;
 use std::env;
 use std::f64::consts::PI;
+use std::fmt::Debug;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
@@ -176,11 +177,13 @@ impl STA_source {
         dest: i32,
         coordinates: Coords,
         does_sta_transmit: bool,
+        rate_service_bps: f64
     ) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
+        let effective_mu = rate_service_bps /mean_length; 
         println!("\n*************************************************"); 
-        println!("[DEBUG STA{}]\tCoordinates: {:#?}\n\tDEST: {}, TX?: {}, Rate[Mbps]: {}, Arrival_rate (pkt/s): {}",
-                      src, coordinates, dest, does_sta_transmit, arrival_rate_bps/1E6, arrival_rate);
+        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t Arrival_rate (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
+                            src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
 
         Self {
             output_port: Default::default(),
@@ -260,6 +263,8 @@ impl STA_source {
 
                 packet.sta_src_id = self.sta_id;
                 packet.sta_dest_id = self.destination_id;
+
+                packet.sta_dest_coords = self.sta_coordinates; 
 
                 self.output_port.send(packet.clone()).await;
                 self.num_packets_sent += 1;
@@ -498,88 +503,136 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            if let Some(first_packet) = self.queue.front() {
+            
+                if let Some(first_packet) = self.queue.front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
                 // Initialize AMPDU with first packet's info (but don't remove it yet)
                 self.aux_ampdu_serviced.reset();
                 self.aux_ampdu_serviced.sta_id = first_packet.sta_dest_id;
                 self.aux_ampdu_serviced.coordinates = first_packet.sta_dest_coords.clone();
-                self.aux_ampdu_serviced.size = 1; // start at 1
 
-                let mut index = 0;
+
                 let mut last_service_duration = Duration::default();
 
-                while index < self.queue.len() {
-                    // Get packet info before any modifications
-                    let (matches_sta_id, packet_length) =
-                        if let Some(current_packet) = self.queue.get(index) {
-                            (
-                                current_packet.sta_dest_id == self.aux_ampdu_serviced.sta_id,
-                                current_packet.length_packet,
-                            )
-                        } else {
-                            break;
-                        };
+                for mut packet_index_loop in 0..self.queue.len(){
+                    
+                    if let Some(current_packet) = self.queue.get(packet_index_loop as usize){
 
-                    if !matches_sta_id {
-                        // Skip packets not matching AMPDU's STA_ID
-                        println!("skip {}", index);
-                        index += 1;
-                        continue;
-                    }
-
-                    // Check AMPDU constraints before adding packet
-                    let resulting_delays = frametransmission_delay(
-                        self.aux_ampdu_serviced.total_length as f64,
-                        self.aux_ampdu_serviced.size,
-                        self.coords_queue,
-                        self.aux_ampdu_serviced.coordinates,
-                        self.p_tx,
-                    );
-
-                    if resulting_delays.service_delay >= DEFAULT_TMAX_AGG
-                        || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE as i32
-                    {
-                        debug_print!(
-                            DebugColor::Yellow,
-                            "{} [DBG AMPDU END] T_s = {} / {} ; SIZE = {} / {}",
-                            format_elapsed!(now),
-                            resulting_delays.service_delay,
-                            DEFAULT_TMAX_AGG,
-                            self.aux_ampdu_serviced.size,
-                            MAX_AMPDU_SIZE
-                        );
-                        break;
-                    }
-
-                    // Remove packet and add to AMPDU
-                    if let Some(mut packet) = self.queue.remove(index) {
-                        packet.queue_out_instant = now;
-
-                        debug_print!(
-                            DebugColor::Blue,
-                            "{} [DBG DEQUE] --Packet {} (STA{}) dequed and put in AMPDU, Iter index: {}, Q_size = {}",
-                            format_elapsed!(now),
-                            packet.packet_id,
-                            packet.sta_dest_id,
-                            index + 1,
-                            self.queue.len(),
-                        );
-                        packet.queue_length_when_out = self.queue.len().clone(); 
-
-                        self.aux_ampdu_serviced.mpdu_packets.push(packet);
-                        self.aux_ampdu_serviced.total_length += packet_length;
+                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_id {
+                            continue; 
+                        }
+                        self.aux_ampdu_serviced.total_length += current_packet.length_packet; 
                         self.aux_ampdu_serviced.size += 1;
 
-                        last_service_duration =
-                            Duration::from_secs_f64(resulting_delays.service_delay);
+                        let resultz = frametransmission_delay(self.aux_ampdu_serviced.total_length as f64, self.aux_ampdu_serviced.size, self.coords_queue, current_packet.sta_dest_coords, P_TX); 
 
-                        // Don't increment index since we removed a packet
-                    } else {
-                        index += 1;
+                        if (resultz.service_delay >= DEFAULT_TMAX_AGG || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE){
+                            debug_print!(DebugColor::Blue,"[DBG DEQUE] \t\t finished early! | T_s: {:.3} of {:.3}, AMPDU_SIZE : {} of {}", 
+                                        resultz.service_delay, DEFAULT_TMAX_AGG, self.aux_ampdu_serviced.size, MAX_AMPDU_SIZE); 
+                            break; 
+                        }
+
+                        if let Some(mut packet_rmvd) = self.queue.remove(packet_index_loop){
+                            
+                            // packet_index_loop -= 1; 
+                            packet_rmvd.queue_length_when_out = self.queue.len(); 
+                            packet_rmvd.queue_out_instant = now; 
+
+                            self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
+
+                            debug_print!(
+                                DebugColor::Blue,
+                                "{} [DBG DEQUE] --Packet {} (STA{}) dequed and put in AMPDU, Iter index: {}, Q_size = {}",
+                                format_elapsed!(now),
+                                packet_rmvd.packet_id,
+                                packet_rmvd.sta_dest_id,
+                                packet_index_loop, 
+                                self.queue.len(),
+                            );
+
+                            last_service_duration = Duration::from_secs_f64(resultz.service_delay); //use the last service delay
+                        }
                     }
                 }
+
+
+
+                // while index < self.queue.len() {
+                //     // Get packet info before any modifications
+                //     let (matches_sta_id, packet_length) =
+                //         if let Some(current_packet) = self.queue.get(index) {
+                //             (
+                //                 current_packet.sta_dest_id == self.aux_ampdu_serviced.sta_id,
+                //                 current_packet.length_packet,
+                //             )
+                //         } else {
+                //             break;
+                //         };
+
+                //     if !matches_sta_id {
+                //         // Skip packets not matching AMPDU's STA_ID
+                //         println!("skip {}", index);
+                //         index += 1;
+                //         continue;
+                //     }
+
+                //     // Check AMPDU constraints before adding packet
+                //     let resulting_delays = frametransmission_delay(
+                //         self.aux_ampdu_serviced.total_length as f64,
+                //         self.aux_ampdu_serviced.size,
+                //         self.coords_queue,
+                //         self.aux_ampdu_serviced.coordinates,
+                //         self.p_tx,
+                //     );
+
+                //     if resulting_delays.service_delay >= DEFAULT_TMAX_AGG
+                //         || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE as i32
+                //     {
+                //         debug_print!(
+                //             DebugColor::Yellow,
+                //             "{} [DBG AMPDU END] T_s = {} / {} ; SIZE = {} / {}",
+                //             format_elapsed!(now),
+                //             resulting_delays.service_delay,
+                //             DEFAULT_TMAX_AGG,
+                //             self.aux_ampdu_serviced.size,
+                //             MAX_AMPDU_SIZE
+                //         );
+                //         break;
+                //     }
+
+                //     // Remove packet and add to AMPDU
+                //     if let Some(mut packet) = self.queue.remove(index) {
+                //         packet.queue_out_instant = now;
+
+                //         debug_print!(
+                //             DebugColor::Blue,
+                //             "{} [DBG DEQUE] --Packet {} (STA{}) dequed and put in AMPDU, Iter index: {}, Q_size = {}",
+                //             format_elapsed!(now),
+                //             packet.packet_id,
+                //             packet.sta_dest_id,
+                //             index + 1,
+                //             self.queue.len(),
+                //         );
+
+
+                //         self.aux_ampdu_serviced.mpdu_packets.push(packet);
+                //         self.aux_ampdu_serviced.total_length += packet.length_packet;
+                //         self.aux_ampdu_serviced.size += 1;
+
+
+                //         debug_print!(DebugColor::Blue, "\t\t aux_ampdu_size: {} L_in: {}", self.aux_ampdu_serviced.size, self.aux_ampdu_serviced.total_length); 
+                //         packet.queue_length_when_out = self.queue.len().clone(); 
+
+                        
+                //         last_service_duration =
+                //             Duration::from_secs_f64(resulting_delays.service_delay);
+
+                //         // Don't increment index since we removed a packet
+                //     } else {
+                //         index += 1;
+                //     }
+                // }
 
                 // Update all packets with the final service duration
                 for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
@@ -638,7 +691,10 @@ impl QueueModule {
                         format_elapsed!(now),
                         format_elapsed!(now + last_service_duration),
                     );
-                    self.aux_ampdu_serviced.print();
+                    
+                    if DEBUG_PRINT_ENABLED{
+                        self.aux_ampdu_serviced.print();
+                    }
 
                     self.packet_being_served = true;
 
@@ -927,6 +983,7 @@ fn multiple_STA_sim(
         coords_sta1,
         P_TX,
     );
+
     let results2 = frametransmission_delay(
         mean_length * MAX_AMPDU_SIZE as f64,
         MAX_AMPDU_SIZE,
@@ -941,18 +998,15 @@ fn multiple_STA_sim(
 
     let aggregated_rate_in = (num_STAs - NUM_STAS_UL) as f64 * rate_bps_in; 
 
-
-  
-
     println!("*******************************************************************"); 
     println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", aggregated_rate_in, mean_length, effective_rate, k_queue); 
 
     let LT = compute_mm1k_metrics(aggregated_rate_in, mean_length as f64, effective_rate, k_queue);
 
     let mut sta1_bg: STA_source =
-        STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta1, true); // STAs 0 and 1 send traffic to 5 through AP
+        STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta1, true, effective_rate1); // STAs 0 and 1 send traffic to 5 through AP
     let mut sta2_bg: STA_source =
-        STA_source::new(rate_bps_in, mean_length, 1, 2, coords_sta2, true);
+        STA_source::new(rate_bps_in, mean_length, 1, 2, coords_sta2, true, effective_rate2);
 
 
 
