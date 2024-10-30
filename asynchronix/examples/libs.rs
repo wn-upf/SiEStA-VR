@@ -492,6 +492,8 @@ pub struct MpduPacket {
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_dest_coords: Coords,
+
+    pub queue_length_when_out: usize, 
 }
 
 impl MpduPacket {
@@ -509,6 +511,7 @@ impl MpduPacket {
             sta_src_id: 0,
             sta_dest_id: 0,
             sta_dest_coords: Coords::new(),
+            queue_length_when_out: 0, 
         }
     }
 
@@ -542,13 +545,13 @@ impl AmpduPacket {
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m[AMPDU INFO] \t\tSize: {}, STA_ID: {}, Total Length: {}\x1b[0m",
+            "\x1b[33m \t\t\t\t[AMPDU INFO]\tSize: {}, STA_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_id, self.total_length
         );
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t\t\t\t\t\t\t- Packet ID: {:.0}\x1b[0m",
-                packet.packet_id
+                "\x1b[33m\t\t\t\t\t\t\t\t\t\t - Packet ID: {:.0}, T_q: {:.8} , T_s: {:.8}\x1b[0m",
+                packet.packet_id, packet.T_q.as_secs_f64(), packet.expected_T_s.as_secs_f64()
             );
         }
     }
