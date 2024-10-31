@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use colored::Colorize; 
+
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
 
@@ -26,7 +28,73 @@ pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
+// Define a constant to control debugging
+pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
+
+
+#[macro_export]
+macro_rules! debug_print {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // Check if debugging is enabled
+        if DEBUG_PRINT_ENABLED {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_color_fn()(msg));
+        }
+    };
+}
+#[macro_export]
+macro_rules! format_elapsed {
+    ($elapsed:expr) => {{
+        let total_seconds =
+            $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
+        format!("{:.9}", total_seconds)
+    }};
+}
+#[macro_export]
+macro_rules! taitime_to_f64 {
+    ($tai:expr) => {{
+        let secs = $tai.as_secs() as f64;
+        let nanos = $tai.subsec_nanos() as f64;
+        secs + (nanos / 1_000_000_000.0)
+    }};
+}
+
+pub enum DebugColor {
+    Red,
+    Green,
+    Blue,
+    Yellow,
+    Magenta,
+}
+
+impl DebugColor {
+    pub fn to_color_fn(&self) -> fn(String) -> colored::ColoredString {
+        match self {
+            DebugColor::Red => |s| s.red(),
+            DebugColor::Green => |s| s.green(),
+            DebugColor::Blue => |s| s.blue(),
+            DebugColor::Yellow => |s| s.yellow(),
+            DebugColor::Magenta => |s| s.magenta(),
+        }
+    }
+}
+
+pub trait DebugPrint {
+    fn print_debug(&self, color: DebugColor, prefix: &str);
+}
+
+impl DebugPrint for MpduPacket {
+    fn print_debug(&self, color: DebugColor, prefix: &str) {
+        debug_print!(
+            color,
+            "[{}] Packet ID: {}, Length: {}",
+            prefix,
+            self.packet_id,
+            self.length_packet
+        );
+    }
+}
 #[macro_export]
 macro_rules! format_timestamp {
     ($elapsed:expr) => {{

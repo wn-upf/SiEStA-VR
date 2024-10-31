@@ -3,3 +3,5 @@ Cargo.lock
 *.csv
 *.ans
 profile.json
+
+Results/*

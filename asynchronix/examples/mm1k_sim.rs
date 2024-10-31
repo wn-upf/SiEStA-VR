@@ -11,99 +11,41 @@
 // !```
 #![allow(non_snake_case)]
 
-use asynchronix::model::{Context, Model};
-use asynchronix::ports::Output;
+
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
-use colored::*;
+
+
+use std::time::{Duration, Instant};
+
+use std::sync::{Arc, Mutex};
+
+mod lib; // for calling m own local library
+use crate::lib::{
+    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
+    write_all_sta_csvs, Coords, CsvType, CumulativeStats, DEFAULT_TMAX_AGG,
+    MAX_AMPDU_SIZE, P_TX, MpduPacket, AmpduPacket, DebugColor, 
+};
+
+
+
+// use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
+// use crate::{debug_print, format_elapsed, format_timestamp}; 
+
+
 use rand::Rng;
 use std::cmp::{self};
 use std::cmp::{max};
 use std::collections::VecDeque;
 use std::env;
 use std::f64::consts::PI;
-use std::fmt::Debug;
 use std::future::Future;
-use std::time::{Duration, Instant};
 
-use std::sync::{Arc, Mutex};
+use asynchronix::model::{Context, Model};
+use asynchronix::ports::Output;
 
-mod libs; // for calling m own local library
+use crate::lib::DEBUG_PRINT_ENABLED;
 
-
-use crate::libs::{
-    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
-    write_all_sta_csvs, Coords, CsvType, CumulativeStats, DEFAULT_TMAX_AGG,
-    MAX_AMPDU_SIZE, P_TX,
-};
-
-use crate::libs::{AmpduPacket, MpduPacket};
-
-// Define a constant to control debugging
-const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-
-#[macro_export]
-macro_rules! debug_print {
-    ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // Check if debugging is enabled
-        if DEBUG_PRINT_ENABLED {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_color_fn()(msg));
-        }
-    };
-}
-#[macro_export]
-macro_rules! format_elapsed {
-    ($elapsed:expr) => {{
-        let total_seconds =
-            $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
-        format!("{:.9}", total_seconds)
-    }};
-}
-#[macro_export]
-macro_rules! taitime_to_f64 {
-    ($tai:expr) => {{
-        let secs = $tai.as_secs() as f64;
-        let nanos = $tai.subsec_nanos() as f64;
-        secs + (nanos / 1_000_000_000.0)
-    }};
-}
-
-pub enum DebugColor {
-    Red,
-    Green,
-    Blue,
-    Yellow,
-    Magenta,
-}
-
-impl DebugColor {
-    fn to_color_fn(&self) -> fn(String) -> colored::ColoredString {
-        match self {
-            DebugColor::Red => |s| s.red(),
-            DebugColor::Green => |s| s.green(),
-            DebugColor::Blue => |s| s.blue(),
-            DebugColor::Yellow => |s| s.yellow(),
-            DebugColor::Magenta => |s| s.magenta(),
-        }
-    }
-}
-
-pub trait DebugPrint {
-    fn print_debug(&self, color: DebugColor, prefix: &str);
-}
-
-impl DebugPrint for MpduPacket {
-    fn print_debug(&self, color: DebugColor, prefix: &str) {
-        debug_print!(
-            color,
-            "[{}] Packet ID: {}, Length: {}",
-            prefix,
-            self.packet_id,
-            self.length_packet
-        );
-    }
-}
 pub struct PoissonSource {
     pub arrival_rate: f64,
     pub mean_length_packets: f64,
@@ -516,7 +458,7 @@ impl QueueModule {
 
                 let mut last_service_duration = Duration::default();
 
-                for mut packet_index_loop in 0..self.queue.len(){
+                for packet_index_loop in 0..self.queue.len(){
                     
                     if let Some(current_packet) = self.queue.get(packet_index_loop as usize){
 
@@ -528,7 +470,7 @@ impl QueueModule {
 
                         let resultz = frametransmission_delay(self.aux_ampdu_serviced.total_length as f64, self.aux_ampdu_serviced.size, self.coords_queue, current_packet.sta_dest_coords, P_TX); 
 
-                        if (resultz.service_delay >= DEFAULT_TMAX_AGG || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE){
+                        if resultz.service_delay >= DEFAULT_TMAX_AGG || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE {
                             debug_print!(DebugColor::Blue,"[DBG DEQUE] \t\t finished early! | T_s: {:.3} of {:.3}, AMPDU_SIZE : {} of {}", 
                                         resultz.service_delay, DEFAULT_TMAX_AGG, self.aux_ampdu_serviced.size, MAX_AMPDU_SIZE); 
                             break; 
