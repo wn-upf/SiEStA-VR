@@ -1,30 +1,20 @@
-// !```text
-// !                     ┌────────────────────────────────────────────────────┐
-// !                     │                                                    │
-// !                     │                   Packet Flow                      │
-// !                     │   ┌──────────────┐                ┌──────────────┐ │
-// !    MpduPacket   ●──►│──►│ PoissonSource├───────────────►│ QueueModule  ├──► AmpduPacket
-// !                     │   │              │    output_port │              │ │    output_port
-// !                     │   └──────────────┘                └──────────────┘ │
-// !                     │                                                    │
-// !                     └────────────────────────────────────────────────────┘
-// !```
-#![allow(non_snake_case)]
 
 
-use asynchronix::simulation::{Mailbox, SimInit};
+use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 
 
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex};
+use serde::{Deserialize, Serialize};
+
 
 mod lib; // for calling m own local library
 use crate::lib::{
     compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
     write_all_sta_csvs, Coords, CsvType, CumulativeStats, DEFAULT_TMAX_AGG,
-    MAX_AMPDU_SIZE, P_TX, MpduPacket, AmpduPacket, DebugColor, 
+    MAX_AMPDU_SIZE, P_TX, MpduPacket, AmpduPacket, DebugColor, SlidingWindowAverage, 
 };
 
 
@@ -45,6 +35,195 @@ use asynchronix::ports::Output;
 
 use crate::lib::DEBUG_PRINT_ENABLED;
 
+
+mod defines_alvr; 
+
+use crate::defines_alvr::*; 
+
+
+pub struct BitrateManager{  
+
+    last_frame_instant: Instant, 
+    last_update_instant: Instant,
+
+    frame_interval_average: SlidingWindowAverage<Duration>, 
+    encoder_latency_average: SlidingWindowAverage<Duration>,
+    network_latency_average: SlidingWindowAverage<Duration>, 
+
+    bitrate_average_mbps: SlidingWindowAverage<f32>,
+
+    last_target_bitrate_mbps: f32, 
+    update_interval_s: Duration, 
+    
+    rtt_average: SlidingWindowAverage<Duration>,
+    peak_throughput_average: SlidingWindowAverage<f32>,
+    frame_interarrival_average: SlidingWindowAverage<f32>,
+}
+
+
+impl BitrateManager{ // TODO: Add method for CBR
+    pub fn new( max_history_size: usize, initial_framerate: f32, initial_bitrate: f32) -> Self {
+
+        Self{
+            last_frame_instant: Instant::now(), 
+            last_update_instant: Instant::now(), 
+    
+            frame_interval_average:  SlidingWindowAverage::new(Duration::ZERO , max_history_size), 
+            encoder_latency_average: SlidingWindowAverage::new(Duration::ZERO , max_history_size), 
+            network_latency_average: SlidingWindowAverage::new(Duration::ZERO , max_history_size), 
+            
+            bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate * 1E6, max_history_size), 
+            last_target_bitrate_mbps: initial_bitrate * 1E6,  
+            update_interval_s: UPDATE_BITRATE_INTERVAL, 
+
+            rtt_average: SlidingWindowAverage::new(Duration::from_millis(5), max_history_size),
+            peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
+            frame_interarrival_average: SlidingWindowAverage::new(
+                1. / initial_framerate,
+                max_history_size,
+            ),
+        }
+    }
+}
+
+
+pub struct XRServer{
+
+    pub bitrate_manager: BitrateManager, 
+
+    pub output_video: Output<MpduPacket>,
+    pub output_audio: Output<MpduPacket>,
+    pub output_haptics: Output<MpduPacket>,  
+
+    pub is_streaming: bool, 
+
+}
+
+impl XRServer{
+    pub fn new() -> Self {
+        let arrival_rate = arrival_rate_bps / mean_length;
+        let effective_mu = rate_service_bps /mean_length; 
+        println!("\n*************************************************"); 
+        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t Arrival_rate (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
+                            src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
+
+        Self {
+            bitrate_manager: BitrateManager::new(MAX_HISTORY_SIZE, INITIAL_FRAMERATE_FPS, INITIAL_BITRATE_MBPS), 
+
+            output_video: Output::default(), 
+            output_audio: Output::default(), 
+            output_haptics: Output::default(), 
+            is_streaming: false, 
+        }
+    }
+    // TODO : More functions to process inputs, handle ABR, etc. 
+}
+
+impl Model for XRServer{}
+
+pub struct XRClient{
+
+    pub decoder_queue: VecDeque<VideoFrame>, 
+
+    pub output_statistics: Output<MpduPacket>,
+    pub output_tracking: Output<MpduPacket>,
+
+    pub coordinates: Coords,
+    pub is_streaming: bool, 
+    
+    pub frames_dropped_counter: usize, 
+
+
+}
+
+impl XRClient{
+    fn new() -> Self{
+        Self{
+            decoder_queue: VecDeque::new(),
+            output_statistics: Output::default(), 
+            output_tracking: Output::default(), 
+
+            coordinates: Coords::new(), 
+            is_streaming: false, 
+            frames_dropped_counter: 0, 
+        }
+    }
+
+    fn input_packets(packet: MpduPacket){
+
+        // TODO: Based on the stream type (VIDEO, AUDIO, etc.) call one function or the other for the same packet
+
+    }
+
+    fn recv_video( &mut self, data: ReceiverData<VideoPacketHeader>) // inside the thread::spawn(move) of connection_pipeline
+    {
+                let packet_stats = NetworkStatisticsPacket{
+                    frame_index: data.get_frame_index() as i32,                 // index of the current frame
+                    frame_span: data.get_frame_span(),                          // duration of the current frame
+
+                    bytes_in_frame: data.get_bytes_in_frame(),                  // bytes received for the current frame, including both prefixes and network headers
+                    bytes_in_frame_app: data.get_bytes_in_frame_app(),          // bytes received for the current frame, excluding both prefixes and network headers
+
+                    // Interval specific metrics
+                    frame_interarrival: data.get_frame_interarrival(),              // time interval between consecutive frames
+
+                    interarrival_jitter: data.get_interarrival_jitter(),        // measure of the variability in the time between the reception of consecutive video shards
+                    ow_delay: data.get_ow_delay(),                              // one-way delay of the received video shards
+                    filtered_ow_delay: data.get_filtered_ow_delay(),            // kalman filtered one-way delay of the received video shards, as GCC does
+
+                    frames_skipped: data.get_frames_skipped(),                  // number of frames skipped
+
+                    rx_bytes: data.get_rx_bytes(),                              // bytes received in the interval between the consecutive frames, including any prefixes and network headers
+
+                    rx_shard_counter: data.get_rx_shard_counter(),              // non-duplicated video shards received during the interval between consecutive frames
+                    duplicated_shard_counter: data.get_duplicated_shard_counter(), // duplicated video shards received during the interval between consecutive frames
+
+                    highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video FRAME received during the interval between consecutive frames
+                    highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video SHARD received ... 
+                }; 
+        
+        // TODO: Make the function to actually schedule sending this packet! 
+        let Ok((header, nal)) = data.get(); 
+
+        if !push_frame_decoder(header.timestamp, nal){
+
+            
+            report_video_packet_dropped(data.get_frame_index()); // report in HistoryFrame the lost packet, but we're not doing HistoryFrame (?) 
+            self.frames_dropped_counter += 1; 
+        }
+        else{
+            // TODO:  
+            // stats.report_video_packet_data(header.timestamp, data.get_frame_index(), frames_dropped); //
+
+        }
+
+        // if header.is_idr {}
+        
+        // if data.had_packet_loss(){
+
+
+        // }
+    }
+    // fn send_statistics_packet(){
+    //     // TODO! 
+    // } 
+
+    fn recv_audio(data: ReceiverData<>){
+
+        // actually we do nothing on this, just consume the packet 
+        
+    }
+
+    fn receive_control_packet() {
+
+    }
+
+
+
+}
+
+
+impl Model for XRClient{}
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
