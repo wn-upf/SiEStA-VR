@@ -1,5 +1,23 @@
 
 
+
+
+
+
+
+
+
+
+////////////////////////////////////// XR SIMULATOR ////////////////////////////
+/// 
+///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
+///     * Will try to stay accurate to packet latencies in all parts of the pipeline ( for now, linear terms with maybe some randomness) 
+/// 
+/// TODO:   
+///     * XRServer sending packets , rate corresponding to FPS and bitrate (90 fps, 100 Mbps) to sink, with correct headers. 
+//      * Decoder queue of XRClient
+
+/// 
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 
@@ -35,16 +53,25 @@ use asynchronix::ports::Output;
 
 use crate::lib::DEBUG_PRINT_ENABLED;
 
+const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
+    + mem::size_of::<u16>() // stream ID
+    + mem::size_of::<u32>() // packet index
+    + mem::size_of::<u32>() // shards count
+    + mem::size_of::<u32>() // shards index
+    + mem::size_of::<f32>(); // tx relative timestamp
 
-mod defines_alvr; 
+mod stream_socket; 
 
-use crate::defines_alvr::*; 
+use crate::stream_socket::*; 
 
 
+#[derive(Clone)]
 pub struct BitrateManager{  
 
     last_frame_instant: Instant, 
     last_update_instant: Instant,
+
+    frame_index: usize, 
 
     frame_interval_average: SlidingWindowAverage<Duration>, 
     encoder_latency_average: SlidingWindowAverage<Duration>,
@@ -67,6 +94,8 @@ impl BitrateManager{ // TODO: Add method for CBR
         Self{
             last_frame_instant: Instant::now(), 
             last_update_instant: Instant::now(), 
+
+            frame_index: 0, 
     
             frame_interval_average:  SlidingWindowAverage::new(Duration::ZERO , max_history_size), 
             encoder_latency_average: SlidingWindowAverage::new(Duration::ZERO , max_history_size), 
@@ -84,12 +113,22 @@ impl BitrateManager{ // TODO: Add method for CBR
             ),
         }
     }
-}
 
+    pub fn adjust_bitrate(&mut self, network_conditions: &NetworkConditions) { 
+        
+            todo!("TODO: ABR!! "); 
+            /* Bitrate adjustment logic */ 
+        }
+
+}
 
 pub struct XRServer{
 
     pub bitrate_manager: BitrateManager, 
+
+    pub sender_video: StreamSender<H>,
+    pub sender_audio: StreamSender<H>,
+    pub sender_haptics: StreamSender<H>, 
 
     pub output_video: Output<MpduPacket>,
     pub output_audio: Output<MpduPacket>,
@@ -110,11 +149,29 @@ impl XRServer{
         Self {
             bitrate_manager: BitrateManager::new(MAX_HISTORY_SIZE, INITIAL_FRAMERATE_FPS, INITIAL_BITRATE_MBPS), 
 
+            sender_video: StreamSender::new(VIDEO), 
+            sender_audio: StreamSender::new(AUDIO), 
+            sender_haptics: StreamSender::new(HAPTICS), 
+
             output_video: Output::default(), 
             output_audio: Output::default(), 
             output_haptics: Output::default(), 
             is_streaming: false, 
         }
+    }
+
+
+    pub fn connection_pipeline(&mut self){
+
+        while self.is_streaming == true {
+
+
+
+
+
+
+        }
+
     }
     // TODO : More functions to process inputs, handle ABR, etc. 
 }
@@ -152,6 +209,8 @@ impl XRClient{
     fn input_packets(packet: MpduPacket){
 
         // TODO: Based on the stream type (VIDEO, AUDIO, etc.) call one function or the other for the same packet
+
+
 
     }
 
@@ -677,8 +736,6 @@ impl QueueModule {
                         }
                     }
                 }
-
-
 
                 // while index < self.queue.len() {
                 //     // Get packet info before any modifications

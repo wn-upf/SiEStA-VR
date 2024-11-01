@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use colored::Colorize; 
+use colored::Colorize;
+
+use crate::ReceiverData; 
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -136,7 +138,6 @@ impl SlidingWindowAverage<Duration> {
         self.history_buffer.iter().sum::<Duration>() / self.history_buffer.len() as u32
     }
 }
-
 
 
 
@@ -594,8 +595,9 @@ pub struct MpduPacket {
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_dest_coords: Coords,
-
     pub queue_length_when_out: usize, 
+
+    pub header: ReceiverData<H>, 
 }
 
 impl MpduPacket {
@@ -614,6 +616,8 @@ impl MpduPacket {
             sta_dest_id: 0,
             sta_dest_coords: Coords::new(),
             queue_length_when_out: 0, 
+
+            shard_prefix: , 
         }
     }
 
