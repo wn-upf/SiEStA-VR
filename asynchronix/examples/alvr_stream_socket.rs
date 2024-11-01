@@ -13,6 +13,9 @@ pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 
 
+const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
+
+
 const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
     + mem::size_of::<u32>() // packet index
@@ -77,14 +80,13 @@ pub enum SocketBufferSize {
     Custom(#[schema(suffix = "B")] u32),
 }
 
-
-
-pub struct StreamSocketSettings {
-
-    
-
-
-
+// Note: face_data does not respect target_timestamp.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Tracking {
+    pub target_timestamp: Duration,
+    pub device_motions: Vec<(u64, DeviceMotion)>,
+    pub hand_skeletons: [Option<[Pose; 26]>; 2],
+    pub face_data: FaceData,
 }
 
 
@@ -373,6 +375,27 @@ pub struct StreamReceiver<H> {
     rx_bytes: u32,
     rx_shard_counter: u32,
     duplicated_shard_counter: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum DscpTos {
+    BestEffort,
+
+    ClassSelector(#[schema(gui(slider(min = 1, max = 7)))] u8),
+
+    AssuredForwarding {
+        #[schema(gui(slider(min = 1, max = 4)))]
+        class: u8,
+        drop_probability: DropProbability,
+    },
+
+    ExpeditedForwarding,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SocketBufferSize {
+    Default,
+    Maximum,
+    Custom(#[schema(suffix = "B")] u32),
 }
 
 pub enum StreamSocketBuilder {

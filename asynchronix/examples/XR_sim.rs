@@ -37,8 +37,11 @@ use crate::lib::{
     MAX_AMPDU_SIZE, P_TX, MpduPacket, AmpduPacket, DebugColor, SlidingWindowAverage, 
 };
 
-mod statistics_manager; 
-use statistics_manager::*;
+mod alvr_statistics_manager; 
+use alvr_statistics_manager::*;
+
+mod alvr_stream_socket;
+use alvr_stream_socket::*; 
 
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -48,6 +51,7 @@ const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp}; 
 
+const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
 use rand::Rng;
 use std::cmp::{max, self};
@@ -181,16 +185,24 @@ impl XRServer{
 
             let mut server_data_lock = SERVER_DATA_MANAGER.write(); // 
 
-            let settings = server_data_lock.settings().clone();
+            // let settings = server_data_lock.settings().clone();
 
+            // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes
+            let stream_port: u16 = 9944; 
+            let stream_protocol: SocketProtocol::Channel; 
+            let dscp:  Option<DscpTos> = None; 
+            let server_send_buffer_bytes : SocketBufferSize = SocketBufferSize::Maximum; 
+            let client_recv_buffer_bytes : SocketBufferSize = SocketBufferSize::Maximum; 
+
+            let packet_size: i32 = 1400; 
 
             let stream_socket_builder = StreamSocketBuilder::listen_for_server(
                 Duration::from_secs(1),
-                settings.connection.stream_port,
-                settings.connection.stream_protocol,
-                settings.connection.dscp,
-                settings.connection.client_send_buffer_bytes,
-                settings.connection.client_recv_buffer_bytes,
+                stream_port,
+                stream_protocol,
+                dscp,
+                client_send_buffer_bytes,
+                client_recv_buffer_bytes,
             )
             .to_con()?;
         
@@ -203,20 +215,34 @@ impl XRServer{
             let mut stream_socket = StreamSocketBuilder::connect_to_client(
             HANDSHAKE_ACTION_TIMEOUT,
             client_ip,
-            settings.connection.stream_port,
-            settings.connection.stream_protocol,
-            settings.connection.dscp,
-            settings.connection.server_send_buffer_bytes,
-            settings.connection.server_recv_buffer_bytes,
-            settings.connection.packet_size as _,
+            stream_port,
+            stream_protocol,
+            dscp,
+            server_send_buffer_bytes,
+            server_recv_buffer_bytes,
+            packet_size as _,
         )?;        
         // do the rest of code for initiating connection
+       
 
+        let mut video_sender = stream_socket.request_stream(VIDEO); 
+        let game_audio_sender = stream_socket.request_stream(AUDIO); 
 
+        let mut tracking_receiver = stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS); 
 
-
+        let mut tracking_receiver =
+            stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS);
         
+        let haptics_sender = stream_socket.request_stream(HAPTICS);
         
+        let mut statics_receiver =
+            stream_socket.subscribe_to_stream::<ClientStatistics>(STATISTICS, MAX_UNREAD_PACKETS);
+        
+        let map: InstantMap = Arc::new(RwLock::new(HashMap::new()));
+
+
+
+
         while self.is_streaming == true {
 
 
