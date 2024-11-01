@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr; 
 
 
 mod lib; // for calling m own local library
@@ -35,6 +36,12 @@ use crate::lib::{
     MAX_AMPDU_SIZE, P_TX, MpduPacket, AmpduPacket, DebugColor, SlidingWindowAverage, 
 };
 
+mod statistics_manager; 
+use statistics_manager::*;
+
+const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
 
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
@@ -65,6 +72,7 @@ mod stream_socket;
 use crate::stream_socket::*; 
 
 
+
 #[derive(Clone)]
 pub struct BitrateManager{  
 
@@ -87,6 +95,10 @@ pub struct BitrateManager{
     frame_interarrival_average: SlidingWindowAverage<f32>,
 }
 
+static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> =
+    Lazy::new(|| Mutex::new(BitrateManager::new(256, 60.0, 30.0)));
+
+static STATISTICS_MANAGER: OptLazy<StatisticsManager> = alvr_common::lazy_mut_none();
 
 impl BitrateManager{ // TODO: Add method for CBR
     pub fn new( max_history_size: usize, initial_framerate: f32, initial_bitrate: f32) -> Self {
@@ -161,8 +173,24 @@ impl XRServer{
     }
 
 
-    pub fn connection_pipeline(&mut self){
+    pub fn connection_pipeline(&mut self) {
 
+        
+
+        *BITRATE_MANAGER.lock() =
+            BitrateManager::new(settings.video.bitrate.history_size, fps, initial_bitrate);
+
+
+
+        let mut stream_socket = StreamSocketBuilder::connect_to_client(timeout, client_ip, port, protocol, dscp, send_buffer_bytes, recv_buffer_bytes, max_packet_size)
+        
+        // do the rest of code for initiating connection
+
+
+
+
+        
+        
         while self.is_streaming == true {
 
 
