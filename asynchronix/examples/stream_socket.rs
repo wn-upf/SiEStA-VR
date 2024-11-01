@@ -79,6 +79,14 @@ pub enum SocketBufferSize {
 
 
 
+pub struct StreamSocketSettings {
+
+    
+
+
+
+}
+
 
 pub struct ShardPacket{
 

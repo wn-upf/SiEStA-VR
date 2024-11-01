@@ -21,6 +21,7 @@
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 
+use std::net::Ipv4Addr; 
 
 use std::time::{Duration, Instant};
 
@@ -151,7 +152,7 @@ pub struct XRServer{
 }
 
 impl XRServer{
-    pub fn new() -> Self {
+    pub fn new(ip_client: IpAddr) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps /mean_length; 
         println!("\n*************************************************"); 
@@ -173,17 +174,42 @@ impl XRServer{
     }
 
 
-    pub fn connection_pipeline(&mut self) {
-
-        
+    pub fn connection_pipeline(&mut self, client_ip: Ipaddr) {
 
         *BITRATE_MANAGER.lock() =
             BitrateManager::new(settings.video.bitrate.history_size, fps, initial_bitrate);
 
+            let mut server_data_lock = SERVER_DATA_MANAGER.write(); // 
+
+            let settings = server_data_lock.settings().clone();
 
 
-        let mut stream_socket = StreamSocketBuilder::connect_to_client(timeout, client_ip, port, protocol, dscp, send_buffer_bytes, recv_buffer_bytes, max_packet_size)
+            let stream_socket_builder = StreamSocketBuilder::listen_for_server(
+                Duration::from_secs(1),
+                settings.connection.stream_port,
+                settings.connection.stream_protocol,
+                settings.connection.dscp,
+                settings.connection.client_send_buffer_bytes,
+                settings.connection.client_recv_buffer_bytes,
+            )
+            .to_con()?;
         
+            if let Err(e) = control_sender.send(&ClientControlPacket::StreamReady) {
+                info!("Server disconnected. Cause: {e:?}");
+                set_hud_message(SERVER_DISCONNECTED_MESSAGE);
+                return Ok(());
+            }
+
+            let mut stream_socket = StreamSocketBuilder::connect_to_client(
+            HANDSHAKE_ACTION_TIMEOUT,
+            client_ip,
+            settings.connection.stream_port,
+            settings.connection.stream_protocol,
+            settings.connection.dscp,
+            settings.connection.server_send_buffer_bytes,
+            settings.connection.server_recv_buffer_bytes,
+            settings.connection.packet_size as _,
+        )?;        
         // do the rest of code for initiating connection
 
 

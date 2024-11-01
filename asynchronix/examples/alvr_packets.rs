@@ -10,7 +10,75 @@ use std::{
     time::Duration,
 };
 
+use std::{
+    marker::PhantomData,
+    mem,
+    net::{IpAddr, TcpListener, TcpStream},
+    time::{Duration, Instant},
+};
 
+
+
+pub struct ProtoControlSocket {
+    inner: TcpStream,
+}
+
+
+pub enum PeerType<'a> {
+    AnyClient(Vec<IpAddr>),
+    Server(&'a TcpListener),
+}
+
+impl ProtoControlSocket {
+    pub fn connect_to(timeout: Duration, peer: PeerType<'_>) -> ConResult<(Self, IpAddr)> {
+        let socket = match peer {
+            PeerType::AnyClient(ips) => {
+                tcp::connect_to_client(
+                    timeout,
+                    &ips,
+                    CONTROL_PORT,
+                    SocketBufferSize::Default,
+                    SocketBufferSize::Default,
+                )?
+                .0
+            }
+            PeerType::Server(listener) => tcp::accept_from_server(listener, None, timeout)?.0,
+        };
+
+        let peer_ip = socket.peer_addr().to_con()?.ip();
+
+        Ok((Self { inner: socket }, peer_ip))
+    }
+
+    pub fn send<S: Serialize>(&mut self, packet: &S) -> Result<()> {
+        framed_send(&mut self.inner, &mut vec![], packet)
+    }
+
+    pub fn recv<R: DeserializeOwned>(&mut self, timeout: Duration) -> ConResult<R> {
+        framed_recv(&mut self.inner, &mut vec![], &mut None, timeout)
+    }
+
+    pub fn split<S: Serialize, R: DeserializeOwned>(
+        self,
+        timeout: Duration,
+    ) -> Result<(ControlSocketSender<S>, ControlSocketReceiver<R>)> {
+        self.inner.set_read_timeout(Some(timeout))?;
+
+        Ok((
+            ControlSocketSender {
+                inner: self.inner.try_clone()?,
+                buffer: vec![],
+                _phantom: PhantomData,
+            },
+            ControlSocketReceiver {
+                inner: self.inner,
+                buffer: vec![],
+                recv_state: None,
+                _phantom: PhantomData,
+            },
+        ))
+    }
+}
 
 
 #[derive(Serialize, Deserialize)]
