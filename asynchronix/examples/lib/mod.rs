@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use colored::Colorize;
 
-use crate::ReceiverData; 
+use once_cell::sync::Lazy; 
 
 
 const CW_MIN: i32 = 15;
@@ -32,9 +32,17 @@ pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 
+pub mod alvr_packets;
+pub mod alvr_stream_socket;
+pub mod alvr_statistics;
+
+pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
+pub const fn lazy_mut_none<T>() -> OptLazy<T> {
+    Lazy::new(|| Mutex::new(None))
+}
 
 #[macro_export]
 macro_rules! debug_print {
@@ -63,6 +71,14 @@ macro_rules! taitime_to_f64 {
     }};
 }
 
+
+use crate::lib::alvr_stream_socket::ConResult; 
+
+
+
+
+
+
 pub enum DebugColor {
     Red,
     Green,
@@ -83,6 +99,7 @@ impl DebugColor {
     }
 }
 
+#[derive(Clone)]
 pub struct SlidingWindowAverage<T> {
     history_buffer: VecDeque<T>,
     max_history_size: usize,
@@ -598,7 +615,6 @@ pub struct MpduPacket {
     pub sta_dest_coords: Coords,
     pub queue_length_when_out: usize, 
 
-    pub header: ReceiverData<H>, 
 }
 
 impl MpduPacket {
@@ -617,8 +633,7 @@ impl MpduPacket {
             sta_dest_id: 0,
             sta_dest_coords: Coords::new(),
             queue_length_when_out: 0, 
-
-            shard_prefix: , 
+            // header: ReceiverData::new(), 
         }
     }
 

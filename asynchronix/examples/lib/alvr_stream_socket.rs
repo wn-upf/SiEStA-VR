@@ -1,18 +1,26 @@
 
+use rand::Rng;
 
-
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender, RecvTimeoutError, TryRecvError};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     mem,
-    net::{IpAddr, TcpListener, UdpSocket},
-    sync::{mpsc, Arc},
+    net::{TcpListener, UdpSocket},
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
-};
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
+    io, 
+}; 
 
+use std::net::IpAddr;
+use anyhow::{anyhow, bail, Context, Result}; 
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use glam::{Vec3, Quat};
+use std::error::Error; 
+
+
+use std::result::Result::Ok;
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1); 
 pub const MAX_HISTORY_SIZE: usize = 256; 
@@ -38,19 +46,133 @@ const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field 
     + mem::size_of::<f32>(); // tx relative timestamp
 
 
+pub trait SocketWriter: Send {
+    fn send(&mut self, buffer: &[u8]) -> Result<()>;
+}
+
+impl SocketWriter for Sender<Vec<u8>>{
+    fn send(&mut self, buffer: &[u8]) -> Result<()>{
+        todo!("TODO SOCKET WRITER FOR CHANNEL"); 
+    }
+
+
+}
+
+// Trait used to abstract different socket (or other input/output) implementations. The funtionality
+// is the intersection of the functionality of each implementation, that is it inheirits all
+// limitations
+pub trait SocketReader: Send {
+    // Returns number of bytes written. buffer must be big enough to be able to receive a full
+    // packet (size of MTU) otherwise data will be corrupted. The size of the data is
+    fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize>;
+
+    fn peek(&self, buffer: &mut [u8]) -> ConResult<usize>;
+}
+
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConError {
+    WouldBlock,
+    Disconnected,
+    BufferTooSmall,
+    Unsupported,
+}
+
+impl std::error::Error for ConError {}
+
+impl std::fmt::Display for ConError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConError::WouldBlock => write!(f, "Operation would block"),
+            ConError::Disconnected => write!(f, "Disconnected"),
+            ConError::BufferTooSmall => write!(f, "Buffer is too small"),
+            ConError::Unsupported => write!(f, "Operation is not supported"),
+        }
+    }
+}
+
+impl From<mpsc::TryRecvError> for ConError {
+    fn from(err: mpsc::TryRecvError) -> Self {
+        match err {
+            mpsc::TryRecvError::Empty => ConError::WouldBlock,
+            mpsc::TryRecvError::Disconnected => ConError::Disconnected,
+        }
+    }
+}
+
+
+impl SocketReader for mpsc::Receiver<Vec<u8>> {
+    fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
+        match self.try_recv() {
+            Ok(data) => {
+                let data_len = data.len();
+                if data_len <= buffer.len() {
+                    buffer[..data_len].copy_from_slice(&data);
+                    Ok(data_len)
+                } else {
+                    Err(ConnectionError::Other(anyhow!("Buffer too small")))
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => try_again(),
+            Err(mpsc::TryRecvError::Disconnected) => Err(ConnectionError::Other(anyhow!("Channel disconnected"))),
+        }
+    }
+
+    fn peek(&self, _buffer: &mut [u8]) -> ConResult<usize> {
+        Err(ConnectionError::Other(anyhow!("Unsupported operation")))
+    }
+}
 
 
 
+
+struct InProgressPacket {
+    buffer: Vec<u8>,
+    buffer_length: usize,
+    received_shard_indices: HashSet<usize>,
+}
 pub struct VideoPacket {
     pub header: VideoPacketHeader,
     pub payload: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub enum SocketBufferSize {
-    Default,
-    Maximum,
-    Custom(#[schema(suffix = "B")] u32),
+#[derive(Serialize, Deserialize)]
+pub struct VideoPacketHeader {
+    pub timestamp: Duration,
+    pub is_idr: bool,
+}
+
+impl VideoPacketHeader{
+    pub fn new(timestamp: Duration, is_idr: bool ) -> Self{
+        Self{
+            timestamp, 
+            is_idr, 
+        }
+
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
+pub struct Pose {
+    pub orientation: Quat, // NB: default Quat is identity
+    pub position: Vec3,
+}
+
+
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
+pub struct DeviceMotion {
+    pub pose: Pose,
+    pub linear_velocity: Vec3,
+    pub angular_velocity: Vec3,
+}
+
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct FaceData {
+    pub eye_gazes: [Option<Pose>; 2],
+    pub fb_face_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 63]
+    pub htc_eye_expression: Option<Vec<f32>>,
+    pub htc_lip_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 37]
 }
 
 // Note: face_data does not respect target_timestamp.
@@ -60,6 +182,15 @@ pub struct Tracking {
     pub device_motions: Vec<(u64, DeviceMotion)>,
     pub hand_skeletons: [Option<[Pose; 26]>; 2],
     pub face_data: FaceData,
+}
+
+
+#[derive(Serialize, Deserialize)]
+pub struct Haptics {
+    pub device_id: u64,
+    pub duration: Duration,
+    pub frequency: f32,
+    pub amplitude: f32,
 }
 
 pub struct ShardPacket{
@@ -72,7 +203,7 @@ pub struct ShardPacket{
 /// Memory buffer that contains a hidden prefix
 #[derive(Default)]
 pub struct Buffer<H = ()> {
-    inner: Vec<u8>,
+    pub inner: Vec<u8>,
     hidden_offset: usize, // this corresponds to prefix + header
     length: usize,
     _phantom: PhantomData<H>,
@@ -149,8 +280,34 @@ impl Default for KalmanFilter {
     }
 }
 
-pub trait SocketWriter: Send {
-    fn send(&mut self, buffer: &[u8]) -> Result<()>;
+
+#[derive(Clone)]
+struct ShardMapStats {
+    tx_r_instant: f32,
+    rx_instant: Instant,
+    rx_bytes: u32,
+    rx_bytes_app: u32,
+}
+
+// struct RecvState {
+//     packet_length: usize, // contains length prefix
+//     packet_cursor: usize, // counts also the length prefix bytes
+
+//     packet_index: u32, 
+
+
+// }
+
+
+struct RecvState {
+    shard_length: usize, // contains prefix length itself
+    stream_id: u16,
+    packet_index: u32,
+    shards_count: usize,
+    shard_index: usize,
+    packet_cursor: usize, // counts also the prefix bytes
+    overwritten_data_backup: Option<[u8; SHARD_PREFIX_SIZE]>,
+    should_discard: bool,
 }
 
 pub struct StreamSocket {
@@ -345,38 +502,68 @@ pub struct StreamReceiver<H> {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum DropProbability {
+    Low = 0x01,
+    Medium = 0x10,
+    High = 0x11,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum DscpTos {
     BestEffort,
 
-    ClassSelector(#[schema(gui(slider(min = 1, max = 7)))] u8),
+    ClassSelector(u8),
 
     AssuredForwarding {
-        #[schema(gui(slider(min = 1, max = 4)))]
         class: u8,
         drop_probability: DropProbability,
     },
 
     ExpeditedForwarding,
 }
+
+pub enum StreamSocketBuilder {
+    // Tcp(TcpListener),
+    // Udp(UdpSocket),
+    Channel(mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>),
+}
+
+
+
+pub enum ConnectionError {
+    TryAgain(anyhow::Error),
+    Other(anyhow::Error),
+}
+pub trait AnyhowToCon<T> {
+    fn to_con(self) -> ConResult<T>;
+}
+
+
+impl<T> AnyhowToCon<T> for Result<T, anyhow::Error> {
+    fn to_con(self) -> ConResult<T> {
+        self.map_err(ConnectionError::Other)
+    }
+}
+
+
+
+pub type ConResult<T = ()> = Result<T, ConnectionError>;
+
+pub fn try_again<T>() -> ConResult<T> {
+    Err(ConnectionError::TryAgain(anyhow!("Try again")))
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SocketProtocol {
+    // Tcp,
+    // Udp,
+    Channel,
+}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SocketBufferSize {
     Default,
     Maximum,
-    Custom(#[schema(suffix = "B")] u32),
+    Custom(u32),
 }
-
-pub enum StreamSocketBuilder {
-    Tcp(TcpListener),
-    Udp(UdpSocket),
-    Channel(mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>),
-}
-
-pub enum SocketProtocol {
-    Tcp,
-    Udp,
-    Channel,
-}
-
 impl StreamSocketBuilder {
     pub fn listen_for_server(
         timeout: Duration,
@@ -387,19 +574,19 @@ impl StreamSocketBuilder {
         recv_buffer_bytes: SocketBufferSize,
     ) -> Result<Self> {
         Ok(match stream_socket_config {
-            SocketProtocol::Udp => StreamSocketBuilder::Udp(udp::bind(
-                port,
-                stream_tos_config,
-                send_buffer_bytes,
-                recv_buffer_bytes,
-            )?),
-            SocketProtocol::Tcp => StreamSocketBuilder::Tcp(tcp::bind(
-                timeout,
-                port,
-                stream_tos_config,
-                send_buffer_bytes,
-                recv_buffer_bytes,
-            )?),
+            // SocketProtocol::Udp => StreamSocketBuilder::Udp(udp::bind(
+            //     port,
+            //     stream_tos_config,
+            //     send_buffer_bytes,
+            //     recv_buffer_bytes,
+            // )?),
+            // SocketProtocol::Tcp => StreamSocketBuilder::Tcp(tcp::bind(
+            //     timeout,
+            //     port,
+            //     stream_tos_config,
+            //     send_buffer_bytes,
+            //     recv_buffer_bytes,
+            // )?),
             SocketProtocol::Channel => {
                 let (sender, receiver) = mpsc::channel();
                 StreamSocketBuilder::Channel(sender, receiver)
@@ -417,20 +604,20 @@ impl StreamSocketBuilder {
         let protocol: SocketProtocol;
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
             match self {
-                StreamSocketBuilder::Udp(socket) => {
-                    let (send_socket, receive_socket) =
-                        udp::connect(&socket, server_ip, port, timeout).to_con()?;
-                    protocol = SocketProtocol::Udp;
+                // StreamSocketBuilder::Udp(socket) => {
+                //     let (send_socket, receive_socket) =
+                //         udp::connect(&socket, server_ip, port, timeout).to_con()?;
+                //     protocol = SocketProtocol::Udp;
 
-                    (Box::new(send_socket), Box::new(receive_socket))
-                }
-                StreamSocketBuilder::Tcp(listener) => {
-                    let (send_socket, receive_socket) =
-                        tcp::accept_from_server(&listener, Some(server_ip), timeout)?;
-                    protocol = SocketProtocol::Tcp;
+                //     (Box::new(send_socket), Box::new(receive_socket))
+                // }
+                // StreamSocketBuilder::Tcp(listener) => {
+                //     let (send_socket, receive_socket) =
+                //         tcp::accept_from_server(&listener, Some(server_ip), timeout)?;
+                //     protocol = SocketProtocol::Tcp;
 
-                    (Box::new(send_socket), Box::new(receive_socket))
-                }
+                //     (Box::new(send_socket), Box::new(receive_socket))
+                // }
                 StreamSocketBuilder::Channel(sender, receiver) => {
                     protocol = SocketProtocol::Channel;
                     (Box::new(sender), Box::new(receiver)) // TODO: SIMULATE "UDP/TCP" here in some way
@@ -447,7 +634,6 @@ impl StreamSocketBuilder {
             stream_recv_components: HashMap::new(),
 
             transport_protocol: protocol,
-
             map_rx: HashMap::new(),
             rx_bytes: 0,
 
@@ -481,25 +667,25 @@ impl StreamSocketBuilder {
     ) -> ConResult<StreamSocket> {
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
             match protocol {
-                SocketProtocol::Udp => {
-                    let socket =
-                        udp::bind(port, dscp, send_buffer_bytes, recv_buffer_bytes).to_con()?;
-                    let (send_socket, receive_socket) =
-                        udp::connect(&socket, client_ip, port, timeout).to_con()?;
+                // SocketProtocol::Udp => {
+                //     let socket =
+                //         udp::bind(port, dscp, send_buffer_bytes, recv_buffer_bytes).to_con()?;
+                //     let (send_socket, receive_socket) =
+                //         udp::connect(&socket, client_ip, port, timeout).to_con()?;
 
-                    (Box::new(send_socket), Box::new(receive_socket))
-                }
-                SocketProtocol::Tcp => {
-                    let (send_socket, receive_socket) = tcp::connect_to_client(
-                        timeout,
-                        &[client_ip],
-                        port,
-                        send_buffer_bytes,
-                        recv_buffer_bytes,
-                    )?;
+                //     (Box::new(send_socket), Box::new(receive_socket))
+                // }
+                // SocketProtocol::Tcp => {
+                //     let (send_socket, receive_socket) = tcp::connect_to_client(
+                //         timeout,
+                //         &[client_ip],
+                //         port,
+                //         send_buffer_bytes,
+                //         recv_buffer_bytes,
+                //     )?;
 
-                    (Box::new(send_socket), Box::new(receive_socket))
-                }
+                //     (Box::new(send_socket), Box::new(receive_socket))
+                // }
                 SocketProtocol::Channel => {
                     let (sender, receiver) = mpsc::channel();
                     (Box::new(sender), Box::new(receiver))
@@ -539,6 +725,59 @@ impl StreamSocketBuilder {
 }
 
 
+pub trait HandleTryAgain<T> {
+    fn handle_try_again(self) -> ConResult<T>;
+}
+
+impl<T> HandleTryAgain<T> for io::Result<T> {
+    fn handle_try_again(self) -> ConResult<T> {
+        self.map_err(|e| {
+            if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock {
+                ConnectionError::TryAgain(e.into())
+            } else {
+                ConnectionError::Other(e.into())
+            }
+        })
+    }
+}
+
+impl<T> HandleTryAgain<T> for std::result::Result<T, RecvTimeoutError> {
+    fn handle_try_again(self) -> ConResult<T> {
+        self.map_err(|e| match e {
+            RecvTimeoutError::Timeout => ConnectionError::TryAgain(e.into()),
+            RecvTimeoutError::Disconnected => ConnectionError::Other(e.into()),
+        })
+    }
+}
+
+impl<T> HandleTryAgain<T> for std::result::Result<T, TryRecvError> {
+    fn handle_try_again(self) -> ConResult<T> {
+        self.map_err(|e| match e {
+            TryRecvError::Empty => ConnectionError::TryAgain(e.into()),
+            TryRecvError::Disconnected => ConnectionError::Other(e.into()),
+        })
+    }
+}
+
+
+
+impl<T> ToCon<T> for Option<T> {
+    fn to_con(self) -> ConResult<T> {
+        self.ok_or_else(|| ConnectionError::Other(anyhow!("Unexpected None")))
+    }
+}
+
+
+pub trait ToCon<T> {
+    /// Convert result to ConResult. The error is always mapped to `Other()`
+    fn to_con(self) -> ConResult<T>;
+}
+
+impl<T, E: Error + Send + Sync + 'static> ToCon<T> for Result<T, E> {
+    fn to_con(self) -> ConResult<T> {
+        self.map_err(|e| ConnectionError::Other(e.into()))
+    }
+}
 
 /// Get next packet reconstructing from shards.
 /// Returns true if a packet has been recontructed and copied into the buffer.
@@ -572,7 +811,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
                 Ordering::Less => {
                     // Old packet, discard
                     self.used_buffer_queue.send(packet.buffer).to_con()?;
-                    return alvr_common::try_again();
+                    return try_again();
                 }
             }
         }
@@ -620,19 +859,30 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     }
 }
 
-
+fn wrapping_cmp(lhs: u32, rhs: u32) -> Ordering {
+    let diff = lhs.wrapping_sub(rhs);
+    if diff == 0 {
+        Ordering::Equal
+    } else if diff < u32::MAX / 2 {
+        Ordering::Greater
+    } else {
+        // if diff > u32::MAX / 2, it means the sub operation wrapped
+        Ordering::Less
+    }
+}
 
 impl StreamSocket {
 
     pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
         
-        StreamSender {
+        StreamSender::<T> {
             inner: Arc::clone(&self.send_socket),
             stream_id,
             max_packet_size: self.max_packet_size,
             next_packet_index: 0,
             used_buffers: vec![],
 
+            _phantom: PhantomData, 
             shards_count: 0,
             ref_time: Instant::now(),  
             frame_tracker: FrameTracker::new(),
@@ -680,6 +930,7 @@ impl StreamSocket {
             rx_shard_counter: 0,
             duplicated_shard_counter: 0,
         }
+        }
 
 
         pub fn recv(&mut self) -> ConResult {
@@ -689,7 +940,7 @@ impl StreamSocket {
                 let mut bytes = [0; SHARD_PREFIX_SIZE];
                 let count = self.receive_socket.peek(&mut bytes)?;
                 if count < SHARD_PREFIX_SIZE {
-                    return alvr_common::try_again();
+                    return try_again();
                 }
     
                 // todo: switch to little endian
@@ -715,8 +966,9 @@ impl StreamSocket {
                     }
     
                     let header_bytes_transport: u32 = match self.transport_protocol {
-                        SocketProtocol::Udp => 42,
-                        SocketProtocol::Tcp => 54,
+                        // SocketProtocol::Udp => 42,
+                        // SocketProtocol::Tcp => 54,
+                        SocketProtocol::Channel => 42 // let's emulate UDP for now
                     };
                     let packet = ShardMapStats {
                         tx_r_instant,
@@ -766,11 +1018,11 @@ impl StreamSocket {
                 .stream_recv_components
                 .get_mut(&shard_recv_state_mut.stream_id)
             else {
-                debug!(
+                println!(
                     "Received packet from stream {} before subscribing!",
                     shard_recv_state_mut.stream_id
                 );
-                return alvr_common::try_again();
+                return try_again();
             };
     
             let in_progress_packet = if shard_recv_state_mut.should_discard {
@@ -994,12 +1246,8 @@ impl StreamSocket {
             Ok(())
         }
 
-    
-    }
-
-
-
 }
+// #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
     stream_id: u16,
@@ -1007,13 +1255,14 @@ pub struct StreamSender<H> {
 
     next_packet_index: u32,
     used_buffers: Vec<Vec<u8>>,
+    _phantom: PhantomData<H>,
     
     shards_count: usize,
     ref_time: Instant,
     frame_tracker: FrameTracker, 
 }
 
-impl StreamSender<H>{
+impl<H> StreamSender<H>{
 
     pub fn get_shards_count(&self) -> usize {
         self.shards_count
@@ -1024,7 +1273,6 @@ impl StreamSender<H>{
     pub fn get_frame_tracker_map(&self) -> HashMap<u32, Instant> {
         self.frame_tracker.map.clone()
     }
-
     /// Shard and send a buffer with zero copies and zero allocations.
     /// The prefix of each shard is written over the previously sent shard to avoid reallocations.
     pub fn send(&mut self, mut buffer: Buffer<H>) -> Result<()> {
@@ -1047,7 +1295,7 @@ impl StreamSender<H>{
             );
 
             let tx_r_instant: f32 = Instant::now()
-                .duration_since(self.reference_time)
+                .duration_since(self.ref_time)
                 .as_secs_f32();
 
             // todo: switch to little endian
@@ -1060,7 +1308,7 @@ impl StreamSender<H>{
             sub_buffer[14..18].copy_from_slice(&(idx as u32).to_be_bytes());
             sub_buffer[18..22].copy_from_slice(&tx_r_instant.to_be_bytes());
 
-            self.inner.lock().send(&sub_buffer[..packet_length])?;
+            self.inner.lock().unwrap().send(&sub_buffer[..packet_length])?;
 
             if idx == 0 {
                 //store next_packet_index - Instant value pair for RTT
@@ -1078,9 +1326,8 @@ impl StreamSender<H>{
 
 
 impl<H: Serialize> StreamSender<H> {
-
-    pub fn get_buffer(&mut self, header: &H) -> Result<Buffer<H>> {
-        let mut buffer = self.used_buffers.pop().unwrap_or_default();
+    pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
+        let mut buffer = generate_random_video_payload(current_bitrate_mbps);
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
@@ -1100,7 +1347,9 @@ impl<H: Serialize> StreamSender<H> {
     }
 
     pub fn send_header(&mut self, header: &H) -> Result<()> {
-        let buffer = self.get_buffer(header)?;
+        let buffer = self.get_buffer_emu(header, 20.0 as f32 )?;
+        
+        println!("WATCHOUT, using 20 as default!!"); 
         self.send(buffer)
     }
 }
@@ -1112,6 +1361,8 @@ pub struct ReceiverDataStats{
     interarrival_jitter: f32,
     ow_delay: f32,
     filtered_ow_delay: f32,
+
+    had_packet_loss: bool,
 
     rx_bytes: u32,
     bytes_in_frame: u32,
@@ -1173,46 +1424,19 @@ impl ReceiverDataStats {
     }
 }
 
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct NetworkStatisticsPacket {
-    pub frame_index: i32,
-    pub frame_span: f32,
-
-    pub bytes_in_frame: u32,
-    pub bytes_in_frame_app: u32,
-
-    pub frame_interarrival: f32,
-
-    pub interarrival_jitter: f32,
-    pub ow_delay: f32,
-    pub filtered_ow_delay: f32,
-
-    pub frames_skipped: u32,
-
-    pub rx_bytes: u32,
-
-    pub rx_shard_counter: u32,
-    pub duplicated_shard_counter: u32,
-
-    pub highest_rx_frame_index: i32,
-    pub highest_rx_shard_index: i32,
-}
-
-
-#[derive(Serialize, Deserialize)]
-pub struct VideoPacketHeader {
-    pub timestamp: Duration,
-    pub is_idr: bool,
-}
-
-impl VideoPacketHeader{
-    pub fn new(timestamp: Duration, is_idr: bool ) -> Self{
-        Self{
-            timestamp, 
-            is_idr, 
-        }
-
-    }
+pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
+    // Initialize the random number generator
+    let mut rng = rand::thread_rng();
+    
+    // Generate a random u8
+    let random_u8: u8 = rng.gen();
+    
+    // Calculate the payload size based on bitrate
+    let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as u8;
+    
+    // Create buffer with random values
+    let buffer_inner = vec![random_u8, no_bytes_based_bitrate];
+    
+    buffer_inner
 }
 
