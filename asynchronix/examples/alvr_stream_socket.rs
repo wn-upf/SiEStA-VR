@@ -1,5 +1,19 @@
 
 
+
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet, VecDeque},
+    marker::PhantomData,
+    mem,
+    net::{IpAddr, TcpListener, UdpSocket},
+    sync::{mpsc, Arc},
+    time::{Duration, Instant},
+};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
+
+
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1); 
 pub const MAX_HISTORY_SIZE: usize = 256; 
 pub const INITIAL_BITRATE_MBPS: f32 = 100.0; 
@@ -25,17 +39,6 @@ const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field 
 
 
 
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
-    marker::PhantomData,
-    mem,
-    net::{IpAddr, TcpListener, UdpSocket},
-    sync::{mpsc, Arc},
-    time::{Duration, Instant},
-};
-use serde::{de::DeserializeOwned, Serialize};
 
 
 pub struct VideoPacket {
@@ -43,7 +46,7 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum SocketBufferSize {
     Default,
     Maximum,
@@ -59,9 +62,7 @@ pub struct Tracking {
     pub face_data: FaceData,
 }
 
-
 pub struct ShardPacket{
-
     shard_id: i32, 
     frame_id: i32, 
     length_shard_bits: usize, 
@@ -151,9 +152,6 @@ impl Default for KalmanFilter {
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
 }
-
-
-
 
 pub struct StreamSocket {
     max_packet_size: usize,
@@ -627,6 +625,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
 impl StreamSocket {
 
     pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
+        
         StreamSender {
             inner: Arc::clone(&self.send_socket),
             stream_id,
@@ -1208,7 +1207,7 @@ pub struct VideoPacketHeader {
 }
 
 impl VideoPacketHeader{
-    fn new(timestamp: Duration, is_idr: bool ) -> Self{
+    pub fn new(timestamp: Duration, is_idr: bool ) -> Self{
         Self{
             timestamp, 
             is_idr, 

@@ -21,7 +21,7 @@
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 
-use std::intrinsics::size_of;
+// use std::intrinsics::size_of;
 use std::net::Ipv4Addr; 
 
 use std::time::{Duration, Instant};
@@ -262,13 +262,19 @@ impl XRServer{
 
                 let elapsed = (context.scheduler.time() + epsilon).duration_since(self.t_0); 
                 let is_idr = false; 
-                let header: VideoPacketHeader::new(elapsed, is_idr); 
-
-                let header_size = bincode::serialized_size(header)? as usize;
-                let hidden_offset = SHARD_PREFIX_SIZE + header_size;
+                
 
                 
-                let mut buffer = video_sender.get_buffer(&header).unwrap(); 
+                let header =  VideoPacketHeader::new(elapsed, is_idr); 
+
+                let header_size = bincode::serialized_size(&header)? as usize;
+                let hidden_offset = SHARD_PREFIX_SIZE + header_size;
+
+                // let mut buffer = video_sender.get_buffer(&header).unwrap(); 
+                let random_u8: u8 = random() * u8::MAX as u8;
+
+                let length_buffer = // given bitrate, how large the packet is in bytes 
+                let mut buffer_inner = vec![random_u8, ]; 
                 
                 println!("Buffer = {:?}", buffer); 
 
