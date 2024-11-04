@@ -17,6 +17,7 @@ use colored::Colorize;
 
 use crate::ReceiverData; 
 
+
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
 

@@ -21,6 +21,7 @@
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 
+use std::intrinsics::size_of;
 use std::net::Ipv4Addr; 
 
 use std::time::{Duration, Instant};
@@ -28,6 +29,9 @@ use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr; 
+
+use tai_time::TaiTime;
+
 
 
 mod lib; // for calling m own local library
@@ -53,7 +57,7 @@ const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
 
 const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
-use rand::Rng;
+use rand::{random, Rng};
 use std::cmp::{max, self};
 use std::collections::VecDeque;
 use std::env;
@@ -141,6 +145,7 @@ impl BitrateManager{ // TODO: Add method for CBR
 
 pub struct XRServer{
 
+    pub t_0 : TaiTime<0>, 
     pub bitrate_manager: BitrateManager, 
 
     pub sender_video: StreamSender<H>,
@@ -156,7 +161,7 @@ pub struct XRServer{
 }
 
 impl XRServer{
-    pub fn new(ip_client: IpAddr) -> Self {
+    pub fn new(ip_client: IpAddr, context: &Context<Self>) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps /mean_length; 
         println!("\n*************************************************"); 
@@ -164,6 +169,7 @@ impl XRServer{
                             src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
 
         Self {
+            t_0: context.scheduler.time(), 
             bitrate_manager: BitrateManager::new(MAX_HISTORY_SIZE, INITIAL_FRAMERATE_FPS, INITIAL_BITRATE_MBPS), 
 
             sender_video: StreamSender::new(VIDEO), 
@@ -178,7 +184,7 @@ impl XRServer{
     }
 
 
-    pub fn connection_pipeline(&mut self, client_ip: Ipaddr) {
+    pub fn connection_pipeline(&mut self, client_ip: Ipaddr, context: &Context<Self>) {
 
         *BITRATE_MANAGER.lock() =
             BitrateManager::new(settings.video.bitrate.history_size, fps, initial_bitrate);
@@ -241,15 +247,47 @@ impl XRServer{
         let map: InstantMap = Arc::new(RwLock::new(HashMap::new()));
 
 
-
-
         while self.is_streaming == true {
 
+            {          
+                // VIDEO STREAMING
 
+                let current_bitrate = self.bitrate_manager.last_target_bitrate_mbps; 
+                let current_rate = 90; // here we can model the source dependent on fps
+                
+                let epsilon = Duration::ZERO; 
+                let num_bytes_current_frame = current_bitrate as usize * packet_size as usize; // holds if 90 fps
+                
+                let payload : Vec<u8> = vec![255; num_bytes_current_frame]; 
 
+                let elapsed = (context.scheduler.time() + epsilon).duration_since(self.t_0); 
+                let is_idr = false; 
+                let header: VideoPacketHeader::new(elapsed, is_idr); 
 
+                let header_size = bincode::serialized_size(header)? as usize;
+                let hidden_offset = SHARD_PREFIX_SIZE + header_size;
 
+                
+                let mut buffer = video_sender.get_buffer(&header).unwrap(); 
+                
+                println!("Buffer = {:?}", buffer); 
 
+                buffer
+                    .get_range_mut(0, payload.len())
+                    .copy_from_slice(&payload);
+                println!("Buffer after = {:?}", buffer); 
+                video_sender.send(buffer).ok(); 
+            }
+            {
+                //AUDIO STREAMING: TODO
+            }
+
+            {
+                // HAPTICS STREAMING: TODO
+                               
+            }
+
+            
         }
 
     }

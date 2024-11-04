@@ -38,40 +38,10 @@ use std::{
 use serde::{de::DeserializeOwned, Serialize};
 
 
-//// CHATGPT PLACEHOLDER CODE //// 
-pub struct ConnectionManager {
-    pub is_connected: bool,
-    pub retry_attempts: usize,
-    pub last_connection_attempt: Instant,
-    pub max_retries: usize,
+pub struct VideoPacket {
+    pub header: VideoPacketHeader,
+    pub payload: Vec<u8>,
 }
-impl ConnectionManager {
-    pub fn new(max_retries: usize) -> Self { /* Initialization */ }
-    pub fn connect(&mut self) { /* Establish connection */ }
-    pub fn disconnect(&mut self) { /* Disconnect logic */ }
-    pub fn retry_connection(&mut self) { /* Retry logic */ }
-}
-
-pub struct ConnectionPipeline {
-    pub video_sender: StreamSender<VideoPacket>,
-    pub audio_sender: StreamSender<AudioPacket>,
-    pub haptic_sender: StreamSender<HapticPacket>,
-    pub latency_tracker: LatencyTracker,
-}
-impl ConnectionPipeline {
-    pub fn send_packet(&mut self, packet_type: PacketType) { /* Sending logic */ }
-    pub fn schedule_packet(&mut self) { /* Scheduling logic */ }
-}
-
-pub struct ConnectionScheduler {
-    event_queue: VecDeque<ConnectionEvent>,
-    retry_interval: Duration,
-}
-impl ConnectionScheduler {
-    pub fn schedule_event(&mut self, event: ConnectionEvent) { /* Event scheduling logic */ }
-    pub fn process_event_queue(&mut self) { /* Event processing logic */ }
-}
-////END CHATGPT CODE //// 
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub enum SocketBufferSize {
@@ -106,7 +76,6 @@ pub struct Buffer<H = ()> {
     length: usize,
     _phantom: PhantomData<H>,
 }
-
 
 
 impl<H> Buffer<H> {
@@ -1236,5 +1205,15 @@ pub struct NetworkStatisticsPacket {
 pub struct VideoPacketHeader {
     pub timestamp: Duration,
     pub is_idr: bool,
+}
+
+impl VideoPacketHeader{
+    fn new(timestamp: Duration, is_idr: bool ) -> Self{
+        Self{
+            timestamp, 
+            is_idr, 
+        }
+
+    }
 }
 
