@@ -52,7 +52,8 @@ pub trait SocketWriter: Send {
 
 impl SocketWriter for Sender<Vec<u8>>{
     fn send(&mut self, buffer: &[u8]) -> Result<()>{
-        todo!("TODO SOCKET WRITER FOR CHANNEL"); 
+        Sender::send( self , buffer.to_vec()).unwrap(); 
+        Ok(())
     }
 
 
@@ -136,7 +137,7 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct VideoPacketHeader {
     pub timestamp: Duration,
     pub is_idr: bool,
@@ -167,7 +168,7 @@ pub struct DeviceMotion {
 }
 
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct FaceData {
     pub eye_gazes: [Option<Pose>; 2],
     pub fb_face_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 63]
@@ -176,7 +177,7 @@ pub struct FaceData {
 }
 
 // Note: face_data does not respect target_timestamp.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Tracking {
     pub target_timestamp: Duration,
     pub device_motions: Vec<(u64, DeviceMotion)>,
@@ -185,7 +186,7 @@ pub struct Tracking {
 }
 
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Haptics {
     pub device_id: u64,
     pub duration: Duration,
@@ -337,7 +338,7 @@ pub struct StreamSocket {
     highest_rx_shard_index: i32,
     highest_rx_frame_index: i32,
 }
-
+#[derive(Clone)]
 struct ReconstructedPacket {
     index: u32,
     buffer: Vec<u8>,
@@ -488,7 +489,7 @@ impl<H: DeserializeOwned> ReceiverData<H> {
         Ok(self.get()?.0)
     }
 }
-
+// #[derive(Clone)]
 pub struct StreamReceiver<H> {
     packet_receiver: mpsc::Receiver<ReconstructedPacket>,
     used_buffer_queue: mpsc::Sender<Vec<u8>>,
@@ -932,322 +933,321 @@ impl StreamSocket {
         }
         }
 
+    pub fn recv(&mut self) -> ConResult {
+        let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
+            state
+        } else {
+            let mut bytes = [0; SHARD_PREFIX_SIZE];
+            let count = self.receive_socket.peek(&mut bytes)?;
+            if count < SHARD_PREFIX_SIZE {
+                return try_again();
+            }
 
-        pub fn recv(&mut self) -> ConResult {
-            let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
-                state
-            } else {
-                let mut bytes = [0; SHARD_PREFIX_SIZE];
-                let count = self.receive_socket.peek(&mut bytes)?;
-                if count < SHARD_PREFIX_SIZE {
-                    return try_again();
-                }
-    
-                // todo: switch to little endian
-                // todo: do not remove sizeof<u32> for packet length
-                let shard_length = mem::size_of::<u32>()
-                    + u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
-                let stream_id = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
-                let packet_index = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
-                let shards_count = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
-                let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
-                let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
-    
-                if stream_id == VIDEO {
-                    let rx_instant = Instant::now();
-    
-                    if self.highest_rx_frame_index == packet_index as i32 {
-                        if self.highest_rx_shard_index < shard_index as i32 {
-                            self.highest_rx_shard_index = shard_index as i32;
-                        }
-                    } else if self.highest_rx_frame_index < packet_index as i32 {
-                        self.highest_rx_frame_index = packet_index as i32;
+            // todo: switch to little endian
+            // todo: do not remove sizeof<u32> for packet length
+            let shard_length = mem::size_of::<u32>()
+                + u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            let stream_id = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
+            let packet_index = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
+            let shards_count = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
+            let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
+            let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
+
+            if stream_id == VIDEO {
+                let rx_instant = Instant::now();
+
+                if self.highest_rx_frame_index == packet_index as i32 {
+                    if self.highest_rx_shard_index < shard_index as i32 {
                         self.highest_rx_shard_index = shard_index as i32;
                     }
-    
-                    let header_bytes_transport: u32 = match self.transport_protocol {
-                        // SocketProtocol::Udp => 42,
-                        // SocketProtocol::Tcp => 54,
-                        SocketProtocol::Channel => 42 // let's emulate UDP for now
-                    };
-                    let packet = ShardMapStats {
-                        tx_r_instant,
-                        rx_instant,
-                        rx_bytes: shard_length as u32 + header_bytes_transport,
-                        rx_bytes_app: (shard_length - SHARD_PREFIX_SIZE) as u32,
-                    };
-    
-                    let shards_map = self.map_rx.entry(packet_index).or_insert(HashMap::new());
-    
-                    if shards_map.contains_key(&shard_index) {
-                        self.duplicated_shard_counter += 1;
-                    } else {
-                        shards_map.insert(shard_index, packet);
-                        self.rx_shard_counter += 1;
-                    }
-    
-                    self.rx_bytes += shard_length as u32 + header_bytes_transport;
-    
-                    // Jitter
-                    {
-                        if let (Some(prev_shard_rx_instant), Some(prev_shard_tx_r_instant)) =
-                            (self.prev_shard_rx_instant, self.prev_shard_tx_r_instant)
-                        {
-                            let transit_diff = (rx_instant - prev_shard_rx_instant).as_secs_f32()
-                                - (tx_r_instant - prev_shard_tx_r_instant); // D(i-1,i), according to RFC 3550
-                            self.interarrival_jitter +=
-                                (transit_diff.abs() - self.interarrival_jitter) / 16.0;
-                        }
-                        self.prev_shard_tx_r_instant = Some(tx_r_instant);
-                        self.prev_shard_rx_instant = Some(rx_instant);
-                    }
+                } else if self.highest_rx_frame_index < packet_index as i32 {
+                    self.highest_rx_frame_index = packet_index as i32;
+                    self.highest_rx_shard_index = shard_index as i32;
                 }
-                self.shard_recv_state.insert(RecvState {
-                    shard_length,
-                    stream_id,
-                    packet_index,
-                    shards_count,
-                    shard_index,
-                    packet_cursor: 0,
-                    overwritten_data_backup: None,
-                    should_discard: false,
-                })
-            };
-    
-            let Some(components) = self
-                .stream_recv_components
-                .get_mut(&shard_recv_state_mut.stream_id)
-            else {
-                println!(
-                    "Received packet from stream {} before subscribing!",
-                    shard_recv_state_mut.stream_id
-                );
-                return try_again();
-            };
-    
-            let in_progress_packet = if shard_recv_state_mut.should_discard {
-                &mut components.discarded_shards_sink
-            } else if let Some(packet) = components
+
+                let header_bytes_transport: u32 = match self.transport_protocol {
+                    // SocketProtocol::Udp => 42,
+                    // SocketProtocol::Tcp => 54,
+                    SocketProtocol::Channel => 42 // let's emulate UDP for now
+                };
+                let packet = ShardMapStats {
+                    tx_r_instant,
+                    rx_instant,
+                    rx_bytes: shard_length as u32 + header_bytes_transport,
+                    rx_bytes_app: (shard_length - SHARD_PREFIX_SIZE) as u32,
+                };
+
+                let shards_map = self.map_rx.entry(packet_index).or_insert(HashMap::new());
+
+                if shards_map.contains_key(&shard_index) {
+                    self.duplicated_shard_counter += 1;
+                } else {
+                    shards_map.insert(shard_index, packet);
+                    self.rx_shard_counter += 1;
+                }
+
+                self.rx_bytes += shard_length as u32 + header_bytes_transport;
+
+                // Jitter
+                {
+                    if let (Some(prev_shard_rx_instant), Some(prev_shard_tx_r_instant)) =
+                        (self.prev_shard_rx_instant, self.prev_shard_tx_r_instant)
+                    {
+                        let transit_diff = (rx_instant - prev_shard_rx_instant).as_secs_f32()
+                            - (tx_r_instant - prev_shard_tx_r_instant); // D(i-1,i), according to RFC 3550
+                        self.interarrival_jitter +=
+                            (transit_diff.abs() - self.interarrival_jitter) / 16.0;
+                    }
+                    self.prev_shard_tx_r_instant = Some(tx_r_instant);
+                    self.prev_shard_rx_instant = Some(rx_instant);
+                }
+            }
+            self.shard_recv_state.insert(RecvState {
+                shard_length,
+                stream_id,
+                packet_index,
+                shards_count,
+                shard_index,
+                packet_cursor: 0,
+                overwritten_data_backup: None,
+                should_discard: false,
+            })
+        };
+
+        let Some(components) = self
+            .stream_recv_components
+            .get_mut(&shard_recv_state_mut.stream_id)
+        else {
+            println!(
+                "Received packet from stream {} before subscribing!",
+                shard_recv_state_mut.stream_id
+            );
+            return try_again();
+        };
+
+        let in_progress_packet = if shard_recv_state_mut.should_discard {
+            &mut components.discarded_shards_sink
+        } else if let Some(packet) = components
+            .in_progress_packets
+            .get_mut(&shard_recv_state_mut.packet_index)
+        {
+            packet
+        } else if let Some(buffer) = components.used_buffer_receiver.try_recv().ok().or_else(|| {
+            // By default, try to dequeue a used buffer. In case none were found, recycle one of the
+            // in progress packets, chances are these buffers are "dead" because one of their shards
+            // has been dropped by the network.
+            let idx = *components.in_progress_packets.iter().next()?.0;
+            Some(components.in_progress_packets.remove(&idx).unwrap().buffer)
+        }) {
+            // NB: Can't use entry pattern because we want to allow bailing out on the line above
+            components.in_progress_packets.insert(
+                shard_recv_state_mut.packet_index,
+                InProgressPacket {
+                    buffer,
+                    buffer_length: 0,
+                    // todo: find a way to skipping this allocation
+                    received_shard_indices: HashSet::with_capacity(
+                        shard_recv_state_mut.shards_count,
+                    ),
+                },
+            );
+            components
                 .in_progress_packets
                 .get_mut(&shard_recv_state_mut.packet_index)
-            {
-                packet
-            } else if let Some(buffer) = components.used_buffer_receiver.try_recv().ok().or_else(|| {
-                // By default, try to dequeue a used buffer. In case none were found, recycle one of the
-                // in progress packets, chances are these buffers are "dead" because one of their shards
-                // has been dropped by the network.
-                let idx = *components.in_progress_packets.iter().next()?.0;
-                Some(components.in_progress_packets.remove(&idx).unwrap().buffer)
-            }) {
-                // NB: Can't use entry pattern because we want to allow bailing out on the line above
-                components.in_progress_packets.insert(
-                    shard_recv_state_mut.packet_index,
-                    InProgressPacket {
-                        buffer,
-                        buffer_length: 0,
-                        // todo: find a way to skipping this allocation
-                        received_shard_indices: HashSet::with_capacity(
-                            shard_recv_state_mut.shards_count,
-                        ),
-                    },
-                );
-                components
-                    .in_progress_packets
-                    .get_mut(&shard_recv_state_mut.packet_index)
-                    .unwrap()
-            } else {
-                // This branch may be hit in case the thread related to the stream hangs for some reason
-                shard_recv_state_mut.should_discard = true;
-                shard_recv_state_mut.packet_cursor = 0; // reset cursor from old shards
-                                                        // always write at the start of the packet so the buffer doesn't grow much
-                shard_recv_state_mut.shard_index = 0;
-    
-                &mut components.discarded_shards_sink
-            };
-    
-            let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
-            // Note: there is no prefix offset, since we want to write the prefix too.
-            let packet_start_index = shard_recv_state_mut.shard_index * max_shard_data_size;
-    
-            // Prepare buffer to accomodate receiving shard
-            {
-                // Note: this contains the prefix offset
-                in_progress_packet.buffer_length = usize::max(
-                    in_progress_packet.buffer_length,
-                    packet_start_index + shard_recv_state_mut.shard_length,
-                );
-    
-                if in_progress_packet.buffer.len() < in_progress_packet.buffer_length {
-                    in_progress_packet
-                        .buffer
-                        .resize(in_progress_packet.buffer_length, 0);
-                }
+                .unwrap()
+        } else {
+            // This branch may be hit in case the thread related to the stream hangs for some reason
+            shard_recv_state_mut.should_discard = true;
+            shard_recv_state_mut.packet_cursor = 0; // reset cursor from old shards
+                                                    // always write at the start of the packet so the buffer doesn't grow much
+            shard_recv_state_mut.shard_index = 0;
+
+            &mut components.discarded_shards_sink
+        };
+
+        let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
+        // Note: there is no prefix offset, since we want to write the prefix too.
+        let packet_start_index = shard_recv_state_mut.shard_index * max_shard_data_size;
+
+        // Prepare buffer to accomodate receiving shard
+        {
+            // Note: this contains the prefix offset
+            in_progress_packet.buffer_length = usize::max(
+                in_progress_packet.buffer_length,
+                packet_start_index + shard_recv_state_mut.shard_length,
+            );
+
+            if in_progress_packet.buffer.len() < in_progress_packet.buffer_length {
+                in_progress_packet
+                    .buffer
+                    .resize(in_progress_packet.buffer_length, 0);
             }
-    
-            let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
-    
-            // Read shard into the single contiguous buffer
-            {
-                // Backup the small section of bytes that will be overwritten by reading from socket.
-                if shard_recv_state_mut.overwritten_data_backup.is_none() {
-                    shard_recv_state_mut.overwritten_data_backup =
-                        Some(sub_buffer[..SHARD_PREFIX_SIZE].try_into().unwrap())
-                }
-    
-                // This loop may bail out at any time if a timeout is reached. This is correctly handled by
-                // the previous code.
-                while shard_recv_state_mut.packet_cursor < shard_recv_state_mut.shard_length {
-                    let size = self.receive_socket.recv(
-                        &mut sub_buffer
-                            [shard_recv_state_mut.packet_cursor..shard_recv_state_mut.shard_length],
-                    )?;
-                    shard_recv_state_mut.packet_cursor += size;
-                }
-    
-                // Restore backed up bytes
-                // Safety: overwritten_data_backup is always set just before receiving the packet
-                sub_buffer[..SHARD_PREFIX_SIZE]
-                    .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
-            }
-    
-            if !shard_recv_state_mut.should_discard {
-                if !in_progress_packet
-                    .received_shard_indices
-                    .contains(&shard_recv_state_mut.shard_index)
-                {
-                    in_progress_packet
-                        .received_shard_indices
-                        .insert(shard_recv_state_mut.shard_index);
-                }
-            }
-    
-            let mut frame_span = 0.0;
-            let mut frame_interarrival: f32 = 0.0;
-    
-            let mut all_bytes_in_frame: u32 = 0;
-            let mut all_bytes_in_frame_app: u32 = 0;
-    
-            // Check if packet is complete and send
-            if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-                if shard_recv_state_mut.stream_id == VIDEO {
-                    if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
-                        let values: Vec<&ShardMapStats> = inner_map.values().collect();
-                        let min_time = values.iter().map(|shard| shard.rx_instant).min().unwrap();
-                        let max_time = values.iter().map(|shard| shard.rx_instant).max().unwrap();
-    
-                        frame_span = max_time.saturating_duration_since(min_time).as_secs_f32();
-                        frame_interarrival = max_time
-                            .saturating_duration_since(self.prev_frame_rx_instant)
-                            .as_secs_f32();
-    
-                        self.prev_frame_rx_instant = max_time;
-    
-                        all_bytes_in_frame = values.iter().map(|shard| shard.rx_bytes).sum();
-                        all_bytes_in_frame_app = values.iter().map(|shard| shard.rx_bytes_app).sum();
-    
-                        // One way delay gradient
-                        if let Some(first_shard_stats) = inner_map.get(&0) {
-                            if let Some(prev_frame_tx_r_instant) = self.prev_frame_tx_r_instant {
-                                self.kalman.ow_delay = frame_interarrival
-                                    - (first_shard_stats.tx_r_instant - prev_frame_tx_r_instant);
-                            }
-                            self.prev_frame_tx_r_instant = Some(first_shard_stats.tx_r_instant);
-    
-                            self.kalman.k_gain = (self.kalman.p_prev + Q_KALMAN)
-                                / (self.kalman.p_prev + Q_KALMAN + self.kalman.noise_estimation);
-    
-                            self.kalman.m_current = (1.0 - self.kalman.k_gain) * self.kalman.m_prev
-                                + self.kalman.k_gain * self.kalman.ow_delay;
-    
-                            self.kalman.residual_z = self.kalman.ow_delay - self.kalman.m_prev;
-    
-                            self.kalman.noise_estimation = (0.95 * self.kalman.noise_prev)
-                                + self.kalman.residual_z.powf(2.0) * 0.05;
-    
-                            self.kalman.p_current =
-                                (1.0 - self.kalman.k_gain) * (self.kalman.p_prev + Q_KALMAN);
-    
-                            self.kalman.p_prev = self.kalman.p_current;
-                            self.kalman.m_prev = self.kalman.m_current;
-                            self.kalman.noise_prev = self.kalman.noise_estimation;
-    
-                            self.kalman.measured_delay += self.kalman.m_current;
-                        }
-                    }
-                }
-    
-                let size = in_progress_packet.buffer_length;
-                components
-                    .packet_queue
-                    .send(ReconstructedPacket {
-                        index: shard_recv_state_mut.packet_index,
-                        buffer: components
-                            .in_progress_packets
-                            .remove(&shard_recv_state_mut.packet_index)
-                            .unwrap()
-                            .buffer,
-                        size,
-    
-                        frame_index: shard_recv_state_mut.packet_index,
-    
-                        frame_span: frame_span,
-                        frame_interarrival: frame_interarrival,
-    
-                        interarrival_jitter: self.interarrival_jitter,
-                        ow_delay: self.kalman.ow_delay,
-                        filtered_ow_delay: self.kalman.m_current,
-    
-                        rx_bytes: self.rx_bytes,
-                        bytes_in_frame: all_bytes_in_frame,
-                        bytes_in_frame_app: all_bytes_in_frame_app,
-    
-                        rx_shard_counter: self.rx_shard_counter,
-                        duplicated_shard_counter: self.duplicated_shard_counter,
-    
-                        highest_rx_frame_index: self.highest_rx_frame_index,
-                        highest_rx_shard_index: self.highest_rx_shard_index,
-                    })
-                    .ok();
-    
-                if shard_recv_state_mut.stream_id == VIDEO {
-                    self.rx_bytes = 0;
-                    self.rx_shard_counter = 0;
-                    self.duplicated_shard_counter = 0;
-    
-                    // Keep only shards data from the latest packets (using wrapping logic)
-                    let mut idxs_to_remove = Vec::new();
-                    for &idx in self.map_rx.keys() {
-                        if wrapping_cmp(idx.wrapping_add(5), shard_recv_state_mut.packet_index)
-                            == Ordering::Less
-                        {
-                            idxs_to_remove.push(idx);
-                        }
-                    }
-                    for idx in idxs_to_remove {
-                        self.map_rx.remove(&idx);
-                    }
-                }
-    
-                // Keep only shards with later packet index (using wrapping logic)
-                while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {
-                    wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
-                }) {
-                    let idx = *idx; // fix borrow rule
-                    let packet = components.in_progress_packets.remove(&idx).unwrap();
-    
-                    // Recycle buffer
-                    components.used_buffer_sender.send(packet.buffer).ok();
-                }
-            }
-    
-            // Mark current shard as read and allow for a new shard to be read
-            self.shard_recv_state = None;
-    
-            Ok(())
         }
 
+        let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
+
+        // Read shard into the single contiguous buffer
+        {
+            // Backup the small section of bytes that will be overwritten by reading from socket.
+            if shard_recv_state_mut.overwritten_data_backup.is_none() {
+                shard_recv_state_mut.overwritten_data_backup =
+                    Some(sub_buffer[..SHARD_PREFIX_SIZE].try_into().unwrap())
+            }
+
+            // This loop may bail out at any time if a timeout is reached. This is correctly handled by
+            // the previous code.
+            while shard_recv_state_mut.packet_cursor < shard_recv_state_mut.shard_length {
+                let size = self.receive_socket.recv(
+                    &mut sub_buffer
+                        [shard_recv_state_mut.packet_cursor..shard_recv_state_mut.shard_length],
+                )?;
+                shard_recv_state_mut.packet_cursor += size;
+            }
+
+            // Restore backed up bytes
+            // Safety: overwritten_data_backup is always set just before receiving the packet
+            sub_buffer[..SHARD_PREFIX_SIZE]
+                .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
+        }
+
+        if !shard_recv_state_mut.should_discard {
+            if !in_progress_packet
+                .received_shard_indices
+                .contains(&shard_recv_state_mut.shard_index)
+            {
+                in_progress_packet
+                    .received_shard_indices
+                    .insert(shard_recv_state_mut.shard_index);
+            }
+        }
+
+        let mut frame_span = 0.0;
+        let mut frame_interarrival: f32 = 0.0;
+
+        let mut all_bytes_in_frame: u32 = 0;
+        let mut all_bytes_in_frame_app: u32 = 0;
+
+        // Check if packet is complete and send
+        if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
+            if shard_recv_state_mut.stream_id == VIDEO {
+                if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
+                    let values: Vec<&ShardMapStats> = inner_map.values().collect();
+                    let min_time = values.iter().map(|shard| shard.rx_instant).min().unwrap();
+                    let max_time = values.iter().map(|shard| shard.rx_instant).max().unwrap();
+
+                    frame_span = max_time.saturating_duration_since(min_time).as_secs_f32();
+                    frame_interarrival = max_time
+                        .saturating_duration_since(self.prev_frame_rx_instant)
+                        .as_secs_f32();
+
+                    self.prev_frame_rx_instant = max_time;
+
+                    all_bytes_in_frame = values.iter().map(|shard| shard.rx_bytes).sum();
+                    all_bytes_in_frame_app = values.iter().map(|shard| shard.rx_bytes_app).sum();
+
+                    // One way delay gradient
+                    if let Some(first_shard_stats) = inner_map.get(&0) {
+                        if let Some(prev_frame_tx_r_instant) = self.prev_frame_tx_r_instant {
+                            self.kalman.ow_delay = frame_interarrival
+                                - (first_shard_stats.tx_r_instant - prev_frame_tx_r_instant);
+                        }
+                        self.prev_frame_tx_r_instant = Some(first_shard_stats.tx_r_instant);
+
+                        self.kalman.k_gain = (self.kalman.p_prev + Q_KALMAN)
+                            / (self.kalman.p_prev + Q_KALMAN + self.kalman.noise_estimation);
+
+                        self.kalman.m_current = (1.0 - self.kalman.k_gain) * self.kalman.m_prev
+                            + self.kalman.k_gain * self.kalman.ow_delay;
+
+                        self.kalman.residual_z = self.kalman.ow_delay - self.kalman.m_prev;
+
+                        self.kalman.noise_estimation = (0.95 * self.kalman.noise_prev)
+                            + self.kalman.residual_z.powf(2.0) * 0.05;
+
+                        self.kalman.p_current =
+                            (1.0 - self.kalman.k_gain) * (self.kalman.p_prev + Q_KALMAN);
+
+                        self.kalman.p_prev = self.kalman.p_current;
+                        self.kalman.m_prev = self.kalman.m_current;
+                        self.kalman.noise_prev = self.kalman.noise_estimation;
+
+                        self.kalman.measured_delay += self.kalman.m_current;
+                    }
+                }
+            }
+
+            let size = in_progress_packet.buffer_length;
+            components
+                .packet_queue
+                .send(ReconstructedPacket {
+                    index: shard_recv_state_mut.packet_index,
+                    buffer: components
+                        .in_progress_packets
+                        .remove(&shard_recv_state_mut.packet_index)
+                        .unwrap()
+                        .buffer,
+                    size,
+
+                    frame_index: shard_recv_state_mut.packet_index,
+
+                    frame_span: frame_span,
+                    frame_interarrival: frame_interarrival,
+
+                    interarrival_jitter: self.interarrival_jitter,
+                    ow_delay: self.kalman.ow_delay,
+                    filtered_ow_delay: self.kalman.m_current,
+
+                    rx_bytes: self.rx_bytes,
+                    bytes_in_frame: all_bytes_in_frame,
+                    bytes_in_frame_app: all_bytes_in_frame_app,
+
+                    rx_shard_counter: self.rx_shard_counter,
+                    duplicated_shard_counter: self.duplicated_shard_counter,
+
+                    highest_rx_frame_index: self.highest_rx_frame_index,
+                    highest_rx_shard_index: self.highest_rx_shard_index,
+                })
+                .ok();
+
+            if shard_recv_state_mut.stream_id == VIDEO {
+                self.rx_bytes = 0;
+                self.rx_shard_counter = 0;
+                self.duplicated_shard_counter = 0;
+
+                // Keep only shards data from the latest packets (using wrapping logic)
+                let mut idxs_to_remove = Vec::new();
+                for &idx in self.map_rx.keys() {
+                    if wrapping_cmp(idx.wrapping_add(5), shard_recv_state_mut.packet_index)
+                        == Ordering::Less
+                    {
+                        idxs_to_remove.push(idx);
+                    }
+                }
+                for idx in idxs_to_remove {
+                    self.map_rx.remove(&idx);
+                }
+            }
+
+            // Keep only shards with later packet index (using wrapping logic)
+            while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {
+                wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
+            }) {
+                let idx = *idx; // fix borrow rule
+                let packet = components.in_progress_packets.remove(&idx).unwrap();
+
+                // Recycle buffer
+                components.used_buffer_sender.send(packet.buffer).ok();
+            }
+        }
+
+        // Mark current shard as read and allow for a new shard to be read
+        self.shard_recv_state = None;
+
+        Ok(())
+    }
+
 }
-// #[derive(Clone)]
+#[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
     stream_id: u16,
@@ -1326,7 +1326,7 @@ impl<H> StreamSender<H>{
 
 
 impl<H: Serialize> StreamSender<H> {
-    pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
+    pub fn get_buffer_emu(&self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
         let mut buffer = generate_random_video_payload(current_bitrate_mbps);
 
         let header_size = bincode::serialized_size(header)? as usize;

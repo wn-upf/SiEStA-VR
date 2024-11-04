@@ -20,7 +20,8 @@
 /// 
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
-use lib::alvr_stream_socket::Buffer;
+use futures_util::Stream;
+use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
 // use std::intrinsics::size_of;
 use std::net::{IpAddr, Ipv4Addr}; 
@@ -122,10 +123,6 @@ pub struct BitrateManager{
 
 pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 
-
-
-
-
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
@@ -158,22 +155,20 @@ impl BitrateManager{ // TODO: Add method for CBR
         }
     }
 
-    // pub fn adjust_bitrate(&mut self, network_conditions: &NetworkConditions) { 
-        
-    //         todo!("TODO: ABR!! "); 
-    //         /* Bitrate adjustment logic */ 
-    //     }
-
 }
 
+
+pub struct SimRuntimeSockets {
+    pub video_sender: Option<StreamSender<VideoPacketHeader>>,
+    pub game_audio_sender: Option<StreamSender<()>>,
+    pub tracking_receiver: Option<StreamReceiver<Tracking>>,
+    pub haptics_sender: Option<StreamSender<Haptics>>,
+    pub statistics_receiver: Option<StreamReceiver<ClientStatistics>>,
+}
 pub struct XRServer{
 
     pub t_0 : TaiTime<0>, 
     pub bitrate_manager: BitrateManager, 
-
-    // pub sender_video: StreamSender<H>,
-    // pub sender_audio: StreamSender<H>,
-    // pub sender_haptics: StreamSender<H>, 
 
     pub output_video: Output<MpduPacket>,
     pub output_audio: Output<MpduPacket>,
@@ -181,8 +176,12 @@ pub struct XRServer{
 
     pub is_streaming: bool, 
 
-}
+    pub fps: f64, 
 
+    pub sockets: SimRuntimeSockets, 
+    pub frames_sent_counter: usize,
+
+}
 impl XRServer{
     pub fn new(ip_client: IpAddr, context: &Context<Self>) -> Self {
         // let arrival_rate = arrival_rate_bps / mean_length;
@@ -190,6 +189,15 @@ impl XRServer{
         // println!("\n*************************************************"); 
         // println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t Arrival_rate (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
         //                     src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
+
+        let sockets = SimRuntimeSockets {
+            video_sender: None,
+            game_audio_sender: None,
+            tracking_receiver: None,
+            haptics_sender: None,
+            statistics_receiver: None,
+        };
+
 
         Self {
             t_0: context.scheduler.time(), 
@@ -203,6 +211,9 @@ impl XRServer{
             output_audio: Output::default(), 
             output_haptics: Output::default(), 
             is_streaming: false, 
+            fps: 90.0,
+            sockets, 
+            frames_sent_counter: 0, 
         }
     }
 
@@ -246,35 +257,28 @@ impl XRServer{
         // }
 
         let mut stream_socket = StreamSocketBuilder::connect_to_client(
-            HANDSHAKE_ACTION_TIMEOUT,
-            client_ip,
-            stream_port,
-            stream_protocol,
-            dscp,
-            server_send_buffer_bytes,
-            server_recv_buffer_bytes,
-            packet_size as _,
-    )?;        
-    // do the rest of code for initiating connection
-    
-
-        let mut video_sender: StreamSender<VideoPacketHeader> = stream_socket.request_stream::<VideoPacketHeader>(VIDEO); 
-        let game_audio_sender: StreamSender<()> = stream_socket.request_stream::<()>(AUDIO); 
-
-        // let mut tracking_receiver = stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS); 
-
-        let mut tracking_receiver =
-            stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS);
+                HANDSHAKE_ACTION_TIMEOUT,
+                client_ip,
+                stream_port,
+                stream_protocol,
+                dscp,
+                server_send_buffer_bytes,
+                server_recv_buffer_bytes,
+                packet_size as _,
+            )?;        
         
-        let haptics_sender = stream_socket.request_stream::<Haptics>(HAPTICS);
-        
-        let statics_receiver =
-            stream_socket.subscribe_to_stream::<ClientStatistics>(STATISTICS, MAX_UNREAD_PACKETS);
-        
+        self.sockets.video_sender = Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO));
+        self.sockets.game_audio_sender = Some(stream_socket.request_stream::<()>(AUDIO));
+        self.sockets.tracking_receiver = Some(stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS));
+        self.sockets.haptics_sender = Some(stream_socket.request_stream::<Haptics>(HAPTICS));
+        self.sockets.statistics_receiver = Some(stream_socket.subscribe_to_stream::<ClientStatistics>(STATISTICS, MAX_UNREAD_PACKETS));
+
         let map: InstantMap = Arc::new(RwLock::new(HashMap::new()));
 
-
-        if self.is_streaming == true
+        self.is_streaming = true; 
+        let map_clone: Arc<RwLock<HashMap<u32, Instant>>> = Arc::clone(&map);
+        
+        while self.is_streaming == true
             {          
                 // VIDEO STREAMING
                 let current_bitrate_mbps = self.bitrate_manager.last_target_bitrate_mbps; 
@@ -290,14 +294,42 @@ impl XRServer{
                 let header_size: usize = bincode::serialized_size(&header).unwrap() as usize;
                 let hidden_offset = SHARD_PREFIX_SIZE + header_size;
 
-                let mut buffer_emu = video_sender.get_buffer_emu(&header, current_bitrate_mbps).unwrap(); 
-                let payload = buffer_emu.inner.clone(); 
+                if let Some(mut video_sender) = self.sockets.video_sender.clone() {
 
-                buffer_emu
-                    .get_range_mut(0, payload.len())
-                    .copy_from_slice(&payload); 
+                    let mut buffer_emu = video_sender.get_buffer_emu(&header, current_bitrate_mbps).unwrap(); 
+                    let payload = buffer_emu.inner.clone(); 
 
-                video_sender.send(buffer_emu).ok(); 
+                    buffer_emu
+                        .get_range_mut(0, payload.len())
+                        .copy_from_slice(&payload); 
+
+                    video_sender.send(buffer_emu).ok(); 
+                    self.frames_sent_counter += 1; 
+                    println!("Sending frame {}!", self.frames_sent_counter); 
+                
+                    let mut time_interarrival =
+                    Duration::from_secs_f64(exponential(1.0 / self.fps));
+                    
+                    // let packets_in_queue = self.
+                    // context.scheduler.schedule_event(time_interarrival, send_, arg)
+                
+                }
+
+                // TODO!                
+                // match map_clone.write() {
+                //     Ok(mut guard) => {
+                //         *guard = cloned_socket_map;
+                //     }
+                //     Err(_) => {
+                //         println!("Failed to acquire write lock in RTT hashmap");
+                //     }
+                // }
+                // let frame_index = video_sender.get_last_packet_id();
+                // let shards_count = video_sender.get_shards_count();
+                // if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                //     stats.report_frame_sent(header.timestamp, frame_index, shards_count);
+                // }
+
             }
             // {
             //     //AUDIO STREAMING: TODO
@@ -561,8 +593,7 @@ impl STA_source {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            if self.does_sta_tx {
-                // if STA is "TX type"         (and not "RX only")
+            if self.does_sta_tx {   // if STA is "TX type"  (and not "RX only")
 
                 let mut packet = MpduPacket::new();
 
@@ -571,9 +602,8 @@ impl STA_source {
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
-                let len_random = exponential(self.mean_length_packets as f64) as usize;
-                
-                // let len_random = self.mean_length_packets as usize; 
+                let len_random = exponential(self.mean_length_packets as f64) as usize;  // random option
+                // let len_random = self.mean_length_packets as usize;                          // deterministic option
 
                 packet.length_packet = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
@@ -872,83 +902,6 @@ impl QueueModule {
                         }
                     }
                 }
-
-                // while index < self.queue.len() {
-                //     // Get packet info before any modifications
-                //     let (matches_sta_id, packet_length) =
-                //         if let Some(current_packet) = self.queue.get(index) {
-                //             (
-                //                 current_packet.sta_dest_id == self.aux_ampdu_serviced.sta_id,
-                //                 current_packet.length_packet,
-                //             )
-                //         } else {
-                //             break;
-                //         };
-
-                //     if !matches_sta_id {
-                //         // Skip packets not matching AMPDU's STA_ID
-                //         println!("skip {}", index);
-                //         index += 1;
-                //         continue;
-                //     }
-
-                //     // Check AMPDU constraints before adding packet
-                //     let resulting_delays = frametransmission_delay(
-                //         self.aux_ampdu_serviced.total_length as f64,
-                //         self.aux_ampdu_serviced.size,
-                //         self.coords_queue,
-                //         self.aux_ampdu_serviced.coordinates,
-                //         self.p_tx,
-                //     );
-
-                //     if resulting_delays.service_delay >= DEFAULT_TMAX_AGG
-                //         || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE as i32
-                //     {
-                //         debug_print!(
-                //             DebugColor::Yellow,
-                //             "{} [DBG AMPDU END] T_s = {} / {} ; SIZE = {} / {}",
-                //             format_elapsed!(now),
-                //             resulting_delays.service_delay,
-                //             DEFAULT_TMAX_AGG,
-                //             self.aux_ampdu_serviced.size,
-                //             MAX_AMPDU_SIZE
-                //         );
-                //         break;
-                //     }
-
-                //     // Remove packet and add to AMPDU
-                //     if let Some(mut packet) = self.queue.remove(index) {
-                //         packet.queue_out_instant = now;
-
-                //         debug_print!(
-                //             DebugColor::Blue,
-                //             "{} [DBG DEQUE] --Packet {} (STA{}) dequed and put in AMPDU, Iter index: {}, Q_size = {}",
-                //             format_elapsed!(now),
-                //             packet.packet_id,
-                //             packet.sta_dest_id,
-                //             index + 1,
-                //             self.queue.len(),
-                //         );
-
-
-                //         self.aux_ampdu_serviced.mpdu_packets.push(packet);
-                //         self.aux_ampdu_serviced.total_length += packet.length_packet;
-                //         self.aux_ampdu_serviced.size += 1;
-
-
-                //         debug_print!(DebugColor::Blue, "\t\t aux_ampdu_size: {} L_in: {}", self.aux_ampdu_serviced.size, self.aux_ampdu_serviced.total_length); 
-                //         packet.queue_length_when_out = self.queue.len().clone(); 
-
-                        
-                //         last_service_duration =
-                //             Duration::from_secs_f64(resulting_delays.service_delay);
-
-                //         // Don't increment index since we removed a packet
-                //     } else {
-                //         index += 1;
-                //     }
-                // }
-
                 // Update all packets with the final service duration
                 for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
                     let packet_queue_time = packet
