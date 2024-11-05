@@ -74,6 +74,7 @@ bincode = "1.3.3"
 glam = { version = "0.25", features = ["serde"] }
 anyhow = { version = "1", features = ["backtrace"] }
 once_cell = "1"
+crossbeam = "0.8.4"
 
 
 [target.'cfg(asynchronix_loom)'.dev-dependencies]

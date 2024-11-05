@@ -1,6 +1,5 @@
-
-use crate::lib::{SlidingWindowAverage};
-use crate::lib::alvr_packets::ClientStatistics;  
+use crate::lib::alvr_packets::ClientStatistics;
+use crate::lib::SlidingWindowAverage;
 // use ::{warn, SlidingWindowAverage};
 use std::{
     collections::VecDeque,

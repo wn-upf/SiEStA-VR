@@ -15,8 +15,7 @@ use std::sync::Mutex;
 
 use colored::Colorize;
 
-use once_cell::sync::Lazy; 
-
+use once_cell::sync::Lazy;
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -34,10 +33,9 @@ pub const P_TX: f64 = 20.0;
 // Define a constant to control debugging
 pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
-
 pub mod alvr_packets;
-pub mod alvr_stream_socket;
 pub mod alvr_statistics;
+pub mod alvr_stream_socket;
 
 pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
@@ -71,13 +69,7 @@ macro_rules! taitime_to_f64 {
     }};
 }
 
-
-use crate::lib::alvr_stream_socket::ConResult; 
-
-
-
-
-
+use crate::lib::alvr_stream_socket::ConResult;
 
 pub enum DebugColor {
     Red,
@@ -156,8 +148,6 @@ impl SlidingWindowAverage<Duration> {
         self.history_buffer.iter().sum::<Duration>() / self.history_buffer.len() as u32
     }
 }
-
-
 
 #[macro_export]
 macro_rules! format_timestamp {
@@ -320,7 +310,7 @@ impl CumulativeStats {
     // Get standard deviation
     pub fn get_std_dev(&self) -> f64 {
         if self.values.len() < 2 {
-            println!("LESS THAN TWO???"); 
+            println!("LESS THAN TWO???");
             return 0.0;
         }
 
@@ -334,7 +324,7 @@ impl CumulativeStats {
             })
             .sum();
 
-        // let std = (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt(); 
+        // let std = (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt();
         (sum_sq_diff / (self.values.len() as f64 - 1.0)).sqrt()
     }
 
@@ -342,7 +332,7 @@ impl CumulativeStats {
     pub fn get_coefficient_variation(&self) -> f64 {
         let mean = self.get_average();
         if mean == 0.0 {
-            println!("ZEROOOOOOOOOOOOOOOo"); 
+            println!("ZEROOOOOOOOOOOOOOOo");
             0.0
         } else {
             self.get_std_dev() / mean
@@ -455,7 +445,6 @@ impl perStaLockStats {
         }
     }
 }
-
 
 #[derive(Debug)]
 pub struct LittleTheoremMM1K {
@@ -613,8 +602,7 @@ pub struct MpduPacket {
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_dest_coords: Coords,
-    pub queue_length_when_out: usize, 
-
+    pub queue_length_when_out: usize,
 }
 
 impl MpduPacket {
@@ -632,8 +620,8 @@ impl MpduPacket {
             sta_src_id: 0,
             sta_dest_id: 0,
             sta_dest_coords: Coords::new(),
-            queue_length_when_out: 0, 
-            // header: ReceiverData::new(), 
+            queue_length_when_out: 0,
+            // header: ReceiverData::new(),
         }
     }
 
@@ -673,7 +661,9 @@ impl AmpduPacket {
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t\t\t\t\t\t\t\t\t\t - Packet ID: {:.0}, T_q: {:.8} , T_s: {:.8}\x1b[0m",
-                packet.packet_id, packet.T_q.as_secs_f64(), packet.expected_T_s.as_secs_f64()
+                packet.packet_id,
+                packet.T_q.as_secs_f64(),
+                packet.expected_T_s.as_secs_f64()
             );
         }
     }
@@ -736,7 +726,7 @@ pub struct ResultsFrameTXDelay {
     pub data_service_delay: f64,
     pub pathloss: f64,
     pub p_rx: f64, // Rust doesn't have a separate `long double`, so f64 is used
-    // pub o_rate: f64,
+                   // pub o_rate: f64,
 }
 
 impl ResultsFrameTXDelay {
@@ -768,9 +758,6 @@ pub fn frametransmission_delay(
     coords_dest: Coords,
     p_tx: f64,
 ) -> ResultsFrameTXDelay {
-
-
-
     let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
@@ -838,8 +825,7 @@ pub fn frametransmission_delay(
     let T =
         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
 
-
-    // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y ); 
+    // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
 
     ResultsFrameTXDelay {
         pathloss: PL,

@@ -1,15 +1,15 @@
+use glam::{Quat, Vec3};
 use std::{
     fmt::{self, Debug},
     net::IpAddr,
     path::PathBuf,
 };
-use glam::{Quat, Vec3};
 
-use serde::{Serialize, Deserialize}; 
+use serde::{Deserialize, Serialize};
 use std::{
     marker::PhantomData,
     mem,
-    net::{ TcpListener, TcpStream},
+    net::{TcpListener, TcpStream},
     time::{Duration, Instant},
 };
 
@@ -57,16 +57,13 @@ pub struct BatteryPacket {
     pub is_plugged: bool,
 }
 
-#[derive(
-    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogSeverity {
     Error = 3,
     Warning = 2,
     Info = 1,
     Debug = 0,
 }
-
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientControlPacket {
@@ -85,7 +82,6 @@ pub enum ClientControlPacket {
 
     NetworkStatistics(NetworkStatisticsPacket),
 }
-
 
 // pub struct ProtoControlSocket {
 //     inner: TcpStream,
@@ -142,14 +138,10 @@ pub enum ClientControlPacket {
 //     }
 // }
 
-
 pub enum PeerType<'a> {
     AnyClient(Vec<IpAddr>),
     Server(&'a TcpListener),
 }
-
-
-
 
 /// A 3-dimensional vector.
 // #[derive(Clone, Copy, PartialEq)]
@@ -167,15 +159,12 @@ pub struct Pose {
     pub position: Vec3,
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
 pub struct DeviceMotion {
     pub pose: Pose,
     pub linear_velocity: Vec3,
     pub angular_velocity: Vec3,
 }
-
-
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct ClientStatistics {
@@ -190,10 +179,8 @@ pub struct ClientStatistics {
     pub vsync_queue: Duration,
     pub total_pipeline_latency: Duration,
 
- 
     pub frames_dropped: u32,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkStatisticsPacket {

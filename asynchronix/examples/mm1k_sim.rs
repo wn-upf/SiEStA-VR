@@ -11,31 +11,26 @@
 // !```
 #![allow(non_snake_case)]
 
-
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
-
 
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex};
 
 // mod lib; // for calling m own local library
-mod lib; 
+mod lib;
 use crate::lib::{
     compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
-    write_all_sta_csvs, Coords, CsvType, CumulativeStats, DEFAULT_TMAX_AGG,
-    MAX_AMPDU_SIZE, P_TX, MpduPacket, AmpduPacket, DebugColor, 
+    write_all_sta_csvs, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MpduPacket,
+    DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
 };
 
-
-
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
-// use crate::{debug_print, format_elapsed, format_timestamp}; 
-
+// use crate::{debug_print, format_elapsed, format_timestamp};
 
 use rand::Rng;
-use std::cmp::{max, self};
+use std::cmp::{self, max};
 use std::collections::VecDeque;
 use std::env;
 use std::f64::consts::PI;
@@ -45,7 +40,6 @@ use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 
 use crate::lib::DEBUG_PRINT_ENABLED;
-
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -120,11 +114,11 @@ impl STA_source {
         dest: i32,
         coordinates: Coords,
         does_sta_transmit: bool,
-        rate_service_bps: f64
+        rate_service_bps: f64,
     ) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
-        let effective_mu = rate_service_bps /mean_length; 
-        println!("\n*************************************************"); 
+        let effective_mu = rate_service_bps / mean_length;
+        println!("\n*************************************************");
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t Arrival_rate (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
                             src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
 
@@ -199,8 +193,8 @@ impl STA_source {
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
                 let len_random = exponential(self.mean_length_packets as f64) as usize;
-                
-                // let len_random = self.mean_length_packets as usize; 
+
+                // let len_random = self.mean_length_packets as usize;
 
                 packet.length_packet = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
@@ -208,7 +202,7 @@ impl STA_source {
                 packet.sta_src_id = self.sta_id;
                 packet.sta_dest_id = self.destination_id;
 
-                packet.sta_dest_coords = self.sta_coordinates; 
+                packet.sta_dest_coords = self.sta_coordinates;
 
                 self.output_port.send(packet.clone()).await;
                 self.num_packets_sent += 1;
@@ -227,7 +221,7 @@ impl Model for STA_source {}
 pub struct QueueStats {
     waiting_time_cum: CumulativeStats,
     service_time_cum: CumulativeStats,
-    queue_length_counter: usize, 
+    queue_length_counter: usize,
 
     num_packets_dropped: usize,
     num_packets_rx: usize,
@@ -237,17 +231,24 @@ impl QueueStats {
         Self {
             waiting_time_cum: CumulativeStats::new(),
             service_time_cum: CumulativeStats::new(),
-            queue_length_counter: 0, 
+            queue_length_counter: 0,
             num_packets_dropped: 0,
             num_packets_rx: 0,
         }
     }
-    pub fn update_cumstats(&mut self, ts: f64, tq: f64, packet_drops: usize, packets_rx: usize, queue_length: usize) {
+    pub fn update_cumstats(
+        &mut self,
+        ts: f64,
+        tq: f64,
+        packet_drops: usize,
+        packets_rx: usize,
+        queue_length: usize,
+    ) {
         self.waiting_time_cum.add(tq);
         self.service_time_cum.add(ts);
         self.num_packets_dropped = packet_drops;
         self.num_packets_rx = packets_rx;
-        self.queue_length_counter += queue_length; 
+        self.queue_length_counter += queue_length;
     }
 
     pub fn print_nicely(&self) {
@@ -275,7 +276,13 @@ impl QueueStats {
         println!("{}", separator);
         // Print statistics
         println!("{}", format_row("P_k (Blocking Probability)", p_k));
-        println!("{}", format_row("E[N_q]", self.queue_length_counter as f64 / self.num_packets_rx as f64)); 
+        println!(
+            "{}",
+            format_row(
+                "E[N_q]",
+                self.queue_length_counter as f64 / self.num_packets_rx as f64
+            )
+        );
         println!(
             "{}",
             format_row(
@@ -429,7 +436,7 @@ impl QueueModule {
             AMPDU_sent.mpdu_packets.len(),
             self.queue.len(),
             AMPDU_sent.total_length,
-            AMPDU_sent.size - 1, 
+            AMPDU_sent.size - 1
         );
         // AMPDU_sent.print();
         self.packet_being_served = false;
@@ -447,8 +454,7 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            
-                if let Some(first_packet) = self.queue.front() {
+            if let Some(first_packet) = self.queue.front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
                 // Initialize AMPDU with first packet's info (but don't remove it yet)
@@ -456,32 +462,36 @@ impl QueueModule {
                 self.aux_ampdu_serviced.sta_id = first_packet.sta_dest_id;
                 self.aux_ampdu_serviced.coordinates = first_packet.sta_dest_coords.clone();
 
-
                 let mut last_service_duration = Duration::default();
 
-                for packet_index_loop in 0..self.queue.len(){
-                    
-                    if let Some(current_packet) = self.queue.get(packet_index_loop as usize){
-
+                for packet_index_loop in 0..self.queue.len() {
+                    if let Some(current_packet) = self.queue.get(packet_index_loop as usize) {
                         if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_id {
-                            continue; 
+                            continue;
                         }
-                        self.aux_ampdu_serviced.total_length += current_packet.length_packet; 
+                        self.aux_ampdu_serviced.total_length += current_packet.length_packet;
                         self.aux_ampdu_serviced.size += 1;
 
-                        let resultz = frametransmission_delay(self.aux_ampdu_serviced.total_length as f64, self.aux_ampdu_serviced.size, self.coords_queue, current_packet.sta_dest_coords, P_TX); 
+                        let resultz = frametransmission_delay(
+                            self.aux_ampdu_serviced.total_length as f64,
+                            self.aux_ampdu_serviced.size,
+                            self.coords_queue,
+                            current_packet.sta_dest_coords,
+                            P_TX,
+                        );
 
-                        if resultz.service_delay >= DEFAULT_TMAX_AGG || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE {
+                        if resultz.service_delay >= DEFAULT_TMAX_AGG
+                            || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE
+                        {
                             debug_print!(DebugColor::Blue,"[DBG DEQUE] \t\t finished early! | T_s: {:.3} of {:.3}, AMPDU_SIZE : {} of {}", 
-                                        resultz.service_delay, DEFAULT_TMAX_AGG, self.aux_ampdu_serviced.size, MAX_AMPDU_SIZE); 
-                            break; 
+                                        resultz.service_delay, DEFAULT_TMAX_AGG, self.aux_ampdu_serviced.size, MAX_AMPDU_SIZE);
+                            break;
                         }
 
-                        if let Some(mut packet_rmvd) = self.queue.remove(packet_index_loop){
-                            
-                            // packet_index_loop -= 1; 
-                            packet_rmvd.queue_length_when_out = self.queue.len(); 
-                            packet_rmvd.queue_out_instant = now; 
+                        if let Some(mut packet_rmvd) = self.queue.remove(packet_index_loop) {
+                            // packet_index_loop -= 1;
+                            packet_rmvd.queue_length_when_out = self.queue.len();
+                            packet_rmvd.queue_out_instant = now;
 
                             self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
 
@@ -495,12 +505,11 @@ impl QueueModule {
                                 self.queue.len(),
                             );
 
-                            last_service_duration = Duration::from_secs_f64(resultz.service_delay); //use the last service delay
+                            last_service_duration = Duration::from_secs_f64(resultz.service_delay);
+                            //use the last service delay
                         }
                     }
                 }
-
-
 
                 // while index < self.queue.len() {
                 //     // Get packet info before any modifications
@@ -559,16 +568,13 @@ impl QueueModule {
                 //             self.queue.len(),
                 //         );
 
-
                 //         self.aux_ampdu_serviced.mpdu_packets.push(packet);
                 //         self.aux_ampdu_serviced.total_length += packet.length_packet;
                 //         self.aux_ampdu_serviced.size += 1;
 
+                //         debug_print!(DebugColor::Blue, "\t\t aux_ampdu_size: {} L_in: {}", self.aux_ampdu_serviced.size, self.aux_ampdu_serviced.total_length);
+                //         packet.queue_length_when_out = self.queue.len().clone();
 
-                //         debug_print!(DebugColor::Blue, "\t\t aux_ampdu_size: {} L_in: {}", self.aux_ampdu_serviced.size, self.aux_ampdu_serviced.total_length); 
-                //         packet.queue_length_when_out = self.queue.len().clone(); 
-
-                        
                 //         last_service_duration =
                 //             Duration::from_secs_f64(resulting_delays.service_delay);
 
@@ -635,8 +641,8 @@ impl QueueModule {
                         format_elapsed!(now),
                         format_elapsed!(now + last_service_duration),
                     );
-                    
-                    if DEBUG_PRINT_ENABLED{
+
+                    if DEBUG_PRINT_ENABLED {
                         self.aux_ampdu_serviced.print();
                     }
 
@@ -677,37 +683,39 @@ impl DataSink {
         }
     }
     pub fn print_nicely(&self) {
-            let width = 48; // Total width of the table
-            let separator = format!("+{}+", "-".repeat(width));
+        let width = 48; // Total width of the table
+        let separator = format!("+{}+", "-".repeat(width));
 
-            // Helper closure to format a row
-            let format_row =
-                |label: &str, value: f64| format!("| {:<30} | {:>14.6} |", label, value);
+        // Helper closure to format a row
+        let format_row = |label: &str, value: f64| format!("| {:<30} | {:>14.6} |", label, value);
 
-            // Print the header
-            println!("{}", separator);
-            println!(
-                "{:^50}",
-                "| SINK                                           |"
-            );
-            println!("{}", separator);
+        // Print the header
+        println!("{}", separator);
+        println!(
+            "{:^50}",
+            "| SINK                                           |"
+        );
+        println!("{}", separator);
 
-            // Print statistics
-            println!(
-                "{}",
-                format_row(
-                    "Average System Time",
-                    self.system_time / self.rx_packets_counter as f64
-                )
-            );
-            println!(
-                "{}",
-                format_row("Avg Received Throughput[Mbps]", (self.av_l / self.last_time ) / 1E6)
-            );
+        // Print statistics
+        println!(
+            "{}",
+            format_row(
+                "Average System Time",
+                self.system_time / self.rx_packets_counter as f64
+            )
+        );
+        println!(
+            "{}",
+            format_row(
+                "Avg Received Throughput[Mbps]",
+                (self.av_l / self.last_time) / 1E6
+            )
+        );
 
-            // Print the footer
-            println!("{}", separator);
-        }
+        // Print the footer
+        println!("{}", separator);
+    }
 }
 
 #[derive(Default)]
@@ -725,17 +733,15 @@ impl Sink {
         }
     }
 
-    pub fn get_data_handle(&self) -> Arc<Mutex<DataSink>>{
+    pub fn get_data_handle(&self) -> Arc<Mutex<DataSink>> {
         Arc::clone(&self.mutex_data)
     }
-
 
     pub async fn input(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let now = context.scheduler.time();
 
         for mut packet in ampdu_packet.mpdu_packets {
-
-            packet.T_s = now.duration_since(packet.queue_out_instant); 
+            packet.T_s = now.duration_since(packet.queue_out_instant);
 
             debug_print!(
                 DebugColor::Magenta,
@@ -756,8 +762,8 @@ impl Sink {
             if let Ok(mut data) = self.mutex_data.lock() {
                 data.system_time += packet_total_time.as_secs_f64();
                 data.av_l += packet.length_packet as f64;
-                data.rx_packets_counter += 1; 
-                data.last_time = taitime_to_f64!(context.scheduler.time()); 
+                data.rx_packets_counter += 1;
+                data.last_time = taitime_to_f64!(context.scheduler.time());
 
                 // println!(
                 //     "dbgggggggggggg st: {}, av_l : {}, rx_c: {}, last_t: {}",
@@ -899,8 +905,8 @@ fn multiple_STA_sim(
 ) {
     let v_distance = vec![1.0, distance, distance]; // just some random values
 
-    const NUM_STAS_UL: usize = 1; //for now 
-    
+    const NUM_STAS_UL: usize = 1; //for now
+
     let coords_sta1 = Coords {
         x: v_distance[0],
         y: 0.0,
@@ -940,29 +946,45 @@ fn multiple_STA_sim(
     let effective_rate2 = mean_length / results2.service_delay;
     let effective_rate = (effective_rate1 + effective_rate2) / 2.0;
 
-    let aggregated_rate_in = (num_STAs - NUM_STAS_UL) as f64 * rate_bps_in; 
+    let aggregated_rate_in = (num_STAs - NUM_STAS_UL) as f64 * rate_bps_in;
 
-    println!("*******************************************************************"); 
-    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", aggregated_rate_in, mean_length, effective_rate, k_queue); 
+    println!("*******************************************************************");
+    println!(
+        "Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}",
+        aggregated_rate_in, mean_length, effective_rate, k_queue
+    );
 
-    let LT = compute_mm1k_metrics(aggregated_rate_in, mean_length as f64, effective_rate, k_queue);
+    let LT = compute_mm1k_metrics(
+        aggregated_rate_in,
+        mean_length as f64,
+        effective_rate,
+        k_queue,
+    );
 
-    let mut sta1_bg: STA_source =
-        STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta1, true, effective_rate1); // STAs 0 and 1 send traffic to 5 through AP
-    let mut sta2_bg: STA_source =
-        STA_source::new(rate_bps_in, mean_length, 1, 2, coords_sta2, true, effective_rate2);
-
-
+    let mut sta1_bg: STA_source = STA_source::new(
+        rate_bps_in,
+        mean_length,
+        0,
+        2,
+        coords_sta1,
+        true,
+        effective_rate1,
+    ); // STAs 0 and 1 send traffic to 5 through AP
+    let mut sta2_bg: STA_source = STA_source::new(
+        rate_bps_in,
+        mean_length,
+        1,
+        2,
+        coords_sta2,
+        true,
+        effective_rate2,
+    );
 
     println!("STA1 PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
-    results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, 
-    results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length); 
+        results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
 
     println!("STA2 PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
-    results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, 
-    results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length); 
-
-
+        results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length);
 
     // let sta5_ul: STA_source = STA_source::new(rate_bps_in, mean_length, 2, 7, coords_sta3, false); // RX STA, acts as sink with coordinates
     let sink: Sink = Sink::new();
@@ -980,9 +1002,7 @@ fn multiple_STA_sim(
     let csv_data_handle = queue.csv_metrics.get_data_handle();
     let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle();
     let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
-    let sinkstats_data_handle = sink.get_data_handle(); 
-
-
+    let sinkstats_data_handle = sink.get_data_handle();
 
     let mbox_sta1 = Mailbox::new();
     let mbox_sta2 = Mailbox::new();
@@ -1024,11 +1044,11 @@ fn multiple_STA_sim(
     assert_eq!(simu.time(), t);
 
     // START WITH FIRST EVENT
-    let epsilon1 = Duration::from_secs_f64(exponential(0.9)); 
-    let epsilon2 = Duration::from_secs_f64(exponential(0.9)); 
+    let epsilon1 = Duration::from_secs_f64(exponential(0.9));
+    let epsilon2 = Duration::from_secs_f64(exponential(0.9));
 
-    let duration_scheduled1= Duration::from_secs(10) + epsilon1; 
-    let duration_scheduled2 = Duration::from_secs(10) + epsilon2 ; 
+    let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
+    let duration_scheduled2 = Duration::from_secs(10) + epsilon2;
 
     scheduler
         .schedule_event(
@@ -1074,14 +1094,17 @@ fn multiple_STA_sim(
         queue_stats.print_nicely();
     }
 
-    if let Ok(sink_stats) = sinkstats_data_handle.lock(){
-        sink_stats.print_nicely(); 
+    if let Ok(sink_stats) = sinkstats_data_handle.lock() {
+        sink_stats.print_nicely();
     }
 
     // println!("************ END RESULTS STAS***********\n LT: ");
 
-    println!("*******************************************************************"); 
-    println!("Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}", aggregated_rate_in, mean_length, effective_rate, k_queue); 
+    println!("*******************************************************************");
+    println!(
+        "Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}",
+        aggregated_rate_in, mean_length, effective_rate, k_queue
+    );
 
     LT.print_results();
 }
