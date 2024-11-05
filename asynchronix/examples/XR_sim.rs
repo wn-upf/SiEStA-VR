@@ -24,15 +24,15 @@ use std::time::{SystemTime};
 
 use once_cell::sync::Lazy;
 
-use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
+use crate::lib::alvr_packets::{ ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
-    AnyhowToCon, ConResult, DscpTos, Haptics, ReceiverData, SocketBufferSize, SocketProtocol,
-    StreamSender, StreamSocketBuilder, Tracking, VideoPacket, VideoPacketHeader,
+    AnyhowToCon, DscpTos, Haptics, ReceiverData, SocketBufferSize, SocketProtocol,
+    StreamSender, StreamSocketBuilder, Tracking,  VideoPacketHeader, parse_shard_data, SocketReader,  
 };
 use tai_time::TaiTime;
 
 use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, INITIAL_BITRATE_MBPS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS,
+    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS,
     TRACKING, VIDEO,
 };
 
@@ -65,6 +65,9 @@ const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(2000);
 
 const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+
+const INITIAL_BITRATE_MBPS: f32 = 5.0; 
+
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
@@ -208,10 +211,55 @@ impl XRServer {
         }
     }
 
-    pub fn connection_pipeline(&mut self, client_ip: IpAddr)
+    pub fn read_network_interface(mut buffer: Vec<u8> ,mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>>){
+        let mut stop = false;
+        while !stop {
+            let ok = receiver.recv(&mut buffer);
+
+            // Check if we successfully received data
+            match ok {
+                Ok(bytes_received) => {
+                    if bytes_received == 0 {
+                        // If no data is received, stop the loop
+                        println!("No new data received, stopping.");
+                        stop = true;
+                    } else {
+
+                        // TODO: CHECK WITH WIRESHARK ENCAPSULATION OF PACKET 
+
+                        
+
+
+                        println!("Parsed from connection output:");
+                        if let Ok((packet_length, stream_id, next_packet_index, shards_count, shard_index, tx_r_instant)) = parse_shard_data(&buffer[..100]) {
+                            println!("Parsed shard data:");
+                            println!("Packet length: {}", packet_length);
+                            println!("Stream ID: {}", stream_id);
+                            println!("Next packet index: {}", next_packet_index);
+                            println!("Shards count: {}", shards_count);
+                            println!("Shard index: {}", shard_index);
+                            println!("Transmit-receive instant: {} )", tx_r_instant);
+                            println!("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__");
+
+                            std::thread::sleep(Duration::from_secs(1));
+                        } else {
+                            println!("Failed to parse shard data, stopping.");
+                            stop = true;
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Handle the error (e.g., if recv times out or there is a network issue)
+                    println!("Error receiving data, stopping.");
+                    stop = true;
+                }
+            }
+        }
+    }
+
+    pub fn connection_pipeline(&mut self, client_ip: IpAddr){
     // no return from this function for now
-    {
-        self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, 3.0);
+        self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, INITIAL_BITRATE_MBPS);
 
         // let mut server_data_lock = SERVER_DATA_MANAGER.write(); //
 
@@ -274,18 +322,10 @@ impl XRServer {
 
                 let mut buffer_emu = send_socket.get_buffer_emu(&header, current_bitrate_mbps).unwrap();
                 
-
-
                 // Fill buffer with meaningful test data
                 // buffer_emu.inner = vec![42u8; 1400]; // Use packet_size for buffer
                 // println!("Buffer size: {}\nWhole buffer: {:?}", buffer_emu.inner.len(), buffer_emu.);
                 println!("DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",current_bitrate_mbps ,buffer_emu.inner.len(),buffer_emu.length); 
-
-                // First, ensure the receiver is ready
-                println!("Setting up receiver...");
-                
-                // Use a longer timeout for receiving
-                let receive_timeout = Duration::from_secs(5);
 
                 let mut payload = buffer_emu.inner.clone(); 
                 buffer_emu
@@ -294,30 +334,34 @@ impl XRServer {
 
                 let mut arc_receiver = send_socket.network_interface.clone(); 
 
-                // After sending data, check if it was successfully sent.
-                let send_result = std::thread::spawn(move || {
-                    println!("Sending data...");
-                    match send_socket.send(buffer_emu) {
-                        Ok(_) => {
-                            println!("All sent successfully.");
-                            
-                            
-                            
-                            
-                            
-                            Ok(())
-                        },
-                        Err(e) => {
-                            println!("Failed to send data: {:?}", e);
-                            Err(e)
-                        },
-                    }
-                });
-                std::thread::sleep(Duration::from_secs(3)); 
-                println!("DBG Receiving data"); 
-                const BUFFER_SIZE: usize = 2000; 
-                let mut buffer = vec![0; BUFFER_SIZE]; 
 
+                let send_result = send_socket.send(buffer_emu); 
+
+                const BUFFER_SIZE: usize = 2000;  
+
+                let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE]; 
+                let mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>> = arc_receiver.lock().unwrap(); 
+
+                XRServer::read_network_interface(buffer, receiver); 
+                
+                
+                // println!("DATA!!!\nt\t\t{:?}\n\n************************************************************************************************************", &buffer[..100]); 
+                
+                // // After sending data, check if it was successfully sent.
+                // let send_result = std::thread::spawn(move || {
+                //     println!("Sending data...");
+                //     match send_socket.send(buffer_emu) {
+                //         Ok(_) => {
+                //             println!("All sent successfully.");
+                            
+                //             Ok(())
+                //         },
+                //         Err(e) => {
+                //             println!("Failed to send data: {:?}", e);
+                //             Err(e)
+                //         },
+                //     }
+                // });
 
                 //     println!("DBG Receiving data"); 
                 //     const BUFFER_SIZE: usize = 100000; 
@@ -499,7 +543,6 @@ impl XRClient {
 }
 
 fn main() {
-    println!("HI!!");
 
     let ip_src = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)); 
     let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)); 

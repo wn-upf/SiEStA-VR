@@ -19,12 +19,12 @@ use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::error::Error;
 use std::net::IpAddr;
+use std::io::{Read, Write};
 
 use std::result::Result::Ok;
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
-pub const INITIAL_BITRATE_MBPS: f32 = 100.0;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const TRACKING: u16 = 0;
@@ -66,9 +66,6 @@ impl SocketWriter for Sender<Vec<u8>> {
 }
 impl SocketReader for Receiver<Vec<u8>> {
     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
-        
-        println!("Socketreader!!"); 
-
 
         match self.try_recv() {
             Ok(data) => {
@@ -84,7 +81,7 @@ impl SocketReader for Receiver<Vec<u8>> {
                     Err(ConnectionError::Other(anyhow!("Buffer too small")))
                 }
             }
-            Err(TryRecvError::Empty) => try_again(),
+            Err(TryRecvError::Empty) =>  Ok(0),
             Err(TryRecvError::Disconnected) => {
                 Err(ConnectionError::Other(anyhow!("Channel disconnected")))
             }
@@ -1262,6 +1259,20 @@ pub struct StreamSender<H> {
     frame_tracker: FrameTracker,
 }
 
+pub fn parse_shard_data(data: &[u8]) -> Result<(usize, u16, u32, u32, u32, f32), &'static str> {
+    if data.len() < 22 {
+        return Err("Received data is too short to contain a complete shard prefix");
+    }
+
+    let packet_length = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize + 4;
+    let stream_id = u16::from_be_bytes(data[4..6].try_into().unwrap());
+    let next_packet_index = u32::from_be_bytes(data[6..10].try_into().unwrap());
+    let shards_count = u32::from_be_bytes(data[10..14].try_into().unwrap()) as u32;
+    let shard_index = u32::from_be_bytes(data[14..18].try_into().unwrap()) as u32;
+    let tx_r_instant = f32::from_be_bytes(data[18..22].try_into().unwrap());
+
+    Ok((packet_length, stream_id, next_packet_index, shards_count, shard_index, tx_r_instant))
+}
 impl<H> StreamSender<H> {
     pub fn get_shards_count(&self) -> usize {
         self.shards_count
@@ -1269,10 +1280,14 @@ impl<H> StreamSender<H> {
     pub fn get_last_packet_id(&self) -> u32 {
         self.next_packet_index - 1
     }
+
+
     pub fn get_frame_tracker_map(&self) -> HashMap<u32, Instant> {
         self.frame_tracker.map.clone()
     }
-    /// Shard and send a buffer with zero copies and zero allocations.
+      
+    
+        /// Shard and send a buffer with zero copies and zero allocations.
     /// The prefix of each shard is written over the previously sent shard to avoid reallocations.
     pub fn send(&mut self, mut buffer: Buffer<H>) -> Result<()> {
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
@@ -1284,7 +1299,7 @@ impl<H> StreamSender<H> {
             // this overlaps with the previous shard, this is intended behavior and allows to
             // reduce allocations
 
-            println!("sending shard {}", idx); 
+            // println!("sending shard {}", idx); 
             let packet_start_position = idx * max_shard_data_size;
             let sub_buffer = &mut buffer.inner[packet_start_position..];
 
@@ -1306,24 +1321,14 @@ impl<H> StreamSender<H> {
             sub_buffer[14..18].copy_from_slice(&(idx as u32).to_be_bytes());
             sub_buffer[18..22].copy_from_slice(&tx_r_instant.to_be_bytes());
 
-
-            println!("\tsending data: \n\t\t\t{:?}", &sub_buffer[..100]); 
-
-            std::thread::sleep(Duration::from_millis(100)); 
-            println!("Let's see the output of the channel after sending: *" ); 
-           
-            const BUFFER_SIZE: usize = 2000;             
-            let mut buffer = vec![0; BUFFER_SIZE]; 
-            let mut receiver = self.network_interface.lock().unwrap(); 
-            let ok = receiver.recv(&mut buffer); 
-
-            println!("DATA!!!\nt\t\t{:?}\n\n************************************************************************************************************", &buffer[..100]); 
-            // let rx_result = std::thread::spawn(move || {
+            // println!("sending data: \n{:?}", &sub_buffer[..100]); 
 
             self.inner
                 .lock()
                 .unwrap()
                 .send(&sub_buffer[..packet_length])?;
+
+            // println!("Let's see the output of the channel after sending: *" ); 
 
             if idx == 0 {
                 //store next_packet_index - Instant value pair for RTT
@@ -1513,7 +1518,7 @@ pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;
 
     // Create buffer with random values
-    let buffer_inner = vec![random_u8; no_bytes_based_bitrate];
+    let buffer_inner = vec![7; no_bytes_based_bitrate]; // TODO: MAKE EACH RANDOM; NOW FOR DBG is 7!
 
     buffer_inner
 }
