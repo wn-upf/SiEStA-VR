@@ -2,7 +2,7 @@ use rand::Rng;
 
 // use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender,};
 
-use crossbeam::channel::{unbounded, Receiver, TryRecvError, Sender}; 
+use crossbeam::channel::{unbounded, Receiver, TryRecvError, Sender, RecvTimeoutError}; 
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
@@ -10,7 +10,7 @@ use std::{
     marker::PhantomData,
     mem,
     net::{TcpListener, UdpSocket},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -33,9 +33,8 @@ pub const AUDIO: u16 = 2;
 pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 
-const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
-
-const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
+pub const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
+pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
     + mem::size_of::<u32>() // packet index
     + mem::size_of::<u32>() // shards count
@@ -46,12 +45,6 @@ pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
 }
 
-impl SocketWriter for Sender<Vec<u8>> {
-    fn send(&mut self, buffer: &[u8]) -> Result<()> {
-        Sender::send(self, buffer.to_vec()).unwrap();
-        Ok(())
-    }
-}
 
 // Trait used to abstract different socket (or other input/output) implementations. The funtionality
 // is the intersection of the functionality of each implementation, that is it inheirits all
@@ -63,6 +56,49 @@ pub trait SocketReader: Send {
 
     fn peek(&self, buffer: &mut [u8]) -> ConResult<usize>;
 }
+
+
+impl SocketWriter for Sender<Vec<u8>> {
+    fn send(&mut self, buffer: &[u8]) -> Result<()> {
+        Sender::send(self, buffer.to_vec()).unwrap();
+        Ok(())
+    }
+}
+impl SocketReader for Receiver<Vec<u8>> {
+    fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
+        
+        println!("Socketreader!!"); 
+
+
+        match self.try_recv() {
+            Ok(data) => {
+                let data_len = data.len();
+                if data_len <= buffer.len() {
+                
+                buffer[..data_len].copy_from_slice(&data);
+                Ok(data_len)
+                                       
+                
+                } else {
+
+                    Err(ConnectionError::Other(anyhow!("Buffer too small")))
+                }
+            }
+            Err(TryRecvError::Empty) => try_again(),
+            Err(TryRecvError::Disconnected) => {
+                Err(ConnectionError::Other(anyhow!("Channel disconnected")))
+            }
+        }
+    }
+
+    fn peek(&self, _buffer: &mut [u8]) -> ConResult<usize> {
+        Err(ConnectionError::Other(anyhow!("Unsupported operation")))
+    }
+}
+
+
+
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConError {
@@ -85,39 +121,14 @@ impl std::fmt::Display for ConError {
     }
 }
 
-impl From<mpsc::TryRecvError> for ConError {
-    fn from(err: mpsc::TryRecvError) -> Self {
-        match err {
-            mpsc::TryRecvError::Empty => ConError::WouldBlock,
-            mpsc::TryRecvError::Disconnected => ConError::Disconnected,
-        }
-    }
-}
-
-
-impl SocketReader for Receiver<Vec<u8>> {
-    fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
-        match self.try_recv() {
-            Ok(data) => {
-                let data_len = data.len();
-                if data_len <= buffer.len() {
-                    buffer[..data_len].copy_from_slice(&data);
-                    Ok(data_len)
-                } else {
-                    Err(ConnectionError::Other(anyhow!("Buffer too small")))
-                }
-            }
-            Err(TryRecvError::Empty) => try_again(),
-            Err(TryRecvError::Disconnected) => {
-                Err(ConnectionError::Other(anyhow!("Channel disconnected")))
-            }
-        }
-    }
-
-    fn peek(&self, _buffer: &mut [u8]) -> ConResult<usize> {
-        Err(ConnectionError::Other(anyhow!("Unsupported operation")))
-    }
-}
+// impl From<mpsc::TryRecvError> for ConError {
+//     fn from(err: mpsc::TryRecvError) -> Self {
+//         match err {
+//             mpsc::TryRecvError::Empty => ConError::WouldBlock,
+//             mpsc::TryRecvError::Disconnected => ConError::Disconnected,
+//         }
+//     }
+// }
 
 // impl SocketReader for mpsc::Receiver<Vec<u8>> {
 //     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
@@ -143,7 +154,7 @@ impl SocketReader for Receiver<Vec<u8>> {
 //     }
 // }
 
-struct InProgressPacket {
+pub struct InProgressPacket {
     buffer: Vec<u8>,
     buffer_length: usize,
     received_shard_indices: HashSet<usize>,
@@ -153,7 +164,7 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VideoPacketHeader {
     pub timestamp: Duration,
     pub is_idr: bool,
@@ -210,12 +221,12 @@ pub struct ShardPacket {
 }
 
 /// Memory buffer that contains a hidden prefix
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Buffer<H = ()> {
     pub inner: Vec<u8>,
-    hidden_offset: usize, // this corresponds to prefix + header
-    length: usize,
-    _phantom: PhantomData<H>,
+    pub hidden_offset: usize, // this corresponds to prefix + header
+    pub length: usize,
+    pub _phantom: PhantomData<H>,
 }
 
 impl<H> Buffer<H> {
@@ -339,29 +350,29 @@ struct ReconstructedPacket {
 }
 
 struct StreamRecvComponents {
-    used_buffer_sender: mpsc::Sender<Vec<u8>>,
-    used_buffer_receiver: mpsc::Receiver<Vec<u8>>,
-    packet_queue: mpsc::Sender<ReconstructedPacket>,
+    used_buffer_sender: Sender<Vec<u8>>,
+    used_buffer_receiver: Receiver<Vec<u8>>,
+    packet_queue: Sender<ReconstructedPacket>,
     in_progress_packets: HashMap<u32, InProgressPacket>,
     discarded_shards_sink: InProgressPacket,
 }
 #[derive(Clone)]
 pub struct FrameTracker {
     // Struct to store frame index and transmission instant pairs
-    map: HashMap<u32, Instant>,
-    queue: VecDeque<u32>,
-    max_size: usize,
+    pub map: HashMap<u32, Instant>,
+    pub queue: VecDeque<u32>,
+    pub max_size: usize,
 }
 
 impl FrameTracker {
-    fn new() -> Self {
+    pub fn new() -> Self {
         FrameTracker {
             map: HashMap::new(),
             queue: VecDeque::new(),
             max_size: 256,
         }
     }
-    fn insert(&mut self, frame_id: u32, instant: Instant) {
+    pub fn insert(&mut self, frame_id: u32, instant: Instant) {
         self.map.insert(frame_id, instant);
         self.queue.push_back(frame_id);
 
@@ -431,7 +442,7 @@ pub enum DscpTos {
 pub struct ReceiverData<H> {
     buffer: Option<Vec<u8>>,
     size: usize, // counting the prefix
-    used_buffer_queue: mpsc::Sender<Vec<u8>>,
+    used_buffer_queue: Sender<Vec<u8>>,
     had_packet_loss: bool,
     _phantom: PhantomData<H>,
 
@@ -525,8 +536,9 @@ impl<H: DeserializeOwned> ReceiverData<H> {
 }
 // #[derive(Clone)]
 pub struct StreamReceiver<H> {
-    packet_receiver: mpsc::Receiver<ReconstructedPacket>,
-    used_buffer_queue: mpsc::Sender<Vec<u8>>,
+    // debug_receiver_channel: Arc<Mutex<Vec<u8>>>,
+    packet_receiver: Receiver<ReconstructedPacket>,
+    used_buffer_queue: Sender<Vec<u8>>,
     last_packet_index: Option<u32>,
     _phantom: PhantomData<H>,
 
@@ -539,7 +551,7 @@ pub struct StreamReceiver<H> {
 pub struct StreamSocket {
     max_packet_size: usize,
     send_socket: Arc<Mutex<Box<dyn SocketWriter>>>,
-    receive_socket: Box<dyn SocketReader>,
+    receive_socket: Arc<Mutex<Box<dyn SocketReader>>>,
     shard_recv_state: Option<RecvState>,
     stream_recv_components: HashMap<u16, StreamRecvComponents>,
 
@@ -568,6 +580,7 @@ impl StreamSocket {
     pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
         StreamSender::<T> {
             inner: Arc::clone(&self.send_socket),
+            network_interface: Arc::clone(&self.receive_socket), 
             stream_id,
             max_packet_size: self.max_packet_size,
             next_packet_index: 0,
@@ -585,11 +598,12 @@ impl StreamSocket {
         stream_id: u16,
         max_concurrent_buffers: usize,
     ) -> StreamReceiver<T> {
-        let (packet_sender, packet_receiver) = mpsc::channel();
-        let (used_buffer_sender, used_buffer_receiver) = mpsc::channel();
-
+        let (packet_sender, packet_receiver): (Sender<ReconstructedPacket>, Receiver<ReconstructedPacket>) = unbounded();
+        let (used_buffer_sender, used_buffer_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = unbounded();
+    
+        // Initialize the used buffers
         for _ in 0..max_concurrent_buffers {
-            used_buffer_sender.send(vec![]).ok();
+            used_buffer_sender.send(vec![]).ok(); // Ignoring the result as in the original code
         }
         
         self.stream_recv_components.insert(
@@ -607,6 +621,7 @@ impl StreamSocket {
             },
         );
         StreamReceiver {
+            // debug_receiver_channel: Arc::clone((self.receive_socket as Receiver<Vec<u8>)), 
             packet_receiver,
             used_buffer_queue: used_buffer_sender,
             _phantom: PhantomData,
@@ -617,17 +632,19 @@ impl StreamSocket {
             duplicated_shard_counter: 0,
         }
     }
+    
 
     pub fn recv(&mut self) -> ConResult {
+
+        println!("Recv function of shards!"); 
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
         } else {
             let mut bytes = [0; SHARD_PREFIX_SIZE];
-            let count = self.receive_socket.peek(&mut bytes)?;
+            let count = self.receive_socket.lock().unwrap().peek(&mut bytes)?;
             if count < SHARD_PREFIX_SIZE {
                 return try_again();
             }
-
             // todo: switch to little endian
             // todo: do not remove sizeof<u32> for packet length
             let shard_length = mem::size_of::<u32>()
@@ -782,7 +799,7 @@ impl StreamSocket {
             // This loop may bail out at any time if a timeout is reached. This is correctly handled by
             // the previous code.
             while shard_recv_state_mut.packet_cursor < shard_recv_state_mut.shard_length {
-                let size = self.receive_socket.recv(
+                let size = self.receive_socket.lock().unwrap().recv(
                     &mut sub_buffer
                         [shard_recv_state_mut.packet_cursor..shard_recv_state_mut.shard_length],
                 )?;
@@ -935,7 +952,7 @@ impl StreamSocket {
 pub enum StreamSocketBuilder {
     // Tcp(TcpListener),
     // Udp(UdpSocket),
-    Channel(mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>),
+    Channel(Sender<Vec<u8>>, Receiver<Vec<u8>>),
 }
 impl StreamSocketBuilder {
 
@@ -945,7 +962,7 @@ impl StreamSocketBuilder {
                 StreamSocket {
                     max_packet_size,
                     send_socket: Arc::new(Mutex::new(Box::new(sender))),
-                    receive_socket: Box::new(receiver),
+                    receive_socket: Arc::new(Mutex::new(Box::new(receiver))),
                     // Initialize remaining fields as needed
                     shard_recv_state: None,
                     stream_recv_components: HashMap::new(),
@@ -991,7 +1008,7 @@ impl StreamSocketBuilder {
             //     recv_buffer_bytes,
             // )?),
             SocketProtocol::Channel => {
-                let (sender, receiver) = mpsc::channel();
+                let (sender, receiver) = unbounded();
                 StreamSocketBuilder::Channel(sender, receiver)
             }
         })
@@ -1032,7 +1049,7 @@ impl StreamSocketBuilder {
             // todo: remove +4
             max_packet_size: max_packet_size + 4,
             send_socket: Arc::new(Mutex::new(send_socket)),
-            receive_socket,
+            receive_socket: Arc::new(Mutex::new(receive_socket)),
             shard_recv_state: None,
             stream_recv_components: HashMap::new(),
 
@@ -1090,7 +1107,7 @@ impl StreamSocketBuilder {
                 //     (Box::new(send_socket), Box::new(receive_socket))
                 // }
                 SocketProtocol::Channel => {
-                    let (sender, receiver) = mpsc::channel();
+                    let (sender, receiver) = unbounded();
                     (Box::new(sender), Box::new(receiver))
                 }
             };
@@ -1100,7 +1117,7 @@ impl StreamSocketBuilder {
             // todo: remove +4
             max_packet_size: max_packet_size + 4,
             send_socket: Arc::new(Mutex::new(send_socket)),
-            receive_socket,
+            receive_socket: Arc::new(Mutex::new(receive_socket)),
             shard_recv_state: None,
             stream_recv_components: HashMap::new(),
 
@@ -1136,7 +1153,7 @@ impl StreamSocketBuilder {
         recv_buffer: SocketBufferSize,
         packet_size: usize,
     ) -> Result<StreamSocket> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         
         Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
     }
@@ -1147,7 +1164,7 @@ impl StreamSocketBuilder {
 impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     pub fn recv(&mut self, timeout: Duration) -> ConResult<ReceiverData<H>> {
 
-        println!("receiving packet!!!"); 
+        println!("receiving FULL packet from shards!!!"); 
         let packet = self
             .packet_receiver
             .recv_timeout(timeout)
@@ -1231,6 +1248,8 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
 #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
+    pub network_interface: Arc<Mutex<Box<dyn SocketReader>>>, 
+    
     stream_id: u16,
     max_packet_size: usize,
 
@@ -1287,6 +1306,20 @@ impl<H> StreamSender<H> {
             sub_buffer[14..18].copy_from_slice(&(idx as u32).to_be_bytes());
             sub_buffer[18..22].copy_from_slice(&tx_r_instant.to_be_bytes());
 
+
+            println!("\tsending data: \n\t\t\t{:?}", &sub_buffer[..100]); 
+
+            std::thread::sleep(Duration::from_millis(100)); 
+            println!("Let's see the output of the channel after sending: *" ); 
+           
+            const BUFFER_SIZE: usize = 2000;             
+            let mut buffer = vec![0; BUFFER_SIZE]; 
+            let mut receiver = self.network_interface.lock().unwrap(); 
+            let ok = receiver.recv(&mut buffer); 
+
+            println!("DATA!!!\nt\t\t{:?}\n\n************************************************************************************************************", &buffer[..100]); 
+            // let rx_result = std::thread::spawn(move || {
+
             self.inner
                 .lock()
                 .unwrap()
@@ -1318,11 +1351,12 @@ impl<H: Serialize> StreamSender<H> {
         }
 
         bincode::serialize_into(&mut buffer[SHARD_PREFIX_SIZE..hidden_offset], header)?;
+        let buffer_len = buffer.len(); 
 
         Ok(Buffer {
             inner: buffer,
             hidden_offset,
-            length: 0,
+            length: buffer_len,
             _phantom: PhantomData,
         })
     }
@@ -1476,10 +1510,10 @@ pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     let random_u8: u8 = rng.gen();
 
     // Calculate the payload size based on bitrate
-    let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as u8;
+    let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;
 
     // Create buffer with random values
-    let buffer_inner = vec![random_u8, no_bytes_based_bitrate];
+    let buffer_inner = vec![random_u8; no_bytes_based_bitrate];
 
     buffer_inner
 }

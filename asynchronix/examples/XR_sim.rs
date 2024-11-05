@@ -95,7 +95,7 @@ pub struct BitrateManager {
 
     bitrate_average_mbps: SlidingWindowAverage<f32>,
 
-    last_target_bitrate_mbps: f32,
+    pub last_target_bitrate_mbps: f32,
     update_interval_s: Duration,
 
     rtt_average: SlidingWindowAverage<Duration>,
@@ -128,10 +128,10 @@ impl BitrateManager {
             network_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
 
             bitrate_average_mbps: SlidingWindowAverage::new(
-                initial_bitrate_mbps * 1E6,
+                initial_bitrate_mbps,
                 max_history_size,
             ),
-            last_target_bitrate_mbps: initial_bitrate_mbps * 1E6,
+            last_target_bitrate_mbps: initial_bitrate_mbps,
             update_interval_s: UPDATE_BITRATE_INTERVAL,
 
             rtt_average: SlidingWindowAverage::new(Duration::from_millis(5), max_history_size),
@@ -152,6 +152,9 @@ pub struct SimRuntimeSockets {
     pub statistics_receiver: Option<StreamReceiver<ClientStatistics>>,
 }
 pub struct XRServer {
+    pub ip_self: IpAddr, 
+    pub ip_client: IpAddr, 
+
     pub t_0: TaiTime<0>,
     pub bitrate_manager: BitrateManager,
 
@@ -167,7 +170,7 @@ pub struct XRServer {
     pub frames_sent_counter: usize,
 }
 impl XRServer {
-    pub fn new(ip_client: IpAddr) -> Self {
+    pub fn new(ip_self:IpAddr, ip_client: IpAddr) -> Self {
         // let arrival_rate = arrival_rate_bps / mean_length;
         // let effective_mu = rate_service_bps /mean_length;
         // println!("\n*************************************************");
@@ -183,6 +186,8 @@ impl XRServer {
         };
         let system_time = SystemTime::UNIX_EPOCH; 
         Self {
+            ip_self,
+            ip_client, 
             t_0: TaiTime::from_system_time(&system_time, 5),
             bitrate_manager: BitrateManager::new(
                 MAX_HISTORY_SIZE,
@@ -206,7 +211,7 @@ impl XRServer {
     pub fn connection_pipeline(&mut self, client_ip: IpAddr)
     // no return from this function for now
     {
-        self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, 30.0);
+        self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, 3.0);
 
         // let mut server_data_lock = SERVER_DATA_MANAGER.write(); //
 
@@ -260,35 +265,46 @@ impl XRServer {
             let mut video_receiver = stream_socket.subscribe_to_stream::<VideoPacketHeader>(VIDEO, MAX_UNREAD_PACKETS);
             
             if let mut send_socket = video_sender {
+
                 let is_idr = false;
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
                 println!("Created header");
                 
-                let current_bitrate_mbps: f32 = 100.0;
+                let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
+
                 let mut buffer_emu = send_socket.get_buffer_emu(&header, current_bitrate_mbps).unwrap();
                 
+
+
                 // Fill buffer with meaningful test data
-                buffer_emu.inner = vec![42u8; 1400]; // Use packet_size for buffer
-                println!("Buffer size: {}", buffer_emu.inner.len());
-                
+                // buffer_emu.inner = vec![42u8; 1400]; // Use packet_size for buffer
+                // println!("Buffer size: {}\nWhole buffer: {:?}", buffer_emu.inner.len(), buffer_emu.);
+                println!("DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",current_bitrate_mbps ,buffer_emu.inner.len(),buffer_emu.length); 
+
                 // First, ensure the receiver is ready
                 println!("Setting up receiver...");
                 
                 // Use a longer timeout for receiving
-                let receive_timeout = Duration::from_secs(20);
-                
-                // Send in a separate thread to avoid blocking
-                // let send_result = std::thread::spawn(move || {
-                //     println!("Sending data...");
-                //     send_socket.send(buffer_emu)
-                // });
-                
+                let receive_timeout = Duration::from_secs(5);
+
+                let mut payload = buffer_emu.inner.clone(); 
+                buffer_emu
+                    .get_range_mut(0, payload.len())
+                    .copy_from_slice(&payload);
+
+                let mut arc_receiver = send_socket.network_interface.clone(); 
+
                 // After sending data, check if it was successfully sent.
                 let send_result = std::thread::spawn(move || {
                     println!("Sending data...");
                     match send_socket.send(buffer_emu) {
                         Ok(_) => {
-                            println!("Data sent successfully.");
+                            println!("All sent successfully.");
+                            
+                            
+                            
+                            
+                            
                             Ok(())
                         },
                         Err(e) => {
@@ -297,25 +313,21 @@ impl XRServer {
                         },
                     }
                 });
+                std::thread::sleep(Duration::from_secs(3)); 
+                println!("DBG Receiving data"); 
+                const BUFFER_SIZE: usize = 2000; 
+                let mut buffer = vec![0; BUFFER_SIZE]; 
+
+
+                //     println!("DBG Receiving data"); 
+                //     const BUFFER_SIZE: usize = 100000; 
+                //     let mut buffer = vec![0; BUFFER_SIZE]; 
+
+                //     let data = video_sender.network_interface.lock().unwrap().recv(&mut buffer[..]).unwrap();              
+                //         //   let data = video_sender.network_interface.lock().unwrap().recv(&buffer); 
+                //     println!("DATA!!!: {}", data); 
+                // }); 
                                 
-                // Wait a moment to ensure send has started
-                std::thread::sleep(Duration::from_secs(5));
-                
-                println!("Waiting for data...");
-                match video_receiver.recv(receive_timeout) {
-                    Ok(data) => {
-                        println!("Successfully received data!");
-                        println!("Received buffer size: {:?}", data.get_buffer().len());
-                        println!("Received data: {:?}", data.get_buffer());
-                    }
-                    Err(e) => {
-                        println!("Failed to receive with error: {:?}", e);
-                        // Check if send completed successfully
-                        if let Ok(send_status) = send_result.join() {
-                            println!("Send completed with status: {:?}", send_status);
-                        }
-                    }
-                }
             }
         }
 
@@ -489,8 +501,10 @@ impl XRClient {
 fn main() {
     println!("HI!!");
 
-    let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)); 
-    let mut XRServer = XRServer::new( ip, );
+    let ip_src = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)); 
+    let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)); 
+
+    let mut XRServer = XRServer::new( ip_src, ip_dest );
     
-    XRServer.connection_pipeline(ip); 
+    XRServer.connection_pipeline(ip_dest); 
 }
