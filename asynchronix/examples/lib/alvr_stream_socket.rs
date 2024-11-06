@@ -1,8 +1,7 @@
+use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 #[allow(unused_imports)]
 #[allow(dead_code)]
-
 use rand::Rng;
-use crossbeam::channel::{unbounded, Receiver, TryRecvError, Sender, RecvTimeoutError}; 
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
@@ -18,8 +17,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::error::Error;
-use std::net::IpAddr;
 use std::io::{Read, Write};
+use std::net::IpAddr;
 
 use std::result::Result::Ok;
 
@@ -45,7 +44,6 @@ pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
 }
 
-
 // Trait used to abstract different socket (or other input/output) implementations. The funtionality
 // is the intersection of the functionality of each implementation, that is it inheirits all
 // limitations
@@ -57,7 +55,6 @@ pub trait SocketReader: Send {
     fn peek(&self, buffer: &mut [u8]) -> ConResult<usize>;
 }
 
-
 impl SocketWriter for Sender<Vec<u8>> {
     fn send(&mut self, buffer: &[u8]) -> Result<()> {
         Sender::send(self, buffer.to_vec()).unwrap();
@@ -66,22 +63,17 @@ impl SocketWriter for Sender<Vec<u8>> {
 }
 impl SocketReader for Receiver<Vec<u8>> {
     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
-
         match self.try_recv() {
             Ok(data) => {
                 let data_len = data.len();
                 if data_len <= buffer.len() {
-                
-                buffer[..data_len].copy_from_slice(&data);
-                Ok(data_len)
-                                       
-                
+                    buffer[..data_len].copy_from_slice(&data);
+                    Ok(data_len)
                 } else {
-
                     Err(ConnectionError::Other(anyhow!("Buffer too small")))
                 }
             }
-            Err(TryRecvError::Empty) =>  Ok(0),
+            Err(TryRecvError::Empty) => Ok(0),
             Err(TryRecvError::Disconnected) => {
                 Err(ConnectionError::Other(anyhow!("Channel disconnected")))
             }
@@ -92,10 +84,6 @@ impl SocketReader for Receiver<Vec<u8>> {
         Err(ConnectionError::Other(anyhow!("Unsupported operation")))
     }
 }
-
-
-
-
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConError {
@@ -518,7 +506,6 @@ impl<H> ReceiverData<H> {
     }
 }
 
-
 impl<H: DeserializeOwned> ReceiverData<H> {
     pub fn get(&self) -> Result<(H, &[u8])> {
         let mut data: &[u8] = &self.buffer.as_ref().unwrap()[SHARD_PREFIX_SIZE..self.size];
@@ -577,7 +564,7 @@ impl StreamSocket {
     pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
         StreamSender::<T> {
             inner: Arc::clone(&self.send_socket),
-            network_interface: Arc::clone(&self.receive_socket), 
+            network_interface: Arc::clone(&self.receive_socket),
             stream_id,
             max_packet_size: self.max_packet_size,
             next_packet_index: 0,
@@ -595,14 +582,18 @@ impl StreamSocket {
         stream_id: u16,
         max_concurrent_buffers: usize,
     ) -> StreamReceiver<T> {
-        let (packet_sender, packet_receiver): (Sender<ReconstructedPacket>, Receiver<ReconstructedPacket>) = unbounded();
-        let (used_buffer_sender, used_buffer_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = unbounded();
-    
+        let (packet_sender, packet_receiver): (
+            Sender<ReconstructedPacket>,
+            Receiver<ReconstructedPacket>,
+        ) = unbounded();
+        let (used_buffer_sender, used_buffer_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+            unbounded();
+
         // Initialize the used buffers
         for _ in 0..max_concurrent_buffers {
             used_buffer_sender.send(vec![]).ok(); // Ignoring the result as in the original code
         }
-        
+
         self.stream_recv_components.insert(
             stream_id,
             StreamRecvComponents {
@@ -618,7 +609,7 @@ impl StreamSocket {
             },
         );
         StreamReceiver {
-            // debug_receiver_channel: Arc::clone((self.receive_socket as Receiver<Vec<u8>)), 
+            // debug_receiver_channel: Arc::clone((self.receive_socket as Receiver<Vec<u8>)),
             packet_receiver,
             used_buffer_queue: used_buffer_sender,
             _phantom: PhantomData,
@@ -629,11 +620,9 @@ impl StreamSocket {
             duplicated_shard_counter: 0,
         }
     }
-    
 
     pub fn recv(&mut self) -> ConResult {
-
-        println!("Recv function of shards!"); 
+        println!("Recv function of shards!");
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
         } else {
@@ -952,7 +941,6 @@ pub enum StreamSocketBuilder {
     Channel(Sender<Vec<u8>>, Receiver<Vec<u8>>),
 }
 impl StreamSocketBuilder {
-
     pub fn build(self, max_packet_size: usize) -> StreamSocket {
         match self {
             StreamSocketBuilder::Channel(sender, receiver) => {
@@ -1151,7 +1139,7 @@ impl StreamSocketBuilder {
         packet_size: usize,
     ) -> Result<StreamSocket> {
         let (sender, receiver) = unbounded();
-        
+
         Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
     }
 }
@@ -1160,13 +1148,12 @@ impl StreamSocketBuilder {
 /// Returns true if a packet has been recontructed and copied into the buffer.
 impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     pub fn recv(&mut self, timeout: Duration) -> ConResult<ReceiverData<H>> {
-
-        println!("receiving FULL packet from shards!!!"); 
+        println!("receiving FULL packet from shards!!!");
         let packet = self
             .packet_receiver
             .recv_timeout(timeout)
             .handle_try_again()?;
-        println!("receiving packet2!!!"); 
+        println!("receiving packet2!!!");
 
         self.frame_interarrival += packet.frame_interarrival;
 
@@ -1196,7 +1183,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             }
         }
 
-        println!("AAAAAAAAAAAAA!!!!!!!!!"); 
+        println!("AAAAAAAAAAAAA!!!!!!!!!");
         let interarrival = self.frame_interarrival;
         let rx_bytes_val = self.rx_bytes;
         let rx_counter = self.rx_shard_counter;
@@ -1240,13 +1227,11 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     }
 }
 
-
-
 #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
-    pub network_interface: Arc<Mutex<Box<dyn SocketReader>>>, 
-    
+    pub network_interface: Arc<Mutex<Box<dyn SocketReader>>>,
+
     stream_id: u16,
     max_packet_size: usize,
 
@@ -1264,15 +1249,21 @@ pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &
         return Err("Received data is too short to contain a complete shard prefix");
     }
 
-    let packet_length:u32 = u32::from_be_bytes(data[0..4].try_into().unwrap()) + 4;
+    let packet_length: u32 = u32::from_be_bytes(data[0..4].try_into().unwrap()) + 4;
     let stream_id = u16::from_be_bytes(data[4..6].try_into().unwrap());
     let next_packet_index = u32::from_be_bytes(data[6..10].try_into().unwrap());
     let shards_count = u32::from_be_bytes(data[10..14].try_into().unwrap()) as u32;
     let shard_index = u32::from_be_bytes(data[14..18].try_into().unwrap()) as u32;
     let tx_r_instant = f32::from_be_bytes(data[18..22].try_into().unwrap());
-    
 
-    Ok((packet_length, stream_id, next_packet_index, shards_count, shard_index, tx_r_instant))
+    Ok((
+        packet_length,
+        stream_id,
+        next_packet_index,
+        shards_count,
+        shard_index,
+        tx_r_instant,
+    ))
 }
 impl<H> StreamSender<H> {
     pub fn get_shards_count(&self) -> usize {
@@ -1282,13 +1273,11 @@ impl<H> StreamSender<H> {
         self.next_packet_index - 1
     }
 
-
     pub fn get_frame_tracker_map(&self) -> HashMap<u32, Instant> {
         self.frame_tracker.map.clone()
     }
-      
-    
-        /// Shard and send a buffer with zero copies and zero allocations.
+
+    /// Shard and send a buffer with zero copies and zero allocations.
     /// The prefix of each shard is written over the previously sent shard to avoid reallocations.
     pub fn send(&mut self, mut buffer: Buffer<H>) -> Result<()> {
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
@@ -1300,7 +1289,7 @@ impl<H> StreamSender<H> {
             // this overlaps with the previous shard, this is intended behavior and allows to
             // reduce allocations
 
-            // println!("sending shard {}", idx); 
+            // println!("sending shard {}", idx);
             let packet_start_position = idx * max_shard_data_size;
             let sub_buffer = &mut buffer.inner[packet_start_position..];
 
@@ -1322,14 +1311,14 @@ impl<H> StreamSender<H> {
             sub_buffer[14..18].copy_from_slice(&(idx as u32).to_be_bytes());
             sub_buffer[18..22].copy_from_slice(&tx_r_instant.to_be_bytes());
 
-            // println!("sending data: \n{:?}", &sub_buffer[..100]); 
+            // println!("sending data: \n{:?}", &sub_buffer[..100]);
 
             self.inner
                 .lock()
                 .unwrap()
                 .send(&sub_buffer[..packet_length])?;
 
-            // println!("Let's see the output of the channel after sending: *" ); 
+            // println!("Let's see the output of the channel after sending: *" );
 
             if idx == 0 {
                 //store next_packet_index - Instant value pair for RTT
@@ -1357,7 +1346,7 @@ impl<H: Serialize> StreamSender<H> {
         }
 
         bincode::serialize_into(&mut buffer[SHARD_PREFIX_SIZE..hidden_offset], header)?;
-        let buffer_len = buffer.len(); 
+        let buffer_len = buffer.len();
 
         Ok(Buffer {
             inner: buffer,
@@ -1374,7 +1363,6 @@ impl<H: Serialize> StreamSender<H> {
         self.send(buffer)
     }
 }
-
 
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
@@ -1426,7 +1414,6 @@ impl<T, E: Error + Send + Sync + 'static> ToCon<T> for Result<T, E> {
         self.map_err(|e| ConnectionError::Other(e.into()))
     }
 }
-
 
 fn wrapping_cmp(lhs: u32, rhs: u32) -> Ordering {
     let diff = lhs.wrapping_sub(rhs);

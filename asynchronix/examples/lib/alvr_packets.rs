@@ -1,16 +1,8 @@
 use glam::{Quat, Vec3};
-use std::{
-    fmt::Debug,
-    net::IpAddr,
-    
-};
+use std::{fmt::Debug, net::IpAddr};
 
 use serde::{Deserialize, Serialize};
-use std::{
-
-    net::TcpListener,
-    time::{Duration},
-};
+use std::{net::TcpListener, time::Duration};
 
 /// A 2-dimensional vector.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]

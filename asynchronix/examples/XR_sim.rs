@@ -15,14 +15,12 @@ use asynchronix::time::MonotonicTime;
 use futures_util::Stream;
 use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
-
-use crate::lib::models_mm1k::{Sink, QueueModule, QueueStats, STA_source};
-
+use crate::lib::models_mm1k::{QueueModule, QueueStats, STA_source, Sink};
 
 use rand::Rng;
-use rand_distr::{Normal, Distribution};
+use rand_distr::{Distribution, Normal};
 
-use lib::{HeaderALVRStream, write_all_sta_csvs};
+use lib::{write_all_sta_csvs, HeaderALVRStream};
 // use std::intrinsics::size_of;
 use serde::{Deserialize, Serialize};
 use std::mem;
@@ -30,26 +28,25 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use std::time::{SystemTime};
+use std::time::SystemTime;
 
 use once_cell::sync::Lazy;
 
-// mod mm1k_sim; 
-// use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink}; 
+// mod mm1k_sim;
+// use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink};
 
-use crate::lib::alvr_packets::{ ClientStatistics, NetworkStatisticsPacket};
+use crate::lib::alvr_packets::{ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
-    AnyhowToCon, DscpTos, Haptics, ReceiverData, SocketBufferSize, SocketProtocol,
-    StreamSender, StreamSocketBuilder, Tracking,  VideoPacketHeader, parse_shard_data, SocketReader,  
+    parse_shard_data, AnyhowToCon, DscpTos, Haptics, ReceiverData, SocketBufferSize,
+    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
 };
 use tai_time::TaiTime;
 
 use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS,
-    TRACKING, VIDEO,
+    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
 };
 
-use rand::{random};
+use rand::random;
 use std::cmp::{self, max};
 use std::collections::VecDeque;
 use std::env;
@@ -79,8 +76,7 @@ const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(2000);
 
 const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 
-const INITIAL_BITRATE_MBPS: f32 = 5.0; 
-
+const INITIAL_BITRATE_MBPS: f32 = 5.0;
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
@@ -143,10 +139,7 @@ impl BitrateManager {
             encoder_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
             network_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
 
-            bitrate_average_mbps: SlidingWindowAverage::new(
-                initial_bitrate_mbps,
-                max_history_size,
-            ),
+            bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
             last_target_bitrate_mbps: initial_bitrate_mbps,
             update_interval_s: UPDATE_BITRATE_INTERVAL,
 
@@ -168,21 +161,19 @@ impl BitrateManager {
 //     pub statistics_receiver: Option<StreamReceiver<ClientStatistics>>,
 // }
 pub struct XRServer {
-    pub ip_self: IpAddr, 
-    pub ip_client: IpAddr, 
+    pub ip_self: IpAddr,
+    pub ip_client: IpAddr,
 
     pub t_0: TaiTime<0>,
     pub bitrate_manager: BitrateManager,
 
-    pub video_app_sender: Option<StreamSender<VideoPacketHeader>> , 
+    pub video_app_sender: Option<StreamSender<VideoPacketHeader>>,
 
-    pub outport_video: Output<MpduPacket>, // ONLY VIDEO FOR NOW! 
-
+    pub outport_video: Output<MpduPacket>, // ONLY VIDEO FOR NOW!
 
     // pub output_video: Output<MpduPacket>,
     // pub output_audio: Output<MpduPacket>,
     // pub output_haptics: Output<MpduPacket>,
-
     pub is_streaming: bool,
 
     pub fps: f64,
@@ -191,9 +182,8 @@ pub struct XRServer {
     pub frames_sent_counter: usize,
 }
 
-
 impl XRServer {
-    pub fn new(ip_self:IpAddr, ip_client: IpAddr) -> Self {
+    pub fn new(ip_self: IpAddr, ip_client: IpAddr) -> Self {
         // let arrival_rate = arrival_rate_bps / mean_length;
         // let effective_mu = rate_service_bps /mean_length;
         // println!("\n*************************************************");
@@ -207,10 +197,10 @@ impl XRServer {
         //     haptics_sender: None,
         //     statistics_receiver: None,
         // };
-        let system_time = SystemTime::UNIX_EPOCH; 
+        let system_time = SystemTime::UNIX_EPOCH;
         Self {
             ip_self,
-            ip_client, 
+            ip_client,
             t_0: TaiTime::from_system_time(&system_time, 5),
             bitrate_manager: BitrateManager::new(
                 MAX_HISTORY_SIZE,
@@ -218,7 +208,7 @@ impl XRServer {
                 INITIAL_BITRATE_MBPS,
             ),
 
-            video_app_sender: None, 
+            video_app_sender: None,
 
             outport_video: Output::default(),
             // output_audio: Output::default(),
@@ -234,35 +224,38 @@ impl XRServer {
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
-        mut buffer: Vec<u8>, 
-        // mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>>, 
-        receiver: Arc<Mutex<Box<dyn SocketReader>>>, 
-
-        ) -> impl Future<Output = ()> + Send + 'a {
+        mut buffer: Vec<u8>,
+        // mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>>,
+        receiver: Arc<Mutex<Box<dyn SocketReader>>>,
+    ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            
             let mut stop = false;
             while !stop {
-
                 let bytes_received = {
                     let mut guard = receiver.lock().unwrap();
                     guard.recv(&mut buffer)
-                    };
-                
-                match bytes_received {
+                };
 
+                match bytes_received {
                     Ok(bytes_received) => {
                         if bytes_received == 0 {
                             // If no data is received, stop the loop
                             println!("No new data received, stopping.");
                             stop = true;
-                            break; 
+                            break;
                         } else {
-    
-                            // TODO: CHECK WITH WIRESHARK ENCAPSULATION OF PACKET 
+                            // TODO: CHECK WITH WIRESHARK ENCAPSULATION OF PACKET
                             println!("Parsed from connection output:");
-                            if let Ok((packet_length, stream_id, next_packet_index, shards_count, shard_index, tx_r_instant)) = parse_shard_data(&buffer[..100]) {
-                                // println!("Data: {:?}", buffer); 
+                            if let Ok((
+                                packet_length,
+                                stream_id,
+                                next_packet_index,
+                                shards_count,
+                                shard_index,
+                                tx_r_instant,
+                            )) = parse_shard_data(&buffer[..100])
+                            {
+                                // println!("Data: {:?}", buffer);
                                 println!("Parsed shard data:");
                                 println!("Packet length: {}", packet_length);
                                 println!("Stream ID: {}", stream_id);
@@ -271,34 +264,32 @@ impl XRServer {
                                 println!("Shard index: {}", shard_index);
                                 println!("Transmit-receive instant: {} )", tx_r_instant);
                                 println!("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__");
-                                
-                                let mut packet = MpduPacket::new(); 
-                            
+
+                                let mut packet = MpduPacket::new();
+
                                 packet.header_alvr = HeaderALVRStream {
-                                    packet_length, 
-                                    stream_id, 
-                                    next_packet_index, 
-                                    shards_count, 
-                                    shard_index, 
-                                    tx_instant: tx_r_instant, 
-                                }; 
-                                packet.data_inner = buffer[..packet_length as usize].to_vec();  
-        
+                                    packet_length,
+                                    stream_id,
+                                    next_packet_index,
+                                    shards_count,
+                                    shard_index,
+                                    tx_instant: tx_r_instant,
+                                };
+                                packet.data_inner = buffer[..packet_length as usize].to_vec();
+
                                 self.outport_video.send(packet.clone()).await;
-        
                             } else {
                                 println!("Failed to parse shard data, stopping.");
                                 stop = true;
-                                break; 
+                                break;
                             }
-                        }   
-
-                    },
-                    Err(_) => {println!("Error receiving data, stopping"); 
-                                stop = true;} 
+                        }
+                    }
+                    Err(_) => {
+                        println!("Error receiving data, stopping");
+                        stop = true;
+                    }
                 }
-
-               
             }
         }
     }
@@ -306,46 +297,51 @@ impl XRServer {
     // pub fn generate_video_frame(&mut self, context: &Context<Self> ){
 
     pub fn generate_video_frame<'a>(
-            &'a mut self,
-            _: (),
-            context: &'a Context<Self>,
-        ) -> impl Future<Output = ()> + Send + 'a {
-
-        async move{
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
             // STEP 1: DEBUG VIDEO
             if let Some(mut send_socket) = self.video_app_sender.clone() {
-
                 let is_idr = false;
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
                 println!("Created header");
-                
+
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
 
-                let mut buffer_emu = send_socket.get_buffer_emu(&header, current_bitrate_mbps).unwrap();
-                
-                println!("DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",current_bitrate_mbps ,buffer_emu.inner.len(),buffer_emu.length); 
+                let mut buffer_emu = send_socket
+                    .get_buffer_emu(&header, current_bitrate_mbps)
+                    .unwrap();
 
-                let mut payload = buffer_emu.inner.clone(); 
+                println!(
+                    "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
+                    current_bitrate_mbps,
+                    buffer_emu.inner.len(),
+                    buffer_emu.length
+                );
+
+                let mut payload = buffer_emu.inner.clone();
                 buffer_emu
                     .get_range_mut(0, payload.len())
                     .copy_from_slice(&payload);
 
-                let mut arc_receiver = send_socket.network_interface.clone(); 
+                let mut arc_receiver = send_socket.network_interface.clone();
 
-                let send_result = send_socket.send(buffer_emu); 
+                let send_result = send_socket.send(buffer_emu);
 
-                const BUFFER_SIZE: usize = 2000;  
+                const BUFFER_SIZE: usize = 2000;
 
-                let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE]; 
+                let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
 
-                // let mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>> = arc_receiver.lock().unwrap(); 
+                // let mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>> = arc_receiver.lock().unwrap();
 
-                XRServer::read_send_network_interface(self, (), context,  buffer, arc_receiver).await;  // FUNCTION TO HANDLE NETWORK PACKETS!
+                XRServer::read_send_network_interface(self, (), context, buffer, arc_receiver)
+                    .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
+                let normal = Normal::new(0.0, 5.0).unwrap(); // Mean = 0, Std dev = 5
+                let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
 
-                let normal = Normal::new(0.0, 5.0).unwrap();  // Mean = 0, Std dev = 5
-                let epsilon = normal.sample(&mut rand::thread_rng());  // Random Gaussian value
-                
                 let time_until_next_frame = Duration::from_secs_f64(1.0 / (self.fps + epsilon));
 
                 context
@@ -356,11 +352,11 @@ impl XRServer {
         }
     }
 
-    pub async fn connection_pipeline(&mut self, client_ip: IpAddr, context: &Context<Self>){
-    // no return from this function for now
+    pub async fn connection_pipeline(&mut self, client_ip: IpAddr, context: &Context<Self>) {
+        // no return from this function for now
         self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, INITIAL_BITRATE_MBPS);
 
-        // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each. 
+        // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
         let stream_port: u16 = 9944;
         let stream_protocol: SocketProtocol = SocketProtocol::Channel;
         let dscp: Option<DscpTos> = None;
@@ -402,16 +398,16 @@ impl XRServer {
         ) {
             println!("Connection established!");
             self.is_streaming = true;
-            
+
             // Create sender and receiver from the same stream socket
-            self.video_app_sender = Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO)); 
+            self.video_app_sender = Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO));
 
             // let mut video_sender: StreamSender<VideoPacketHeader> = stream_socket.request_stream::<VideoPacketHeader>(VIDEO);
             // let mut video_receiver = stream_socket.subscribe_to_stream::<VideoPacketHeader>(VIDEO, MAX_UNREAD_PACKETS);
-            
-            XRServer::generate_video_frame(self, (), context).await; 
-            // STEP 2: DO SAME FOR REST OF PACKETS (VIDEO; HAPTICS) and loop using context.scheduler! 
-            // TODO! 
+
+            XRServer::generate_video_frame(self, (), context).await;
+            // STEP 2: DO SAME FOR REST OF PACKETS (VIDEO; HAPTICS) and loop using context.scheduler!
+            // TODO!
         }
     }
 }
@@ -510,7 +506,6 @@ impl Model for XRServer {}
 //     fn receive_control_packet() {}
 // }
 
-
 #[allow(non_camel_case_types)]
 pub struct STA_extended {
     // extended class to PoissonGen
@@ -528,7 +523,7 @@ pub struct STA_extended {
     pub does_sta_tx: bool,
 }
 
-impl STA_extended{
+impl STA_extended {
     pub fn new(
         arrival_rate_bps: f64,
         mean_length: f64,
@@ -581,11 +576,8 @@ impl STA_extended{
         println!("                  After: {:?}", self.sta_coordinates);
     }
 
-
-
-    pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>){
-
-        // do everything else to the packet: 
+    pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
+        // do everything else to the packet:
 
         packet.length_packet = packet.header_alvr.packet_length as usize;
         packet.packet_id = self.num_packets_sent;
@@ -597,7 +589,6 @@ impl STA_extended{
 
         self.output_port.send(packet.clone()).await;
         self.num_packets_sent += 1;
-
     }
 
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
@@ -660,7 +651,6 @@ impl STA_extended{
 impl Model for STA_extended {}
 
 fn main() {
-    
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
 
     // READ COMMAND-LINE ARGUMENTS
@@ -679,7 +669,7 @@ fn main() {
     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().expect("Invalid STA distance");
 
-    const num_STAs: usize = 2; 
+    const num_STAs: usize = 2;
 
     let v_distance = vec![1.0, distance, distance]; // just some random values
 
@@ -698,7 +688,7 @@ fn main() {
 
     let vec_coords = vec![coords_staxr, coords_sink];
     println!("vec_coords: {:?}\n", vec_coords);
-    
+
     // TODO: Make this dynamic based on Vec<Coords> and Vec<ResultsFrameTXDelay> with a function
 
     let results1 = frametransmission_delay(
@@ -713,7 +703,7 @@ fn main() {
         mean_length * MAX_AMPDU_SIZE as f64,
         MAX_AMPDU_SIZE,
         Coords::new(),
-        coords_sink,        // TO TEST
+        coords_sink, // TO TEST
         P_TX,
     );
 
@@ -729,15 +719,10 @@ fn main() {
         aggregated_rate_in, mean_length, effective_rate, k_queue
     );
 
-    let ip_src = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)); 
-    let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)); 
+    let ip_src = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 
-    let mut xr_server = XRServer::new( ip_src, ip_dest );
-    
-
-
-    
-
+    let mut xr_server = XRServer::new(ip_src, ip_dest);
 
     let mut sta1_xr: STA_extended = STA_extended::new(
         INITIAL_BITRATE_MBPS as f64 * 1E6,
@@ -773,13 +758,12 @@ fn main() {
     let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
     let sinkstats_data_handle = sink.get_data_handle();
 
-    
-    let mbox_xr_server = Mailbox::new(); 
+    let mbox_xr_server = Mailbox::new();
     let mbox_sta_xr = Mailbox::new();
     let mbox_queue = Mailbox::new();
-    let mbox_sink = Mailbox::new(); 
+    let mbox_sink = Mailbox::new();
 
-    let xr_server_address = mbox_xr_server.address(); 
+    let xr_server_address = mbox_xr_server.address();
     let sta1_address = mbox_sta_xr.address();
 
     let queue_address = mbox_queue.address();
@@ -787,17 +771,19 @@ fn main() {
 
     // CONNECT COMPONENTS
 
-    xr_server.outport_video.connect(STA_extended::input_XR_app, &mbox_sta_xr); 
-    sta1_xr.output_port.connect(QueueModule::input, &mbox_queue); 
+    xr_server
+        .outport_video
+        .connect(STA_extended::input_XR_app, &mbox_sta_xr);
+    sta1_xr.output_port.connect(QueueModule::input, &mbox_queue);
     queue.output_port.connect(Sink::input, &mbox_sink);
 
     let t0 = MonotonicTime::EPOCH;
 
     let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
         .add_model(xr_server, mbox_xr_server, "XR Server")
-        .add_model(sta1_xr, mbox_sta_xr,      "STA1 (XR_s)")
-        .add_model(queue, mbox_queue,         "Queue")
-        .add_model(sink, mbox_sink,           "SINK")
+        .add_model(sta1_xr, mbox_sta_xr, "STA1 (XR_s)")
+        .add_model(queue, mbox_queue, "Queue")
+        .add_model(sink, mbox_sink, "SINK")
         .init(t0);
 
     let scheduler = simu.scheduler();
@@ -816,7 +802,6 @@ fn main() {
 
     let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
 
-
     scheduler
         .schedule_event(
             duration_scheduled1,
@@ -825,7 +810,6 @@ fn main() {
             &xr_server_address,
         )
         .unwrap();
-
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
@@ -864,6 +848,4 @@ fn main() {
         "Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}",
         aggregated_rate_in, mean_length, effective_rate, k_queue
     );
-
-
 }

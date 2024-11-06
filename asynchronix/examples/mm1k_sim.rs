@@ -22,13 +22,12 @@ use std::sync::{Arc, Mutex};
 // mod lib; // for calling m own local library
 mod lib;
 use crate::lib::{
-    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
-    write_all_sta_csvs, AmpduPacket, Coords, CsvType, CumulativeStats, perStaStats,DebugColor, MpduPacket,
-    DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX, CsvData
+    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats, perStaStats,
+    write_all_sta_csvs, AmpduPacket, Coords, CsvData, CsvType, CumulativeStats, DebugColor,
+    MpduPacket, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
 };
 
-
-use crate::lib::models_mm1k::{Sink, QueueModule, QueueStats}; 
+use crate::lib::models_mm1k::{QueueModule, QueueStats, Sink};
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
@@ -44,12 +43,12 @@ use asynchronix::ports::Output;
 
 use crate::lib::DEBUG_PRINT_ENABLED;
 
-
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////// SIMULATION ////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-fn simple_MM1K(   // 1st scenario: Single STA -> Queue -> Sink 
+fn simple_MM1K(
+    // 1st scenario: Single STA -> Queue -> Sink
     stoptime: f64,
     mean_length: f64,
     k_queue: usize,
@@ -57,7 +56,6 @@ fn simple_MM1K(   // 1st scenario: Single STA -> Queue -> Sink
     rate_queue_bps: f64,
     distance: f64,
 ) {
-
     let num_STAs = 1;
     let coords_sta = Coords {
         x: distance,
@@ -76,16 +74,23 @@ fn simple_MM1K(   // 1st scenario: Single STA -> Queue -> Sink
 
     let LT = compute_mm1k_metrics(rate_bps_in, mean_length, effective_rate, k_queue);
 
+    let rate_service_bps: f64 = 20E3;
 
-    let rate_service_bps: f64 = 20E3; 
-
-    let mut source: STA_source = STA_source::new(rate_bps_in, mean_length, 0, 2, coords_sta, true, rate_service_bps); // STAs 0
-    let mut queue: QueueModule = QueueModule::new(num_STAs ,k_queue - 1 as usize, rate_queue_bps);
+    let mut source: STA_source = STA_source::new(
+        rate_bps_in,
+        mean_length,
+        0,
+        2,
+        coords_sta,
+        true,
+        rate_service_bps,
+    ); // STAs 0
+    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps);
     let sink = Sink::new();
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
     let csv_data_handle: Arc<Mutex<CsvData>> = queue.csv_metrics.get_data_handle();
-    let queuestats_data_handle= queue.get_queue_stats_handle();
+    let queuestats_data_handle = queue.get_queue_stats_handle();
     let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
 
     let mbox_src = Mailbox::new();
@@ -143,7 +148,6 @@ fn simple_MM1K(   // 1st scenario: Single STA -> Queue -> Sink
     }
 
     if let Ok(data) = stats_sta_data_handle.lock() {
-
         if let Err(e) = write_all_sta_csvs(&data) {
             eprintln!("Error writing STA CSV files: {}", e);
         }
@@ -153,14 +157,25 @@ fn simple_MM1K(   // 1st scenario: Single STA -> Queue -> Sink
     LT.print_results();
 
     if let Ok(queue_stats) = queuestats_data_handle.lock() {
-        println!("Waiting time mean: {}", queue_stats.waiting_time_cum.get_average());
-        println!("Waiting time std dev: {}", queue_stats.waiting_time_cum.get_std_dev());
-        println!("Service time mean: {}", queue_stats.service_time_cum.get_average());
-        println!("Service time std dev: {}", queue_stats.service_time_cum.get_std_dev());
+        println!(
+            "Waiting time mean: {}",
+            queue_stats.waiting_time_cum.get_average()
+        );
+        println!(
+            "Waiting time std dev: {}",
+            queue_stats.waiting_time_cum.get_std_dev()
+        );
+        println!(
+            "Service time mean: {}",
+            queue_stats.service_time_cum.get_average()
+        );
+        println!(
+            "Service time std dev: {}",
+            queue_stats.service_time_cum.get_std_dev()
+        );
     } else {
         eprintln!("Failed to lock queue stats");
     };
-
 }
 
 // SCENARIO 2: TWO STAS AS BG TRAFFIC, 1 STA AS SINK

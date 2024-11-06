@@ -10,13 +10,14 @@ use asynchronix::ports::Output;
 
 use std::time::{Duration, Instant};
 
-use std::sync::{Arc, Mutex};
 use crate::DebugColor;
+use std::sync::{Arc, Mutex};
 
-use crate::lib::{DEBUG_PRINT_ENABLED,CsvType, MAX_AMPDU_SIZE, DEFAULT_TMAX_AGG, P_TX, frametransmission_delay, perStaLockStats,  MpduPacket, exponential, Coords, AmpduPacket, CumulativeStats,
-     
-        };
-use crate::{debug_print, format_elapsed, taitime_to_f64}; 
+use crate::lib::{
+    exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords, CsvType,
+    CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
+};
+use crate::{debug_print, format_elapsed, taitime_to_f64};
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -430,62 +431,61 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
+
             if let Some(first_packet) = self.queue.front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
-
-                // Initialize AMPDU with first packet's info (but don't remove it yet)
+    
+                // Initialize AMPDU with first packet's info
                 self.aux_ampdu_serviced.reset();
                 self.aux_ampdu_serviced.sta_id = first_packet.sta_dest_id;
                 self.aux_ampdu_serviced.coordinates = first_packet.sta_dest_coords.clone();
-
+    
                 let mut last_service_duration = Duration::default();
-
-                for packet_index_loop in 0..self.queue.len() {
-                    if let Some(current_packet) = self.queue.get(packet_index_loop as usize) {
+                let mut packet_index = 0;
+    
+                // Continue processing while we have more packets to check
+                while packet_index < self.queue.len() {
+                    if let Some(current_packet) = self.queue.get(packet_index) {
+                        // Skip packets not matching AMPDU's destination
                         if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_id {
+                            packet_index += 1;
                             continue;
                         }
-                        self.aux_ampdu_serviced.total_length += current_packet.length_packet;
-                        self.aux_ampdu_serviced.size += 1;
-
+    
+                        // Calculate potential new service delay
+                        let new_total_length = self.aux_ampdu_serviced.total_length + current_packet.length_packet;
+                        let new_size = self.aux_ampdu_serviced.size + 1;
+                        
                         let resultz = frametransmission_delay(
-                            self.aux_ampdu_serviced.total_length as f64,
-                            self.aux_ampdu_serviced.size,
+                            new_total_length as f64,
+                            new_size,
                             self.coords_queue,
                             current_packet.sta_dest_coords,
                             P_TX,
                         );
-
-                        if resultz.service_delay >= DEFAULT_TMAX_AGG
-                            || self.aux_ampdu_serviced.size >= MAX_AMPDU_SIZE
-                        {
-                            debug_print!(DebugColor::Blue,"[DBG DEQUE] \t\t finished early! | T_s: {:.3} of {:.3}, AMPDU_SIZE : {} of {}", 
-                                        resultz.service_delay, DEFAULT_TMAX_AGG, self.aux_ampdu_serviced.size, MAX_AMPDU_SIZE);
+    
+                        // Check if adding this packet would exceed limits
+                        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size >= MAX_AMPDU_SIZE {
                             break;
                         }
-
-                        if let Some(mut packet_rmvd) = self.queue.remove(packet_index_loop) {
-                            // packet_index_loop -= 1;
+    
+                        // Remove packet and update AMPDU
+                        if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
                             packet_rmvd.queue_length_when_out = self.queue.len();
                             packet_rmvd.queue_out_instant = now;
-
-                            self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd.clone());
-
-                            debug_print!(
-                                DebugColor::Blue,
-                                "{} [DBG DEQUE] --Packet {} (STA{}) dequed and put in AMPDU, Iter index: {}, Q_size = {}",
-                                format_elapsed!(now),
-                                packet_rmvd.packet_id,
-                                packet_rmvd.sta_dest_id,
-                                packet_index_loop, 
-                                self.queue.len(),
-                            );
-
+    
+                            self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
+                            self.aux_ampdu_serviced.total_length = new_total_length;
+                            self.aux_ampdu_serviced.size = new_size;
+                            
                             last_service_duration = Duration::from_secs_f64(resultz.service_delay);
-                            //use the last service delay
+    
+                            // Don't increment packet_index since we removed a packet
+                            // and the next packet shifted into the current position
                         }
                     }
                 }
+            
 
                 // while index < self.queue.len() {
                 //     // Get packet info before any modifications
@@ -727,7 +727,7 @@ impl Sink {
                 packet.sta_src_id,
                 packet.sta_dest_id,
                 packet.T_s.as_secs_f64(),
-                packet.expected_T_s.as_secs_f64(), 
+                packet.expected_T_s.as_secs_f64(),
 
             );
             // println!("{} - Packet received!!", format_duration(elapsed));
