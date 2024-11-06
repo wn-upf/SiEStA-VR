@@ -1,7 +1,6 @@
 use rand::Rng;
 use std::cmp::{self, max};
 use std::collections::VecDeque;
-use std::env;
 use std::f64::consts::PI;
 use std::future::Future;
 
@@ -10,6 +9,7 @@ use asynchronix::ports::Output;
 
 use std::time::{Duration, Instant};
 
+use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::DebugColor;
 use std::sync::{Arc, Mutex};
 
@@ -431,18 +431,17 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
             if let Some(first_packet) = self.queue.front() {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
-    
+
                 // Initialize AMPDU with first packet's info
                 self.aux_ampdu_serviced.reset();
                 self.aux_ampdu_serviced.sta_id = first_packet.sta_dest_id;
                 self.aux_ampdu_serviced.coordinates = first_packet.sta_dest_coords.clone();
-    
+
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
-    
+
                 // Continue processing while we have more packets to check
                 while packet_index < self.queue.len() {
                     if let Some(current_packet) = self.queue.get(packet_index) {
@@ -451,11 +450,12 @@ impl QueueModule {
                             packet_index += 1;
                             continue;
                         }
-    
+
                         // Calculate potential new service delay
-                        let new_total_length = self.aux_ampdu_serviced.total_length + current_packet.length_packet;
+                        let new_total_length =
+                            self.aux_ampdu_serviced.total_length + current_packet.length_packet;
                         let new_size = self.aux_ampdu_serviced.size + 1;
-                        
+
                         let resultz = frametransmission_delay(
                             new_total_length as f64,
                             new_size,
@@ -463,29 +463,28 @@ impl QueueModule {
                             current_packet.sta_dest_coords,
                             P_TX,
                         );
-    
+
                         // Check if adding this packet would exceed limits
                         if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size >= MAX_AMPDU_SIZE {
                             break;
                         }
-    
+
                         // Remove packet and update AMPDU
                         if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
                             packet_rmvd.queue_length_when_out = self.queue.len();
                             packet_rmvd.queue_out_instant = now;
-    
+
                             self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
                             self.aux_ampdu_serviced.total_length = new_total_length;
                             self.aux_ampdu_serviced.size = new_size;
-                            
+
                             last_service_duration = Duration::from_secs_f64(resultz.service_delay);
-    
+
                             // Don't increment packet_index since we removed a packet
                             // and the next packet shifted into the current position
                         }
                     }
                 }
-            
 
                 // while index < self.queue.len() {
                 //     // Get packet info before any modifications
@@ -730,6 +729,38 @@ impl Sink {
                 packet.expected_T_s.as_secs_f64(),
 
             );
+            if packet.data_inner.len() >= 100 {
+                if let Ok((
+                    packet_length,
+                    stream_id,
+                    next_packet_index,
+                    shards_count,
+                    shard_index,
+                    tx_r_instant,
+                )) = parse_shard_data(&packet.data_inner[..100])
+                {
+                    let str_id = match stream_id {
+                        0 => "Tracking",
+                        1 => "Haptics",
+                        2 => "Audio",
+                        3 => "Video",
+                        4 => "Statistics",
+                        _ => "?? IDK",
+                    };
+
+                    debug_print!(
+                        DebugColor::DarkRed,
+                        "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
+                        packet_length,
+                        str_id,
+                        next_packet_index,
+                        shards_count,
+                        shard_index,
+                        tx_r_instant
+                    );
+                }
+            }
+
             // println!("{} - Packet received!!", format_duration(elapsed));
             // packet.print();
 

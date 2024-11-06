@@ -36,6 +36,7 @@ pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 pub mod alvr_packets;
 pub mod alvr_statistics;
 pub mod alvr_stream_socket;
+pub mod models_XR;
 pub mod models_mm1k;
 
 pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
@@ -70,7 +71,7 @@ macro_rules! taitime_to_f64 {
     }};
 }
 
-use crate::lib::alvr_stream_socket::ConResult;
+// use crate::lib::alvr_stream_socket::ConResult;
 
 pub enum DebugColor {
     Red,
@@ -78,6 +79,13 @@ pub enum DebugColor {
     Blue,
     Yellow,
     Magenta,
+    DarkGreen,
+    DarkRed,
+    Cyan,
+    White,
+    Black,
+    Orange,
+    Purple,
 }
 
 impl DebugColor {
@@ -88,6 +96,13 @@ impl DebugColor {
             DebugColor::Blue => |s| s.blue(),
             DebugColor::Yellow => |s| s.yellow(),
             DebugColor::Magenta => |s| s.magenta(),
+            DebugColor::DarkGreen => |s| s.truecolor(0, 100, 0),
+            DebugColor::DarkRed => |s| s.truecolor(139, 0, 0),
+            DebugColor::Cyan => |s| s.cyan(),
+            DebugColor::White => |s| s.white(),
+            DebugColor::Black => |s| s.black(),
+            DebugColor::Orange => |s| s.truecolor(255, 165, 0),
+            DebugColor::Purple => |s| s.truecolor(128, 0, 128),
         }
     }
 }

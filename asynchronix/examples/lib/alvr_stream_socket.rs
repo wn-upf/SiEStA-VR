@@ -8,24 +8,31 @@ use std::{
     io,
     marker::PhantomData,
     mem,
-    net::{TcpListener, UdpSocket},
+    // net::{TcpListener, UdpSocket},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use asynchronix::model::{Context, Model};
+
+use crate::lib::models_XR::{
+    XRServer, // ,XRClient
+};
+use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::error::Error;
-use std::io::{Read, Write};
+// use std::io::{Read, Write};
 use std::net::IpAddr;
 
 use std::result::Result::Ok;
+use tai_time::TaiTime;
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
+pub const MAX_PACKET_SIZE_RECV: usize = 2000;
 pub const TRACKING: u16 = 0;
 pub const HAPTICS: u16 = 1;
 pub const AUDIO: u16 = 2;
@@ -518,7 +525,7 @@ impl<H: DeserializeOwned> ReceiverData<H> {
         Ok(self.get()?.0)
     }
 }
-// #[derive(Clone)]
+#[derive(Clone)]
 pub struct StreamReceiver<H> {
     // debug_receiver_channel: Arc<Mutex<Vec<u8>>>,
     packet_receiver: Receiver<ReconstructedPacket>,
@@ -530,6 +537,9 @@ pub struct StreamReceiver<H> {
     rx_bytes: u32,
     rx_shard_counter: u32,
     duplicated_shard_counter: u32,
+
+    pub network_app_interface: Arc<Mutex<Box<dyn SocketWriter>>>,
+    pub inner: Arc<Mutex<Box<dyn SocketReader>>>,
 }
 
 pub struct StreamSocket {
@@ -561,10 +571,10 @@ pub struct StreamSocket {
 }
 
 impl StreamSocket {
-    pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
+    pub fn request_stream<T>(&self, stream_id: u16, t0: TaiTime<0>) -> StreamSender<T> {
         StreamSender::<T> {
             inner: Arc::clone(&self.send_socket),
-            network_interface: Arc::clone(&self.receive_socket),
+            app_network_interface: Arc::clone(&self.receive_socket),
             stream_id,
             max_packet_size: self.max_packet_size,
             next_packet_index: 0,
@@ -572,7 +582,7 @@ impl StreamSocket {
 
             _phantom: PhantomData,
             shards_count: 0,
-            ref_time: Instant::now(),
+            ref_time: t0,
             frame_tracker: FrameTracker::new(),
         }
     }
@@ -618,16 +628,23 @@ impl StreamSocket {
             rx_bytes: 0,
             rx_shard_counter: 0,
             duplicated_shard_counter: 0,
+
+            network_app_interface: Arc::clone(&self.send_socket),
+            inner: Arc::clone(&self.receive_socket),
         }
     }
 
-    pub fn recv(&mut self) -> ConResult {
+    // pub fn recv(&mut self, context: &Context<XRServer>) -> ConResult {
+    pub fn recv<T: Model>(&mut self, context: &Context<T>) -> ConResult {
         println!("Recv function of shards!");
+
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
         } else {
-            let mut bytes = [0; SHARD_PREFIX_SIZE];
-            let count = self.receive_socket.lock().unwrap().peek(&mut bytes)?;
+            let mut bytes = [0; MAX_PACKET_SIZE_RECV];
+
+            let count = self.receive_socket.lock().unwrap().recv(&mut bytes)?;
+
             if count < SHARD_PREFIX_SIZE {
                 return try_again();
             }
@@ -915,7 +932,6 @@ impl StreamSocket {
                     self.map_rx.remove(&idx);
                 }
             }
-
             // Keep only shards with later packet index (using wrapping logic)
             while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {
                 wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
@@ -1142,6 +1158,23 @@ impl StreamSocketBuilder {
 
         Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
     }
+
+    pub fn accept_from_server_mod(
+        server_ip: IpAddr,
+        port: u16,
+        packet_size: usize,
+    ) -> Result<StreamSocket> {
+        // let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) = match self {
+        //     StreamSocketBuilder::Channel(sender, receiver) => {
+        //         let protocol = SocketProtocol::Channel;
+        //         (Box::new(sender), Box::new(receiver))
+        //     }
+        // };
+
+        let (sender, receiver) = unbounded();
+
+        Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
+    }
 }
 
 /// Get next packet reconstructing from shards.
@@ -1230,17 +1263,17 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
 #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
-    pub network_interface: Arc<Mutex<Box<dyn SocketReader>>>,
+    pub app_network_interface: Arc<Mutex<Box<dyn SocketReader>>>,
 
     stream_id: u16,
     max_packet_size: usize,
 
-    next_packet_index: u32,
+    pub next_packet_index: u32,
     used_buffers: Vec<Vec<u8>>,
     _phantom: PhantomData<H>,
 
     shards_count: usize,
-    ref_time: Instant,
+    ref_time: TaiTime<0>,
     frame_tracker: FrameTracker,
 }
 
@@ -1279,7 +1312,7 @@ impl<H> StreamSender<H> {
 
     /// Shard and send a buffer with zero copies and zero allocations.
     /// The prefix of each shard is written over the previously sent shard to avoid reallocations.
-    pub fn send(&mut self, mut buffer: Buffer<H>) -> Result<()> {
+    pub fn send(&mut self, mut buffer: Buffer<H>, context: &Context<XRServer>) -> Result<()> {
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
         let actual_buffer_size = buffer.hidden_offset + buffer.length;
         let data_size = actual_buffer_size - SHARD_PREFIX_SIZE;
@@ -1299,7 +1332,13 @@ impl<H> StreamSender<H> {
                 actual_buffer_size - packet_start_position,
             );
 
-            let tx_r_instant: f32 = Instant::now().duration_since(self.ref_time).as_secs_f32();
+            // let tx_r_instant: f32 = Instant::now().duration_since(self.ref_time).as_secs_f32();
+
+            let tx_r_instant = context
+                .scheduler
+                .time()
+                .duration_since(self.ref_time)
+                .as_secs_f32();
 
             // todo: switch to little endian
             // todo: do not remove sizeof<u32> for packet length
@@ -1327,7 +1366,6 @@ impl<H> StreamSender<H> {
             }
         }
         self.shards_count = shards_count;
-        self.next_packet_index += 1;
         self.used_buffers.push(buffer.inner);
 
         Ok(())
@@ -1335,7 +1373,7 @@ impl<H> StreamSender<H> {
 }
 
 impl<H: Serialize> StreamSender<H> {
-    pub fn get_buffer_emu(&self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
+    pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
         let mut buffer = generate_random_video_payload(current_bitrate_mbps);
 
         let header_size = bincode::serialized_size(header)? as usize;
@@ -1348,6 +1386,7 @@ impl<H: Serialize> StreamSender<H> {
         bincode::serialize_into(&mut buffer[SHARD_PREFIX_SIZE..hidden_offset], header)?;
         let buffer_len = buffer.len();
 
+        self.next_packet_index += 1;
         Ok(Buffer {
             inner: buffer,
             hidden_offset,
@@ -1356,11 +1395,11 @@ impl<H: Serialize> StreamSender<H> {
         })
     }
 
-    pub fn send_header(&mut self, header: &H) -> Result<()> {
+    pub fn send_header(&mut self, header: &H, context: &Context<XRServer>) -> Result<()> {
         let buffer = self.get_buffer_emu(header, 20.0 as f32)?;
 
         println!("WATCHOUT, using 20 as default!!");
-        self.send(buffer)
+        self.send(buffer, context)
     }
 }
 
