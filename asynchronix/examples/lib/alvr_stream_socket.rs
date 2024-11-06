@@ -1,7 +1,7 @@
+#[allow(unused_imports)]
+#[allow(dead_code)]
+
 use rand::Rng;
-
-// use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender,};
-
 use crossbeam::channel::{unbounded, Receiver, TryRecvError, Sender, RecvTimeoutError}; 
 use std::{
     cmp::Ordering,
@@ -1259,17 +1259,18 @@ pub struct StreamSender<H> {
     frame_tracker: FrameTracker,
 }
 
-pub fn parse_shard_data(data: &[u8]) -> Result<(usize, u16, u32, u32, u32, f32), &'static str> {
+pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &'static str> {
     if data.len() < 22 {
         return Err("Received data is too short to contain a complete shard prefix");
     }
 
-    let packet_length = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize + 4;
+    let packet_length:u32 = u32::from_be_bytes(data[0..4].try_into().unwrap()) + 4;
     let stream_id = u16::from_be_bytes(data[4..6].try_into().unwrap());
     let next_packet_index = u32::from_be_bytes(data[6..10].try_into().unwrap());
     let shards_count = u32::from_be_bytes(data[10..14].try_into().unwrap()) as u32;
     let shard_index = u32::from_be_bytes(data[14..18].try_into().unwrap()) as u32;
     let tx_r_instant = f32::from_be_bytes(data[18..22].try_into().unwrap());
+    
 
     Ok((packet_length, stream_id, next_packet_index, shards_count, shard_index, tx_r_instant))
 }

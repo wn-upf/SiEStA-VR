@@ -1,23 +1,22 @@
 use glam::{Quat, Vec3};
 use std::{
-    fmt::{self, Debug},
+    fmt::Debug,
     net::IpAddr,
-    path::PathBuf,
+    
 };
 
 use serde::{Deserialize, Serialize};
 use std::{
-    marker::PhantomData,
-    mem,
-    net::{TcpListener, TcpStream},
-    time::{Duration, Instant},
+
+    net::TcpListener,
+    time::{Duration},
 };
 
 /// A 2-dimensional vector.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "cuda", repr(align(8)))]
-#[cfg_attr(not(target_arch = "spirv"), repr(C))]
-#[cfg_attr(target_arch = "spirv", repr(simd))]
+// #[cfg_attr(feature = "cuda", repr(align(8)))]
+// #[cfg_attr(not(target_arch = "spirv"), repr(C))]
+// #[cfg_attr(target_arch = "spirv", repr(simd))]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,

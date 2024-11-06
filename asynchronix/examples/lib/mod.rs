@@ -36,6 +36,7 @@ pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 pub mod alvr_packets;
 pub mod alvr_statistics;
 pub mod alvr_stream_socket;
+pub mod models_mm1k; 
 
 pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
@@ -574,22 +575,19 @@ pub fn compute_mm1k_metrics(
     }
 }
 
-// #[derive(Debug)] // unused (todo)
-// pub struct MG1K {
-//     pub rho: f64,
-//     pub n_q: f64,
-//     pub n: f64,
-//     pub t: f64,
-//     pub t_q: f64,
-//     pub t_s: f64,
-//     pub mean_t_s: f64,
-//     pub std_t_s: f64,
-//     pub cv_t_s: f64,
-//     pub t_residual: f64,
-// }
+#[derive(Default, Debug, Clone)]
+pub struct HeaderALVRStream{
+    pub packet_length :  u32     , 
+    pub stream_id:        u16   ,
+    pub next_packet_index: u32   ,
+    pub shards_count: u32        ,
+    pub shard_index: u32         ,
+    pub tx_instant:   f32       , 
+}
 
-#[derive(Debug, Clone, Copy)]
-pub struct MpduPacket {
+
+#[derive(Debug, Clone)]
+pub struct MpduPacket {    
     pub packet_id: usize,
     pub length_packet: usize,
     pub queue_in_instant: TaiTime<0>,
@@ -603,6 +601,9 @@ pub struct MpduPacket {
     pub sta_dest_id: i32,
     pub sta_dest_coords: Coords,
     pub queue_length_when_out: usize,
+    
+    pub data_inner: Vec<u8>, 
+    pub header_alvr: HeaderALVRStream, 
 }
 
 impl MpduPacket {
@@ -621,6 +622,8 @@ impl MpduPacket {
             sta_dest_id: 0,
             sta_dest_coords: Coords::new(),
             queue_length_when_out: 0,
+            data_inner: vec![], 
+            header_alvr: HeaderALVRStream::default(), 
             // header: ReceiverData::new(),
         }
     }
