@@ -15,9 +15,12 @@ use std::{
 
 use asynchronix::model::{Context, Model};
 
+
 use crate::lib::models_XR::{
     XRServer, // ,XRClient
 };
+
+use crate::lib::models_XR::SHARD_PREFIX_SIZE; 
 use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -40,12 +43,6 @@ pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 
 pub const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
-pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
-    + mem::size_of::<u16>() // stream ID
-    + mem::size_of::<u32>() // packet index
-    + mem::size_of::<u32>() // shards count
-    + mem::size_of::<u32>() // shards index
-    + mem::size_of::<f32>(); // tx relative timestamp
 
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
@@ -618,6 +615,7 @@ impl StreamSocket {
                 },
             },
         );
+
         StreamReceiver {
             // debug_receiver_channel: Arc::clone((self.receive_socket as Receiver<Vec<u8>)),
             packet_receiver,
@@ -634,8 +632,8 @@ impl StreamSocket {
         }
     }
 
-    // pub fn recv(&mut self, context: &Context<XRServer>) -> ConResult {
-    pub fn recv<T: Model>(&mut self, context: &Context<T>) -> ConResult {
+    pub fn recv(&mut self, arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
+    ) -> ConResult {
         println!("Recv function of shards!");
 
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
@@ -643,11 +641,16 @@ impl StreamSocket {
         } else {
             let mut bytes = [0; MAX_PACKET_SIZE_RECV];
 
-            let count = self.receive_socket.lock().unwrap().recv(&mut bytes)?;
+            // let count = self.receive_socket.lock().unwrap().recv(&mut bytes)?;
+            let count = arc_receiver.lock().unwrap().recv(&mut bytes).unwrap() ; 
+
+            println!("DEBBG -> BYTES INSIDE PACKET {}", count); 
+            println!("DEBBG -> Data inside packet{:?}", &bytes[0..100]); 
 
             if count < SHARD_PREFIX_SIZE {
                 return try_again();
             }
+
             // todo: switch to little endian
             // todo: do not remove sizeof<u32> for packet length
             let shard_length = mem::size_of::<u32>()
@@ -657,6 +660,9 @@ impl StreamSocket {
             let shards_count = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
             let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
+
+
+            println!("Received packet Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index, shards_count, tx_r_instant ); 
 
             if stream_id == VIDEO {
                 let rx_instant = Instant::now();
@@ -673,7 +679,7 @@ impl StreamSocket {
                 let header_bytes_transport: u32 = match self.transport_protocol {
                     // SocketProtocol::Udp => 42,
                     // SocketProtocol::Tcp => 54,
-                    SocketProtocol::Channel => 42, // let's emulate UDP for now
+                    SocketProtocol::Channel => 0, // let's NOT emulate UDP for now
                 };
                 let packet = ShardMapStats {
                     tx_r_instant,
@@ -706,6 +712,7 @@ impl StreamSocket {
                     self.prev_shard_tx_r_instant = Some(tx_r_instant);
                     self.prev_shard_rx_instant = Some(rx_instant);
                 }
+
             }
             self.shard_recv_state.insert(RecvState {
                 shard_length,
@@ -731,7 +738,10 @@ impl StreamSocket {
         };
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
+            
+
             &mut components.discarded_shards_sink
+            
         } else if let Some(packet) = components
             .in_progress_packets
             .get_mut(&shard_recv_state_mut.packet_index)
@@ -743,6 +753,8 @@ impl StreamSocket {
             // has been dropped by the network.
             let idx = *components.in_progress_packets.iter().next()?.0;
             Some(components.in_progress_packets.remove(&idx).unwrap().buffer)
+
+            
         }) {
             // NB: Can't use entry pattern because we want to allow bailing out on the line above
             components.in_progress_packets.insert(
@@ -774,8 +786,11 @@ impl StreamSocket {
         // Note: there is no prefix offset, since we want to write the prefix too.
         let packet_start_index = shard_recv_state_mut.shard_index * max_shard_data_size;
 
+        println!("MAX_DATA_SIZE_SHARD: {}, packet_start_index: {}", max_shard_data_size, packet_start_index); 
+
         // Prepare buffer to accomodate receiving shard
-        {
+        {   
+            println!("ACCOMODATE BUFFER BL {}, other: {}", in_progress_packet.buffer_length, packet_start_index + shard_recv_state_mut.shard_length); 
             // Note: this contains the prefix offset
             in_progress_packet.buffer_length = usize::max(
                 in_progress_packet.buffer_length,
@@ -787,16 +802,19 @@ impl StreamSocket {
                     .buffer
                     .resize(in_progress_packet.buffer_length, 0);
             }
+            println!("final length: {} (buffer_length = {})", in_progress_packet.buffer.len(), in_progress_packet.buffer_length); 
         }
 
         let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
-
+        println!("subbuffer"); 
         // Read shard into the single contiguous buffer
         {
             // Backup the small section of bytes that will be overwritten by reading from socket.
             if shard_recv_state_mut.overwritten_data_backup.is_none() {
+
                 shard_recv_state_mut.overwritten_data_backup =
                     Some(sub_buffer[..SHARD_PREFIX_SIZE].try_into().unwrap())
+                    
             }
 
             // This loop may bail out at any time if a timeout is reached. This is correctly handled by
@@ -807,12 +825,15 @@ impl StreamSocket {
                         [shard_recv_state_mut.packet_cursor..shard_recv_state_mut.shard_length],
                 )?;
                 shard_recv_state_mut.packet_cursor += size;
+                println!("inside while :) size = {}, packet_cursor = {}", size, shard_recv_state_mut.packet_cursor); 
             }
 
             // Restore backed up bytes
             // Safety: overwritten_data_backup is always set just before receiving the packet
             sub_buffer[..SHARD_PREFIX_SIZE]
                 .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
+
+            println!("END!!!")
         }
 
         if !shard_recv_state_mut.should_discard {
@@ -824,6 +845,8 @@ impl StreamSocket {
                     .received_shard_indices
                     .insert(shard_recv_state_mut.shard_index);
             }
+            println!("NOT DISCARDING"); 
+
         }
 
         let mut frame_span = 0.0;
@@ -849,6 +872,8 @@ impl StreamSocket {
 
                     all_bytes_in_frame = values.iter().map(|shard| shard.rx_bytes).sum();
                     all_bytes_in_frame_app = values.iter().map(|shard| shard.rx_bytes_app).sum();
+
+                    println!("SEND COMPLETE PACKET!"); 
 
                     // One way delay gradient
                     if let Some(first_shard_stats) = inner_map.get(&0) {

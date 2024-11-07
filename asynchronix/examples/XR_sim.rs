@@ -210,7 +210,7 @@ fn main() {
 
     // CONNECT COMPONENTS
     xr_server
-        .outport_video
+        .outport_videoapp_network
         .connect(STA_extended::input_XR_app, &mbox_sta_xr_server);
 
     sta1_xr

@@ -67,9 +67,9 @@ use crate::lib::{
 
 use crate::lib::alvr_statistics::StatisticsManager;
 
-use super::alvr_stream_socket::{SocketWriter, MAX_PACKET_SIZE_RECV};
+use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 
-const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
+pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
     + mem::size_of::<u32>() // packet index
     + mem::size_of::<u32>() // shards count
@@ -149,7 +149,7 @@ pub struct XRServer {
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
 
-    pub outport_video: Output<MpduPacket>, // ONLY VIDEO FOR NOW!
+    pub outport_videoapp_network: Output<MpduPacket>, // ONLY VIDEO FOR NOW!
 
     pub is_streaming: bool,
 
@@ -176,7 +176,7 @@ impl XRServer {
             tracking_app_receiver: None,
             statistics_app_receiver: None,
 
-            outport_video: Output::default(),
+            outport_videoapp_network: Output::default(),
             // output_audio: Output::default(),
             // output_haptics: Output::default(),
             is_streaming: false,
@@ -294,7 +294,7 @@ impl XRServer {
                                 };
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
 
-                                self.outport_video.send(packet.clone()).await;
+                                self.outport_videoapp_network.send(packet.clone()).await;
                             } else {
                                 println!(
                                     "{}",
@@ -355,7 +355,7 @@ impl XRServer {
 
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
 
-                let mut buffer_emu = send_socket
+                let mut buffer_emu = send_socket        // generate the actual video frame data
                     .get_buffer_emu(&header, current_bitrate_mbps)
                     .unwrap();
 
@@ -366,7 +366,7 @@ impl XRServer {
                 //     buffer_emu.length
                 // );
 
-                let mut payload = buffer_emu.inner.clone();
+                let payload = buffer_emu.inner.clone();
                 buffer_emu
                     .get_range_mut(0, payload.len())
                     .copy_from_slice(&payload);
@@ -462,6 +462,8 @@ pub struct XRClient {
 
     pub frames_dropped_counter: usize,
     pub server_ip: IpAddr,
+
+    pub streamsocket_clone: Option<StreamSocket>, 
 }
 
 impl XRClient {
@@ -480,6 +482,7 @@ impl XRClient {
             is_streaming: false,
             frames_dropped_counter: 0,
             server_ip,
+            streamsocket_clone: None, 
         }
     }
 
@@ -526,6 +529,9 @@ impl XRClient {
             self.input_app_haptics =
                 Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
 
+
+            self.streamsocket_clone = Some(stream_socket); 
+
             // {
             //     // retrieve video packets in RX buffer
             //     if let Some(rx_socket) = self.input_app_video.clone(){
@@ -547,8 +553,6 @@ impl XRClient {
     }
 
     pub async fn in_from_network(&mut self, packet: MpduPacket) {
-        // println!("[DBG XR_CLIENT] PACKET {} IN FROM NETWORK! \n", packet.packet_id);
-        // println!("Header: {:#?}", packet.header_alvr );
 
         let header = packet.header_alvr;
 
@@ -576,11 +580,16 @@ impl XRClient {
             VIDEO => {
                 if let Some(mut sock) = self.input_app_video.clone() {
                     println!("app lock");
-                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
+                    
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     println!("reader lock");
-                    let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                    println!("receiver: {:?}", receiver);
+
+                    let result = StreamSocket::recv(&mut self.streamsocket_clone.as_mut().unwrap(), sock.inner); 
+                    // let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
+                    println!("receiver result:: {:?}", result.unwrap());
+
+
                 } else {
                     println!("NO SOME??");
                 }
@@ -591,7 +600,6 @@ impl XRClient {
         };
         println!("\tEND PACKET {}", packet.packet_id);
         ()
-
         // Read channel mpsc of Vec<u8> into the streamsocket!
     }
 
