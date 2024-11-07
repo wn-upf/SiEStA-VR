@@ -752,8 +752,6 @@ impl StreamSocket {
     pub fn recv(&mut self, arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
     ) -> ConResult {
         println!("Recv function of shards!");
-        let mut first_in_queue = true; 
-         
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
         } else {
@@ -827,7 +825,8 @@ impl StreamSocket {
                     self.prev_shard_tx_r_instant = Some(tx_r_instant);
                     self.prev_shard_rx_instant = Some(rx_instant);
                 }
-            }
+            } // if ID ==VIDEO END
+
             self.shard_recv_state.insert(RecvState {
                 shard_length,
                 stream_id,
@@ -849,7 +848,7 @@ impl StreamSocket {
                 shard_recv_state_mut.stream_id
             );
             return try_again();
-        };
+         };
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -859,41 +858,47 @@ impl StreamSocket {
             .get_mut(&shard_recv_state_mut.packet_index)
         {
             packet
-        } else if let Some(buffer) = components.used_buffer_receiver.try_recv().ok().or_else(|| {
-            // By default, try to dequeue a used buffer. In case none were found, recycle one of the
-            // in progress packets, chances are these buffers are "dead" because one of their shards
-            // has been dropped by the network.
-            let idx = *components.in_progress_packets.iter().next()?.0;
-            Some(components.in_progress_packets.remove(&idx).unwrap().buffer)
-
+        }  else {
+            // Try to get a buffer through three fallback mechanisms
+            let buffer = components.used_buffer_receiver.try_recv()
+                .ok()
+                .or_else(|| {
+                    // First fallback: Try to recycle old packets
+                    let recyclable = components.in_progress_packets.iter()
+                        .find(|(&idx, _)| {
+                            wrapping_cmp(idx, shard_recv_state_mut.packet_index.wrapping_sub(5)) 
+                                == Ordering::Less
+                        })
+                        .map(|(&k, _)| k);
+                    
+                    recyclable.and_then(|idx| {
+                        components.in_progress_packets.remove(&idx)
+                            .map(|packet| packet.buffer)
+                    })
+                })
+                .or_else(|| {
+                    // Second fallback: If still no buffer, create a new emergency buffer
+                    println!("Warning: Creating new emergency buffer - consider increasing buffer pool");
+                    Some(Vec::with_capacity(self.max_packet_size * shard_recv_state_mut.shards_count))
+                })
+                .unwrap(); // Now safe to unwrap as we always have a buffer
             
-    }) {
-            // NB: Can't use entry pattern because we want to allow bailing out on the line above
             components.in_progress_packets.insert(
                 shard_recv_state_mut.packet_index,
                 InProgressPacket {
                     buffer,
                     buffer_length: 0,
-                    // todo: find a way to skipping this allocation
                     received_shard_indices: HashSet::with_capacity(
                         shard_recv_state_mut.shards_count,
                     ),
                 },
             );
+            
             components
                 .in_progress_packets
                 .get_mut(&shard_recv_state_mut.packet_index)
                 .unwrap()
-        } else {
-            // This branch may be hit in case the thread related to the stream hangs for some reason
-            // shard_recv_state_mut.should_discard = true;
-            // shard_recv_state_mut.packet_cursor = 0; // reset cursor from old shards
-            //                                         // always write at the start of the packet so the buffer doesn't grow much
-            // shard_recv_state_mut.shard_index = 0;
-
-            println!("\n\n***BREAKING THINGS HAHA****\n\n"); 
-            &mut components.discarded_shards_sink
-        };
+        }; 
 
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
         // Note: there is no prefix offset, since we want to write the prefix too.
@@ -1017,36 +1022,36 @@ impl StreamSocket {
                     }
                 }
             }
-            println!("Reconstructed packet!!"); 
+            println!("Reconstructed FR;!! {}", shard_recv_state_mut.packet_index); 
             let size = in_progress_packet.buffer_length;
 
-            let reconstruct = ReconstructedPacket {
-                index: shard_recv_state_mut.packet_index,
-                buffer: components
-                    .in_progress_packets
-                    .remove(&shard_recv_state_mut.packet_index)
-                    .unwrap()
-                    .buffer,
-                size,
-                // print everything but the buffer
-                frame_index: shard_recv_state_mut.packet_index,
+                let reconstruct = ReconstructedPacket {
+                    index: shard_recv_state_mut.packet_index,
+                    buffer: components
+                        .in_progress_packets
+                        .remove(&shard_recv_state_mut.packet_index)
+                        .unwrap()
+                        .buffer,
+                    size,
+                    // print everything but the buffer
+                    frame_index: shard_recv_state_mut.packet_index,
 
-                frame_span: frame_span,
-                frame_interarrival: frame_interarrival,
+                    frame_span: frame_span,
+                    frame_interarrival: frame_interarrival,
 
-                interarrival_jitter: self.interarrival_jitter,
-                ow_delay: self.kalman.ow_delay,
-                filtered_ow_delay: self.kalman.m_current,
+                    interarrival_jitter: self.interarrival_jitter,
+                    ow_delay: self.kalman.ow_delay,
+                    filtered_ow_delay: self.kalman.m_current,
 
-                rx_bytes: self.rx_bytes,
-                bytes_in_frame: all_bytes_in_frame,
-                bytes_in_frame_app: all_bytes_in_frame_app,
+                    rx_bytes: self.rx_bytes,
+                    bytes_in_frame: all_bytes_in_frame,
+                    bytes_in_frame_app: all_bytes_in_frame_app,
 
-                rx_shard_counter: self.rx_shard_counter,
-                duplicated_shard_counter: self.duplicated_shard_counter,
+                    rx_shard_counter: self.rx_shard_counter,
+                    duplicated_shard_counter: self.duplicated_shard_counter,
 
-                highest_rx_frame_index: self.highest_rx_frame_index,
-                highest_rx_shard_index: self.highest_rx_shard_index,
+                    highest_rx_frame_index: self.highest_rx_frame_index,
+                    highest_rx_shard_index: self.highest_rx_shard_index,
             }; 
 
             println!("{:?} Reconstructed packet!!", reconstruct); 
