@@ -37,13 +37,11 @@ use crate::lib::alvr_stream_socket::{
     AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
 };
 
-const INITIAL_BITRATE_MBPS: f32 = 5.0;
-const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
-const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
-
-const CAPACITY_RX_BUFFER: usize = 2000;
+pub const CAPACITY_RX_BUFFER: usize = 2000;
 
 use crate::lib::DEBUG_PRINT_ENABLED;
 
@@ -66,6 +64,7 @@ use crate::lib::{
 };
 
 use crate::lib::alvr_statistics::StatisticsManager;
+use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 
@@ -169,7 +168,7 @@ impl XRServer {
             bitrate_manager: BitrateManager::new(
                 MAX_HISTORY_SIZE,
                 INITIAL_FRAMERATE_FPS,
-                INITIAL_BITRATE_MBPS,
+                INITIAL_BITRATE_MBPS_SIM,
             ),
 
             video_app_sender: None,
@@ -400,7 +399,7 @@ impl XRServer {
 
     pub async fn connection_pipeline(&mut self, client_ip: IpAddr, context: &Context<Self>) {
         // no return from this function for now
-        self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, INITIAL_BITRATE_MBPS);
+        self.bitrate_manager = BitrateManager::new(MAX_HISTORY_SIZE, 90.0, INITIAL_BITRATE_MBPS_SIM);
 
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
         let stream_port: u16 = 9944;
@@ -530,7 +529,7 @@ impl XRClient {
                 Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
 
 
-            self.streamsocket_clone = Some(stream_socket); 
+            self.streamsocket_clone = Some(stream_socket.clone()); 
 
             // {
             //     // retrieve video packets in RX buffer
@@ -557,7 +556,7 @@ impl XRClient {
         let header = packet.header_alvr;
 
         let mut buffer = packet.data_inner.clone();
-        println!("buffer is {:?}", &buffer[..100]);
+        // println!("buffer is {:?}", &buffer[..100]);
 
         match header.stream_id.clone() {
             HAPTICS => {
@@ -579,17 +578,15 @@ impl XRClient {
             }
             VIDEO => {
                 if let Some(mut sock) = self.input_app_video.clone() {
-                    println!("app lock");
+                    // println!("app lock");
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
-                    
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
-                    println!("reader lock");
+                    // println!("reader lock");
 
-                    let result = StreamSocket::recv(&mut self.streamsocket_clone.as_mut().unwrap(), sock.inner); 
-                    // let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                    println!("receiver result:: {:?}", result.unwrap());
-
-
+                    if let Some(mut ssocket)  = self.streamsocket_clone.as_mut(){
+                        let resulllt = StreamSocket::recv(&mut ssocket, sock.inner );
+                        println!("Result of reader? {:?}" , resulllt);  
+                    }
                 } else {
                     println!("NO SOME??");
                 }
@@ -598,14 +595,11 @@ impl XRClient {
                 println!("ERROR WRONG STREAM SENT? XRCLIENT {}", header.stream_id);
             }
         };
-        println!("\tEND PACKET {}", packet.packet_id);
+        println!("\tEND shard {:?}, ", header.clone());
         ()
         // Read channel mpsc of Vec<u8> into the streamsocket!
     }
 
-    // fn send_statistics_packet(){
-    //     // TODO!
-    // }
 
     fn recv_audio(data: ReceiverData<()>) {
 
@@ -623,6 +617,7 @@ pub struct STA_extended {
     pub output_network_port: Output<MpduPacket>,
 
     pub to_app_socket: Output<MpduPacket>,
+    pub to_app_socket_end_ampdu: Output<bool>, 
 
     pub sta_id: i32,
     pub destination_id: i32,
@@ -659,6 +654,7 @@ impl STA_extended {
             output_network_port: Default::default(),
 
             to_app_socket: Default::default(),
+            to_app_socket_end_ampdu: Default::default(), 
 
             sta_id: src,
             destination_id: dest,
@@ -712,6 +708,7 @@ impl STA_extended {
 
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
+
         for packet in ampdu_packet.mpdu_packets {
             debug_print!(
                 DebugColor::Red,
@@ -724,7 +721,6 @@ impl STA_extended {
             );
 
             self.received_packet_counter += 1;
-
             self.to_app_socket.send(packet.clone()).await;
 
             ///////////// TODOTODO CONNECT WITH StreamReceiver
@@ -765,6 +761,9 @@ impl STA_extended {
                 }
             }
         }
+
+        self.to_app_socket_end_ampdu.send(true).await; // once whole ampdu is written, send signal to APP to read channel/buffer (to ensure packets are available)
+
     }
 
     fn send_packet_BG<'a>(

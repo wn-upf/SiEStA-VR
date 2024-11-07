@@ -80,7 +80,8 @@ use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(2000);
 
-const INITIAL_BITRATE_MBPS_SIM: f32 = 5.0;
+use crate::lib::INITIAL_BITRATE_MBPS_SIM; 
+
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
@@ -224,6 +225,9 @@ fn main() {
     sta_client
         .to_app_socket
         .connect(XRClient::in_from_network, &mbox_client_xr_app);
+    // sta_client
+    //     .to_app_socket_end_ampdu
+    //     .connect(XRClient::end_ampdu_input, &mbox_client_xr_app); 
 
     sta1_xr
         .to_app_socket

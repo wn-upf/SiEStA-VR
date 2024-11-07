@@ -13,14 +13,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asynchronix::model::{Context, Model};
 
+use std::cell::RefCell;
+use asynchronix::model::{Context, Model};
+use std::fmt;
 
 use crate::lib::models_XR::{
     XRServer, // ,XRClient
 };
 
-use crate::lib::models_XR::SHARD_PREFIX_SIZE; 
+use crate::lib::models_XR::{SHARD_PREFIX_SIZE, UPDATE_BITRATE_INTERVAL}; 
 use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -31,7 +33,9 @@ use std::net::IpAddr;
 use std::result::Result::Ok;
 use tai_time::TaiTime;
 
-pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+
+
+// pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
@@ -65,29 +69,117 @@ impl SocketWriter for Sender<Vec<u8>> {
         Ok(())
     }
 }
-impl SocketReader for Receiver<Vec<u8>> {
+// impl SocketReader for Receiver<Vec<u8>> {
+//     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
+//         match self.try_recv() {
+//             Ok(data) => {
+//                 let data_len = data.len();
+//                 if data_len <= buffer.len() {
+//                     buffer[..data_len].copy_from_slice(&data);
+//                     Ok(data_len)
+//                 } else {
+//                     Err(ConnectionError::Other(anyhow!("Buffer too small")))
+//                 }
+//             }
+//             Err(TryRecvError::Empty) => Ok(0),
+//             Err(TryRecvError::Disconnected) => {
+//                 Err(ConnectionError::Other(anyhow!("Channel disconnected")))
+//             }
+//         }
+//     }
+
+//     fn peek(&self, _buffer: &mut [u8]) -> ConResult<usize> {
+//         Err(ConnectionError::Other(anyhow!("Unsupported operation")))
+//     }
+// }
+
+// Wrapper struct to hold the receiver and its buffer
+pub struct BufferedReceiver<T> {
+    receiver: Receiver<T>,
+    buffer: RefCell<Option<T>>,
+}
+
+impl<T> BufferedReceiver<T> {
+    pub fn new(receiver: Receiver<T>) -> Self {
+        BufferedReceiver {
+            receiver,
+            buffer: RefCell::new(None),
+        }
+    }
+}
+
+impl SocketReader for BufferedReceiver<Vec<u8>> {
     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
-        match self.try_recv() {
-            Ok(data) => {
-                let data_len = data.len();
-                if data_len <= buffer.len() {
-                    buffer[..data_len].copy_from_slice(&data);
-                    Ok(data_len)
-                } else {
-                    Err(ConnectionError::Other(anyhow!("Buffer too small")))
-                }
+        // First check if we have data in the buffer
+        if let Some(data) = self.buffer.take() {
+            let data_len = data.len();
+            if data_len <= buffer.len() {
+                buffer[..data_len].copy_from_slice(&data);
+                Ok(data_len)
+            } else {
+                // Put the data back in the buffer since it didn't fit
+                *self.buffer.borrow_mut() = Some(data);
+                Err(ConnectionError::Other(anyhow!("Buffer too small")))
             }
-            Err(TryRecvError::Empty) => Ok(0),
-            Err(TryRecvError::Disconnected) => {
-                Err(ConnectionError::Other(anyhow!("Channel disconnected")))
+        } else {
+            // If no buffered data, try to receive new data
+            match self.receiver.try_recv() {
+                Ok(data) => {
+                    let data_len = data.len();
+                    if data_len <= buffer.len() {
+                        buffer[..data_len].copy_from_slice(&data);
+                        Ok(data_len)
+                    } else {
+                        Err(ConnectionError::Other(anyhow!("Buffer too small")))
+                    }
+                }
+                Err(TryRecvError::Empty) => Ok(0),
+                Err(TryRecvError::Disconnected) => {
+                    Err(ConnectionError::Other(anyhow!("Channel disconnected")))
+                }
             }
         }
     }
 
-    fn peek(&self, _buffer: &mut [u8]) -> ConResult<usize> {
-        Err(ConnectionError::Other(anyhow!("Unsupported operation")))
+    fn peek(&self, buffer: &mut [u8]) -> ConResult<usize> {
+        let mut buffer_guard = self.buffer.borrow_mut();
+        
+        // If we don't have data in the buffer, try to receive it
+        if buffer_guard.is_none() {
+            match self.receiver.try_recv() {
+                Ok(data) => {
+                    *buffer_guard = Some(data);
+                }
+                Err(TryRecvError::Empty) => return Ok(0),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(ConnectionError::Other(anyhow!("Channel disconnected")))
+                }
+            }
+        }
+
+        // Now we either had data in the buffer or just received it
+        if let Some(ref data) = *buffer_guard {
+            let data_len = data.len();
+            if data_len <= buffer.len() {
+                buffer[..data_len].copy_from_slice(data);
+                Ok(data_len)
+            } else {
+                Err(ConnectionError::Other(anyhow!("Buffer too small")))
+            }
+        } else {
+            // This should never happen due to the logic above
+            Ok(0)
+        }
     }
 }
+
+
+// Helper function to create a buffered channel
+pub fn buffered_channel<T>() -> (Sender<T>, BufferedReceiver<T>) {
+    let (sender, receiver) = unbounded();
+    (sender, BufferedReceiver::new(receiver))
+}
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConError {
@@ -142,7 +234,7 @@ impl std::fmt::Display for ConError {
 //         Err(ConnectionError::Other(anyhow!("Unsupported operation")))
 //     }
 // }
-
+#[derive(Clone)]
 pub struct InProgressPacket {
     buffer: Vec<u8>,
     buffer_length: usize,
@@ -257,6 +349,8 @@ impl<H> Buffer<H> {
 
 const Q_KALMAN: f32 = 10E-8;
 
+
+#[derive(Clone)]
 pub struct KalmanFilter {
     ow_delay: f32,
     m_current: f32,
@@ -303,6 +397,7 @@ struct ShardMapStats {
 
 // }
 
+#[derive(Clone)]
 struct RecvState {
     shard_length: usize, // contains prefix length itself
     stream_id: u16,
@@ -338,6 +433,29 @@ struct ReconstructedPacket {
     highest_rx_shard_index: i32,
 }
 
+impl fmt::Debug for ReconstructedPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReconstructedPacket")
+            .field("index", &self.index)
+            // buffer is omitted
+            .field("size", &self.size)
+            .field("frame_index", &self.frame_index)
+            .field("frame_span", &self.frame_span)
+            .field("frame_interarrival", &self.frame_interarrival)
+            .field("interarrival_jitter", &self.interarrival_jitter)
+            .field("ow_delay", &self.ow_delay)
+            .field("filtered_ow_delay", &self.filtered_ow_delay)
+            .field("rx_bytes", &self.rx_bytes)
+            .field("bytes_in_frame", &self.bytes_in_frame)
+            .field("bytes_in_frame_app", &self.bytes_in_frame_app)
+            .field("rx_shard_counter", &self.rx_shard_counter)
+            .field("duplicated_shard_counter", &self.duplicated_shard_counter)
+            .field("highest_rx_frame_index", &self.highest_rx_frame_index)
+            .field("highest_rx_shard_index", &self.highest_rx_shard_index)
+            .finish()
+    }
+}
+#[derive(Clone)]
 struct StreamRecvComponents {
     used_buffer_sender: Sender<Vec<u8>>,
     used_buffer_receiver: Receiver<Vec<u8>>,
@@ -538,7 +656,7 @@ pub struct StreamReceiver<H> {
     pub network_app_interface: Arc<Mutex<Box<dyn SocketWriter>>>,
     pub inner: Arc<Mutex<Box<dyn SocketReader>>>,
 }
-
+#[derive(Clone)]
 pub struct StreamSocket {
     max_packet_size: usize,
     send_socket: Arc<Mutex<Box<dyn SocketWriter>>>,
@@ -617,7 +735,6 @@ impl StreamSocket {
         );
 
         StreamReceiver {
-            // debug_receiver_channel: Arc::clone((self.receive_socket as Receiver<Vec<u8>)),
             packet_receiver,
             used_buffer_queue: used_buffer_sender,
             _phantom: PhantomData,
@@ -635,17 +752,16 @@ impl StreamSocket {
     pub fn recv(&mut self, arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
     ) -> ConResult {
         println!("Recv function of shards!");
-
+        let mut first_in_queue = true; 
+         
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
         } else {
             let mut bytes = [0; MAX_PACKET_SIZE_RECV];
-
             // let count = self.receive_socket.lock().unwrap().recv(&mut bytes)?;
-            let count = arc_receiver.lock().unwrap().recv(&mut bytes).unwrap() ; 
-
-            println!("DEBBG -> BYTES INSIDE PACKET {}", count); 
-            println!("DEBBG -> Data inside packet{:?}", &bytes[0..100]); 
+            let count = arc_receiver.lock().unwrap().peek(&mut bytes).unwrap() ; 
+            // println!("DEBBG -> BYTES INSIDE PACKET {}", count); 
+            // println!("DEBBG -> Data inside packet{:?}", &bytes[0..100]); 
 
             if count < SHARD_PREFIX_SIZE {
                 return try_again();
@@ -661,8 +777,7 @@ impl StreamSocket {
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
             let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
 
-
-            println!("Received packet Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index, shards_count, tx_r_instant ); 
+            println!("Received packet Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant ); 
 
             if stream_id == VIDEO {
                 let rx_instant = Instant::now();
@@ -712,7 +827,6 @@ impl StreamSocket {
                     self.prev_shard_tx_r_instant = Some(tx_r_instant);
                     self.prev_shard_rx_instant = Some(rx_instant);
                 }
-
             }
             self.shard_recv_state.insert(RecvState {
                 shard_length,
@@ -738,8 +852,6 @@ impl StreamSocket {
         };
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
-            
-
             &mut components.discarded_shards_sink
             
         } else if let Some(packet) = components
@@ -755,7 +867,7 @@ impl StreamSocket {
             Some(components.in_progress_packets.remove(&idx).unwrap().buffer)
 
             
-        }) {
+    }) {
             // NB: Can't use entry pattern because we want to allow bailing out on the line above
             components.in_progress_packets.insert(
                 shard_recv_state_mut.packet_index,
@@ -774,11 +886,12 @@ impl StreamSocket {
                 .unwrap()
         } else {
             // This branch may be hit in case the thread related to the stream hangs for some reason
-            shard_recv_state_mut.should_discard = true;
-            shard_recv_state_mut.packet_cursor = 0; // reset cursor from old shards
-                                                    // always write at the start of the packet so the buffer doesn't grow much
-            shard_recv_state_mut.shard_index = 0;
+            // shard_recv_state_mut.should_discard = true;
+            // shard_recv_state_mut.packet_cursor = 0; // reset cursor from old shards
+            //                                         // always write at the start of the packet so the buffer doesn't grow much
+            // shard_recv_state_mut.shard_index = 0;
 
+            println!("\n\n***BREAKING THINGS HAHA****\n\n"); 
             &mut components.discarded_shards_sink
         };
 
@@ -786,8 +899,7 @@ impl StreamSocket {
         // Note: there is no prefix offset, since we want to write the prefix too.
         let packet_start_index = shard_recv_state_mut.shard_index * max_shard_data_size;
 
-        println!("MAX_DATA_SIZE_SHARD: {}, packet_start_index: {}", max_shard_data_size, packet_start_index); 
-
+        println!("packet_start_index: {}", packet_start_index); 
         // Prepare buffer to accomodate receiving shard
         {   
             println!("ACCOMODATE BUFFER BL {}, other: {}", in_progress_packet.buffer_length, packet_start_index + shard_recv_state_mut.shard_length); 
@@ -806,7 +918,7 @@ impl StreamSocket {
         }
 
         let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
-        println!("subbuffer"); 
+
         // Read shard into the single contiguous buffer
         {
             // Backup the small section of bytes that will be overwritten by reading from socket.
@@ -816,24 +928,22 @@ impl StreamSocket {
                     Some(sub_buffer[..SHARD_PREFIX_SIZE].try_into().unwrap())
                     
             }
-
+            
             // This loop may bail out at any time if a timeout is reached. This is correctly handled by
             // the previous code.
             while shard_recv_state_mut.packet_cursor < shard_recv_state_mut.shard_length {
-                let size = self.receive_socket.lock().unwrap().recv(
-                    &mut sub_buffer
-                        [shard_recv_state_mut.packet_cursor..shard_recv_state_mut.shard_length],
-                )?;
-                shard_recv_state_mut.packet_cursor += size;
-                println!("inside while :) size = {}, packet_cursor = {}", size, shard_recv_state_mut.packet_cursor); 
-            }
 
+                let size = arc_receiver.lock().unwrap().recv(&mut sub_buffer[shard_recv_state_mut.packet_cursor .. shard_recv_state_mut.shard_length]).unwrap(); 
+                shard_recv_state_mut.packet_cursor += size;
+
+                if shard_recv_state_mut.stream_id == VIDEO{
+                    println!(" inside while :) size = {}, packet_cursor = {}\\n",  size, shard_recv_state_mut.packet_cursor); 
+                }
+            }
             // Restore backed up bytes
             // Safety: overwritten_data_backup is always set just before receiving the packet
             sub_buffer[..SHARD_PREFIX_SIZE]
                 .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
-
-            println!("END!!!")
         }
 
         if !shard_recv_state_mut.should_discard {
@@ -857,6 +967,8 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
+
+            println!("PACKET IS COMPLETE, SENDING!!"); 
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     let values: Vec<&ShardMapStats> = inner_map.values().collect();
@@ -905,38 +1017,42 @@ impl StreamSocket {
                     }
                 }
             }
-
+            println!("Reconstructed packet!!"); 
             let size = in_progress_packet.buffer_length;
+
+            let reconstruct = ReconstructedPacket {
+                index: shard_recv_state_mut.packet_index,
+                buffer: components
+                    .in_progress_packets
+                    .remove(&shard_recv_state_mut.packet_index)
+                    .unwrap()
+                    .buffer,
+                size,
+                // print everything but the buffer
+                frame_index: shard_recv_state_mut.packet_index,
+
+                frame_span: frame_span,
+                frame_interarrival: frame_interarrival,
+
+                interarrival_jitter: self.interarrival_jitter,
+                ow_delay: self.kalman.ow_delay,
+                filtered_ow_delay: self.kalman.m_current,
+
+                rx_bytes: self.rx_bytes,
+                bytes_in_frame: all_bytes_in_frame,
+                bytes_in_frame_app: all_bytes_in_frame_app,
+
+                rx_shard_counter: self.rx_shard_counter,
+                duplicated_shard_counter: self.duplicated_shard_counter,
+
+                highest_rx_frame_index: self.highest_rx_frame_index,
+                highest_rx_shard_index: self.highest_rx_shard_index,
+            }; 
+
+            println!("{:?} Reconstructed packet!!", reconstruct); 
             components
                 .packet_queue
-                .send(ReconstructedPacket {
-                    index: shard_recv_state_mut.packet_index,
-                    buffer: components
-                        .in_progress_packets
-                        .remove(&shard_recv_state_mut.packet_index)
-                        .unwrap()
-                        .buffer,
-                    size,
-
-                    frame_index: shard_recv_state_mut.packet_index,
-
-                    frame_span: frame_span,
-                    frame_interarrival: frame_interarrival,
-
-                    interarrival_jitter: self.interarrival_jitter,
-                    ow_delay: self.kalman.ow_delay,
-                    filtered_ow_delay: self.kalman.m_current,
-
-                    rx_bytes: self.rx_bytes,
-                    bytes_in_frame: all_bytes_in_frame,
-                    bytes_in_frame_app: all_bytes_in_frame_app,
-
-                    rx_shard_counter: self.rx_shard_counter,
-                    duplicated_shard_counter: self.duplicated_shard_counter,
-
-                    highest_rx_frame_index: self.highest_rx_frame_index,
-                    highest_rx_shard_index: self.highest_rx_shard_index,
-                })
+                .send(reconstruct)
                 .ok();
 
             if shard_recv_state_mut.stream_id == VIDEO {
@@ -963,7 +1079,6 @@ impl StreamSocket {
             }) {
                 let idx = *idx; // fix borrow rule
                 let packet = components.in_progress_packets.remove(&idx).unwrap();
-
                 // Recycle buffer
                 components.used_buffer_sender.send(packet.buffer).ok();
             }
@@ -979,7 +1094,7 @@ impl StreamSocket {
 pub enum StreamSocketBuilder {
     // Tcp(TcpListener),
     // Udp(UdpSocket),
-    Channel(Sender<Vec<u8>>, Receiver<Vec<u8>>),
+    Channel(Sender<Vec<u8>>, BufferedReceiver<Vec<u8>>),
 }
 impl StreamSocketBuilder {
     pub fn build(self, max_packet_size: usize) -> StreamSocket {
@@ -1034,7 +1149,7 @@ impl StreamSocketBuilder {
             //     recv_buffer_bytes,
             // )?),
             SocketProtocol::Channel => {
-                let (sender, receiver) = unbounded();
+                let (sender, receiver) = buffered_channel();
                 StreamSocketBuilder::Channel(sender, receiver)
             }
         })
@@ -1133,7 +1248,7 @@ impl StreamSocketBuilder {
                 //     (Box::new(send_socket), Box::new(receive_socket))
                 // }
                 SocketProtocol::Channel => {
-                    let (sender, receiver) = unbounded();
+                    let (sender, receiver) = buffered_channel();
                     (Box::new(sender), Box::new(receiver))
                 }
             };
@@ -1179,7 +1294,7 @@ impl StreamSocketBuilder {
         recv_buffer: SocketBufferSize,
         packet_size: usize,
     ) -> Result<StreamSocket> {
-        let (sender, receiver) = unbounded();
+        let (sender, receiver) = buffered_channel();
 
         Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
     }
@@ -1196,7 +1311,7 @@ impl StreamSocketBuilder {
         //     }
         // };
 
-        let (sender, receiver) = unbounded();
+        let (sender, receiver) = buffered_channel();
 
         Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
     }

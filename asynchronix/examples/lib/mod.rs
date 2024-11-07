@@ -30,6 +30,10 @@ pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
+
+pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
+
+
 // Define a constant to control debugging
 pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
@@ -677,10 +681,12 @@ impl AmpduPacket {
         );
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t\t\t\t\t\t\t\t\t\t - Packet ID: {:.0}, T_q: {:.8} , T_s: {:.8}\x1b[0m",
+                "\x1b[33m\t\t\t\t\t\t\t\t\t\t - Packet ID: {:.0}, ALVR: {:?} T_q: {:.8} , T_s: {:.8}\x1b[0m",
                 packet.packet_id,
+                packet.header_alvr, 
                 packet.T_q.as_secs_f64(),
                 packet.expected_T_s.as_secs_f64()
+
             );
         }
     }
