@@ -1,11 +1,11 @@
 use glam::{Quat, Vec3};
 use std::{fmt::Debug, net::IpAddr};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{net::TcpListener, time::Duration};
 
 /// A 2-dimensional vector.
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 // #[cfg_attr(feature = "cuda", repr(align(8)))]
 // #[cfg_attr(not(target_arch = "spirv"), repr(C))]
 // #[cfg_attr(target_arch = "spirv", repr(simd))]
@@ -15,7 +15,7 @@ pub struct Vec2 {
 }
 
 // Field of view in radians
-#[derive(Serialize, Deserialize, PartialEq, Default, Clone, Copy)]
+#[derive(Serialize, Deserialize, PartialEq, Default, Clone, Copy, Debug)]
 pub struct Fov {
     pub left: f32,
     pub right: f32,
@@ -23,7 +23,7 @@ pub struct Fov {
     pub down: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ViewsConfig {
     // Note: the head-to-eye transform is always a translation along the x axis
     pub ipd_m: f32,
@@ -41,7 +41,7 @@ pub struct ButtonEntry {
     pub path_id: u64,
     pub value: ButtonValue,
 }
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BatteryPacket {
     pub device_id: u64,
     pub gauge_value: f32, // range [0, 1]
@@ -56,7 +56,7 @@ pub enum LogSeverity {
     Debug = 0,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug )]
 pub enum ClientControlPacket {
     PlayspaceSync(Option<Vec2>),
     RequestIdr,
@@ -65,7 +65,7 @@ pub enum ClientControlPacket {
     ViewsConfig(ViewsConfig),
     Battery(BatteryPacket),
     VideoErrorReport, // legacy
-    Buttons(Vec<ButtonEntry>),
+    // Buttons(Vec<ButtonEntry>),
     ActiveInteractionProfile { device_id: u64, profile_id: u64 },
     Log { level: LogSeverity, message: String },
     Reserved(String),

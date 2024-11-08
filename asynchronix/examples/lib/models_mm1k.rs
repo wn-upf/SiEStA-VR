@@ -142,7 +142,7 @@ impl STA_source {
         for packet in ampdu_packet.mpdu_packets {
             debug_print!(
                 DebugColor::Red,
-                "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
+                "{} [DBG STA SRC {} IN]  ---Packet {} arrived from STA{} into STA{}",
                 format_elapsed!(elapsed),
                 self.sta_id,
                 packet.packet_id,
@@ -294,7 +294,9 @@ impl QueueStats {
 
 #[derive(Clone)]
 pub struct QueueModule {
-    pub output_port: Output<AmpduPacket>,
+    pub output_port_sta1: Output<AmpduPacket>,
+    pub output_port_sta2: Output<AmpduPacket>,
+
 
     pub queue: VecDeque<MpduPacket>,
     pub queue_maxsize: usize,
@@ -347,7 +349,8 @@ impl QueueModule {
         Self {
             queue: VecDeque::new(),
             queue_maxsize: queue_size,
-            output_port: Default::default(),
+            output_port_sta1: Default::default(),
+            output_port_sta2: Default::default(), 
             service_timer: Duration::ZERO,
             aux_ampdu_serviced: AmpduPacket::new(),
             packet_being_served: false,
@@ -453,7 +456,12 @@ impl QueueModule {
         // AMPDU_sent.print();
         self.packet_being_served = false;
 
-        self.output_port.send(AMPDU_sent.clone()).await;
+        match AMPDU_sent.sta_dest_id{
+         0 =>    {self.output_port_sta1.send(AMPDU_sent.clone()).await;}
+         2 =>    {self.output_port_sta2.send(AMPDU_sent.clone()).await;}
+
+         _ =>    {println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE"); }
+        }
         
 
         if self.queue.len() > 0 {

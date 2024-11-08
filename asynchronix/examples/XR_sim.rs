@@ -157,7 +157,7 @@ fn main() {
     let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 
     let t0 = MonotonicTime::EPOCH;
-    let mut xr_server = XRServer::new(ip_src, ip_dest, t0);
+    let mut xr_server = XRServer::new(ip_src, ip_dest, t0, INITIAL_FRAMERATE_FPS);
     let mut xr_client_app = XRClient::new(ip_src, INITIAL_FRAMERATE_FPS);
 
     let mut sta1_xr: STA_extended = STA_extended::new(
@@ -222,12 +222,12 @@ fn main() {
         .connect(QueueModule::input_UL, &mbox_queue);
 
     queue
-        .output_port
+        .output_port_sta2
         .connect(STA_extended::input_wireless, &mbox_sta_client_xr);   
     
     queue
-        .output_port
-        .connect(STA_extended::input_wireless_UL, &mbox_sta_xr_server); // UL CONNECTION QUEUE
+        .output_port_sta1
+        .connect(STA_extended::input_wireless,  &mbox_sta_xr_server); // UL CONNECTION QUEUE
 
     sta_client
         .to_app_socket

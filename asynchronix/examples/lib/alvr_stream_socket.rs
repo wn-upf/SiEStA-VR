@@ -43,6 +43,8 @@ pub const AUDIO: u16 = 2;
 pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 
+pub const CONTROL_STREAM:u16  = 5; 
+
 pub const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 pub trait SocketWriter: Send {
@@ -91,6 +93,8 @@ impl SocketWriter for Sender<Vec<u8>> {
 // }
 
 // Wrapper struct to hold the receiver and its buffer
+
+#[derive(Clone)]
 pub struct BufferedReceiver<T> {
     receiver: Receiver<T>,
     buffer: RefCell<Option<T>>,

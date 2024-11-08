@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use std::sync::Arc;
 use std::sync::Mutex;
-
+use serde::{Deserialize, Serialize};  
 use colored::Colorize;
-
+use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
 use once_cell::sync::Lazy;
 
 const CW_MIN: i32 = 15;
@@ -40,6 +40,8 @@ pub mod alvr_statistics;
 pub mod alvr_stream_socket;
 pub mod models_XR;
 pub mod models_mm1k;
+
+pub mod alvr_control_socket;
 
 pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
@@ -106,6 +108,127 @@ impl DebugColor {
             DebugColor::Orange => |s| s.truecolor(255, 165, 0),
             DebugColor::Purple => |s| s.truecolor(128, 0, 128),
         }
+    }
+}
+#[derive(Clone)]
+pub struct SlidingWindowWeighted<T> {
+    history_buffer: VecDeque<T>,
+    interval_buffer: VecDeque<f32>,
+}
+
+impl<T> SlidingWindowWeighted<T> {
+    pub fn new(initial_value: T, initial_interval: f32) -> Self {
+        Self {
+            history_buffer: [initial_value].into_iter().collect(),
+            interval_buffer: [initial_interval].into_iter().collect(),
+        }
+    }
+
+    pub fn submit_sample(&mut self, sample: T, interval: f32) {
+        self.history_buffer.push_back(sample);
+        self.interval_buffer.push_back(interval);
+    }
+
+    fn cleanup_old_samples(&mut self) {
+        self.history_buffer.clear();
+        self.interval_buffer.clear();
+    }
+
+    pub fn get_interval_buffer_sum(&self) -> f32 {
+        self.interval_buffer.iter().sum::<f32>()
+    }
+}
+
+impl SlidingWindowWeighted<f32> {
+    pub fn weighted_sum(&self) -> f32 {
+        self.history_buffer
+            .iter()
+            .zip(self.interval_buffer.iter())
+            .map(|(value, weight)| value * weight)
+            .sum()
+    }
+
+    pub fn get_average(&mut self) -> f32 {
+        let average = self.weighted_sum() / self.get_interval_buffer_sum();
+        self.cleanup_old_samples();
+        return average;
+    }
+}
+
+
+pub struct SlidingWindowTimely<T> {
+    history_buffer: VecDeque<T>,
+    interval_buffer: VecDeque<f32>,
+    max_window_duration: f32,
+}
+
+impl<T> SlidingWindowTimely<T> {
+    pub fn new(initial_value: T, initial_interval: f32, max_window_duration: f32) -> Self {
+        Self {
+            history_buffer: [initial_value].into_iter().collect(),
+            interval_buffer: [initial_interval].into_iter().collect(),
+            max_window_duration,
+        }
+    }
+
+    pub fn submit_sample(&mut self, sample: T, interval: f32) {
+        self.history_buffer.push_back(sample);
+        self.interval_buffer.push_back(interval);
+        self.cleanup_old_samples();
+    }
+
+    fn cleanup_old_samples(&mut self) {
+        let mut total_interval = 0.0;
+        let mut index = self.interval_buffer.len();
+
+        for &interval in self.interval_buffer.iter().rev() {
+            total_interval += interval;
+            if total_interval > self.max_window_duration {
+                break;
+            }
+            index -= 1;
+        }
+
+        while index > 0 {
+            if self.interval_buffer.len() > 1 {
+                // keep at least one
+                self.history_buffer.pop_front();
+                self.interval_buffer.pop_front();
+            }
+            index -= 1;
+        }
+    }
+
+    pub fn get_interval_buffer_sum(&self) -> f32 {
+        self.interval_buffer.iter().sum::<f32>()
+    }
+
+    pub fn get_interval_buffer_mean(&self) -> f32 {
+        self.get_interval_buffer_sum() / self.interval_buffer.len() as f32
+    }
+}
+
+impl SlidingWindowTimely<f32> {
+    pub fn get_average(&self) -> f32 {
+        self.history_buffer.iter().sum::<f32>() / self.history_buffer.len() as f32
+    }
+
+    pub fn get_sum(&self) -> f32 {
+        self.history_buffer.iter().sum::<f32>()
+    }
+
+    pub fn get_std(&self) -> f32 {
+        if self.history_buffer.len() < 2 {
+            return 0.;
+        }
+        let average = self.get_average();
+        let variance = self
+            .history_buffer
+            .iter()
+            .map(|&x| (x - average).powf(2.))
+            .sum::<f32>()
+            / (self.history_buffer.len() - 1) as f32; // sample variance
+        variance.sqrt()
     }
 }
 
@@ -620,6 +743,7 @@ pub struct MpduPacket {
 
     pub data_inner: Vec<u8>,
     pub header_alvr: HeaderALVRStream,
+    // pub is_alvr_control_packet: bool, 
 }
 
 impl MpduPacket {
@@ -640,7 +764,7 @@ impl MpduPacket {
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
-            // header: ReceiverData::new(),
+            // is_alvr_control_packet: false, 
         }
     }
 
@@ -674,16 +798,16 @@ impl AmpduPacket {
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m \t\t\t\t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
+            "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_dest_id, self.total_length
         );
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t\t\t\t\t\t\t\t\t\t - Packet ID: {:.0}, ALVR: {:?} T_q: {:.8} , T_s: {:.8}\x1b[0m",
+                "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}, {:?} \x1b[0m",
                 packet.packet_id,
-                packet.header_alvr,
                 packet.T_q.as_secs_f64(),
-                packet.expected_T_s.as_secs_f64()
+                packet.expected_T_s.as_secs_f64(), 
+                packet.header_alvr
 
             );
         }
@@ -911,6 +1035,177 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Resu
         }
     }
     Ok(())
+}
+// Bitrate statistics minus the empirical output value
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct NominalBitrateStats {
+    pub scaled_calculated_bps: Option<f32>,
+    pub decoder_latency_limiter_bps: Option<f32>,
+    pub network_latency_limiter_bps: Option<f32>,
+    pub encoder_latency_limiter_bps: Option<f32>,
+    pub manual_max_bps: Option<f32>,
+    pub manual_min_bps: Option<f32>,
+    pub requested_bps: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct GraphNetworkStatistics {
+    pub frame_index: u32,
+
+    pub frame_size_bytes: usize, 
+
+    pub client_fps: f32,
+    pub server_fps: f32,
+
+    pub frame_span_ms: f32,
+
+    pub interarrival_jitter_ms: f32,
+
+    pub ow_delay_ms: f32,
+    pub filtered_ow_delay_ms: f32,
+
+    pub rtt_ms: f32,
+
+    pub frame_interarrival_ms: f32,
+    pub frame_jitter_ms: f32,
+
+    pub frames_skipped: u32,
+
+    pub shards_lost: isize,
+    pub shards_duplicated: u32,
+
+    pub instant_network_throughput_bps: f32,
+    pub peak_network_throughput_bps: f32,
+
+    pub nominal_bitrate: NominalBitrateStats,
+
+    pub interval_avg_plot_throughput: f32,
+}
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub enum LogSeverity {
+    Error = 3,
+    Warning = 2,
+    Info = 1,
+    Debug = 0,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LogEntry {
+    pub severity: LogSeverity,
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct StatisticsSummary {
+    pub video_packets_total: usize,
+    pub video_packets_per_sec: usize,
+
+    pub video_mbytes_total: usize,
+    pub video_mbits_per_sec: f32,
+
+    pub video_throughput_mbits_per_sec: f32,
+
+    pub total_pipeline_latency_average_ms: f32,
+    pub game_delay_average_ms: f32,
+    pub server_compositor_delay_average_ms: f32,
+    pub encode_delay_average_ms: f32,
+    pub network_delay_average_ms: f32,
+    pub decode_delay_average_ms: f32,
+    pub decoder_queue_delay_average_ms: f32,
+    pub client_compositor_average_ms: f32,
+    pub vsync_queue_delay_average_ms: f32,
+
+    pub packets_dropped_total: usize,
+    pub packets_dropped_per_sec: usize,
+
+    pub packets_skipped_total: usize,
+    pub packets_skipped_per_sec: usize,
+
+    pub frame_jitter_ms: f32,
+
+    pub client_fps: f32,
+    pub server_fps: f32,
+
+    pub battery_hmd: u32,
+    pub hmd_plugged: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct GraphStatistics {
+    pub frame_index: i32,
+    pub is_idr: bool,
+
+    pub frames_dropped: u32,
+
+    pub total_pipeline_latency_s: f32,
+    pub game_time_s: f32,
+    pub server_compositor_s: f32,
+    pub encoder_s: f32,
+    pub network_s: f32,
+    pub decoder_s: f32,
+    pub decoder_queue_s: f32,
+    pub client_compositor_s: f32,
+    pub vsync_queue_s: f32,
+
+    //pub client_fps: f32,
+    //pub server_fps: f32,
+    pub nominal_bitrate: NominalBitrateStats,
+    pub actual_bitrate_bps: f32,
+}
+
+
+#[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
+pub struct HeuristicStats {
+    pub frame_interval_s: f32,
+    pub server_fps: f32,
+    pub steps_bps: f32,
+
+    pub network_heur_fps: f32,
+    pub rtt_avg_heur_s: f32,
+    pub random_prob: f32,
+
+    pub threshold_fps: f32,
+    pub threshold_rtt_s: f32,
+    pub threshold_u: f32,
+
+    pub requested_bitrate_bps: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct HapticsEvent {
+    pub path: String,
+    pub duration: Duration,
+    pub frequency: f32,
+    pub amplitude: f32,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TrackingEvent {
+    pub head_motion: Option<DeviceMotion>,
+    pub controller_motions: [Option<DeviceMotion>; 2],
+    pub hand_skeletons: [Option<[Pose; 26]>; 2],
+    pub eye_gazes: [Option<Pose>; 2],
+    pub fb_face_expression: Option<Vec<f32>>,
+    pub htc_eye_expression: Option<Vec<f32>>,
+    pub htc_lip_expression: Option<Vec<f32>>,
+}
+
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum EventType {
+    Log(LogEntry),
+    // Session(Box<SessionConfig>),
+    StatisticsSummary(StatisticsSummary),
+    GraphStatistics(GraphStatistics),
+    GraphNetworkStatistics(GraphNetworkStatistics),
+    HeuristicStats(HeuristicStats),
+    Tracking(Box<TrackingEvent>),
+    // Buttons(Vec<ButtonEvent>),
+    Haptics(HapticsEvent),
+    // AudioDevices(AudioDevicesList),
+    // DriversList(Vec<PathBuf>),
+    ServerRequestsSelfRestart,
 }
 
 // pub fn simpler_frametx_delay(bandwidth_dep:f64, mean_l: f64 )->ResultsFrameTXDelay {

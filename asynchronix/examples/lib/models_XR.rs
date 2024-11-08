@@ -1,14 +1,15 @@
+use crate::lib::alvr_control_socket::{framed_recv, framed_recv_vec, ControlSocketReceiver, ControlSocketSender};
 use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
-
-
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 use crate::debug_print;
 use crate::format_elapsed;
 use crate::lib::HeaderALVRStream;
+
 // use std::intrinsics::size_of;
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
+
 use std::mem;
 use std::net::IpAddr;
 // use std::process::Output;
@@ -16,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use std::time::SystemTime;
+
+
 
 use once_cell::sync::Lazy;
 
@@ -28,6 +31,8 @@ use crate::lib::alvr_stream_socket::{
     SocketBufferSize, SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking,
     VideoPacketHeader,
 };
+
+use crate::lib::alvr_control_socket::{ProtoControlSocket, ControlPacketType}; 
 use tai_time::TaiTime;
 
 use crate::lib::alvr_stream_socket::{
@@ -43,6 +48,11 @@ pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(100);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 use crate::lib::DEBUG_PRINT_ENABLED;
+
+static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
+
+
+
 
 use std::cmp::{self, max};
 use std::collections::VecDeque;
@@ -63,6 +73,7 @@ use crate::lib::{
 use crate::lib::alvr_statistics::StatisticsManager;
 use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
+use super::alvr_stream_socket::CONTROL_STREAM;
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
@@ -95,6 +106,25 @@ pub struct BitrateManager {
     frame_interarrival_average: SlidingWindowAverage<f32>,
 }
 
+impl BitrateManager{
+    pub fn report_network_statistics(
+        &mut self,
+        network_rtt: Duration,
+        peak_throughput_bps: f32,
+        frame_interarrival_s: f32,
+    ) {
+        self.rtt_average.submit_sample(network_rtt);
+
+        self.peak_throughput_average
+            .submit_sample(peak_throughput_bps);
+
+        self.frame_interarrival_average
+            .submit_sample(frame_interarrival_s);
+    }
+}
+
+
+
 // static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> =
 //     Lazy::new(|| Mutex::new(BitrateManager::new(256, 60.0, 30.0)));
 
@@ -103,8 +133,6 @@ pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
-
-static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
 impl BitrateManager {
     // TODO: Add method for CBR
@@ -145,18 +173,25 @@ pub struct XRServer {
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
 
+    pub control_socket_sender: Option<ControlSocketSender<ClientControlPacket>>, 
+    pub control_socket_receiver: Option<ControlSocketReceiver<ClientControlPacket>>, 
+   
+   
     pub outport_videoapp_network: Output<MpduPacket>, // ONLY VIDEO FOR NOW!
 
     pub is_streaming: bool,
 
-    pub fps: f64,
+    pub fps: f32,
 
     // pub sockets: SimRuntimeSockets,
     pub frames_sent_counter: usize,
+
+    pub map_rtt: InstantMap, 
+    pub STATISTICS_MANAGER: StatisticsManager, 
 }
 
 impl XRServer {
-    pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>) -> Self {
+    pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>, frame_rate: f32) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         Self {
             ip_self,
@@ -169,28 +204,80 @@ impl XRServer {
             ),
 
             video_app_sender: None,
+            
             tracking_app_receiver: None,
             statistics_app_receiver: None,
 
+            control_socket_sender: None, 
+            control_socket_receiver: None,
             outport_videoapp_network: Output::default(),
             // output_audio: Output::default(),
             // output_haptics: Output::default(),
             is_streaming: false,
-            fps: 90.0,
+            fps: frame_rate,
             // sockets,
             frames_sent_counter: 0,
+
+            map_rtt : Arc::new(RwLock::new(HashMap::new())), 
+            STATISTICS_MANAGER: StatisticsManager::new(MAX_HISTORY_SIZE, Duration::from_secs_f32(1.0/frame_rate) , 0.0 ), 
         }
     }
 
+    pub fn handle_control_packet(&mut self, packet: ClientControlPacket){
+    
+        if let Some(mut protorecv) = self.control_socket_receiver.clone(){
+            // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap(); 
+            let map_clone: Arc<RwLock<HashMap<u32, Instant>>> = Arc::clone(&self.map_rtt) ;
+
+            match packet {    
+                ClientControlPacket::NetworkStatistics(network_stats) => {
+                            
+                            let now = Instant::now();
+                            let map_rtt_lock = map_clone.read().unwrap();
+                            let mut hashmap = map_rtt_lock.clone();
+                            let frame_id = network_stats.frame_index as u32;
+                            let rtt: Duration;
+
+                            if let Some(send_instant) = hashmap.remove(&frame_id) {
+                                rtt = now.saturating_duration_since(send_instant);
+                            } else {
+                                rtt = Duration::ZERO;
+                            }
+
+                            let (peak_network_throughput_bps, frame_interarrival_s) =
+                                self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt);
+
+                            // BITRATE_MANAGER.lock().report_network_statistics
+                            self.bitrate_manager.report_network_statistics(
+                                rtt,
+                                peak_network_throughput_bps,
+                                frame_interarrival_s,
+                            );   
+                    }
+                _ =>  {println!("UNEXPECTED CONTROL PACKET RECEIVED!!"); }  
+        
+            }
+        }
+
+       
+
+
+
+    }
+
     pub async fn in_from_network(&mut self, packet: MpduPacket) {
-        let header = packet.header_alvr;
+        let header = packet.header_alvr.clone();
         let buffer = packet.data_inner.clone();
+        // println!("XRServer IN NETWORK. Header: {:?}, buffer_len = {}", header, buffer.len()); 
+
         match header.stream_id {
             TRACKING => {
                 if let Some(sock) = self.tracking_app_receiver.clone() {
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
+                
+                    println!("TODO THE REST!!"); 
                 }
             }
             STATISTICS => {
@@ -198,8 +285,27 @@ impl XRServer {
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
+                    println!("TODO THE REST!!"); 
+
                 }
             }
+            
+            CONTROL_STREAM => {
+                if let Some(mut sock) = self.control_socket_sender.as_mut() {
+                    println!("Received control stream!!");      
+                    // Deserialize into ClientControlPacket directly, not a reference
+
+                    // println!("Size of buffer: {}", packet.data_inner.len() ); 
+                    let stats: ClientControlPacket = framed_recv_vec(&packet.data_inner).unwrap(); 
+                    
+                    // println!("STATS IS {:?}", stats); 
+
+                    let results = sock.send(&stats);
+
+                    XRServer::handle_control_packet(self, stats);
+                }
+            }
+            
             _ => {
                 println!("ERROR WRONG STREAM SENT? {} XRSERVER", header.stream_id);
             }
@@ -383,7 +489,7 @@ impl XRServer {
                 let normal = Normal::new(0.0, 5.0).unwrap(); // Mean = 0, Std dev = 5
                 let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
 
-                let time_until_next_frame = Duration::from_secs_f64(1.0 / (self.fps + epsilon));
+                let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps + epsilon));
 
                 context
                     .scheduler
@@ -429,14 +535,25 @@ impl XRServer {
                     .subscribe_to_stream::<ClientStatistics>(STATISTICS, MAX_UNREAD_PACKETS),
             );
 
+            // self.control_receiver = Some(
+            //     stream_socket.subscribe_to_stream::<()>(CONTROL_STREAM,  MAX_UNREAD_PACKETS),
+            // );
+
+            let (proto_socket,_) = ProtoControlSocket::connect(STREAMING_RECV_TIMEOUT).unwrap(); 
+
+            let (mut control_sender, mut control_receiver):
+                    (ControlSocketSender<ClientControlPacket>, ControlSocketReceiver<ClientControlPacket>)
+                    = proto_socket.split().unwrap(); 
+
+            self.control_socket_sender = Some(control_sender);
+            self.control_socket_receiver = Some(control_receiver);  
+
             XRServer::generate_video_frame(self, (), context).await;
             // STEP 2: DO SAME FOR REST OF PACKETS (VIDEO; HAPTICS) and loop using context.scheduler!
             // TODO!
         }
     }
 }
-
-// TODO : More functions to process inputs, handle ABR, etc.
 
 impl Model for XRServer {}
 
@@ -451,8 +568,6 @@ pub struct XRClient {
 
     pub framerate: f32,
 
-    // pub output_statistics: Output<MpduPacket>,
-    // pub output_tracking: Output<MpduPacket>,
     pub output_app_network: Output<MpduPacket>,
 
     pub coordinates: Coords,
@@ -507,8 +622,7 @@ impl XRClient {
         )?;
         let mut packetz = MpduPacket::new();
         packetz.data_inner = buffer[0..packet_size].to_vec();
-        packetz.header_alvr.stream_id = STATISTICS;
-        // packetz.sta_dest_id 
+        packetz.header_alvr.stream_id = CONTROL_STREAM;
         
         self.output_app_network.send(packetz).await; // send to input_XR_app of STA
         Ok(())
@@ -516,17 +630,17 @@ impl XRClient {
 
     pub async fn output_control(&mut self, packet: ClientControlPacket) -> () {
         // Sends directly TCP packets related to Control. For now, just NetworkStatistics
-        println!("output_control"); 
+        // println!("output_control"); 
+        let pack = packet.clone(); 
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
-                let result = Self::framed_send(self, &inner.clone()).await;
-                println!("result: {:?}", result); 
+                let result = Self::framed_send(self, &pack).await;
+                // println!("result: {:?}", result); 
             }
             _ => eprintln!("Uncovered match case!!"),
         }
         ()
     }
-
 
     pub fn video_receive_thread<'a>(
         &'a mut self,
@@ -576,6 +690,7 @@ impl XRClient {
                         println!("UNABLE TO GET HEADER NAL? ");
                         return;
                     };
+
                 }
                 // if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                 //     stats.report_video_packet_received(header.timestamp);
@@ -679,7 +794,7 @@ impl XRClient {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             println!("WHAAAAAAAAAAATDOESTHISDO!!");
-
+            panic!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA PANIIIIIC"); 
             let bytes_transmitted = {
                 let mut guard = receiver.lock().unwrap();
                 guard.send(&mut buffer)
@@ -737,8 +852,6 @@ impl XRClient {
 
     pub async fn in_from_network(&mut self, packet: MpduPacket, context: &Context<Self>) {
         
-        
-        
         let header = packet.header_alvr;
 
         let buffer = packet.data_inner.clone();
@@ -773,6 +886,8 @@ impl XRClient {
                         let resulllt = StreamSocket::recv(&mut ssocket, sock.inner, context);
                         // println!("Result of reader? {:?}" , resulllt);
                     }
+
+
 
                     // Decode next frame from ReconstructedPackets and put in queue
                 } else {
@@ -822,7 +937,7 @@ pub struct STA_extended {
     pub output_network_port: Output<MpduPacket>,
 
     pub to_app_socket: Output<MpduPacket>,
-    pub to_app_socket_end_ampdu: Output<bool>,
+    // pub to_app_socket_end_ampdu: Output<bool>,
 
     pub sta_id: i32,
     pub destination_id: i32,
@@ -859,7 +974,7 @@ impl STA_extended {
             output_network_port: Default::default(),
 
             to_app_socket: Default::default(),
-            to_app_socket_end_ampdu: Default::default(),
+            // to_app_socket_end_ampdu: Default::default(),
 
             sta_id: src,
             destination_id: dest,
@@ -917,7 +1032,8 @@ impl STA_extended {
         
         if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
             let elapsed = context.scheduler.time();
-            for packet in ampdu_packet.mpdu_packets {
+            for packet in ampdu_packet.mpdu_packets { // iterate through whole AMPDU
+
                 debug_print!(
                     DebugColor::Red,
                     "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
@@ -927,113 +1043,51 @@ impl STA_extended {
                     packet.sta_src_id,
                     packet.sta_dest_id,
                 );
-    
+                // if packet.data_inner.len() >= 100 {
+                debug_print!(
+                    DebugColor::DarkRed,
+                    "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
+                    format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
+                );
+
                 self.received_packet_counter += 1;
                 self.to_app_socket.send(packet.clone()).await;
-    
-                ///////////// TODOTODO CONNECT WITH StreamReceiver
-                if packet.data_inner.len() >= 100 {
-                    debug_print!(
-                        DebugColor::DarkRed,
-                        "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                        format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
-                    );
-    
-                    if let Ok((
-                        packet_length,
-                        stream_id,
-                        next_packet_index,
-                        shards_count,
-                        shard_index,
-                        tx_r_instant,
-                    )) = parse_shard_data(&packet.data_inner[..100])
-                    {
-                        let str_id = match stream_id {
-                            0 => "Tracking",
-                            1 => "Haptics",
-                            2 => "Audio",
-                            3 => "Video",
-                            4 => "Statistics",
-                            _ => "?? IDK",
-                        };
-                        debug_print!(
-                            DebugColor::DarkRed,
-                            "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
-                            packet_length,
-                            str_id,
-                            next_packet_index,
-                            shards_count,
-                            shard_index,
-                            tx_r_instant
-                        );
-                    }
-                }
+
+                // if let Ok((
+                //     packet_length,
+                //     stream_id,
+                //     next_packet_index,
+                //     shards_count,
+                //     shard_index,
+                //     tx_r_instant,
+                // )) = parse_shard_data(&packet.data_inner[..100])
+                //     {
+                //         let str_id = match stream_id {
+                //             0 => "Tracking",
+                //             1 => "Haptics",
+                //             2 => "Audio",
+                //             3 => "Video",
+                //             4 => "Statistics",
+                //             _ => "?? IDK",
+                //         };
+                //         debug_print!(
+                //             DebugColor::DarkRed,
+                //             "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
+                //             packet_length,
+                //             str_id,
+                //             next_packet_index,
+                //             shards_count,
+                //             shard_index,
+                //             tx_r_instant
+                //         );
+                //     }
+                // else{println!("CONTROL PACKET MAYBE??")}
+
+
             }
-    
-            self.to_app_socket_end_ampdu.send(true).await; // once whole ampdu is written, send signal to APP to read channel/buffer (to ensure packets are available)
         }
     }
-        
-    pub async fn input_wireless_UL(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
-        
-        if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
-            let elapsed = context.scheduler.time();
-            for packet in ampdu_packet.mpdu_packets {
-                debug_print!(
-                    DebugColor::Red,
-                    "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
-                    format_elapsed!(elapsed),
-                    self.sta_id,
-                    packet.packet_id,
-                    packet.sta_src_id,
-                    packet.sta_dest_id,
-                );
-    
-                self.received_packet_counter += 1;
-                self.to_app_socket.send(packet.clone()).await;
-    
-                ///////////// TODOTODO CONNECT WITH StreamReceiver
-                if packet.data_inner.len() >= 100 {
-                    debug_print!(
-                        DebugColor::DarkRed,
-                        "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                        format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
-                    );
-    
-                    if let Ok((
-                        packet_length,
-                        stream_id,
-                        next_packet_index,
-                        shards_count,
-                        shard_index,
-                        tx_r_instant,
-                    )) = parse_shard_data(&packet.data_inner[..100])
-                    {
-                        let str_id = match stream_id {
-                            0 => "Tracking",
-                            1 => "Haptics",
-                            2 => "Audio",
-                            3 => "Video",
-                            4 => "Statistics",
-                            _ => "?? IDK",
-                        };
-                        debug_print!(
-                            DebugColor::DarkRed,
-                            "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
-                            packet_length,
-                            str_id,
-                            next_packet_index,
-                            shards_count,
-                            shard_index,
-                            tx_r_instant
-                        );
-                    }
-                }
-            }
-    
-            self.to_app_socket_end_ampdu.send(true).await; // once whole ampdu is written, send signal to APP to read channel/buffer (to ensure packets are available)
-        }      
-    }
+      
 
     fn send_packet_BG<'a>(
         &'a mut self,
