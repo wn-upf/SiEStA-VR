@@ -1,3 +1,4 @@
+use asynchronix::model::Context;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
@@ -80,8 +81,7 @@ use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(2000);
 
-use crate::lib::INITIAL_BITRATE_MBPS_SIM; 
-
+use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
@@ -162,7 +162,7 @@ fn main() {
 
     let t0 = MonotonicTime::EPOCH;
     let mut xr_server = XRServer::new(ip_src, ip_dest, t0);
-    let mut xr_client_app = XRClient::new(ip_src);
+    let mut xr_client_app = XRClient::new(ip_src, INITIAL_FRAMERATE_FPS);
 
     let mut sta1_xr: STA_extended = STA_extended::new(
         INITIAL_BITRATE_MBPS_SIM as f64 * 1E6,
@@ -196,13 +196,13 @@ fn main() {
     let mut mbox_sta_xr_server = Mailbox::new();
     let mbox_queue = Mailbox::new();
     let mbox_sta_client_xr = Mailbox::new();
-    let mbox_client_xr_app = Mailbox::new();
+    let mbox_xr_client_app = Mailbox::new();
 
     let xr_server_address = mbox_xr_server.address();
     let sta1_address = mbox_sta_xr_server.address();
     let queue_address = mbox_queue.address();
     let sta_client_address = mbox_sta_client_xr.address();
-    let xr_client_app_address = mbox_client_xr_app.address();
+    let xr_client_app_address = mbox_xr_client_app.address();
 
     let csv_data_handle = queue.csv_metrics.get_data_handle(); // all queue stats for csv (per packet)
     let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle(); // cumulative averages, sliding windows
@@ -224,10 +224,10 @@ fn main() {
 
     sta_client
         .to_app_socket
-        .connect(XRClient::in_from_network, &mbox_client_xr_app);
+        .connect(XRClient::in_from_network, &mbox_xr_client_app);
     // sta_client
     //     .to_app_socket_end_ampdu
-    //     .connect(XRClient::end_ampdu_input, &mbox_client_xr_app); 
+    //     .connect(XRClient::end_ampdu_input, &mbox_xr_client_app);
 
     sta1_xr
         .to_app_socket
@@ -236,18 +236,22 @@ fn main() {
         .output_network_port
         .connect(QueueModule::input, &mbox_queue);
 
+    xr_client_app
+        .output_app_network
+        .connect(STA_extended::input_XR_app, &mbox_sta_client_xr);
+
     // // connect applications to STAs:
     // sta1_xr.to_app_socket.connect(XRServer::in_from_network, &mbox_sta_xr );
     // sta_client.to_app_socket.connect(XRClient::in_from_network, &mbox_sta_client_xr);
 
     // xr_client.outport_streams.connect(STA_extended::input_XR_app, &mbox_sta_client_xr);
 
-    let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
+    let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(128)
         .add_model(xr_server, mbox_xr_server, "ALVR Server")
         .add_model(sta1_xr, mbox_sta_xr_server, "STA1 (XR_s)")
         .add_model(queue, mbox_queue, "Queue")
         .add_model(sta_client, mbox_sta_client_xr, "STA 2 (XR Client)")
-        .add_model(xr_client_app, mbox_client_xr_app, "ALVR Client")
+        .add_model(xr_client_app, mbox_xr_client_app, "ALVR Client")
         .init(t0);
 
     let scheduler = simu.scheduler();
@@ -281,6 +285,8 @@ fn main() {
             &xr_client_app_address,
         )
         .unwrap();
+
+    // scheduler.schedule_periodic_event(Duration::from_millis(10), Duration::from_millis(10), XRClient::video_receive_thread, (), &xr_client_app_address).unwrap();  // video receiver thread of ALVR
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
