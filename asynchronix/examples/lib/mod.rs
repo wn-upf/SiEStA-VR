@@ -615,7 +615,7 @@ pub struct MpduPacket {
 
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
-    pub sta_dest_coords: Coords,
+    pub sta_src_coords: Coords,
     pub queue_length_when_out: usize,
 
     pub data_inner: Vec<u8>,
@@ -636,7 +636,7 @@ impl MpduPacket {
 
             sta_src_id: 0,
             sta_dest_id: 0,
-            sta_dest_coords: Coords::new(),
+            sta_src_coords: Coords::new(),
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
@@ -652,7 +652,7 @@ impl MpduPacket {
 pub struct AmpduPacket {
     pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
     pub total_length: usize,           // Total length of aggregated packets
-    pub sta_id: i32,                   // ID for the source STA
+    pub sta_dest_id: i32,                   // ID for the source STA
     pub size: i32,
     pub coordinates: Coords,
 }
@@ -662,7 +662,7 @@ impl AmpduPacket {
         AmpduPacket {
             mpdu_packets: Vec::new(), // Initialize an empty vector for MPDU packets
             total_length: 0,          // Initialize total length to 0
-            sta_id: -1, // Initialize STA_ID to -1 (assuming -1 indicates uninitialized)
+            sta_dest_id: -1, // Initialize STA_ID to -1 (assuming -1 indicates uninitialized)
             size: 0,    // Initialize size to 0
             coordinates: Coords {
                 x: 0.0,
@@ -675,7 +675,7 @@ impl AmpduPacket {
     pub fn print(&self) {
         println!(
             "\x1b[33m \t\t\t\t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
-            self.size, self.sta_id, self.total_length
+            self.size, self.sta_dest_id, self.total_length
         );
         for packet in &self.mpdu_packets {
             println!(
@@ -695,7 +695,7 @@ impl AmpduPacket {
                                    // self.mpdu_packets.reserve(MAX_AMPDU_SIZE as usize);
         self.total_length = 0; // Reset total length
         self.size = 0; // Reset size
-        self.sta_id = -1; // Reset STA_ID (assuming -1 is an uninitialized value)
+        self.sta_dest_id = -1; // Reset STA_ID (assuming -1 is an uninitialized value)
         self.coordinates = Coords {
             x: 0.0,
             y: 0.0,

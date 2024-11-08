@@ -188,13 +188,16 @@ fn main() {
         queue.STA_coords_grid[i] = vec_coords[i];
     }
 
-    let mbox_xr_server = Mailbox::new();
-    let mbox_sta_xr_server = Mailbox::new();
-    let mbox_queue = Mailbox::new();
-    let mbox_sta_client_xr = Mailbox::new();
+    let mbox_xr_server_app = Mailbox::new();
     let mbox_xr_client_app = Mailbox::new();
 
-    let xr_server_address = mbox_xr_server.address();
+    let mbox_queue = Mailbox::new();
+    
+    let mbox_sta_client_xr = Mailbox::new();
+    let mbox_sta_xr_server = Mailbox::new();
+
+    let xr_server_app_address = mbox_xr_server_app.address();
+
     let sta1_address = mbox_sta_xr_server.address();
     let queue_address = mbox_queue.address();
     let sta_client_address = mbox_sta_client_xr.address();
@@ -213,24 +216,27 @@ fn main() {
     sta1_xr
         .output_network_port
         .connect(QueueModule::input, &mbox_queue);
+
+    sta_client
+        .output_network_port
+        .connect(QueueModule::input_UL, &mbox_queue);
+
     queue
         .output_port
-        .connect(STA_extended::input_wireless, &mbox_sta_client_xr);
-    // queue.output_port.connect(STA_extended::input_wireless, &mbox_sta_xr_server);
+        .connect(STA_extended::input_wireless, &mbox_sta_client_xr);   
+    
+    queue
+        .output_port
+        .connect(STA_extended::input_wireless_UL, &mbox_sta_xr_server); // UL CONNECTION QUEUE
 
     sta_client
         .to_app_socket
         .connect(XRClient::in_from_network, &mbox_xr_client_app);
-    // sta_client
-    //     .to_app_socket_end_ampdu
-    //     .connect(XRClient::end_ampdu_input, &mbox_xr_client_app);
 
     sta1_xr
         .to_app_socket
-        .connect(XRServer::in_from_network, &mbox_xr_server);
-    sta_client
-        .output_network_port
-        .connect(QueueModule::input, &mbox_queue);
+        .connect(XRServer::in_from_network, &mbox_xr_server_app);
+    
 
     xr_client_app
         .output_app_network
@@ -243,7 +249,7 @@ fn main() {
     // xr_client.outport_streams.connect(STA_extended::input_XR_app, &mbox_sta_client_xr);
 
     let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(128)
-        .add_model(xr_server, mbox_xr_server, "ALVR Server")
+        .add_model(xr_server, mbox_xr_server_app, "ALVR Server")
         .add_model(sta1_xr, mbox_sta_xr_server, "STA1 (XR_s)")
         .add_model(queue, mbox_queue, "Queue")
         .add_model(sta_client, mbox_sta_client_xr, "STA 2 (XR Client)")
@@ -265,22 +271,25 @@ fn main() {
 
     let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
 
+
+    scheduler // Configure XRClient before sending packets to it
+    .schedule_event(
+        Duration::from_nanos(1),
+        XRClient::configure_streams,
+        (),
+        &xr_client_app_address,
+    )
+    .unwrap();
+
     scheduler
         .schedule_event(
             duration_scheduled1,
             XRServer::connection_pipeline,
             ip_dest,
-            &xr_server_address,
+            &xr_server_app_address,
         )
         .unwrap();
-    scheduler
-        .schedule_event(
-            Duration::from_nanos(1),
-            XRClient::configure_streams,
-            (),
-            &xr_client_app_address,
-        )
-        .unwrap();
+
 
     // scheduler.schedule_periodic_event(Duration::from_millis(10), Duration::from_millis(10), XRClient::video_receive_thread, (), &xr_client_app_address).unwrap();  // video receiver thread of ALVR
 

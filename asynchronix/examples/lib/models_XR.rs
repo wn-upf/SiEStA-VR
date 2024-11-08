@@ -489,7 +489,7 @@ impl XRClient {
         &mut self,
         packet: &S,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("FRAMEDSEND!");
+        // println!("FRAMEDSEND!");
         let mut buffer = vec![0; MAX_PACKET_SIZE_RECV];
 
         let serialized_size = bincode::serialized_size(&packet)? as usize;
@@ -505,26 +505,28 @@ impl XRClient {
             &mut buffer[FRAMED_PREFIX_CONTROL_LENGTH..packet_size],
             &packet,
         )?;
-
         let mut packetz = MpduPacket::new();
         packetz.data_inner = buffer[0..packet_size].to_vec();
         packetz.header_alvr.stream_id = STATISTICS;
-
-        self.output_app_network.send(packetz).await;
+        // packetz.sta_dest_id 
+        
+        self.output_app_network.send(packetz).await; // send to input_XR_app of STA
         Ok(())
     }
 
     pub async fn output_control(&mut self, packet: ClientControlPacket) -> () {
         // Sends directly TCP packets related to Control. For now, just NetworkStatistics
+        println!("output_control"); 
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
-                let result = Self::framed_send(self, &inner).await;
-                println!("Result = {:?}", result.unwrap());
+                let result = Self::framed_send(self, &inner.clone()).await;
+                println!("result: {:?}", result); 
             }
             _ => eprintln!("Uncovered match case!!"),
         }
         ()
     }
+
 
     pub fn video_receive_thread<'a>(
         &'a mut self,
@@ -568,8 +570,7 @@ impl XRClient {
                     println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
-                    self.output_control(ClientControlPacket::NetworkStatistics(net))
-                        .await;
+                    self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
                     let Ok((header, nal)) = data.get() else {
                         println!("UNABLE TO GET HEADER NAL? ");
@@ -735,6 +736,9 @@ impl XRClient {
     }
 
     pub async fn in_from_network(&mut self, packet: MpduPacket, context: &Context<Self>) {
+        
+        
+        
         let header = packet.header_alvr;
 
         let buffer = packet.data_inner.clone();
@@ -901,69 +905,134 @@ impl STA_extended {
         packet.sta_src_id = self.sta_id;
         packet.sta_dest_id = self.destination_id;
 
-        packet.sta_dest_coords = self.sta_coordinates;
+        packet.sta_src_coords = self.sta_coordinates; 
+
+        // println!("STA IN: packet.src_id = {}, packet.sta_dest_id = {}\n Coords src: {:?}", packet.sta_src_id, packet.sta_dest_id, packet.sta_src_coords);
 
         self.output_network_port.send(packet.clone()).await;
         self.num_packets_sent += 1;
     }
 
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
-        let elapsed = context.scheduler.time();
-
-        for packet in ampdu_packet.mpdu_packets {
-            debug_print!(
-                DebugColor::Red,
-                "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
-                format_elapsed!(elapsed),
-                self.sta_id,
-                packet.packet_id,
-                packet.sta_src_id,
-                packet.sta_dest_id,
-            );
-
-            self.received_packet_counter += 1;
-            self.to_app_socket.send(packet.clone()).await;
-
-            ///////////// TODOTODO CONNECT WITH StreamReceiver
-            if packet.data_inner.len() >= 100 {
+        
+        if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
+            let elapsed = context.scheduler.time();
+            for packet in ampdu_packet.mpdu_packets {
                 debug_print!(
-                    DebugColor::DarkRed,
-                    "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                    format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
+                    DebugColor::Red,
+                    "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
+                    format_elapsed!(elapsed),
+                    self.sta_id,
+                    packet.packet_id,
+                    packet.sta_src_id,
+                    packet.sta_dest_id,
                 );
-
-                if let Ok((
-                    packet_length,
-                    stream_id,
-                    next_packet_index,
-                    shards_count,
-                    shard_index,
-                    tx_r_instant,
-                )) = parse_shard_data(&packet.data_inner[..100])
-                {
-                    let str_id = match stream_id {
-                        0 => "Tracking",
-                        1 => "Haptics",
-                        2 => "Audio",
-                        3 => "Video",
-                        4 => "Statistics",
-                        _ => "?? IDK",
-                    };
+    
+                self.received_packet_counter += 1;
+                self.to_app_socket.send(packet.clone()).await;
+    
+                ///////////// TODOTODO CONNECT WITH StreamReceiver
+                if packet.data_inner.len() >= 100 {
                     debug_print!(
                         DebugColor::DarkRed,
-                        "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
+                        "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
+                        format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
+                    );
+    
+                    if let Ok((
                         packet_length,
-                        str_id,
+                        stream_id,
                         next_packet_index,
                         shards_count,
                         shard_index,
-                        tx_r_instant
-                    );
+                        tx_r_instant,
+                    )) = parse_shard_data(&packet.data_inner[..100])
+                    {
+                        let str_id = match stream_id {
+                            0 => "Tracking",
+                            1 => "Haptics",
+                            2 => "Audio",
+                            3 => "Video",
+                            4 => "Statistics",
+                            _ => "?? IDK",
+                        };
+                        debug_print!(
+                            DebugColor::DarkRed,
+                            "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
+                            packet_length,
+                            str_id,
+                            next_packet_index,
+                            shards_count,
+                            shard_index,
+                            tx_r_instant
+                        );
+                    }
                 }
             }
+    
+            self.to_app_socket_end_ampdu.send(true).await; // once whole ampdu is written, send signal to APP to read channel/buffer (to ensure packets are available)
         }
-
-        self.to_app_socket_end_ampdu.send(true).await; // once whole ampdu is written, send signal to APP to read channel/buffer (to ensure packets are available)
+    }
+        
+    pub async fn input_wireless_UL(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
+        
+        if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
+            let elapsed = context.scheduler.time();
+            for packet in ampdu_packet.mpdu_packets {
+                debug_print!(
+                    DebugColor::Red,
+                    "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
+                    format_elapsed!(elapsed),
+                    self.sta_id,
+                    packet.packet_id,
+                    packet.sta_src_id,
+                    packet.sta_dest_id,
+                );
+    
+                self.received_packet_counter += 1;
+                self.to_app_socket.send(packet.clone()).await;
+    
+                ///////////// TODOTODO CONNECT WITH StreamReceiver
+                if packet.data_inner.len() >= 100 {
+                    debug_print!(
+                        DebugColor::DarkRed,
+                        "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
+                        format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
+                    );
+    
+                    if let Ok((
+                        packet_length,
+                        stream_id,
+                        next_packet_index,
+                        shards_count,
+                        shard_index,
+                        tx_r_instant,
+                    )) = parse_shard_data(&packet.data_inner[..100])
+                    {
+                        let str_id = match stream_id {
+                            0 => "Tracking",
+                            1 => "Haptics",
+                            2 => "Audio",
+                            3 => "Video",
+                            4 => "Statistics",
+                            _ => "?? IDK",
+                        };
+                        debug_print!(
+                            DebugColor::DarkRed,
+                            "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
+                            packet_length,
+                            str_id,
+                            next_packet_index,
+                            shards_count,
+                            shard_index,
+                            tx_r_instant
+                        );
+                    }
+                }
+            }
+    
+            self.to_app_socket_end_ampdu.send(true).await; // once whole ampdu is written, send signal to APP to read channel/buffer (to ensure packets are available)
+        }      
     }
 
     fn send_packet_BG<'a>(
@@ -992,7 +1061,7 @@ impl STA_extended {
                 packet.sta_src_id = self.sta_id;
                 packet.sta_dest_id = self.destination_id;
 
-                packet.sta_dest_coords = self.sta_coordinates;
+                packet.sta_src_coords = self.sta_coordinates;
 
                 self.output_network_port.send(packet.clone()).await;
                 self.num_packets_sent += 1;

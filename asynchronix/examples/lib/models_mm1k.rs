@@ -180,7 +180,7 @@ impl STA_source {
                 packet.sta_src_id = self.sta_id;
                 packet.sta_dest_id = self.destination_id;
 
-                packet.sta_dest_coords = self.sta_coordinates;
+                packet.sta_src_coords = self.sta_coordinates;
 
                 self.output_port.send(packet.clone()).await;
                 self.num_packets_sent += 1;
@@ -403,13 +403,48 @@ impl QueueModule {
         }
     }
 
+    pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
+        self.arrived_packet_counter += 1;
+        self.queue_length_counter += self.queue.len();
+
+        let now = context.scheduler.time();
+        if self.queue.len() < self.queue_maxsize {
+            packet.queue_in_instant = now;
+            self.queue.push_back(packet.clone());
+
+            debug_print!(
+                DebugColor::Green,
+                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
+                format_elapsed!(now),
+                packet.packet_id,
+                packet.sta_src_id,
+                packet.sta_dest_id,
+                self.queue.len()
+            );
+
+            if self.queue.len() == 1 && !self.packet_being_served {
+                self.deque_schedule_service((), context).await;
+            }
+        } else {
+            self.blocked_packet_counter += 1;
+            let elapsed = context.scheduler.time();
+            debug_print!(
+                DebugColor::Red,
+                "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {}",
+                format_elapsed!(elapsed),
+                packet.packet_id,
+                self.queue.len()
+            );
+        }
+    }
+
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
         debug_print!(
             DebugColor::Red,
             "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
             format_elapsed!(elapsed),
-            AMPDU_sent.sta_id,
+            AMPDU_sent.sta_dest_id,
             AMPDU_sent.mpdu_packets.len(),
             self.queue.len(),
             AMPDU_sent.total_length,
@@ -417,12 +452,16 @@ impl QueueModule {
         );
         // AMPDU_sent.print();
         self.packet_being_served = false;
-        self.output_port.send(AMPDU_sent).await;
-        self.aux_ampdu_serviced.reset();
+
+        self.output_port.send(AMPDU_sent.clone()).await;
+        
 
         if self.queue.len() > 0 {
-            self.deque_schedule_service((), context).await;
+            context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
         }
+        self.aux_ampdu_serviced.reset();
+
+        
     }
 
     fn deque_schedule_service<'a>(
@@ -436,8 +475,8 @@ impl QueueModule {
 
                 // Initialize AMPDU with first packet's info
                 self.aux_ampdu_serviced.reset();
-                self.aux_ampdu_serviced.sta_id = first_packet.sta_dest_id;
-                self.aux_ampdu_serviced.coordinates = first_packet.sta_dest_coords.clone();
+                self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
+                self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
 
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
@@ -446,7 +485,7 @@ impl QueueModule {
                 while packet_index < self.queue.len() {
                     if let Some(current_packet) = self.queue.get(packet_index) {
                         // Skip packets not matching AMPDU's destination
-                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_id {
+                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id {
                             packet_index += 1;
                             continue;
                         }
@@ -460,7 +499,7 @@ impl QueueModule {
                             new_total_length as f64,
                             new_size,
                             self.coords_queue,
-                            current_packet.sta_dest_coords,
+                            current_packet.sta_src_coords, // gets transmission delay between AP and the source of the packet itself
                             P_TX,
                         );
 

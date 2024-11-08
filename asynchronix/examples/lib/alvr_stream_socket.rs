@@ -926,11 +926,11 @@ impl StreamSocket {
                     .buffer
                     .resize(in_progress_packet.buffer_length, 0);
             }
-            println!(
-                "final length: {} (buffer_length = {})",
-                in_progress_packet.buffer.len(),
-                in_progress_packet.buffer_length
-            );
+            // println!(
+            //     "final length: {} (buffer_length = {})",
+            //     in_progress_packet.buffer.len(),
+            //     in_progress_packet.buffer_length
+            // );
         }
 
         let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
@@ -1371,7 +1371,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             }
         }
 
-        println!("AAAAAAAAAAAAA!!!!!!!!!");
+        // println!("AAAAAAAAAAAAA!!!!!!!!!");
         let interarrival = self.frame_interarrival;
         let rx_bytes_val = self.rx_bytes;
         let rx_counter = self.rx_shard_counter;
