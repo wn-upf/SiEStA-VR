@@ -1,20 +1,16 @@
 use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
-use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
-use asynchronix::time::MonotonicTime;
-use futures_util::Stream;
 
-use crate::lib::models_mm1k::{QueueModule, QueueStats, STA_source, Sink};
 
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 use crate::debug_print;
 use crate::format_elapsed;
-use crate::lib::{write_all_sta_csvs, HeaderALVRStream};
+use crate::lib::HeaderALVRStream;
 // use std::intrinsics::size_of;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::mem;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 // use std::process::Output;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,7 +24,7 @@ use once_cell::sync::Lazy;
 
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
-    parse_shard_data, AnyhowToCon, ConnectionError, DscpTos, Haptics, ReceiverData,
+    parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData,
     SocketBufferSize, SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking,
     VideoPacketHeader,
 };
@@ -48,10 +44,8 @@ pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 use crate::lib::DEBUG_PRINT_ENABLED;
 
-use rand::random;
 use std::cmp::{self, max};
 use std::collections::VecDeque;
-use std::env;
 use std::f64::consts::PI;
 use std::future::Future;
 
@@ -62,8 +56,8 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::lib::{
-    exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords, DebugColor,
-    MpduPacket, SlidingWindowAverage, MAX_AMPDU_SIZE, P_TX,
+    exponential, AmpduPacket, Coords, DebugColor,
+    MpduPacket, SlidingWindowAverage,
 };
 
 use crate::lib::alvr_statistics::StatisticsManager;
@@ -193,14 +187,14 @@ impl XRServer {
         let buffer = packet.data_inner.clone();
         match header.stream_id {
             TRACKING => {
-                if let Some(mut sock) = self.tracking_app_receiver.clone() {
+                if let Some(sock) = self.tracking_app_receiver.clone() {
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                 }
             }
             STATISTICS => {
-                if let Some(mut sock) = self.statistics_app_receiver.clone() {
+                if let Some(sock) = self.statistics_app_receiver.clone() {
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
@@ -374,12 +368,12 @@ impl XRServer {
                     .get_range_mut(0, payload.len())
                     .copy_from_slice(&payload);
 
-                let mut arc_receiver: Arc<Mutex<Box<dyn SocketReader>>> =
+                let arc_receiver: Arc<Mutex<Box<dyn SocketReader>>> =
                     send_socket.app_network_interface.clone();
 
                 let send_result = send_socket.send(buffer_emu, &context);
 
-                let mut buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+                let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 
                 // let mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>> = arc_receiver.lock().unwrap();
 
@@ -743,12 +737,12 @@ impl XRClient {
     pub async fn in_from_network(&mut self, packet: MpduPacket, context: &Context<Self>) {
         let header = packet.header_alvr;
 
-        let mut buffer = packet.data_inner.clone();
+        let buffer = packet.data_inner.clone();
         // println!("buffer is {:?}", &buffer[..100]);
 
         match header.stream_id.clone() {
             HAPTICS => {
-                if let Some(mut sock) = self.input_app_haptics.clone() {
+                if let Some(sock) = self.input_app_haptics.clone() {
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
@@ -757,7 +751,7 @@ impl XRClient {
             }
 
             AUDIO => {
-                if let Some(mut sock) = self.input_app_audio.clone() {
+                if let Some(sock) = self.input_app_audio.clone() {
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                     let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
@@ -765,10 +759,10 @@ impl XRClient {
                 }
             }
             VIDEO => {
-                if let Some(mut sock) = self.input_app_video.clone() {
+                if let Some(sock) = self.input_app_video.clone() {
                     // println!("app lock");
                     let sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
-                    let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                    let new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                     // println!("reader lock");
 
                     if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {

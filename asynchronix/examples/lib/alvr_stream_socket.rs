@@ -1,4 +1,4 @@
-use asynchronix::model::{Context, Model};
+use asynchronix::model::Context;
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 #[allow(unused_imports)]
 #[allow(dead_code)]
@@ -13,7 +13,7 @@ use std::{
     mem,
     // net::{TcpListener, UdpSocket},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::lib::models_XR::{
@@ -21,7 +21,7 @@ use crate::lib::models_XR::{
     XRServer, // ,XRClient
 };
 
-use crate::lib::models_XR::{SHARD_PREFIX_SIZE, UPDATE_BITRATE_INTERVAL};
+use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};

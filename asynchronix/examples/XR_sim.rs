@@ -1,4 +1,3 @@
-use asynchronix::model::Context;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
@@ -17,11 +16,9 @@ use asynchronix::time::MonotonicTime;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
 // use tai_time::TaiTime;
-use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
-};
+use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 mod lib; // for calling m own local library
-use crate::lib::models_mm1k::{QueueModule, QueueStats, Sink};
+use crate::lib::models_mm1k::{QueueModule, QueueStats};
 use crate::lib::{
     exponential,
     frametransmission_delay,
@@ -86,7 +83,6 @@ use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
-use crate::lib::DEBUG_PRINT_ENABLED;
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
@@ -193,7 +189,7 @@ fn main() {
     }
 
     let mbox_xr_server = Mailbox::new();
-    let mut mbox_sta_xr_server = Mailbox::new();
+    let mbox_sta_xr_server = Mailbox::new();
     let mbox_queue = Mailbox::new();
     let mbox_sta_client_xr = Mailbox::new();
     let mbox_xr_client_app = Mailbox::new();

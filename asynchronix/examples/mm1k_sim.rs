@@ -15,33 +15,25 @@ use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::STA_source;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::sync::{Arc, Mutex};
 
 // mod lib; // for calling m own local library
 mod lib;
 use crate::lib::{
-    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats, perStaStats,
-    write_all_sta_csvs, AmpduPacket, Coords, CsvData, CsvType, CumulativeStats, DebugColor,
-    MpduPacket, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
+    compute_mm1k_metrics, exponential, frametransmission_delay, perStaLockStats,
+    write_all_sta_csvs, Coords, CsvData, DebugColor, MAX_AMPDU_SIZE, P_TX,
 };
 
 use crate::lib::models_mm1k::{QueueModule, QueueStats, Sink};
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
-use rand::Rng;
-use std::cmp::{self, max};
-use std::collections::VecDeque;
 use std::env;
-use std::f64::consts::PI;
-use std::future::Future;
 
-use asynchronix::model::{Context, Model};
-use asynchronix::ports::Output;
+use asynchronix::model::Model;
 
-use crate::lib::DEBUG_PRINT_ENABLED;
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////// SIMULATION ////////////////////////////////////////////////////////////////////////////////////
