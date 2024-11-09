@@ -44,7 +44,7 @@ pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
 pub const CAPACITY_RX_BUFFER: usize = 2000;
-pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(100);
+pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 use crate::lib::DEBUG_PRINT_ENABLED;
@@ -265,53 +265,55 @@ impl XRServer {
 
     }
 
-    pub async fn in_from_network(&mut self, packet: MpduPacket) {
-        let header = packet.header_alvr.clone();
-        let buffer = packet.data_inner.clone();
-        // println!("XRServer IN NETWORK. Header: {:?}, buffer_len = {}", header, buffer.len()); 
+    pub async fn in_from_network(&mut self, packet_vec: Vec<MpduPacket>) {
+        for packet in packet_vec{
+            let header = packet.header_alvr.clone();
+            let buffer = packet.data_inner.clone();
+            // println!("XRServer IN NETWORK. Header: {:?}, buffer_len = {}", header, buffer.len()); 
 
-        match header.stream_id {
-            TRACKING => {
-                if let Some(sock) = self.tracking_app_receiver.clone() {
-                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
-                    let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
-                    let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                
-                    println!("TODO THE REST!!"); 
-                }
-            }
-            STATISTICS => {
-                if let Some(sock) = self.statistics_app_receiver.clone() {
-                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
-                    let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
-                    let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                    println!("TODO THE REST!!"); 
-
-                }
-            }
-            
-            CONTROL_STREAM => {
-                if let Some(mut sock) = self.control_socket_sender.as_mut() {
-                    println!("Received control stream!!");      
-                    // Deserialize into ClientControlPacket directly, not a reference
-
-                    // println!("Size of buffer: {}", packet.data_inner.len() ); 
-                    let stats: ClientControlPacket = framed_recv_vec(&packet.data_inner).unwrap(); 
+            match header.stream_id {
+                TRACKING => {
+                    if let Some(sock) = self.tracking_app_receiver.clone() {
+                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                        let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                     
-                    // println!("STATS IS {:?}", stats); 
-
-                    let results = sock.send(&stats);
-
-                    XRServer::handle_control_packet(self, stats);
+                        println!("TODO THE REST!!"); 
+                    }
                 }
-            }
-            
-            _ => {
-                println!("ERROR WRONG STREAM SENT? {} XRSERVER", header.stream_id);
-            }
-        };
+                STATISTICS => {
+                    if let Some(sock) = self.statistics_app_receiver.clone() {
+                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                        let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
+                        println!("TODO THE REST!!"); 
 
-        // Read channel mpsc of Vec<u8> into the streamsocket!
+                    }
+                }
+                
+                CONTROL_STREAM => {
+                    if let Some(mut sock) = self.control_socket_sender.as_mut() {
+                        println!("Received control stream!!");      
+                        // Deserialize into ClientControlPacket directly, not a reference
+
+                        // println!("Size of buffer: {}", packet.data_inner.len() ); 
+                        let stats: ClientControlPacket = framed_recv_vec(&packet.data_inner).unwrap(); 
+                        
+                        // println!("STATS IS {:?}", stats); 
+
+                        let results = sock.send(&stats);
+
+                        XRServer::handle_control_packet(self, stats);
+                    }
+                }
+                
+                _ => {
+                    println!("ERROR WRONG STREAM SENT? {} XRSERVER", header.stream_id);
+                }
+            };
+
+        }
+        
     }
 
     fn read_app_send_network_interface<'a>(
@@ -396,7 +398,7 @@ impl XRServer {
                                 };
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
 
-                                self.outport_videoapp_network.send(packet.clone()).await;
+                                self.outport_videoapp_network.send(packet).await;
                             } else {
                                 println!(
                                     "{}",
@@ -850,61 +852,63 @@ impl XRClient {
         }
     }
 
-    pub async fn in_from_network(&mut self, packet: MpduPacket, context: &Context<Self>) {
+    pub async fn in_from_network(&mut self, packet_vec: Vec<MpduPacket>, context: &Context<Self>) {
         
-        let header = packet.header_alvr;
 
-        let buffer = packet.data_inner.clone();
-        // println!("buffer is {:?}", &buffer[..100]);
+        for packet in packet_vec{
 
-        match header.stream_id.clone() {
-            HAPTICS => {
-                if let Some(sock) = self.input_app_haptics.clone() {
-                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
-                    let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
-                    let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                    println!("receiver: {:?}", receiver);
-                }
-            }
+            let header = packet.header_alvr;
 
-            AUDIO => {
-                if let Some(sock) = self.input_app_audio.clone() {
-                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
-                    let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
-                    let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                    println!("receiver: {:?}", receiver);
-                }
-            }
-            VIDEO => {
-                if let Some(sock) = self.input_app_video.clone() {
-                    // println!("app lock");
-                    let sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
-                    let new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
-                    // println!("reader lock");
-
-                    if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
-                        let resulllt = StreamSocket::recv(&mut ssocket, sock.inner, context);
-                        // println!("Result of reader? {:?}" , resulllt);
+            let buffer = packet.data_inner.clone();
+            // println!("buffer is {:?}", &buffer[..100]);
+    
+            match header.stream_id.clone() {
+                HAPTICS => {
+                    if let Some(sock) = self.input_app_haptics.clone() {
+                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                        let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
+                        println!("receiver: {:?}", receiver);
                     }
-
-
-
-                    // Decode next frame from ReconstructedPackets and put in queue
-                } else {
-                    println!("NO SOME??");
                 }
-            }
-            _ => {
-                println!("ERROR WRONG STREAM SENT? XRCLIENT {}", header.stream_id);
-            }
-        };
-        // println!("\tEND shard {:?}, ", header.clone());
-        context
-            .scheduler
-            .schedule_event(Duration::from_micros(10), Self::video_receive_thread, ())
-            .unwrap();
-        ()
-        // Read channel mpsc of Vec<u8> into the streamsocket!
+    
+                AUDIO => {
+                    if let Some(sock) = self.input_app_audio.clone() {
+                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                        let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
+                        println!("receiver: {:?}", receiver);
+                    }
+                }
+                VIDEO => {
+                    if let Some(sock) = self.input_app_video.clone() {
+                        // println!("app lock");
+                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
+                        let new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                        // println!("reader lock");
+    
+                        if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
+                            let resulllt = StreamSocket::recv(&mut ssocket, sock.inner, context);
+                            // println!("Result of reader? {:?}" , resulllt);
+                        }
+    
+                    } else {
+                        println!("NO SOME??");
+                    }
+                }
+                _ => {
+                    println!("ERROR WRONG STREAM SENT? XRCLIENT {}", header.stream_id);
+                }
+            };
+            // println!("\tEND shard {:?}, ", header.clone());
+            context
+                .scheduler
+                .schedule_event(Duration::from_micros(500), Self::video_receive_thread, ())
+                .unwrap();
+            ()
+
+        }
+        
     }
 
     fn recv_audio(data: ReceiverData<()>) {
@@ -936,7 +940,7 @@ pub struct STA_extended {
     // extended class to PoissonGen
     pub output_network_port: Output<MpduPacket>,
 
-    pub to_app_socket: Output<MpduPacket>,
+    pub to_app_socket: Output<Vec<MpduPacket>>,
     // pub to_app_socket_end_ampdu: Output<bool>,
 
     pub sta_id: i32,
@@ -1023,13 +1027,13 @@ impl STA_extended {
         packet.sta_src_coords = self.sta_coordinates; 
 
         // println!("STA IN: packet.src_id = {}, packet.sta_dest_id = {}\n Coords src: {:?}", packet.sta_src_id, packet.sta_dest_id, packet.sta_src_coords);
-
-        self.output_network_port.send(packet.clone()).await;
+        self.output_network_port.send(packet).await;
         self.num_packets_sent += 1;
     }
 
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
-        
+        let mut packet_batch = Vec::new(); // Create a batch to hold packets
+
         if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
             let elapsed = context.scheduler.time();
             for packet in ampdu_packet.mpdu_packets { // iterate through whole AMPDU
@@ -1047,45 +1051,21 @@ impl STA_extended {
                 debug_print!(
                     DebugColor::DarkRed,
                     "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                    format_elapsed!(context.scheduler.time().duration_since(self.t_0)),
+                    format_elapsed!(elapsed.duration_since(self.t_0)),
                 );
 
                 self.received_packet_counter += 1;
-                self.to_app_socket.send(packet.clone()).await;
-
-                // if let Ok((
-                //     packet_length,
-                //     stream_id,
-                //     next_packet_index,
-                //     shards_count,
-                //     shard_index,
-                //     tx_r_instant,
-                // )) = parse_shard_data(&packet.data_inner[..100])
-                //     {
-                //         let str_id = match stream_id {
-                //             0 => "Tracking",
-                //             1 => "Haptics",
-                //             2 => "Audio",
-                //             3 => "Video",
-                //             4 => "Statistics",
-                //             _ => "?? IDK",
-                //         };
-                //         debug_print!(
-                //             DebugColor::DarkRed,
-                //             "\nPacket length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------__",
-                //             packet_length,
-                //             str_id,
-                //             next_packet_index,
-                //             shards_count,
-                //             shard_index,
-                //             tx_r_instant
-                //         );
-                //     }
-                // else{println!("CONTROL PACKET MAYBE??")}
-
-
+                packet_batch.push(packet); 
             }
         }
+        if !packet_batch.is_empty() {
+            self.to_app_socket.send(packet_batch).await; 
+            
+            
+            // Send the batch to the app socket in one go
+            // self.to_app_socket.send(packet_batch).await;
+        }
+
     }
       
 
@@ -1117,7 +1097,7 @@ impl STA_extended {
 
                 packet.sta_src_coords = self.sta_coordinates;
 
-                self.output_network_port.send(packet.clone()).await;
+                self.output_network_port.send(packet).await;
                 self.num_packets_sent += 1;
 
                 // context // reschedule this function // DON'T SELF-schedule (depends on XR_source)

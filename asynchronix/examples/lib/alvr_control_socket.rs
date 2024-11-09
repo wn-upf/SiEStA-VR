@@ -75,7 +75,7 @@ pub fn framed_recv_vec<R: serde::de::DeserializeOwned>(
     buffer: &[u8],
 ) -> Result<R, bincode::Error> {
 
-    println!("BUFLEN = {} / {}", buffer.len(), FRAMED_PREFIX_LENGTH); 
+    // println!("BUFLEN = {} / {}", buffer.len(), FRAMED_PREFIX_LENGTH); 
     if buffer.len() < FRAMED_PREFIX_LENGTH {
         return Err(Box::new(bincode::ErrorKind::SizeLimit));
     }

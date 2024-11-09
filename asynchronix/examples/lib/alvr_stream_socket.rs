@@ -2,6 +2,9 @@ use asynchronix::model::Context;
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 #[allow(unused_imports)]
 #[allow(dead_code)]
+
+use crate::lib::DEBUG_PRINT_ENABLED; 
+
 use rand::Rng;
 use std::cell::RefCell;
 use std::fmt;
@@ -16,12 +19,14 @@ use std::{
     time::Duration,
 };
 
+use crate::debug_print;
 use crate::lib::models_XR::{
     XRDevice,
     XRServer, // ,XRClient
 };
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
+use crate::lib::DebugColor;
 use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -776,7 +781,7 @@ impl StreamSocket {
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
             let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
 
-            println!("Received packet Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant );
+            debug_print!(DebugColor::Blue, "[StreamSocket recv] Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant );
 
             if stream_id == VIDEO {
                 let rx_instant = context.scheduler.time();

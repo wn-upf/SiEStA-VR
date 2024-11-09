@@ -8,7 +8,7 @@ rate_bps_queue=6E5 ## does nothing theoretically
 
 distance=10.0
 
-initial_bitrate_mbps=5.0
+initial_bitrate_mbps=100.0
 
 
 # rm out_log.ans
