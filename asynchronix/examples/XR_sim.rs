@@ -89,9 +89,9 @@ fn main() {
 
     // READ COMMAND-LINE ARGUMENTS
     let args: Vec<String> = env::args().collect();
-    if args.len() != 7 {
+    if args.len() != 8 {
         eprintln!(
-            "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance>",
+            "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate>",
             args[0]
         );
         return;
@@ -102,7 +102,8 @@ fn main() {
     let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().expect("Invalid STA distance");
-
+    let initial_bitrate: f64 = args[7].parse().expect("Invalid bitrate"); 
+    
     const num_STAs: usize = 2;
 
     let v_distance = vec![1.0, distance, distance]; // just some random values
@@ -126,7 +127,7 @@ fn main() {
     // TODO: Make this dynamic based on Vec<Coords> and Vec<ResultsFrameTXDelay> with a function
 
     let results1 = frametransmission_delay(
-        INITIAL_BITRATE_MBPS_SIM as f64 * 1E6, // optimistic assumption of max throughput
+        initial_bitrate as f64 * 1E6, // optimistic assumption of max throughput
         MAX_AMPDU_SIZE,
         Coords::new(),
         coords_staxr,
@@ -157,11 +158,11 @@ fn main() {
     let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 
     let t0 = MonotonicTime::EPOCH;
-    let mut xr_server = XRServer::new(ip_src, ip_dest, t0, INITIAL_FRAMERATE_FPS);
+    let mut xr_server = XRServer::new(ip_src, ip_dest, t0, INITIAL_FRAMERATE_FPS, initial_bitrate as f32);
     let mut xr_client_app = XRClient::new(ip_src, INITIAL_FRAMERATE_FPS);
 
     let mut sta1_xr: STA_extended = STA_extended::new(
-        INITIAL_BITRATE_MBPS_SIM as f64 * 1E6,
+        initial_bitrate as f64 * 1E6,
         mean_length,
         0,
         2,
@@ -248,7 +249,7 @@ fn main() {
 
     // xr_client.outport_streams.connect(STA_extended::input_XR_app, &mbox_sta_client_xr);
 
-    let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(128)
+    let mut simu: asynchronix::simulation::Simulation = SimInit::new()
         .add_model(xr_server, mbox_xr_server_app, "ALVR Server")
         .add_model(sta1_xr, mbox_sta_xr_server, "STA1 (XR_s)")
         .add_model(queue, mbox_queue, "Queue")
@@ -273,13 +274,13 @@ fn main() {
 
 
     scheduler // Configure XRClient before sending packets to it
-    .schedule_event(
-        Duration::from_nanos(1),
-        XRClient::configure_streams,
-        (),
-        &xr_client_app_address,
-    )
-    .unwrap();
+        .schedule_event(
+            Duration::from_nanos(1),
+            XRClient::configure_streams,
+            (),
+            &xr_client_app_address,
+        )
+        .unwrap();
 
     scheduler
         .schedule_event(

@@ -191,7 +191,7 @@ pub struct XRServer {
 }
 
 impl XRServer {
-    pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>, frame_rate: f32) -> Self {
+    pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>, frame_rate: f32, initial_bitrate: f32) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         Self {
             ip_self,
@@ -200,7 +200,7 @@ impl XRServer {
             bitrate_manager: BitrateManager::new(
                 MAX_HISTORY_SIZE,
                 INITIAL_FRAMERATE_FPS,
-                INITIAL_BITRATE_MBPS_SIM,
+                initial_bitrate,
             ),
 
             video_app_sender: None,

@@ -465,12 +465,15 @@ impl QueueModule {
         
 
         if self.queue.len() > 0 {
-            context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
+            
+            self.deque_schedule_service((), context).await; 
+            // context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
         }
-        self.aux_ampdu_serviced.reset();
+        // self.aux_ampdu_serviced.reset();
 
         
     }
+
 
     fn deque_schedule_service<'a>(
         &'a mut self,
@@ -488,15 +491,21 @@ impl QueueModule {
 
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
+                println!("hanging here??"); 
 
                 // Continue processing while we have more packets to check
                 while packet_index < self.queue.len() {
+                    println!("OR maybeeeee hanging here??"); 
+
                     if let Some(current_packet) = self.queue.get(packet_index) {
                         // Skip packets not matching AMPDU's destination
                         if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id {
                             packet_index += 1;
                             continue;
                         }
+
+                        println!("OR hanging here??"); 
+
 
                         // Calculate potential new service delay
                         let new_total_length =
@@ -678,14 +687,15 @@ impl QueueModule {
                             self.aux_ampdu_serviced.clone(),
                         )
                         .unwrap();
+
                 } else {
                     println!("?????????");
                 }
             }
         }
     }
-}
 
+}
 impl Model for QueueModule {}
 
 #[derive(Clone, Default)]
