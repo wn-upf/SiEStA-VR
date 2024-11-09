@@ -134,13 +134,13 @@ fn simple_MM1K(
 
     // After simulation, write the CSV data
     if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv() {
+        if let Err(e) = data.write_to_csv("") {
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
 
     if let Ok(data) = stats_sta_data_handle.lock() {
-        if let Err(e) = write_all_sta_csvs(&data) {
+        if let Err(e) = write_all_sta_csvs(&data, "") {
             eprintln!("Error writing STA CSV files: {}", e);
         }
     }

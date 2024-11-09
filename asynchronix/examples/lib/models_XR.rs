@@ -191,7 +191,7 @@ pub struct XRServer {
 }
 
 impl XRServer {
-    pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>, frame_rate: f32, initial_bitrate: f32) -> Self {
+    pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>, frame_rate: f32, initial_bitrate: f32, name_folder: &str) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         Self {
             ip_self,
@@ -219,7 +219,7 @@ impl XRServer {
             frames_sent_counter: 0,
 
             map_rtt : Arc::new(RwLock::new(HashMap::new())), 
-            STATISTICS_MANAGER: StatisticsManager::new(MAX_HISTORY_SIZE, Duration::from_secs_f32(1.0/frame_rate) , 0.0 ), 
+            STATISTICS_MANAGER: StatisticsManager::new(MAX_HISTORY_SIZE, Duration::from_secs_f32(1.0/frame_rate) , 0.0, name_folder), 
         }
     }
 

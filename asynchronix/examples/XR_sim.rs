@@ -30,6 +30,9 @@ use crate::lib::{
     MAX_AMPDU_SIZE,
     P_TX,
 };
+use std::fs;
+use std::path::Path;
+
 use lib::write_all_sta_csvs;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
@@ -37,43 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
-// use rand::Rng;
-// use rand_distr::{Distribution, Normal};
 
-// use std::intrinsics::size_of;
-// use serde::{Deserialize, Serialize};
-// use std::mem;
-
-// Instant};
-
-// use std::time::SystemTime;
-
-// mod mm1k_sim;
-// use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink};
-
-// use crate::lib::alvr_packets::{ClientStatistics, NetworkStatisticsPacket};
-// use crate::lib::alvr_stream_socket::{
-// parse_shard_data, AnyhowToCon, DscpTos, Haptics, ReceiverData, SocketBufferSize,
-// SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
-// };
-
-// use std::cmp::{self, max};
-
-// use rand::random;
-// use std::collections::VecDeque;
-// use std::f64::consts::PI;
-// use std::future::Future;
-
-// use asynchronix::model::{Context, Model};
-// use asynchronix::ports::Output;
-
-// use std::collections::HashMap;
-// use std::sync::RwLock;
-
-// mod alvr_statistics_manager;  //TODO!
-// use alvr_statistics_manager::*;
-
-// use crate::lib::alvr_statistics::StatisticsManager;
 
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -103,7 +70,28 @@ fn main() {
     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().expect("Invalid STA distance");
     let initial_bitrate: f64 = args[7].parse().expect("Invalid bitrate"); 
-    
+
+    let name_folder = format!(
+        "sim_T{:.0}_Plen{:.0}_K{}_Rq{:.0}_D{:.0}_Br{:.0}",
+        stoptime,        // T: simulation end time (stoptime)
+        mean_length,     // ML: mean packet length
+        k_queue,         // K: queue capacity
+        rate_queue_bps,  // Rq: queue bitrate
+        distance,        // D: STA distance
+        initial_bitrate  // Br: initial bitrate
+    );
+
+
+    let output_path = format!("Results/{}", name_folder);
+    let path = Path::new(&output_path);
+
+    // Ensure the folder exists or create it
+    if let Err(e) = fs::create_dir_all(path) {
+        eprintln!("Error creating directory {}: {}", output_path, e);
+    } else {
+        println!("Directory created or exists at {}", output_path);
+    }
+        
     const num_STAs: usize = 2;
 
     let v_distance = vec![1.0, distance, distance]; // just some random values
@@ -158,7 +146,7 @@ fn main() {
     let ip_dest = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 
     let t0 = MonotonicTime::EPOCH;
-    let mut xr_server = XRServer::new(ip_src, ip_dest, t0, INITIAL_FRAMERATE_FPS, initial_bitrate as f32);
+    let mut xr_server = XRServer::new(ip_src, ip_dest, t0, INITIAL_FRAMERATE_FPS, initial_bitrate as f32, &name_folder);
     let mut xr_client_app = XRClient::new(ip_src, INITIAL_FRAMERATE_FPS);
 
     let mut sta1_xr: STA_extended = STA_extended::new(
@@ -291,14 +279,13 @@ fn main() {
         )
         .unwrap();
 
-
     // scheduler.schedule_periodic_event(Duration::from_millis(10), Duration::from_millis(10), XRClient::video_receive_thread, (), &xr_client_app_address).unwrap();  // video receiver thread of ALVR
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
-
+    
     // After simulation, write the CSV data
     if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv() {
+        if let Err(e) = data.write_to_csv(&name_folder) {
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
@@ -310,7 +297,8 @@ fn main() {
             }
         }
 
-        if let Err(e) = write_all_sta_csvs(&stats_vec) {
+        if let Err(e) = write_all_sta_csvs(&stats_vec, &name_folder) {
+            println!("name_folder: {name_folder}"); 
             eprintln!("Error writing STA CSV files: {}", e);
         }
     }

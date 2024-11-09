@@ -2,7 +2,12 @@ use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::SlidingWindowAverage;
 use crate::lib::alvr_packets::NetworkStatisticsPacket; 
 
-use crate::lib::{SlidingWindowWeighted, SlidingWindowTimely, EventType, GraphNetworkStatistics, NominalBitrateStats}; 
+
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::Path;
+
+use crate::lib::{SlidingWindowWeighted, SlidingWindowTimely, EventType, GraphNetworkStatistics, GraphNetworkStatistics_csv, NominalBitrateStats}; 
 // use ::{warn, SlidingWindowAverage};
 use std::{
     collections::{VecDeque, HashMap},
@@ -90,6 +95,9 @@ pub struct StatisticsManager {
     map_frames_spf: HashMap<u32, usize>,
 
     is_first_stats: bool,
+
+    folder: String, 
+    last_stats: GraphNetworkStatistics_csv, 
 }
 
 impl StatisticsManager {
@@ -97,6 +105,7 @@ impl StatisticsManager {
         max_history_size: usize,
         nominal_server_frame_interval: Duration,
         steamvr_pipeline_frames: f32,
+        folder: &str, 
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(),
@@ -174,6 +183,9 @@ impl StatisticsManager {
             map_frames_spf: HashMap::new(),
 
             is_first_stats: true,
+
+            folder: folder.to_string(), 
+            last_stats: GraphNetworkStatistics_csv::default(), 
         }
     }
      // This statistics are reported for every succesfully received frame
@@ -312,9 +324,101 @@ impl StatisticsManager {
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
         })));
 
+        self.last_stats = GraphNetworkStatistics_csv {
+            frame_index: network_stats.frame_index as u32,
+
+            frame_size_bytes: network_stats.bytes_in_frame as usize, 
+
+            server_fps: 1.
+                / self
+                    .server_frames_moving
+                    .get_interval_buffer_mean()
+                    .max(Duration::from_millis(1).as_secs_f32()),
+
+            client_fps: 1.
+                / self
+                    .client_frames_moving
+                    .get_interval_buffer_mean()
+                    .max(Duration::from_millis(1).as_secs_f32()),
+
+            frame_span_ms: network_stats.frame_span * 1000.0,
+
+            interarrival_jitter_ms: network_stats.interarrival_jitter * 1000.0,
+
+            ow_delay_ms: network_stats.ow_delay * 1000.0,
+            filtered_ow_delay_ms: network_stats.filtered_ow_delay * 1000.0,
+
+            rtt_ms: rtt.as_secs_f32() * 1000.0,
+
+            frame_interarrival_ms: network_stats.frame_interarrival * 1000.0,
+            frame_jitter_ms: self.frame_interarrival_average.get_std() * 1000.0,
+
+            frames_skipped: network_stats.frames_skipped,
+
+            shards_lost: shards_lost,
+            shards_duplicated: network_stats.duplicated_shard_counter,
+
+            instant_network_throughput_bps: instant_network_throughput_bps,
+            peak_network_throughput_bps: peak_network_throughput_bps,
+
+            requested_bps: self.last_nominal_bitrate_stats.requested_bps.clone(),
+
+            interval_avg_plot_throughput: self.interval_avg_plot_throughput,
+        }; 
+
+        // Call method to save data to CSV
+        self.save_network_stats_to_csv();
         return (peak_network_throughput_bps, frame_interarrival);
     }
+    // Add a method to save stats to CSV
+    pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
+        let file_path = format!("Results/{}/XR_stats.csv", self.folder);
+        let path = Path::new(&file_path);
 
+        // Open the CSV file in append mode or create it if it doesn't exist
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+
+        // Prepare the header if the file is empty
+        if file.metadata()?.len() == 0 {
+            writeln!(
+                file,
+                "frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput"
+            )?;
+        }
+
+        // Prepare the data line to write to the CSV
+        let data_line = format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            self.last_stats.frame_index,                                 // frame_index
+            self.last_stats.frame_size_bytes,                            // frame_size_bytes
+            self.last_stats.server_fps,                                  // server_fps
+            self.last_stats.client_fps,                                  // client_fps
+            self.last_stats.frame_span_ms,                               // frame_span_ms
+            self.last_stats.interarrival_jitter_ms,                      // interarrival_jitter_ms
+            self.last_stats.ow_delay_ms,                                 // ow_delay_ms
+            self.last_stats.filtered_ow_delay_ms,                        // filtered_ow_delay_ms
+            self.last_stats.rtt_ms,                                      // rtt_ms
+            self.last_stats.frame_interarrival_ms,                       // frame_interarrival_ms
+            self.last_stats.frame_jitter_ms,                             // frame_jitter_ms
+            self.last_stats.frames_skipped,                              // frames_skipped
+            self.last_stats.shards_lost,                                 // shards_lost
+            self.last_stats.shards_duplicated,                           // shards_duplicated
+            self.last_stats.instant_network_throughput_bps,              // instant_network_throughput_bps
+            self.last_stats.peak_network_throughput_bps,                 // peak_network_throughput_bps
+            self.last_stats.requested_bps,                           // nominal_bitrate
+            self.interval_avg_plot_throughput,                // interval_avg_plot_throughput
+        );
+
+        // Write the data line to the CSV file
+        writeln!(file, "{}", data_line)?;
+
+        Ok(())
+    }
+
+    
     pub fn report_input_acquired(&mut self, target_timestamp: Duration) {
         if !self
             .history_buffer

@@ -340,12 +340,14 @@ impl CsvData {
         }
     }
 
-    pub fn write_to_csv(&self) -> std::io::Result<()> {
+    pub fn write_to_csv(&self, folder: &str) -> std::io::Result<()> {
+        
+        let path = format!("Results/{folder}/QUEUE_stats.csv"); 
         let file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open("Results/QUEUE_stats.csv")?;
+            .open(path)?; 
 
         let mut writer = Writer::from_writer(file);
 
@@ -981,13 +983,13 @@ pub fn frametransmission_delay(
     }
 }
 
-pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>) -> std::io::Result<()> {
+pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>, folder: &str) -> std::io::Result<()> {
     for (_index, sta_stats) in sta_stats_vec.iter().enumerate() {
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
-            let filename = format!("Results/STA{}.csv", stats.sta_id);
-
+            let filename: String = format!("Results/{folder}/STA{}.csv", stats.sta_id);
+            println!("FILENAMEEE: {filename}"); 
             // Open file with write permissions
             let file = OpenOptions::new()
                 .write(true)
@@ -1081,6 +1083,42 @@ pub struct GraphNetworkStatistics {
 
     pub interval_avg_plot_throughput: f32,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct GraphNetworkStatistics_csv {
+    pub frame_index: u32,
+
+    pub frame_size_bytes: usize, 
+
+    pub client_fps: f32,
+    pub server_fps: f32,
+
+    pub frame_span_ms: f32,
+
+    pub interarrival_jitter_ms: f32,
+
+    pub ow_delay_ms: f32,
+    pub filtered_ow_delay_ms: f32,
+
+    pub rtt_ms: f32,
+
+    pub frame_interarrival_ms: f32,
+    pub frame_jitter_ms: f32,
+
+    pub frames_skipped: u32,
+
+    pub shards_lost: isize,
+    pub shards_duplicated: u32,
+
+    pub instant_network_throughput_bps: f32,
+    pub peak_network_throughput_bps: f32,
+
+    pub requested_bps: f32,
+
+    pub interval_avg_plot_throughput: f32,
+}
+
+
 #[derive(
     Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
 )]
