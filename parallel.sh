@@ -6,10 +6,10 @@ rate_bps_src=3E6        # Explore different source rates
 # distance_values=(10.0 30.0)
 # initial_bitrate_values=(20.0 100.0)
 
-rate_bps_queue_values=(10000.0)         # Explore different queue rates
-distance_values=(2.5 30.0)         # Different distances
-initial_bitrate_values=(50.0 150.0)  # Different initial bitrates
-k_queue_values=(100 1000 10000)
+rate_bps_queue_values=(10000.0 100000.0 1000000.0)         # Explore different queue rates
+distance_values=(2.5 10.0 25.0 30.0)         # Different distances
+initial_bitrate_values=(5.0 10.0 50.0 75.0 100.0 150.0)  # Different initial bitrates
+k_queue_values=(1000 10000)
 
 # Trap exit signals to kill background jobs
 trap 'kill $(jobs -p)' EXIT
