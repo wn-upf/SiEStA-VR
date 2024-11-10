@@ -10,6 +10,7 @@ use crate::lib::HeaderALVRStream;
 // use std::intrinsics::size_of;
 use serde::{de::DeserializeOwned, Serialize};
 
+use core::net;
 use std::mem;
 use std::net::IpAddr;
 // use std::process::Output;
@@ -43,7 +44,7 @@ use crate::lib::DEBUG_PRINT_ENABLED;
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const MAX_UNREAD_PACKETS: usize = 30; // Applies per stream
+pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
 
 pub const CAPACITY_RX_BUFFER: usize = 2000;
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
@@ -233,17 +234,20 @@ impl XRServer {
 
             match packet {    
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-                            
+
+                            println!("{:.9}- Server receving stats\n{:?}",now.duration_since(self.t_0).as_secs_f64(), network_stats);
+
                             let map_rtt_lock = map_clone.read().unwrap();
                             let mut hashmap = map_rtt_lock.clone();
                             let frame_id = network_stats.frame_index as u32;
                             let rtt: Duration;
-
                             if let Some(send_instant) = hashmap.remove(&frame_id) {
                                 rtt = now.duration_since(send_instant);
                             } else {
+                                println!("ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!");
                                 rtt = Duration::ZERO;
                             }
+                            println!("RTT = {:.9}", rtt.as_secs_f64()); 
                             let (peak_network_throughput_bps, frame_interarrival_s) =
                                 self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt, now);
 
@@ -302,7 +306,6 @@ impl XRServer {
 
                         // println!("Size of buffer: {}", packet.data_inner.len() ); 
                         let stats: ClientControlPacket = framed_recv_vec(&packet.data_inner).unwrap(); 
-                        
                         // println!("STATS IS {:?}", stats); 
 
                         let results = sock.send(&stats);
@@ -401,7 +404,10 @@ impl XRServer {
                                     tx_instant: tx_r_instant,
                                 };
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
-
+                                
+                                if packet.header_alvr.shard_index == 0{
+                                    println!("\n{:.9}-Server sending {:#?}",now.duration_since(self.t_0).as_secs_f64(), packet.header_alvr);
+                                }
                                 self.outport_videoapp_network.send(packet).await;
 
                             } else {
@@ -455,6 +461,7 @@ impl XRServer {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time(); 
+            let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
 
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
@@ -470,7 +477,17 @@ impl XRServer {
                     send_socket // generate the actual video frame data
                         .get_buffer_emu(&header, current_bitrate_mbps)
                         .unwrap();
-                // println!(
+
+                let cloned_socket_map = send_socket.get_frame_tracker_map(); 
+
+                match map_clone.write() {
+                    Ok(mut guard) => {
+                        *guard = cloned_socket_map;
+                    }
+                    Err(_) => {
+                        println!("Failed to acquire write lock in RTT hashmap");
+                    }
+                }                // println!(
                 //     "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
                 //     current_bitrate_mbps,
                 //     buffer_emu.inner.len(),
@@ -486,6 +503,17 @@ impl XRServer {
                     send_socket.app_network_interface.clone();
 
                 let send_result = send_socket.send(buffer_emu, now);
+
+                let cloned_socket_map = send_socket.get_frame_tracker_map(); 
+
+                match map_clone.write() {
+                    Ok(mut guard) => {
+                        *guard = cloned_socket_map;
+                    }
+                    Err(_) => {
+                        println!("Failed to acquire write lock in RTT hashmap");
+                    }
+                }        
 
                 let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 

@@ -328,6 +328,8 @@ pub struct QueueModule {
     pub stats_rx : Option<Receiver<StatsUpdate>>,
 
     pub array_stas_stats: Arc<Mutex<Vec<perStaLockStats>>>,
+
+    pub PL_probability: f64, 
 }
 
 
@@ -352,7 +354,7 @@ impl QueueModule {
         self.array_stas_stats.clone()
     }
 
-    pub fn new(num_stas: usize, queue_size: usize, rate_departures_bps: f64) -> Self {
+    pub fn new(num_stas: usize, queue_size: usize, rate_departures_bps: f64, PL_prob: f64) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = Vec::with_capacity(num_stas);
         
@@ -391,6 +393,8 @@ impl QueueModule {
 
             stats_tx : Some(stats_tx),
             stats_rx: Some(stats_rx),  
+
+            PL_probability: PL_prob, 
 
         }
     }
@@ -477,6 +481,9 @@ impl QueueModule {
         );
         // AMPDU_sent.print();
         self.packet_being_served = false;
+
+        // if P>0,01 then drop
+
         match AMPDU_sent.sta_dest_id{
          0 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
          2 =>    {self.output_port_sta2.send(AMPDU_sent).await;}
@@ -609,6 +616,27 @@ impl QueueModule {
                         if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size >= MAX_AMPDU_SIZE {
                             break;
                         }
+
+
+                        // Simulate packet loss based on probability
+                        let mut rng = rand::thread_rng();
+                        let random_value: f64 = rng.gen();
+
+                        if random_value <= self.PL_probability {
+                            // Drop the packet (simulate packet loss)
+                            debug_print!(
+                                DebugColor::Purple,
+                                "{} [DBG TX] --AMPDU packet dropped due to loss probability",
+                                format_elapsed!(now)
+                            );
+
+                            // Remove the packet from the queue
+                            self.queue.remove(packet_index);
+
+                            // No need to increment packet_index since we removed the current packet
+                            continue;
+                        }
+
 
                         // Remove packet and update AMPDU
                         if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {

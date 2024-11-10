@@ -56,9 +56,9 @@ fn main() {
 
     // READ COMMAND-LINE ARGUMENTS
     let args: Vec<String> = env::args().collect();
-    if args.len() != 8 {
+    if args.len() != 9 {
         eprintln!(
-            "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate>",
+            "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate> <PL_prob>",
             args[0]
         );
         return;
@@ -70,15 +70,17 @@ fn main() {
     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().expect("Invalid STA distance");
     let initial_bitrate: f64 = args[7].parse().expect("Invalid bitrate"); 
+    let PL_prob: f64 = args[8].parse().expect("Invalid PL probability"); 
 
     let name_folder = format!(
-        "sim_T{:.0}_Plen{:.0}_K{}_Rq{:.0}_D{:.0}_Br{:.0}",
+        "sim_T{:.0}_Plen{:.0}_K{}_Rq{:.0}_D{:.0}_Br{:.0}_PL{:.6}",
         stoptime,        // T: simulation end time (stoptime)
         mean_length,     // ML: mean packet length
         k_queue,         // K: queue capacity
         rate_queue_bps,  // Rq: queue bitrate
         distance,        // D: STA distance
-        initial_bitrate  // Br: initial bitrate
+        initial_bitrate,  // Br: initial bitrate
+        PL_prob
     );
 
 
@@ -160,15 +162,14 @@ fn main() {
         t0,
     ); // STAs 0 and 1 send traffic to 5 through AP
 
+    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0);
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
 
     println!("STA XR Client PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length);
 
-    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0);
-
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps);
+    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, PL_prob);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 

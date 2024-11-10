@@ -1,5 +1,6 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use futures_util::stream::empty;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 
@@ -717,9 +718,19 @@ impl StreamSocket {
         let (used_buffer_sender, used_buffer_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
             unbounded();
 
+
+        // let EXPECTED_NO_PACKETS = match stream_id{ // TODO: 
+        //     VIDEO => let bitrate = .... 
+        //     AUDIO => 
+        //     STATISTICS => 
+        //     HAPTICS => 
+        //     TRACKING => 
+        // }
+        let EXPECTED_NO_PACKETS: usize = 100; 
+        
         // Initialize the used buffers
         for _ in 0..max_concurrent_buffers {
-            used_buffer_sender.send(vec![]).ok(); // Ignoring the result as in the original code
+            used_buffer_sender.send(vec![]).unwrap(); // Ignoring the result as in the original code
         }
 
         self.stream_recv_components.insert(
@@ -858,6 +869,12 @@ impl StreamSocket {
             return try_again();
         };
 
+        // println!(
+        //     "{:.9}[BEFORE!]Buffer stats - Pool: {}, In-progress: {}",
+        //     context.scheduler.time().duration_since(TaiTime::EPOCH).as_secs_f32(),
+        //     components.used_buffer_receiver.len(),
+        //     components.in_progress_packets.len()
+        // );
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
         } else if let Some(packet) = components
@@ -872,21 +889,30 @@ impl StreamSocket {
                 .try_recv()
                 .ok()
                 .or_else(|| {
+                    println!("First fallback"); 
                     // First fallback: Try to recycle old packets
                     let recyclable = components
                         .in_progress_packets
                         .iter()
                         .find(|(&idx, _)| {
-                            wrapping_cmp(idx, shard_recv_state_mut.packet_index.wrapping_sub(5))
+                            wrapping_cmp(idx, shard_recv_state_mut.packet_index.wrapping_sub(3))
                                 == Ordering::Less
                         })
                         .map(|(&k, _)| k);
+
+                    // println!(
+                    //     "{:.9}[INSIDE1!]Buffer stats - Pool: {}, In-progress: {}",
+                    //     context.scheduler.time().duration_since(TaiTime::EPOCH).as_secs_f32(),
+                    //     components.used_buffer_receiver.len(),
+                    //     components.in_progress_packets.len()
+                    // );
 
                     recyclable.and_then(|idx| {
                         components
                             .in_progress_packets
                             .remove(&idx)
                             .map(|packet| packet.buffer)
+                    
                     })
                 })
                 .or_else(|| {
@@ -894,6 +920,12 @@ impl StreamSocket {
                     println!(
                         "Warning: Creating new emergency buffer - consider increasing buffer pool"
                     );
+                    // println!(
+                    //     "{:.9}[INSIDE2!]Buffer stats - Pool: {}, In-progress: {}",
+                    //     context.scheduler.time().duration_since(TaiTime::EPOCH).as_secs_f32(),
+                    //     components.used_buffer_receiver.len(),
+                    //     components.in_progress_packets.len()
+                    // );
                     Some(Vec::with_capacity(
                         self.max_packet_size * shard_recv_state_mut.shards_count,
                     ))
@@ -1075,15 +1107,22 @@ impl StreamSocket {
                 highest_rx_shard_index: self.highest_rx_shard_index,
             };
 
+            let empty_buffer = Vec::with_capacity(reconstruct.buffer.capacity()); 
+            // println!("capacity of empty buffer! {}, len : {}", empty_buffer.capacity(), empty_buffer.len()); 
+            
             // println!("{:?} Reconstructed packet!!", reconstruct);
             components.packet_queue.send(reconstruct).ok();
+
+            // let packet = components.in_progress_packets.remove(&idx).unwrap();
+            // Immediately return the buffer to the pool
+            components.used_buffer_sender.send(empty_buffer).ok();
 
             if shard_recv_state_mut.stream_id == VIDEO {
                 self.rx_bytes = 0;
                 self.rx_shard_counter = 0;
                 self.duplicated_shard_counter = 0;
 
-                // Keep only shards data from the latest packets (using wrapping logic)
+                // Keep only shards data from the latest 5 frames (using wrapping logic)
                 let mut idxs_to_remove = Vec::new();
                 for &idx in self.map_rx.keys() {
                     if wrapping_cmp(idx.wrapping_add(5), shard_recv_state_mut.packet_index)
