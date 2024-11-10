@@ -269,7 +269,7 @@ fn multiple_STA_sim(
     let sink: Sink = Sink::new();
     let mbox_sink: Mailbox<Sink> = Mailbox::new();
 
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps);
+    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.0);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 

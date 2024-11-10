@@ -629,6 +629,7 @@ impl QueueModule {
                                 "{} [DBG TX] --AMPDU packet dropped due to loss probability",
                                 format_elapsed!(now)
                             );
+                            self.blocked_packet_counter += 1; 
 
                             // Remove the packet from the queue
                             self.queue.remove(packet_index);
