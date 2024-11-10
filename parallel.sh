@@ -1,3 +1,6 @@
+
+cargo build --release --example XR_sim
+
 # Define ranges for each variable
 simTime=100
 mean_length=12000.0
@@ -15,11 +18,14 @@ num_initial_bitrate=${#initial_bitrate_values[@]}
 num_k_queue=${#k_queue_values[@]}
 total_iterations=$((num_rate_bps_queue * num_distance * num_initial_bitrate * num_k_queue))
 
+# Define the batch size for parallel jobs
+BATCH_SIZE=10 # Set to the desired level of parallelism
+
+
 echo "Total number of iterations: $total_iterations"
+echo "Batch size: $BATCH_SIZE"
 sleep 5
 
-# Define the batch size for parallel jobs
-BATCH_SIZE=600  # Set to the desired level of parallelism
 
 # Trap exit signals to kill background jobs
 trap 'kill $(jobs -p)' EXIT
@@ -33,4 +39,4 @@ for rate_bps_queue in "${rate_bps_queue_values[@]}"; do
       done
     done
   done
-done | xargs -n 7 -P "$BATCH_SIZE" bash -c 'cargo run --example XR_sim "$@"' _ 
+done | xargs -n 7 -P "$BATCH_SIZE" bash -c './target/release/examples/XR_sim "$@"' _

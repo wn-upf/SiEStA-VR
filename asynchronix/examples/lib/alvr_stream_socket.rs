@@ -1044,7 +1044,6 @@ impl StreamSocket {
                     }
                 }
             }
-            println!("Reconstructed Frame {}", shard_recv_state_mut.packet_index);
             let size = in_progress_packet.buffer_length;
 
             let reconstruct = ReconstructedPacket {

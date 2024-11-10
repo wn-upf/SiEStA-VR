@@ -297,7 +297,7 @@ impl XRServer {
                 
                 CONTROL_STREAM => {
                     if let Some(mut sock) = self.control_socket_sender.as_mut() {
-                        println!("Received control stream!!");      
+                        // println!("Received control stream!!");      
                         // Deserialize into ClientControlPacket directly, not a reference
 
                         // println!("Size of buffer: {}", packet.data_inner.len() ); 
@@ -348,12 +348,12 @@ impl XRServer {
                     Ok(bytes_received) => {
                         if bytes_received == 0 {
                             // If no data is received, stop the loop
-                            println!(
-                                "{}",
-                                DebugColor::DarkGreen.to_color_fn()(String::from(
-                                    "No new data received, stopping."
-                                ))
-                            );
+                            // println!(
+                            //     "{}",
+                            //     DebugColor::DarkGreen.to_color_fn()(String::from(
+                            //         "No new data received, stopping."
+                            //     ))
+                            // );
                             stop = true;
                             break;
                         } else {
@@ -686,7 +686,7 @@ impl XRClient {
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
                 let result = Self::framed_send(self, &pack, context).await;
-                println!("result of output control: {:?}", result); 
+                // println!("result of output control: {:?}", result); 
             }
             _ => eprintln!("Uncovered match case!!"),
         }
@@ -732,7 +732,7 @@ impl XRClient {
                         highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video frame received during the interval between consecutive frames
                         highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video shard received during the interval between consecutive frames
                     };
-                    println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
+                    // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
                     context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_control, ClientControlPacket::NetworkStatistics(net)).unwrap();
