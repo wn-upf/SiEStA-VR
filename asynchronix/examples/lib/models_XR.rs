@@ -38,16 +38,18 @@ use tai_time::TaiTime;
 use crate::lib::alvr_stream_socket::{
     AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
 };
+use crate::lib::DEBUG_PRINT_ENABLED;
+
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
+pub const MAX_UNREAD_PACKETS: usize = 30; // Applies per stream
 
 pub const CAPACITY_RX_BUFFER: usize = 2000;
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
-use crate::lib::DEBUG_PRINT_ENABLED;
+pub const DECODER_BUFFERING_FRAMES: usize = 3;
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -83,7 +85,7 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<u32>() // shards index
     + mem::size_of::<f32>(); // tx relative timestamp
 
-type InstantMap = Arc<RwLock<HashMap<u32, Instant>>>;
+type InstantMap = Arc<RwLock<HashMap<u32, TaiTime<0>>>>;
 
 #[derive(Clone)]
 pub struct BitrateManager {
@@ -223,29 +225,27 @@ impl XRServer {
         }
     }
 
-    pub fn handle_control_packet(&mut self, packet: ClientControlPacket){
+    pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>){
     
         if let Some(mut protorecv) = self.control_socket_receiver.clone(){
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap(); 
-            let map_clone: Arc<RwLock<HashMap<u32, Instant>>> = Arc::clone(&self.map_rtt) ;
+            let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt) ;
 
             match packet {    
                 ClientControlPacket::NetworkStatistics(network_stats) => {
                             
-                            let now = Instant::now();
                             let map_rtt_lock = map_clone.read().unwrap();
                             let mut hashmap = map_rtt_lock.clone();
                             let frame_id = network_stats.frame_index as u32;
                             let rtt: Duration;
 
                             if let Some(send_instant) = hashmap.remove(&frame_id) {
-                                rtt = now.saturating_duration_since(send_instant);
+                                rtt = now.duration_since(send_instant);
                             } else {
                                 rtt = Duration::ZERO;
                             }
-
                             let (peak_network_throughput_bps, frame_interarrival_s) =
-                                self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt);
+                                self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt, now);
 
                             // BITRATE_MANAGER.lock().report_network_statistics
                             self.bitrate_manager.report_network_statistics(
@@ -265,7 +265,11 @@ impl XRServer {
 
     }
 
-    pub async fn in_from_network(&mut self, packet_vec: Vec<MpduPacket>) {
+    pub async fn in_from_network(&mut self, frame: TimedFrame) {
+
+        let packet_vec = frame.vec; 
+        let now = frame.timestamp; 
+
         for packet in packet_vec{
             let header = packet.header_alvr.clone();
             let buffer = packet.data_inner.clone();
@@ -303,7 +307,7 @@ impl XRServer {
 
                         let results = sock.send(&stats);
 
-                        XRServer::handle_control_packet(self, stats);
+                        XRServer::handle_control_packet(self, stats, now);
                     }
                 }
                 
@@ -319,7 +323,7 @@ impl XRServer {
     fn read_app_send_network_interface<'a>(
         &'a mut self,
         _: (),
-        context: &'a Context<Self>,
+        now: TaiTime<0>, 
         mut buffer: Vec<u8>,
         // mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>>,
         receiver: Arc<Mutex<Box<dyn SocketReader>>>,
@@ -327,7 +331,7 @@ impl XRServer {
         async move {
             let mut stop = false;
 
-            let mut elapsed = context.scheduler.time().duration_since(self.t_0);
+            let mut elapsed = now.duration_since(self.t_0);
 
             debug_print!(
                 DebugColor::DarkGreen,
@@ -372,7 +376,7 @@ impl XRServer {
                                     4 => "Statistics",
                                     _ => "?? IDK",
                                 };
-                                elapsed = context.scheduler.time().duration_since(self.t_0);
+                                elapsed = now.duration_since(self.t_0);
 
                                 debug_print!(
                                     DebugColor::DarkGreen,
@@ -399,6 +403,7 @@ impl XRServer {
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
 
                                 self.outport_videoapp_network.send(packet).await;
+
                             } else {
                                 println!(
                                     "{}",
@@ -449,6 +454,8 @@ impl XRServer {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
+            let now = context.scheduler.time(); 
+
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
             self.frames_sent_counter += 1;
@@ -463,7 +470,6 @@ impl XRServer {
                     send_socket // generate the actual video frame data
                         .get_buffer_emu(&header, current_bitrate_mbps)
                         .unwrap();
-
                 // println!(
                 //     "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
                 //     current_bitrate_mbps,
@@ -479,13 +485,13 @@ impl XRServer {
                 let arc_receiver: Arc<Mutex<Box<dyn SocketReader>>> =
                     send_socket.app_network_interface.clone();
 
-                let send_result = send_socket.send(buffer_emu, &context);
+                let send_result = send_socket.send(buffer_emu, now);
 
                 let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 
                 // let mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>> = arc_receiver.lock().unwrap();
 
-                XRServer::read_app_send_network_interface(self, (), context, buffer, arc_receiver)
+                XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
                 let normal = Normal::new(0.0, 5.0).unwrap(); // Mean = 0, Std dev = 5
@@ -559,8 +565,46 @@ impl XRServer {
 
 impl Model for XRServer {}
 
+
+struct DroppingVecDeque<T> {
+    deque: VecDeque<T>,
+    capacity: usize,
+    dropped_frame_counter: usize, 
+    ok_dequed_frame_counter: usize, 
+}
+
+impl<T> DroppingVecDeque<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            deque: VecDeque::with_capacity(capacity),
+            capacity,
+            dropped_frame_counter: 0,
+            ok_dequed_frame_counter: 0,
+        }
+    }
+    fn push(&mut self, item: T) {
+        // If we are at capacity, pop the oldest frame from the front
+        if self.deque.len() == self.capacity {
+            self.deque.pop_front(); 
+            self.dropped_frame_counter += 1; 
+        }
+        // Push the new item to the back
+        self.deque.push_back(item);
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.ok_dequed_frame_counter += 1; 
+        self.deque.pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.deque.len()
+    }
+}
+
+
 pub struct XRClient {
-    pub decoder_queue: VecDeque<Buffer>,
+    pub decoder_queue: DroppingVecDeque<Vec<u8>>,
 
     pub outport_streams: Output<Vec<u8>>,
 
@@ -584,7 +628,7 @@ pub struct XRClient {
 impl XRClient {
     pub fn new(server_ip: IpAddr, fps: f32) -> Self {
         Self {
-            decoder_queue: VecDeque::new(),
+            decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
             outport_streams: Output::default(),
             input_app_video: None,
             input_app_audio: None,
@@ -605,6 +649,7 @@ impl XRClient {
     pub async fn framed_send<S: Serialize>(
         &mut self,
         packet: &S,
+        context: &Context<Self>, 
     ) -> Result<(), Box<dyn std::error::Error>> {
         // println!("FRAMEDSEND!");
         let mut buffer = vec![0; MAX_PACKET_SIZE_RECV];
@@ -626,18 +671,22 @@ impl XRClient {
         packetz.data_inner = buffer[0..packet_size].to_vec();
         packetz.header_alvr.stream_id = CONTROL_STREAM;
         
-        self.output_app_network.send(packetz).await; // send to input_XR_app of STA
+        context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_app_network_send , packetz).unwrap(); 
         Ok(())
     }
 
-    pub async fn output_control(&mut self, packet: ClientControlPacket) -> () {
+    pub async fn output_app_network_send(&mut self, packet: MpduPacket){
+        self.output_app_network.send(packet).await; // send to input_XR_app of STA
+    }
+
+    pub async fn output_control(&mut self, packet: ClientControlPacket, context: &Context<Self>) -> () {
         // Sends directly TCP packets related to Control. For now, just NetworkStatistics
         // println!("output_control"); 
         let pack = packet.clone(); 
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
-                let result = Self::framed_send(self, &pack).await;
-                // println!("result: {:?}", result); 
+                let result = Self::framed_send(self, &pack, context).await;
+                println!("result of output control: {:?}", result); 
             }
             _ => eprintln!("Uncovered match case!!"),
         }
@@ -686,13 +735,15 @@ impl XRClient {
                     println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
-                    self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
+                    context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_control, ClientControlPacket::NetworkStatistics(net)).unwrap();
+                    // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
-                    let Ok((header, nal)) = data.get() else {
+                    let Ok((_header, nal)) = data.get() else {
                         println!("UNABLE TO GET HEADER NAL? ");
                         return;
                     };
 
+                    self.decoder_queue.push(nal.to_vec());
                 }
                 // if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                 //     stats.report_video_packet_received(header.timestamp);
@@ -852,8 +903,10 @@ impl XRClient {
         }
     }
 
-    pub async fn in_from_network(&mut self, packet_vec: Vec<MpduPacket>, context: &Context<Self>) {
-        
+    pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
+
+        let packet_vec = frame.vec; 
+        let now = frame.timestamp; 
 
         for packet in packet_vec{
 
@@ -883,12 +936,12 @@ impl XRClient {
                 VIDEO => {
                     if let Some(sock) = self.input_app_video.clone() {
                         // println!("app lock");
-                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
-                        let new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
+                        let _sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
                         // println!("reader lock");
     
                         if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
-                            let resulllt = StreamSocket::recv(&mut ssocket, sock.inner, context);
+                            let _resulllt = StreamSocket::recv(&mut ssocket, sock.inner, context);
+                            // println!("result of sender {:?}", sender ); 
                             // println!("Result of reader? {:?}" , resulllt);
                         }
     
@@ -903,7 +956,7 @@ impl XRClient {
             // println!("\tEND shard {:?}, ", header.clone());
             context
                 .scheduler
-                .schedule_event(Duration::from_micros(500), Self::video_receive_thread, ())
+                .schedule_event(Duration::from_nanos(10), Self::video_receive_thread, ())
                 .unwrap();
             ()
 
@@ -934,13 +987,19 @@ impl XRDevice for XRServer {
         println!("WOWZA!!");
     }
 }
+#[derive(Clone)]
+pub struct TimedFrame{
+    vec: Vec<MpduPacket>,
+    timestamp: TaiTime<0>, 
+}
+
 
 #[allow(non_camel_case_types)]
 pub struct STA_extended {
     // extended class to PoissonGen
     pub output_network_port: Output<MpduPacket>,
 
-    pub to_app_socket: Output<Vec<MpduPacket>>,
+    pub to_app_socket: Output<TimedFrame>,
     // pub to_app_socket_end_ampdu: Output<bool>,
 
     pub sta_id: i32,
@@ -1027,21 +1086,25 @@ impl STA_extended {
         packet.sta_src_coords = self.sta_coordinates; 
 
         // println!("STA IN: packet.src_id = {}, packet.sta_dest_id = {}\n Coords src: {:?}", packet.sta_src_id, packet.sta_dest_id, packet.sta_src_coords);
-        self.output_network_port.send(packet).await;
+        context.scheduler.schedule_event(Duration::from_nanos(10), Self::send_packet_wireless, packet).unwrap(); 
+        // self.output_network_port.send(packet).await;
         self.num_packets_sent += 1;
+    }
+    pub async fn send_packet_wireless(&mut self, packet: MpduPacket){
+        self.output_network_port.send(packet).await; 
     }
 
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let mut packet_batch = Vec::new(); // Create a batch to hold packets
+        let now = context.scheduler.time(); 
 
         if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
-            let elapsed = context.scheduler.time();
             for packet in ampdu_packet.mpdu_packets { // iterate through whole AMPDU
 
                 debug_print!(
                     DebugColor::Red,
                     "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
-                    format_elapsed!(elapsed),
+                    format_elapsed!(now),
                     self.sta_id,
                     packet.packet_id,
                     packet.sta_src_id,
@@ -1051,7 +1114,7 @@ impl STA_extended {
                 debug_print!(
                     DebugColor::DarkRed,
                     "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                    format_elapsed!(elapsed.duration_since(self.t_0)),
+                    format_elapsed!(now.duration_since(self.t_0)),
                 );
 
                 self.received_packet_counter += 1;
@@ -1059,15 +1122,19 @@ impl STA_extended {
             }
         }
         if !packet_batch.is_empty() {
-            self.to_app_socket.send(packet_batch).await; 
-            
-            
+            let frame = TimedFrame{
+                vec: packet_batch,
+                timestamp: now,
+            }; 
+            context.scheduler.schedule_event(Duration::from_nanos(10), Self::to_app_socket_send, frame).unwrap(); 
             // Send the batch to the app socket in one go
             // self.to_app_socket.send(packet_batch).await;
         }
 
     }
-      
+    pub async fn to_app_socket_send(&mut self, frame: TimedFrame){
+        self.to_app_socket.send(frame).await; 
+    }
 
     fn send_packet_BG<'a>(
         &'a mut self,
@@ -1097,7 +1164,9 @@ impl STA_extended {
 
                 packet.sta_src_coords = self.sta_coordinates;
 
-                self.output_network_port.send(packet).await;
+                // self.output_network_port.send(packet).await;
+                context.scheduler.schedule_event(Duration::from_nanos(10), Self::send_packet_wireless, packet).unwrap(); 
+
                 self.num_packets_sent += 1;
 
                 // context // reschedule this function // DON'T SELF-schedule (depends on XR_source)

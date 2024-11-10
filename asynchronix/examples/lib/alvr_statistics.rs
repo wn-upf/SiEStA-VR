@@ -13,7 +13,8 @@ use std::{
     collections::{VecDeque, HashMap},
     time::{Duration, Instant},
 };
-use serde::{Deserialize, Serialize}; 
+use serde::{Deserialize, Serialize};
+use tai_time::{TaiClock, TaiTime}; 
 
 #[derive(Clone)]
 struct HistoryFrame {
@@ -86,7 +87,7 @@ pub struct StatisticsManager {
 
     history_throughput_weighted: SlidingWindowWeighted<f32>,
     interval_avg_plot_throughput: f32,
-    instant_weighted_avg_prev: Instant,
+    instant_weighted_avg_prev: TaiTime<0>,
 
     prev_highest_shard: i32,
     prev_highest_frame: i32,
@@ -173,7 +174,7 @@ impl StatisticsManager {
             client_frames_moving: SlidingWindowTimely::new(60., 16., 1.),
 
             history_throughput_weighted: SlidingWindowWeighted::new(0., 0.0),
-            instant_weighted_avg_prev: Instant::now(),
+            instant_weighted_avg_prev: TaiTime::EPOCH,
             interval_avg_plot_throughput: 0. as f32,
 
             prev_highest_shard: -1,
@@ -193,6 +194,8 @@ impl StatisticsManager {
         &mut self,
         network_stats: NetworkStatisticsPacket,
         rtt: Duration,
+        now: TaiTime<0>, 
+
     ) -> (f32, f32) {
         self.packets_skipped_total += network_stats.frames_skipped as usize;
         self.packets_skipped_partial_sum += network_stats.frames_skipped as usize;
@@ -206,7 +209,7 @@ impl StatisticsManager {
             self.frame_interarrival_average
                 .submit_sample(frame_interarrival);
         } else {
-            frame_interarrival = 0.011;
+            frame_interarrival = 7.0;
             self.is_first_stats = false;
         }
 
@@ -277,8 +280,8 @@ impl StatisticsManager {
             self.map_frames_spf.remove_entry(&key);
         }
 
-        if Instant::now().duration_since(self.instant_weighted_avg_prev) >= Duration::from_secs(1) {
-            self.instant_weighted_avg_prev = Instant::now();
+        if now.duration_since(self.instant_weighted_avg_prev) >= Duration::from_secs(1) {
+            self.instant_weighted_avg_prev = now;
             self.interval_avg_plot_throughput = self.history_throughput_weighted.get_average();
         }
 
@@ -367,7 +370,9 @@ impl StatisticsManager {
         }; 
 
         // Call method to save data to CSV
-        self.save_network_stats_to_csv();
+        if self.save_network_stats_to_csv().is_err(){
+            println!("ERROR HERE CSV!!"); 
+        }
         return (peak_network_throughput_bps, frame_interarrival);
     }
     // Add a method to save stats to CSV

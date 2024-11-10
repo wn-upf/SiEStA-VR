@@ -781,7 +781,7 @@ impl StreamSocket {
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
             let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
 
-            debug_print!(DebugColor::Blue, "[StreamSocket recv] Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant );
+            // debug_print!(DebugColor::Blue, "[StreamSocket recv] Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant );
 
             if stream_id == VIDEO {
                 let rx_instant = context.scheduler.time();
@@ -1476,7 +1476,7 @@ impl<H> StreamSender<H> {
 
     /// Shard and send a buffer with zero copies and zero allocations.
     /// The prefix of each shard is written over the previously sent shard to avoid reallocations.
-    pub fn send(&mut self, mut buffer: Buffer<H>, context: &Context<XRServer>) -> Result<()> {
+    pub fn send(&mut self, mut buffer: Buffer<H>, now: TaiTime<0>) -> Result<()> {
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
         let actual_buffer_size = buffer.hidden_offset + buffer.length;
         let data_size = actual_buffer_size - SHARD_PREFIX_SIZE;
@@ -1498,9 +1498,7 @@ impl<H> StreamSender<H> {
 
             // let tx_r_instant: f32 = Instant::now().duration_since(self.ref_time).as_secs_f32();
 
-            let tx_r_instant = context
-                .scheduler
-                .time()
+            let tx_r_instant = now
                 .duration_since(self.ref_time)
                 .as_secs_f32();
 
@@ -1525,7 +1523,7 @@ impl<H> StreamSender<H> {
             if idx == 0 {
                 //store next_packet_index - Instant value pair for RTT
                 self.frame_tracker
-                    .insert(self.next_packet_index, context.scheduler.time());
+                    .insert(self.next_packet_index, now);
             }
         }
         self.shards_count = shards_count;
@@ -1558,11 +1556,12 @@ impl<H: Serialize> StreamSender<H> {
         })
     }
 
-    pub fn send_header(&mut self, header: &H, context: &Context<XRServer>) -> Result<()> {
+    pub fn send_header(&mut self, header: &H, now:TaiTime<0> ) -> Result<()> {
+
         let buffer = self.get_buffer_emu(header, 20.0 as f32)?;
 
         println!("WATCHOUT, using 20 as default!!");
-        self.send(buffer, context)
+        self.send(buffer, now)
     }
 }
 

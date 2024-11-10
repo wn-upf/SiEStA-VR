@@ -98,7 +98,9 @@ fn simple_MM1K(
     // source.output_port.connect(Sink::input, &sink_mbox);
 
     source.output_port.connect(QueueModule::input, &mbox_queue);
-    queue.output_port.connect(Sink::input, &sink_mbox);
+    queue.output_port_sta1.connect(Sink::input, &sink_mbox);
+    queue.output_port_sta2.connect(Sink::input, &sink_mbox);
+
 
     let t0 = MonotonicTime::EPOCH;
 
@@ -299,7 +301,9 @@ fn multiple_STA_sim(
 
     sta1_bg.output_port.connect(QueueModule::input, &mbox_queue); // Two DL STAs send
     sta2_bg.output_port.connect(QueueModule::input, &mbox_queue);
-    queue.output_port.connect(Sink::input, &mbox_sink);
+
+    queue.output_port_sta1.connect(Sink::input, &mbox_sink);
+    queue.output_port_sta2.connect(Sink::input, &mbox_sink);
 
     let t0 = MonotonicTime::EPOCH;
 
@@ -348,8 +352,10 @@ fn multiple_STA_sim(
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
     // After simulation, write the CSV data
+
+    let filename = format!("MM1K_sim"); 
     if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv() {
+        if let Err(e) = data.write_to_csv(&filename) {
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
@@ -361,7 +367,7 @@ fn multiple_STA_sim(
             }
         }
 
-        if let Err(e) = write_all_sta_csvs(&stats_vec) {
+        if let Err(e) = write_all_sta_csvs(&stats_vec, &filename) {
             eprintln!("Error writing STA CSV files: {}", e);
         }
     }
