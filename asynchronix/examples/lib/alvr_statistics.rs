@@ -265,11 +265,6 @@ impl StatisticsManager {
 
         shards_lost = shards_sent as isize - network_stats.rx_shard_counter as isize;
         
-        if shards_lost !=0 {
-            // println!("SHARDS SENT = {}, shard_counter = {}", shards_sent, network_stats.rx_shard_counter); 
-            // println!("DBG LOST {} SHARDS!!", shards_lost); 
-        }
-
         self.prev_highest_frame = network_stats.highest_rx_frame_index as i32;
         self.prev_highest_shard = network_stats.highest_rx_shard_index as i32;
 

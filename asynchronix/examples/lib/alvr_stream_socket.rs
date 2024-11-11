@@ -41,6 +41,8 @@ use std::net::IpAddr;
 use std::result::Result::Ok;
 use tai_time::TaiTime;
 
+use super::alvr_packets::NetworkStatisticsPacket;
+
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
@@ -775,19 +777,25 @@ impl StreamSocket {
         }
     }
 
-    pub fn flush_shards_lost_deadline(&mut self) -> usize {
+    pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
 
         let mut total_lost_deadline = 0; 
         // Collect keys into a vector before modifying the map
         let keys: Vec<_> = self.lost_shards_deadline_map.keys().cloned().collect();
 
+        let mut vec_keys = vec![]; 
+        let mut vec_lost = vec![]; 
+
         // Now you can iterate over the keys and remove them from the map
         for frame_deadlined in keys {
             println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
-            total_lost_deadline += self.lost_shards_deadline_map.remove(&frame_deadlined).unwrap();
-        }
+            vec_keys.push(frame_deadlined);
 
-        total_lost_deadline
+            let lost_in_frame = self.lost_shards_deadline_map.remove(&frame_deadlined).unwrap(); 
+            vec_lost.push(lost_in_frame); 
+            total_lost_deadline += lost_in_frame; 
+        }
+        (vec_keys, vec_lost)
 
     }
 
@@ -907,9 +915,8 @@ impl StreamSocket {
             return try_again();
         };
 
-        println!("{}[DBG] deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {}",format_elapsed!(now) , format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index);
+        println!("{}[DBG] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index);
     
-
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
         } else if let Some(packet) = components
@@ -1007,11 +1014,6 @@ impl StreamSocket {
                     .buffer
                     .resize(in_progress_packet.buffer_length, 0);
             }
-            // println!(
-            //     "final length: {} (buffer_length = {})",
-            //     in_progress_packet.buffer.len(),
-            //     in_progress_packet.buffer_length
-            // );
         }
 
         let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
@@ -1037,9 +1039,6 @@ impl StreamSocket {
                     .unwrap();
                 shard_recv_state_mut.packet_cursor += size;
 
-                // if shard_recv_state_mut.stream_id == VIDEO {
-                //     // println!(" inside while :) size = {}, packet_cursor = {}\\n",  size, shard_recv_state_mut.packet_cursor);
-                // }
             }
             // Restore backed up bytes
             // Safety: overwritten_data_backup is always set just before receiving the packet
@@ -1154,7 +1153,6 @@ impl StreamSocket {
             // println!("{:?} Reconstructed packet!!", reconstruct);
             components.packet_queue.send(reconstruct).ok();
 
-            // let packet = components.in_progress_packets.remove(&idx).unwrap();
             // Immediately return the buffer to the pool
             components.used_buffer_sender.send(empty_buffer).ok();
 
@@ -1177,15 +1175,7 @@ impl StreamSocket {
                     self.map_rx.remove(&idx);
                 }
             }
- 
-
-
-
-
-
         } // if len == shard_count END
-
-
             // Initialize a counter to track the total loss
         let mut total_loss = 0;
 
@@ -1193,40 +1183,34 @@ impl StreamSocket {
         let mut expired_keys = Vec::new();
 
         // Iterate through in_progress_packets to identify expired packets
+      // In the deadline check section:
         for (id, shard) in components.in_progress_packets.iter_mut() {
             if let Some(deadline) = shard.deadline {
-                // Check if the packet's deadline has expired
                 if deadline <= now {
-                    // Compute the loss
                     let expected_shards = shard.num_shards_expected;
                     let shards_arrived = shard.received_shard_indices.len();
                     let shards_lost = expected_shards - shards_arrived;
 
-                    // Update the total loss counter
-                    total_loss += shards_lost;
+                    // Store stats
+                    self.lost_shards_deadline_map.insert(shard.id_frame, shards_lost);
 
-                    // Print information about the expired packet
-                    // println!(
-                    //     "{} WOWWWW!!!!!!! -> Expired shard deadline: {:?}, frame_id: {} ,  packet loss: {:?} / {}",
-                    //     format_elapsed!(now),
-                    //     format_elapsed!(shard.deadline.unwrap()),
-                    //     shard.id_frame, 
-                    //     shards_lost,
-                    //     expected_shards
-                    // );
-
-                    self.lost_shards_deadline_map.insert(shard.id_frame,shards_lost); 
-                    // Add the expired packet's key to the list of expired keys
+                    // Mark for removal
                     expired_keys.push(*id);
                 }
             }
         }
 
 
-        // Remove expired packets from the HashMap using the collected keys
+
+        // Remove expired packets and cleanup
         for key in expired_keys {
-            components.in_progress_packets.remove(&key);
-            
+            if let Some(packet) = components.in_progress_packets.remove(&key) {
+                // Return the buffer to the pool if possible
+                if !packet.buffer.is_empty() {
+                    let empty_buffer = Vec::with_capacity(packet.buffer.capacity());
+                    components.used_buffer_sender.send(empty_buffer).ok();
+                }
+            }
         }
 
         // Mark current shard as read and allow for a new shard to be read
@@ -1428,7 +1412,7 @@ impl StreamSocketBuilder {
 
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
-            lost_shards_deadline_map: HashMap::new(), 
+            lost_shards_deadline_map: HashMap::new(),
         })
     }
 

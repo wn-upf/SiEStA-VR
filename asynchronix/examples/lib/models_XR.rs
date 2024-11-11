@@ -721,7 +721,11 @@ impl XRClient {
         }
         ()
     }
+    pub fn report_frame_lost(frame: u32, shards_lost: usize){
 
+        todo!("SEND CONTROL PACKET WITH STATS"); 
+
+    }
     pub fn video_receive_thread<'a>(
         &'a mut self,
         _: (),
@@ -732,16 +736,17 @@ impl XRClient {
                 if let Some(mut receiver) = self.input_app_video.clone() {
                     
                     
-                    let mut packets_lost_deadline = 0; 
+                    let (frames_lost, shards_lost) : (Vec<u32>, Vec<usize>); 
+
                     if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
-                                                
-                        packets_lost_deadline =StreamSocket::flush_shards_lost_deadline(&mut ssocket); 
-                        
-                        if packets_lost_deadline != 0 {
-                            println!("LOST {} PACKETS???????????", packets_lost_deadline); 
+                        let mut counter = 0;                     
+                        (frames_lost, shards_lost) =StreamSocket::flush_shards_lost_deadline(&mut ssocket); 
+                        for i in frames_lost{
+                            self.report_frame_lost(i, shards_lost); 
                         }
+                        
                     }
-                    
+
                     let data: ReceiverData<VideoPacketHeader> =
                         match receiver.recv(STREAMING_RECV_TIMEOUT) {
                             Ok(data) => data,

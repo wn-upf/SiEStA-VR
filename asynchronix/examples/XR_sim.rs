@@ -50,7 +50,7 @@ use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
-
+    // std::env::set_var("RUST_BACKTRACE", "full");
     // READ COMMAND-LINE ARGUMENTS
     let args: Vec<String> = env::args().collect();
     if args.len() != 9 {
