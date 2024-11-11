@@ -42,9 +42,6 @@ use std::time::Duration;
 use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
 
 
-const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
-const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(2000);
-
 use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};

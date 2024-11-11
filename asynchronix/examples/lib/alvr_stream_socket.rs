@@ -1384,10 +1384,12 @@ impl StreamSocketBuilder {
 impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     pub fn recv(&mut self, timeout: Duration) -> ConResult<ReceiverData<H>> {
         // println!("receiving FULL packet from shards!!!");
-        let packet = self
-            .packet_receiver
-            .recv_timeout(timeout)
-            .handle_try_again()?;
+        // let packet = self
+        //     .packet_receiver
+        //     .recv_timeout(timeout)
+        //     .handle_try_again()?;
+
+        let packet = self.packet_receiver.try_recv().handle_try_again()?;  
         // println!("receiving packet2!!!");
 
         self.frame_interarrival += packet.frame_interarrival;

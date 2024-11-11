@@ -25,9 +25,15 @@ trap 'echo -e "\nSimulation stopped. Output folder location: $Results/$name_fold
 
 
 # rm out_log.ans
-# script -q -c "cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance" out_log.ans
-./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans"
+# script -q -c "cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance" out_log.ans ##                                              # linux dbg output
+# ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
 
+
+
+
+
+# echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+samply record cargo run --profile profiling --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL 
 # code Results/$name_folder/out_log.ans
 # samply record cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance # for Tracing syscalls
 

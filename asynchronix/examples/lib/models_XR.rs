@@ -15,6 +15,7 @@ use std::mem;
 use std::net::IpAddr;
 // use std::process::Output;
 use std::sync::{Arc, Mutex};
+use std::thread::yield_now;
 use std::time::{Duration, Instant};
 
 use std::time::SystemTime;
@@ -772,6 +773,7 @@ impl XRClient {
                     };
 
                     self.decoder_queue.push(nal.to_vec());
+                    ()
                 }
                 // if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                 //     stats.report_video_packet_received(header.timestamp);
@@ -1158,6 +1160,7 @@ impl STA_extended {
             // Send the batch to the app socket in one go
             // self.to_app_socket.send(packet_batch).await;
         }
+        yield_now();
 
     }
     pub async fn to_app_socket_send(&mut self, frame: TimedFrame){
