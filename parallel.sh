@@ -1,4 +1,4 @@
-BATCH_SIZE=1000 # Set to the desired level of parallelism
+BATCH_SIZE=200 # Set to the desired level of parallelism
 
 cargo build --release --example XR_sim
 
@@ -34,27 +34,51 @@ total_iterations=$((num_rate_bps_queue * num_distance * num_initial_bitrate * nu
 # mkdir -p "Results/$name_folder"
 
 
-
-# Define the batch size for parallel jobs
-
-
 echo "Total number of iterations: $total_iterations"
 echo "Batch size: $BATCH_SIZE"
-sleep 5
+sleep 3
 
 
 # Trap exit signals to kill background jobs
 trap 'kill $(jobs -p)' EXIT
 
-#  ---------------- version without log output --------------------
+# Initialize counter and batch array
+counter=0
+batch=()
+
+# Collect commands in batches and execute
 for rate_bps_queue in "${rate_bps_queue_values[@]}"; do
   for distance in "${distance_values[@]}"; do
     for initial_bitrate in "${initial_bitrate_values[@]}"; do
       for k_queue in "${k_queue_values[@]}"; do
         for PL in "${PL_probs[@]}"; do
-          echo "$simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate"
+          
+          # Accumulate parameters in batch array
+          batch+=("$simTime" "$mean_length" "$k_queue" "$rate_bps_src" "$rate_bps_queue" "$distance" "$initial_bitrate $PL")
+
+          # Increment counter
+          ((counter++))
+
+          # If batch is full, execute with xargs
+          if (( counter % BATCH_SIZE == 0 )); then
+            printf "%s\n" "${batch[@]}" | xargs -n 8 -P "$BATCH_SIZE" bash -c './target/release/examples/XR_sim "$@"' _
+            
+            # Clear the batch array
+            batch=()
+            
+            # Pause and print message
+            echo "✨ Completed $counter iterations. Pausing for 5 seconds... ✨ Doing great ✨"
+            sleep 5
+          fi
+
         done
       done
     done
   done
-done | xargs -n 7 -P "$BATCH_SIZE" bash -c './target/release/examples/XR_sim "$@"' _
+done
+
+# Execute any remaining commands in the last batch
+if (( ${#batch[@]} > 0 )); then
+  printf "%s\n" "${batch[@]}" | xargs -n 8 -P "$BATCH_SIZE" bash -c './target/release/examples/XR_sim "$@"' _
+fi
+

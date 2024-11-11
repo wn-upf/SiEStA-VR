@@ -730,12 +730,28 @@ impl XRClient {
         async move {
             if self.is_streaming {
                 if let Some(mut receiver) = self.input_app_video.clone() {
+                    
+                    
+                    let mut packets_lost_deadline = 0; 
+                    if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
+                                                
+                        packets_lost_deadline =StreamSocket::flush_shards_lost_deadline(&mut ssocket); 
+                        
+                        if packets_lost_deadline != 0 {
+                            println!("LOST {} PACKETS???????????", packets_lost_deadline); 
+                        }
+                    }
+                    
                     let data: ReceiverData<VideoPacketHeader> =
                         match receiver.recv(STREAMING_RECV_TIMEOUT) {
                             Ok(data) => data,
                             Err(ConnectionError::TryAgain(_)) => return,
                             Err(ConnectionError::Other(_)) => return,
                         };
+
+                    let mut packets_lost_deadline = 0; 
+                                      
+                        
                     let net = NetworkStatisticsPacket {
                         // Frame specific metrics
                         frame_index: data.get_frame_index() as i32, // index of the current frame
@@ -760,10 +776,12 @@ impl XRClient {
 
                         highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video frame received during the interval between consecutive frames
                         highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video shard received during the interval between consecutive frames
+                        lost_shards_deadline: packets_lost_deadline, 
                     };
                     // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
+         
                     context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_control, ClientControlPacket::NetworkStatistics(net)).unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
@@ -971,6 +989,8 @@ impl XRClient {
     
                         if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
                             let _resulllt = StreamSocket::recv(&mut ssocket, sock.inner, context);
+
+             
                             // println!("result of sender {:?}", sender ); 
                             // println!("Result of reader? {:?}" , resulllt);
                         }

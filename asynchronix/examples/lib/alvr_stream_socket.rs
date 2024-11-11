@@ -1,10 +1,13 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use futures_util::stream::empty;
+// use futures_util::stream::empty;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 
-use crate::lib::DEBUG_PRINT_ENABLED; 
+use crate::lib::{DEBUG_PRINT_ENABLED}; 
+
+use crate::format_elapsed; 
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(20); 
 
 use rand::Rng;
 use std::cell::RefCell;
@@ -244,6 +247,9 @@ pub struct InProgressPacket {
     buffer: Vec<u8>,
     buffer_length: usize,
     received_shard_indices: HashSet<usize>,
+    deadline: Option<TaiTime<0>>, 
+    num_shards_expected: usize, 
+    id_frame: u32, 
 }
 pub struct VideoPacket {
     pub header: VideoPacketHeader,
@@ -411,6 +417,7 @@ struct RecvState {
     packet_cursor: usize, // counts also the prefix bytes
     overwritten_data_backup: Option<[u8; SHARD_PREFIX_SIZE]>,
     should_discard: bool,
+    frame_first_shard_deadline: Option<TaiTime<0>>, 
 }
 
 #[derive(Clone)]
@@ -687,6 +694,8 @@ pub struct StreamSocket {
 
     highest_rx_shard_index: i32,
     highest_rx_frame_index: i32,
+
+    pub lost_shards_deadline_map: HashMap<u32, usize>,  // key: frame_id, val: shard loss  
 }
 
 impl StreamSocket {
@@ -744,6 +753,9 @@ impl StreamSocket {
                     buffer: vec![],
                     buffer_length: 0,
                     received_shard_indices: HashSet::new(),
+                    deadline: None, 
+                    num_shards_expected: 0, 
+                    id_frame: 0, 
                 },
             },
         );
@@ -763,11 +775,31 @@ impl StreamSocket {
         }
     }
 
+    pub fn flush_shards_lost_deadline(&mut self) -> usize {
+
+        let mut total_lost_deadline = 0; 
+        // Collect keys into a vector before modifying the map
+        let keys: Vec<_> = self.lost_shards_deadline_map.keys().cloned().collect();
+
+        // Now you can iterate over the keys and remove them from the map
+        for frame_deadlined in keys {
+            println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
+            total_lost_deadline += self.lost_shards_deadline_map.remove(&frame_deadlined).unwrap();
+        }
+
+        total_lost_deadline
+
+    }
+
+
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
         arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
         context: &Context<T>,
     ) -> ConResult {
+
+        let now = context.scheduler.time(); 
+        
         // println!("Recv function of shards!");
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
@@ -795,7 +827,7 @@ impl StreamSocket {
             // debug_print!(DebugColor::Blue, "[StreamSocket recv] Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant );
 
             if stream_id == VIDEO {
-                let rx_instant = context.scheduler.time();
+                let rx_instant = now;
 
                 if self.highest_rx_frame_index == packet_index as i32 {
                     if self.highest_rx_shard_index < shard_index as i32 {
@@ -855,8 +887,14 @@ impl StreamSocket {
                 packet_cursor: 0,
                 overwritten_data_backup: None,
                 should_discard: false,
+                frame_first_shard_deadline: None, 
             })
         };
+
+        if shard_recv_state_mut.frame_first_shard_deadline.is_none(){
+            shard_recv_state_mut.frame_first_shard_deadline = now.checked_add(DEADLINE_PACKETS_S); 
+        }
+
 
         let Some(components) = self
             .stream_recv_components
@@ -869,12 +907,9 @@ impl StreamSocket {
             return try_again();
         };
 
-        // println!(
-        //     "{:.9}[BEFORE!]Buffer stats - Pool: {}, In-progress: {}",
-        //     context.scheduler.time().duration_since(TaiTime::EPOCH).as_secs_f32(),
-        //     components.used_buffer_receiver.len(),
-        //     components.in_progress_packets.len()
-        // );
+        println!("{}[DBG] deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {}",format_elapsed!(now) , format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index);
+    
+
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
         } else if let Some(packet) = components
@@ -895,7 +930,7 @@ impl StreamSocket {
                         .in_progress_packets
                         .iter()
                         .find(|(&idx, _)| {
-                            wrapping_cmp(idx, shard_recv_state_mut.packet_index.wrapping_sub(3))
+                            wrapping_cmp(idx, shard_recv_state_mut.packet_index.wrapping_sub(5))
                                 == Ordering::Less
                         })
                         .map(|(&k, _)| k);
@@ -940,6 +975,9 @@ impl StreamSocket {
                     received_shard_indices: HashSet::with_capacity(
                         shard_recv_state_mut.shards_count,
                     ),
+                    deadline: shard_recv_state_mut.frame_first_shard_deadline, 
+                    num_shards_expected: shard_recv_state_mut.shards_count,
+                    id_frame: shard_recv_state_mut.packet_index, 
                 },
             );
             components
@@ -947,6 +985,8 @@ impl StreamSocket {
                 .get_mut(&shard_recv_state_mut.packet_index)
                 .unwrap()
         };
+
+        
 
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
         // Note: there is no prefix offset, since we want to write the prefix too.
@@ -997,15 +1037,16 @@ impl StreamSocket {
                     .unwrap();
                 shard_recv_state_mut.packet_cursor += size;
 
-                if shard_recv_state_mut.stream_id == VIDEO {
-                    // println!(" inside while :) size = {}, packet_cursor = {}\\n",  size, shard_recv_state_mut.packet_cursor);
-                }
+                // if shard_recv_state_mut.stream_id == VIDEO {
+                //     // println!(" inside while :) size = {}, packet_cursor = {}\\n",  size, shard_recv_state_mut.packet_cursor);
+                // }
             }
             // Restore backed up bytes
             // Safety: overwritten_data_backup is always set just before receiving the packet
             sub_buffer[..SHARD_PREFIX_SIZE]
                 .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
         }
+
 
         if !shard_recv_state_mut.should_discard {
             if !in_progress_packet
@@ -1118,6 +1159,7 @@ impl StreamSocket {
             components.used_buffer_sender.send(empty_buffer).ok();
 
             if shard_recv_state_mut.stream_id == VIDEO {
+
                 self.rx_bytes = 0;
                 self.rx_shard_counter = 0;
                 self.duplicated_shard_counter = 0;
@@ -1135,15 +1177,56 @@ impl StreamSocket {
                     self.map_rx.remove(&idx);
                 }
             }
-            // Keep only shards with later packet index (using wrapping logic)
-            while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {
-                wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
-            }) {
-                let idx = *idx; // fix borrow rule
-                let packet = components.in_progress_packets.remove(&idx).unwrap();
-                // Recycle buffer
-                components.used_buffer_sender.send(packet.buffer).ok();
+ 
+
+
+
+
+
+        } // if len == shard_count END
+
+
+            // Initialize a counter to track the total loss
+        let mut total_loss = 0;
+
+        // Create a vector to store the keys of expired packets (to remove them later)
+        let mut expired_keys = Vec::new();
+
+        // Iterate through in_progress_packets to identify expired packets
+        for (id, shard) in components.in_progress_packets.iter_mut() {
+            if let Some(deadline) = shard.deadline {
+                // Check if the packet's deadline has expired
+                if deadline <= now {
+                    // Compute the loss
+                    let expected_shards = shard.num_shards_expected;
+                    let shards_arrived = shard.received_shard_indices.len();
+                    let shards_lost = expected_shards - shards_arrived;
+
+                    // Update the total loss counter
+                    total_loss += shards_lost;
+
+                    // Print information about the expired packet
+                    // println!(
+                    //     "{} WOWWWW!!!!!!! -> Expired shard deadline: {:?}, frame_id: {} ,  packet loss: {:?} / {}",
+                    //     format_elapsed!(now),
+                    //     format_elapsed!(shard.deadline.unwrap()),
+                    //     shard.id_frame, 
+                    //     shards_lost,
+                    //     expected_shards
+                    // );
+
+                    self.lost_shards_deadline_map.insert(shard.id_frame,shards_lost); 
+                    // Add the expired packet's key to the list of expired keys
+                    expired_keys.push(*id);
+                }
             }
+        }
+
+
+        // Remove expired packets from the HashMap using the collected keys
+        for key in expired_keys {
+            components.in_progress_packets.remove(&key);
+            
         }
 
         // Mark current shard as read and allow for a new shard to be read
@@ -1183,6 +1266,7 @@ impl StreamSocketBuilder {
                     duplicated_shard_counter: 0,
                     highest_rx_shard_index: -1,
                     highest_rx_frame_index: -1,
+                    lost_shards_deadline_map: HashMap::new(), 
                 }
             }
         }
@@ -1274,6 +1358,7 @@ impl StreamSocketBuilder {
 
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
+            lost_shards_deadline_map: HashMap::new(), 
         })
     }
 
@@ -1343,6 +1428,7 @@ impl StreamSocketBuilder {
 
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
+            lost_shards_deadline_map: HashMap::new(), 
         })
     }
 

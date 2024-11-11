@@ -7,9 +7,9 @@ rate_bps_src=3E6;
 rate_bps_queue=6E5 ## does nothing theoretically 
 
 distance=10.0
-PL=0.001
+PL=0.1
 
-initial_bitrate_mbps=50.0
+initial_bitrate_mbps=15.0
 
 # Define folder name based on the same logic in Rust
 name_folder=$(printf "sim_T%.0f_Plen%.0f_K%d_Rq%.0f_D%.0f_Br%.0f_PL%.06f" \
@@ -26,14 +26,15 @@ trap 'echo -e "\nSimulation stopped. Output folder location: $Results/$name_fold
 
 # rm out_log.ans
 # script -q -c "cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance" out_log.ans ##                                              # linux dbg output
-# ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
+./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
 
+code Results/$name_folder/out_log.ans
 
 
 
 
 # echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
-samply record cargo run --profile profiling --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL 
+# samply record cargo run --profile profiling --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL 
 # code Results/$name_folder/out_log.ans
 # samply record cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance # for Tracing syscalls
 

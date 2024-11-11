@@ -469,6 +469,9 @@ impl QueueModule {
 
     pub async fn send_ampdu(&mut self, mut AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
+        
+       
+        
         debug_print!(
             DebugColor::Red,
             "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
@@ -482,7 +485,6 @@ impl QueueModule {
         // AMPDU_sent.print();
         self.packet_being_served = false;
 
-        // if P>0,01 then drop
 
         match AMPDU_sent.sta_dest_id{
          0 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
@@ -617,28 +619,6 @@ impl QueueModule {
                             break;
                         }
 
-
-                        // Simulate packet loss based on probability
-                        let mut rng = rand::thread_rng();
-                        let random_value: f64 = rng.gen();
-
-                        if random_value <= self.PL_probability {
-                            // Drop the packet (simulate packet loss)
-                            debug_print!(
-                                DebugColor::Purple,
-                                "{} [DBG TX] --AMPDU packet dropped due to loss probability",
-                                format_elapsed!(now)
-                            );
-                            self.blocked_packet_counter += 1; 
-
-                            // Remove the packet from the queue
-                            self.queue.remove(packet_index);
-
-                            // No need to increment packet_index since we removed the current packet
-                            continue;
-                        }
-
-
                         // Remove packet and update AMPDU
                         if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
                             packet_rmvd.queue_length_when_out = self.queue.len();
@@ -686,8 +666,29 @@ impl QueueModule {
 
                     self.packet_being_served = true;
                     
+
+                    let mut rng = rand::thread_rng();
+
+                    self.aux_ampdu_serviced.mpdu_packets.retain(|packet| {
+                        let random_value: f64 = rng.gen();
+                    
+                        if random_value <= self.PL_probability {
+                            debug_print!(
+                                DebugColor::Purple,
+                                "{} [DBG TX] --packet {:?} dropped due to loss probability", 
+                                format_elapsed!(now),
+                                packet.header_alvr,
+                            );
+                            self.blocked_packet_counter += 1;
+                            false // Do not retain the packet
+                        } else {
+                            true // Retain the packet
+                        }
+                    });
+
                     // Move AMPDU to scheduled event instead of cloning
                     let ampdu_to_send = std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
+                    
                     context.scheduler
                         .schedule_event(
                             last_service_duration,
@@ -699,130 +700,6 @@ impl QueueModule {
             }
         }
     }
-
-    // fn deque_schedule_service<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-    //     async move {
-    //         if let Some(first_packet) = self.queue.front() {
-    //             let now: tai_time::TaiTime<0> = context.scheduler.time();
-
-    //             // Initialize AMPDU with first packet's info
-    //             self.aux_ampdu_serviced.reset();
-    //             self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
-    //             self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
-
-    //             let mut last_service_duration = Duration::default();
-    //             let mut packet_index = 0;
-
-    //             // Continue processing while we have more packets to check
-    //             while packet_index < self.queue.len() {
-
-    //                 if let Some(current_packet) = self.queue.get(packet_index) {
-    //                     // Skip packets not matching AMPDU's destination
-    //                     if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id {
-    //                         packet_index += 1;
-    //                         continue;
-    //                     }
-
-    //                     // Calculate potential new service delay
-    //                     let new_total_length =
-    //                         self.aux_ampdu_serviced.total_length + current_packet.length_packet;
-    //                     let new_size = self.aux_ampdu_serviced.size + 1;
-
-    //                     let resultz = frametransmission_delay(
-    //                         new_total_length as f64,
-    //                         new_size,
-    //                         self.coords_queue,
-    //                         current_packet.sta_src_coords, // gets transmission delay between AP and the source of the packet itself
-    //                         P_TX,
-    //                     );
-
-    //                     // Check if adding this packet would exceed limits
-    //                     if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size >= MAX_AMPDU_SIZE {
-    //                         break;
-    //                     }
-
-    //                     // Remove packet and update AMPDU
-    //                     if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
-    //                         packet_rmvd.queue_length_when_out = self.queue.len();
-    //                         packet_rmvd.queue_out_instant = now;
-
-    //                         self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
-    //                         self.aux_ampdu_serviced.total_length = new_total_length;
-    //                         self.aux_ampdu_serviced.size = new_size;
-
-    //                         last_service_duration = Duration::from_secs_f64(resultz.service_delay);
-
-    //                         // Don't increment packet_index since we removed a packet
-    //                         // and the next packet shifted into the current position
-    //                     }
-    //                 }
-    //             }
-
-    //             if let Some(stats_tx) = &self.stats_tx {
-    //                 for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
-    //                     let stats_update = StatsUpdate {
-    //                         T_s: packet.expected_T_s.as_secs_f64(),
-    //                         T_q: packet.T_q.as_secs_f64(),
-    //                         blocked_packet_counter: self.blocked_packet_counter ,
-    //                         arrived_packet_counter: self.arrived_packet_counter ,
-    //                         queue_length_when_out: packet.queue_length_when_out,
-    //                         sta_src_id: packet.sta_src_id as usize,
-    //                         packet_id: packet.packet_id as i32,
-    //                         now,
-    //                         length_packet: packet.length_packet,
-    //                     };
-    //                     // Send to stats processing thread
-    //                     stats_tx.send(stats_update).expect("Failed to send stats update");
-    //                 }
-    //             }
-
-    //             for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
-    //                 let packet_queue_time = packet
-    //                     .queue_out_instant
-    //                     .duration_since(packet.queue_in_instant);
-
-    //                 packet.T_q = packet_queue_time;
-    //                 packet.expected_T_s = last_service_duration;
-
-    //                 let T_s_f64 = packet.expected_T_s.as_secs_f64();
-    //                 let T_q_f64 = packet.T_q.as_secs_f64();
-                   
-    //             }
-
-    //             if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
-    //                 debug_print!(
-    //                     DebugColor::Yellow,
-    //                     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-    //                     format_elapsed!(now),
-    //                     format_elapsed!(now + last_service_duration),
-    //                 );
-
-    //                 if DEBUG_PRINT_ENABLED {
-    //                     self.aux_ampdu_serviced.print();
-    //                 }
-
-    //                 self.packet_being_served = true;
-    //                 println!("scheduling"); 
-    //                 context
-    //                     .scheduler
-    //                     .schedule_event(
-    //                         last_service_duration,
-    //                         Self::send_ampdu,
-    //                         self.aux_ampdu_serviced.clone(),
-    //                     )
-    //                     .unwrap();
-    //                 println!("scheduling end"); 
-
-    //             } else {
-    //                 println!("?????????");
-    //             }
-    //         }
-    //     }
-    // }
 
 }
 impl Model for QueueModule {}

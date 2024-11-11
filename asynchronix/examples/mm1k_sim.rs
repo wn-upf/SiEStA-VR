@@ -402,6 +402,7 @@ fn main() {
             "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance>",
             args[0]
         );
+        println!("ARGS: {:#?}", args); 
         return;
     }
     let stoptime: f64 = args[1].parse().expect("Invalid T_END");

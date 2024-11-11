@@ -58,6 +58,8 @@ fn main() {
             "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate> <PL_prob>",
             args[0]
         );
+        println!("ARGS: {:#?}", args); 
+
         return;
     }
     let stoptime: f64 = args[1].parse().expect("Invalid T_END");
@@ -79,7 +81,10 @@ fn main() {
         initial_bitrate,  // Br: initial bitrate
         PL_prob
     );
+    println!("NAME_FOLDER: {:?}", name_folder); 
+    println!("PL_probability: {:?}", PL_prob); 
 
+    std::thread::sleep(Duration::from_secs(2)); 
 
     let output_path = format!("Results/{}", name_folder);
     let path = Path::new(&output_path);

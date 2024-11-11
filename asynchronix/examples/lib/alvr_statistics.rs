@@ -263,8 +263,12 @@ impl StatisticsManager {
             shards_sent = shards_from_prev + shards_from_inbetween + shards_from_actual;
         }
 
-        // warn!("SHARDS SENT = {}", shards_sent); 
         shards_lost = shards_sent as isize - network_stats.rx_shard_counter as isize;
+        
+        if shards_lost !=0 {
+            // println!("SHARDS SENT = {}, shard_counter = {}", shards_sent, network_stats.rx_shard_counter); 
+            // println!("DBG LOST {} SHARDS!!", shards_lost); 
+        }
 
         self.prev_highest_frame = network_stats.highest_rx_frame_index as i32;
         self.prev_highest_shard = network_stats.highest_rx_shard_index as i32;
@@ -284,48 +288,6 @@ impl StatisticsManager {
             self.instant_weighted_avg_prev = now;
             self.interval_avg_plot_throughput = self.history_throughput_weighted.get_average();
         }
-
-        // println!("{:?}", (EventType::GraphNetworkStatistics(GraphNetworkStatistics {
-        //     frame_index: network_stats.frame_index as u32,
-
-        //     frame_size_bytes: network_stats.bytes_in_frame as usize, 
-
-        //     server_fps: 1.
-        //         / self
-        //             .server_frames_moving
-        //             .get_interval_buffer_mean()
-        //             .max(Duration::from_millis(1).as_secs_f32()),
-
-        //     client_fps: 1.
-        //         / self
-        //             .client_frames_moving
-        //             .get_interval_buffer_mean()
-        //             .max(Duration::from_millis(1).as_secs_f32()),
-
-        //     frame_span_ms: network_stats.frame_span * 1000.0,
-
-        //     interarrival_jitter_ms: network_stats.interarrival_jitter * 1000.0,
-
-        //     ow_delay_ms: network_stats.ow_delay * 1000.0,
-        //     filtered_ow_delay_ms: network_stats.filtered_ow_delay * 1000.0,
-
-        //     rtt_ms: rtt.as_secs_f32() * 1000.0,
-
-        //     frame_interarrival_ms: network_stats.frame_interarrival * 1000.0,
-        //     frame_jitter_ms: self.frame_interarrival_average.get_std() * 1000.0,
-
-        //     frames_skipped: network_stats.frames_skipped,
-
-        //     shards_lost: shards_lost,
-        //     shards_duplicated: network_stats.duplicated_shard_counter,
-
-        //     instant_network_throughput_bps: instant_network_throughput_bps,
-        //     peak_network_throughput_bps: peak_network_throughput_bps,
-
-        //     nominal_bitrate: self.last_nominal_bitrate_stats.clone(),
-
-        //     interval_avg_plot_throughput: self.interval_avg_plot_throughput,
-        // })));
 
         self.last_stats = GraphNetworkStatistics_csv {
             frame_index: network_stats.frame_index as u32,

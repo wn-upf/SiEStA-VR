@@ -33,7 +33,7 @@ pub const P_TX: f64 = 20.0;
 pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;

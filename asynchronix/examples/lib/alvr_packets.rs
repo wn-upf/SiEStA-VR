@@ -196,4 +196,6 @@ pub struct NetworkStatisticsPacket {
 
     pub highest_rx_frame_index: i32,
     pub highest_rx_shard_index: i32,
+
+    pub lost_shards_deadline: usize, 
 }
