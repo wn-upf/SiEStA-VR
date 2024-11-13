@@ -1,9 +1,9 @@
-BATCH_SIZE=200 # Set to the desired level of parallelism
+BATCH_SIZE=300 # Set to the desired level of parallelism
 
 cargo build --release --example XR_sim
 
 # Define ranges for each variable
-simTime=100
+simTime=1000.0
 mean_length=12000.0
 rate_bps_src=3E6
 

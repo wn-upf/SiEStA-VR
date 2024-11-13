@@ -8,6 +8,7 @@ use crate::lib::{DEBUG_PRINT_ENABLED};
 
 use crate::format_elapsed; 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(20); 
+pub const MAX_DEADLINE_IN_STATS: usize = 5; 
 
 use rand::Rng;
 use std::cell::RefCell;
@@ -792,6 +793,7 @@ impl StreamSocket {
             vec_keys.push(frame_deadlined);
 
             let lost_in_frame = self.lost_shards_deadline_map.remove(&frame_deadlined).unwrap(); 
+            println!("Lost in frame: {:?}", lost_in_frame); 
             vec_lost.push(lost_in_frame); 
             total_lost_deadline += lost_in_frame; 
         }

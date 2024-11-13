@@ -77,7 +77,8 @@ use crate::lib::{
 use crate::lib::alvr_statistics::StatisticsManager;
 use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
-use super::alvr_stream_socket::CONTROL_STREAM;
+use super::alvr_packets::DeadlineShardlossStatPacket;
+use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
@@ -235,30 +236,37 @@ impl XRServer {
 
             match packet {    
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-
-                            println!("{:.9}- Server receving stats\n{:?}",now.duration_since(self.t_0).as_secs_f64(), network_stats);
-
-                            let map_rtt_lock = map_clone.read().unwrap();
-                            let mut hashmap = map_rtt_lock.clone();
-                            let frame_id = network_stats.frame_index as u32;
-                            let rtt: Duration;
-                            if let Some(send_instant) = hashmap.remove(&frame_id) {
-                                rtt = now.duration_since(send_instant);
-                            } else {
-                                println!("ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!");
-                                rtt = Duration::ZERO;
-                            }
-                            println!("RTT = {:.9}", rtt.as_secs_f64()); 
-                            let (peak_network_throughput_bps, frame_interarrival_s) =
-                                self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt, now);
-
-                            // BITRATE_MANAGER.lock().report_network_statistics
-                            self.bitrate_manager.report_network_statistics(
-                                rtt,
-                                peak_network_throughput_bps,
-                                frame_interarrival_s,
-                            );   
+                    println!("{:.9}- Server receving stats\n{:?}",now.duration_since(self.t_0).as_secs_f64(), network_stats);
+                    let map_rtt_lock = map_clone.read().unwrap();
+                    let mut hashmap = map_rtt_lock.clone();
+                    let frame_id = network_stats.frame_index as u32;
+                    let rtt: Duration;
+                    if let Some(send_instant) = hashmap.remove(&frame_id) {
+                        rtt = now.duration_since(send_instant);
+                    } else {
+                        println!("ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!");
+                        rtt = Duration::ZERO;
                     }
+                    println!("RTT = {:.9}", rtt.as_secs_f64()); 
+                    let (peak_network_throughput_bps, frame_interarrival_s) =
+                        self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt, now);
+
+                    // BITRATE_MANAGER.lock().report_network_statistics
+                    self.bitrate_manager.report_network_statistics(
+                        rtt,
+                        peak_network_throughput_bps,
+                        frame_interarrival_s,
+                    );   
+                }
+                ClientControlPacket::DeadlineShardLossStat(inner) => {  
+                    let frames_lost = inner.frame_indexes; 
+                    let shards_lost = inner.shards_lost; 
+                    
+                    for (frame,shard) in frames_lost.iter().zip(shards_lost.iter()) {
+                        println!("[DBG_DEAD_RX server] Frame {} lost {} shards", frame, shard); 
+                    }; 
+                }
+                
                 _ =>  {println!("UNEXPECTED CONTROL PACKET RECEIVED!!"); }  
         
             }
@@ -717,14 +725,23 @@ impl XRClient {
                 let result = Self::framed_send(self, &pack, context).await;
                 // println!("result of output control: {:?}", result); 
             }
+            ClientControlPacket::DeadlineShardLossStat(inner) => {
+                let result = Self::framed_send(self, &pack, context).await;
+
+            }
             _ => eprintln!("Uncovered match case!!"),
         }
         ()
     }
-    pub fn report_frame_lost(frame: u32, shards_lost: usize){
+    pub fn report_frame_lost( mut frames:  Vec<u32>, mut shards_lost: Vec<usize>, context: &Context<Self> ) {
+        frames.truncate(MAX_DEADLINE_IN_STATS);
+        shards_lost.truncate(MAX_DEADLINE_IN_STATS);
 
-        todo!("SEND CONTROL PACKET WITH STATS"); 
-
+        let net = DeadlineShardlossStatPacket{
+            frame_indexes: frames, 
+            shards_lost: shards_lost, 
+        }; 
+        context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_control, ClientControlPacket::DeadlineShardLossStat(net)).unwrap();
     }
     pub fn video_receive_thread<'a>(
         &'a mut self,
@@ -741,9 +758,8 @@ impl XRClient {
                     if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
                         let mut counter = 0;                     
                         (frames_lost, shards_lost) =StreamSocket::flush_shards_lost_deadline(&mut ssocket); 
-                        for i in frames_lost{
-                            self.report_frame_lost(i, shards_lost); 
-                        }
+                        XRClient::report_frame_lost(frames_lost, shards_lost, context); 
+
                         
                     }
 
@@ -870,43 +886,27 @@ impl XRClient {
         }
     }
 
-    // pub async fn vsync<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // )-> impl Future<Output = ()> + Send + 'a {
-    //     async move{
-    //         let mut T_vsync = Duration::from_secs_f32(1.0 / self.framerate);
-
-    //         // TODO:
-    //         // let video_frame = self.decoder_queue.pop_front();
-    //         // let stats = NetworkStatisticsPacket::new();
-
-    //         // self.output_statistics.send(stats);
-
-    //         // context
-    //         //     .scheduler
-    //         //     .schedule_event(T_vsync, Self::vsync, ())
-    //         //     .unwrap();
-    //     }
-    // }
-    pub async fn read_network_interface_to_app<'a>(
+    pub async fn vsync<'a>(
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
-        mut buffer: Vec<u8>,
-        // mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>>,
-        receiver: Arc<Mutex<Box<dyn SocketWriter>>>,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            println!("WHAAAAAAAAAAATDOESTHISDO!!");
-            panic!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA PANIIIIIC"); 
-            let bytes_transmitted = {
-                let mut guard = receiver.lock().unwrap();
-                guard.send(&mut buffer)
-            };
+    )-> impl Future<Output = ()> + Send + 'a {
+        async move{
+            let mut T_vsync = Duration::from_secs_f32(1.0 / self.framerate);
+
+            // TODO:
+            // let video_frame = self.decoder_queue.pop_front();
+            // let stats = NetworkStatisticsPacket::new();
+
+            // self.output_statistics.send(stats);
+
+            // context
+            //     .scheduler
+            //     .schedule_event(T_vsync, Self::vsync, ())
+            //     .unwrap();
         }
     }
+
 
     pub async fn configure_streams(&mut self) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.

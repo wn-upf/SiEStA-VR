@@ -72,6 +72,7 @@ pub enum ClientControlPacket {
     ReservedBuffer(Vec<u8>),
 
     NetworkStatistics(NetworkStatisticsPacket),
+    DeadlineShardLossStat(DeadlineShardlossStatPacket), 
 }
 
 // pub struct ProtoControlSocket {
@@ -172,6 +173,15 @@ pub struct ClientStatistics {
 
     pub frames_dropped: u32,
 }
+
+
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeadlineShardlossStatPacket{
+    pub frame_indexes: Vec<u32>, 
+    pub shards_lost: Vec<usize>, 
+} 
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkStatisticsPacket {
