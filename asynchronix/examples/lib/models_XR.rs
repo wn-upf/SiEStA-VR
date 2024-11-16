@@ -52,6 +52,8 @@ pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 pub const DECODER_BUFFERING_FRAMES: usize = 3;
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2; 
+
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -624,6 +626,7 @@ impl<T> DroppingVecDeque<T> {
         if self.deque.len() == self.capacity {
             self.deque.pop_front(); 
             self.dropped_frame_counter += 1; 
+            println!("DROPPED A FRAME IN DECODER!!"); 
         }
         // Push the new item to the back
         self.deque.push_back(item);
@@ -649,6 +652,8 @@ pub struct XRClient {
     pub input_app_audio: Option<StreamReceiver<()>>,
     pub input_app_haptics: Option<StreamReceiver<Haptics>>,
 
+    pub out_video_decoded: Output<Vec<u8>>, 
+
     pub framerate: f32,
 
     pub output_app_network: Output<MpduPacket>,
@@ -670,6 +675,8 @@ impl XRClient {
             input_app_video: None,
             input_app_audio: None,
             input_app_haptics: None,
+
+            out_video_decoded: Output::default(), 
 
             framerate: fps,
 
@@ -758,9 +765,7 @@ impl XRClient {
                     if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
                         let mut counter = 0;                     
                         (frames_lost, shards_lost) =StreamSocket::flush_shards_lost_deadline(&mut ssocket); 
-                        XRClient::report_frame_lost(frames_lost, shards_lost, context); 
-
-                        
+                        XRClient::report_frame_lost(frames_lost, shards_lost, context);                         
                     }
 
                     let data: ReceiverData<VideoPacketHeader> =
@@ -772,7 +777,6 @@ impl XRClient {
 
                     let mut packets_lost_deadline = 0; 
                                       
-                        
                     let net = NetworkStatisticsPacket {
                         // Frame specific metrics
                         frame_index: data.get_frame_index() as i32, // index of the current frame
@@ -886,7 +890,7 @@ impl XRClient {
         }
     }
 
-    pub async fn vsync<'a>(
+    pub fn vsync<'a>(
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
@@ -895,15 +899,20 @@ impl XRClient {
             let mut T_vsync = Duration::from_secs_f32(1.0 / self.framerate);
 
             // TODO:
-            // let video_frame = self.decoder_queue.pop_front();
-            // let stats = NetworkStatisticsPacket::new();
+            if let Some(video_frame) = self.decoder_queue.pop(){
+                println!("{} decoded frame OK! ok: {} | dropped: {} , data: {:?}", format_elapsed!(context.scheduler.time()), self.decoder_queue.ok_dequed_frame_counter, self.decoder_queue.dropped_frame_counter, &video_frame[0..10]); 
+                self.out_video_decoded.send(video_frame).await;  
 
-            // self.output_statistics.send(stats);
+            }
+            else{
+            }
+            println!("Decoder queue size: {}", self.decoder_queue.len());
+            if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE
+            {
+                T_vsync = T_vsync * 2; // duplicate wait so queue can fill
+            } 
 
-            // context
-            //     .scheduler
-            //     .schedule_event(T_vsync, Self::vsync, ())
-            //     .unwrap();
+            context.scheduler.schedule_event( T_vsync, Self::vsync, ()).unwrap(); 
         }
     }
 
@@ -935,6 +944,7 @@ impl XRClient {
             self.input_app_haptics =
                 Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
             self.streamsocket_clone = Some(stream_socket.clone());
+
 
             // {
             //     // retrieve video packets in RX buffer
@@ -1028,6 +1038,19 @@ impl XRClient {
 }
 
 impl Model for XRClient {}
+
+pub struct SinkVideo_XR {
+    pub counter_decoded: usize, 
+}
+impl SinkVideo_XR{
+    pub fn new() ->  Self{
+        Self { counter_decoded: (0) }
+    }
+    pub async fn in_video(&mut self, inpuut: Vec<u8>){
+        println!("Reproducing vid {:?}", inpuut); 
+    }
+}
+impl Model for SinkVideo_XR{}
 
 pub trait XRDevice {
     fn some_shared_method(&self);

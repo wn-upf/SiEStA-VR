@@ -33,6 +33,9 @@ struct BatteryData {
 }
 
 
+
+
+
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>,
     max_history_size: usize,
