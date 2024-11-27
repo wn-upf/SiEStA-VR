@@ -590,15 +590,16 @@ impl QueueModule {
                 // Initialize AMPDU with first packet's info
                 self.aux_ampdu_serviced.reset();
                 self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
+                self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id; 
                 self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
 
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
 
-                // Process packets that match the AMPDU destination
+                // Process packets that match the AMPDU destination (and source?)
                 while packet_index < self.queue.len() {
                     if let Some(current_packet) = self.queue.get(packet_index) {
-                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id {
+                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id || if current_packet.sta_src_id != self.aux_ampdu_serviced.src_id{ // make sure we select packets at a single interface (sta)
                             packet_index += 1;
                             continue;
                         }

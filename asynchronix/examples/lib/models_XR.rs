@@ -1091,6 +1091,8 @@ pub struct STA_extended {
     pub sta_coordinates: Coords,
     pub does_sta_tx: bool,
 
+    pub is_bg_sta: bool,
+
     pub t_0: TaiTime<0>,
 }
 
@@ -1104,13 +1106,14 @@ impl STA_extended {
         does_sta_transmit: bool,
         rate_service_bps: f64,
         t0_sim: TaiTime<0>,
+        is_bg_sta: bool,
     ) -> Self {
         let arrival_rate_BG = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps / mean_length;
         println!("\n*************************************************");
-        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t arrival_rate_BG (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
-                            src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate_BG,effective_mu ,mean_length);
-
+        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t arrival_rate_BG (pack/s): {:.3}, Departure_rate: {:.3},  L = {}, is_BG_STA {}",
+                            src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate_BG,effective_mu ,mean_length, is_bg_sta);
+        
         Self {
             output_network_port: Default::default(),
 
@@ -1127,6 +1130,7 @@ impl STA_extended {
             received_packet_counter: 0,
             does_sta_tx: does_sta_transmit,
             t_0: t0_sim,
+            is_bg_sta, 
         }
     }
 
@@ -1215,13 +1219,13 @@ impl STA_extended {
         self.to_app_socket.send(frame).await; 
     }
 
-    fn send_packet_BG<'a>(
+    pub fn send_packet_BG<'a>(
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            if self.does_sta_tx {
+            if self.does_sta_tx && self.is_bg_sta {
                 // if STA is "TX type"         (and not "RX only")
 
                 let mut packet = MpduPacket::new();
@@ -1248,10 +1252,10 @@ impl STA_extended {
 
                 self.num_packets_sent += 1;
 
-                // context // reschedule this function // DON'T SELF-schedule (depends on XR_source)
-                //     .scheduler
-                //     .schedule_event(time_interarrival, Self::send_packet, ())
-                //     .unwrap();
+                context // reschedule this function 
+                    .scheduler
+                    .schedule_event(time_interarrival, Self::send_packet_BG, ())
+                    .unwrap();
             }
         }
     }

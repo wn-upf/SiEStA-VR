@@ -162,9 +162,10 @@ fn main() {
         true,
         effective_rate1,
         t0,
+        false, 
     ); // STAs 0 and 1 send traffic to 5 through AP
 
-    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0);
+    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0, false);
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
 

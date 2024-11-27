@@ -778,7 +778,8 @@ impl MpduPacket {
 pub struct AmpduPacket {
     pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
     pub total_length: usize,           // Total length of aggregated packets
-    pub sta_dest_id: i32,                   // ID for the source STA
+    pub sta_src_id: i32, 
+    pub sta_dest_id: i32,                   // ID for the destination STA
     pub size: i32,
     pub coordinates: Coords,
 }

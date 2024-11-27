@@ -1,5 +1,5 @@
 
-simTime=1000.0
+simTime=1000
 k_queue=10000
 mean_length=12000.0
 rate_bps_src=3E6; 
