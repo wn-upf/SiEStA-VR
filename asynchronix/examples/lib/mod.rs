@@ -33,7 +33,7 @@ pub const P_TX: f64 = 20.0;
 pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED:bool = true; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;
@@ -51,10 +51,12 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 #[macro_export]
 macro_rules! debug_print {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // Check if debugging is enabled
-        if DEBUG_PRINT_ENABLED {
+        if DEBUG_PRINT_ENABLED == true {
             let msg = format!($fmt, $($arg)*);
             println!("{}", $color.to_color_fn()(msg));
+        }
+        else{
+            
         }
     };
 }
@@ -326,6 +328,9 @@ pub struct CsvData {
     v_queue_ts: Vec<f64>,
     v_queue_tq: Vec<f64>,
     v_packet_l: Vec<usize>,
+
+    v_id_src: Vec<usize>, 
+    v_id_dest: Vec<usize>, 
 }
 
 impl CsvData {
@@ -337,6 +342,9 @@ impl CsvData {
             v_queue_ts: Vec::new(),
             v_queue_tq: Vec::new(),
             v_packet_l: Vec::new(),
+            v_id_src: Vec::new(),
+            v_id_dest: Vec::new(),
+
         }
     }
 
@@ -359,6 +367,8 @@ impl CsvData {
             "L_packet",
             "T_s",
             "T_q",
+            "id_src",
+            "id_dest", 
         ])?;
 
         // Write all stored data at once
@@ -370,6 +380,8 @@ impl CsvData {
                 &self.v_packet_l[i].to_string(),
                 &self.v_queue_ts[i].to_string(),
                 &self.v_queue_tq[i].to_string(),
+                &self.v_id_src[i].to_string(),
+                &self.v_id_dest[i].to_string(),         
             ])?;
         }
 
@@ -403,6 +415,8 @@ impl CsvType {
         Ts: f64,
         Tq: f64,
         length_packet: usize,
+        id_src: usize, 
+        id_dest: usize, 
     ) {
         let formatted_timestamp = format_timestamp!(now);
 
@@ -413,6 +427,8 @@ impl CsvType {
             data.v_queue_ts.push(Ts);
             data.v_queue_tq.push(Tq);
             data.v_packet_l.push(length_packet);
+            data.v_id_src.push(id_src); 
+            data.v_id_dest.push(id_dest); 
         }
     }
 }
@@ -561,6 +577,8 @@ impl perStaStats {
         Ts: f64,
         Tq: f64,
         length_packet: usize,
+        sta_src_id: usize,
+        sta_dest_id: usize, 
     ) {
         self.q_time_sta_cum.add(Tq);
         self.s_time_sta_cum.add(Ts);
@@ -574,6 +592,9 @@ impl perStaStats {
         self.csv_data.v_queue_ts.push(Ts);
         self.csv_data.v_queue_tq.push(Tq);
         self.csv_data.v_packet_l.push(length_packet);
+        self.csv_data.v_id_src.push(sta_src_id); 
+        self.csv_data.v_id_dest.push(sta_dest_id); 
+
     }
 }
 #[allow(non_camel_case_types)]
@@ -789,7 +810,9 @@ impl AmpduPacket {
         AmpduPacket {
             mpdu_packets: Vec::new(), // Initialize an empty vector for MPDU packets
             total_length: 0,          // Initialize total length to 0
+            sta_src_id: -1,
             sta_dest_id: -1, // Initialize STA_ID to -1 (assuming -1 indicates uninitialized)
+
             size: 0,    // Initialize size to 0
             coordinates: Coords {
                 x: 0.0,
@@ -797,12 +820,13 @@ impl AmpduPacket {
                 z: 0.0,
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
         }
+
     }
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
-            self.size, self.sta_dest_id, self.total_length
+            "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
+            self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
         for packet in &self.mpdu_packets {
             println!(
@@ -1008,6 +1032,8 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>, folder: &str) ->
                 "L_packet",
                 "T_s",
                 "T_q",
+                "id_src",
+                "id_dest"
             ])?;
 
             // Write all stored data for this station
@@ -1019,6 +1045,8 @@ pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>, folder: &str) ->
                     &stats.csv_data.v_packet_l[i].to_string(),
                     &stats.csv_data.v_queue_ts[i].to_string(),
                     &stats.csv_data.v_queue_tq[i].to_string(),
+                    &stats.csv_data.v_id_src[i].to_string(),
+                    &stats.csv_data.v_id_dest[i].to_string(),
                 ])?;
             }
 

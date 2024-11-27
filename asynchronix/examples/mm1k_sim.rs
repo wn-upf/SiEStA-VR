@@ -480,6 +480,7 @@ fn downlink_uplink_scenario(
 
 
     let t0 = MonotonicTime::EPOCH;
+    let coords_ap = Coords::new(); 
 
 
     // UPLINK 
@@ -505,13 +506,14 @@ fn downlink_uplink_scenario(
         t0, 
         true, 
     ); 
+
     // DOWNLINK DIRECTION (AP IS 2)
     let mut sta3_bg: STA_extended = STA_extended::new(
         rate_bps_in,
         mean_length, 
-        2, 
+        12, 
         0,
-        coords_sta1, 
+        coords_ap, 
         true,
         effective_rate1, 
         t0, 
@@ -520,9 +522,9 @@ fn downlink_uplink_scenario(
     let mut sta4_bg: STA_extended = STA_extended::new(
         rate_bps_in,
         mean_length, 
-        2, 
+        12, 
         1,
-        coords_sta2, 
+        coords_ap, 
         true,
         effective_rate2, 
         t0, 
@@ -557,21 +559,24 @@ fn downlink_uplink_scenario(
     let mbox_sta1 = Mailbox::new();
     let mbox_sta2 = Mailbox::new();
 
+    let mbox_sta3 = Mailbox::new();
+    let mbox_sta4 = Mailbox::new(); 
+
     let sta1_address = mbox_sta1.address();
     let sta2_address = mbox_sta2.address();
+
+    let sta3_address = mbox_sta3.address(); 
+    let sta4_address = mbox_sta4.address(); 
     // let sta3_address = mbox_sink.address();
 
     let mbox_queue = Mailbox::new();
-    // let queue_address = mbox_queue.address();
+    
+    
+    sta1_bg.output_network_port.connect(QueueModule::input, &mbox_queue); // Two DL STAs send
+    sta2_bg.output_network_port.connect(QueueModule::input, &mbox_queue);
+    sta3_bg.output_network_port.connect(QueueModule::input, &mbox_queue); 
+    sta4_bg.output_network_port.connect(QueueModule::input, &mbox_queue); 
 
-    // let sink_mbox = Mailbox::new();
-    // let sink_mbox_address = sink_mbox.address();
-
-    // CONNECT COMPONENTS
-    // source.output_port.connect(Sink::input, &sink_mbox);
-
-    // sta1_bg.output_port.connect(QueueModule::input, &mbox_queue); // Two DL STAs send
-    // sta2_bg.output_port.connect(QueueModule::input, &mbox_queue);
 
     queue.output_port_sta1.connect(Sink::input, &mbox_sink);
     queue.output_port_sta2.connect(Sink::input, &mbox_sink);
@@ -579,8 +584,10 @@ fn downlink_uplink_scenario(
     let t0 = MonotonicTime::EPOCH;
 
     let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
-        .add_model(sta1_bg, mbox_sta1, "STA1 (BG)")
-        .add_model(sta2_bg, mbox_sta2, "STA2 (BG)")
+        .add_model(sta1_bg, mbox_sta1, "STA1 (BG_UL)")
+        .add_model(sta2_bg, mbox_sta2, "STA2 (BG_UL)")
+        .add_model(sta3_bg, mbox_sta3, "STA3 (BG DL)")
+        .add_model(sta4_bg, mbox_sta4, "STA4 (BG DL)")
         .add_model(queue, mbox_queue, "Queue")
         .add_model(sink, mbox_sink, "SINK")
         .init(t0);
@@ -602,12 +609,13 @@ fn downlink_uplink_scenario(
     let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
     let duration_scheduled2 = Duration::from_secs(10) + epsilon2;
 
+    // Initialize sta3 and 4 for Downlink, 1 and 2 for Uplink
     scheduler
         .schedule_event(
             duration_scheduled1,
             STA_extended::send_packet_BG,
             (),
-            &sta1_address,
+            &sta3_address,
         )
         .unwrap();
 
@@ -616,7 +624,7 @@ fn downlink_uplink_scenario(
             duration_scheduled2,
             STA_extended::send_packet_BG,
             (),
-            &sta2_address,
+            &sta4_address,
         )
         .unwrap();
 

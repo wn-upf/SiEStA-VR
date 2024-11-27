@@ -10,8 +10,8 @@ rate_bps_queue=1 ## does nothing theoretically
 
 
 
-start_bandwidth=2.5E6
-end_bandwidth=40E6
+start_bandwidth=50E6
+end_bandwidth=50E6
 step_bandwidth=2.5E6
 
 

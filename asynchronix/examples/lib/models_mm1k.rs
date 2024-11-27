@@ -341,6 +341,7 @@ pub struct StatsUpdate {
     pub arrived_packet_counter: usize,
     pub queue_length_when_out: usize,
     pub sta_src_id: usize,
+    pub sta_dest_id: usize, 
     pub packet_id: i32,
     pub now: tai_time::TaiTime<0>,
     pub length_packet: usize,
@@ -488,7 +489,9 @@ impl QueueModule {
 
         match AMPDU_sent.sta_dest_id{
          0 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
+         1 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
          2 =>    {self.output_port_sta2.send(AMPDU_sent).await;}
+         12 =>   {self.output_port_sta2.send(AMPDU_sent).await;}
 
          _ =>    {println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE"); }
         }
@@ -519,6 +522,8 @@ impl QueueModule {
                                     stats_update.T_s,
                                     stats_update.T_q,
                                     stats_update.length_packet,
+                                    stats_update.sta_src_id,
+                                    stats_update.sta_dest_id, 
                                 );
                             }
                         }
@@ -530,6 +535,8 @@ impl QueueModule {
                             stats_update.T_s,
                             stats_update.T_q,
                             stats_update.length_packet,
+                            stats_update.sta_src_id, 
+                            stats_update.sta_dest_id, 
                         );
                     }
                 }
@@ -561,6 +568,8 @@ impl QueueModule {
                                 stats_update.T_s,
                                 stats_update.T_q,
                                 stats_update.length_packet,
+                                stats_update.sta_src_id,
+                                stats_update.sta_dest_id, 
                             );
                         }
                     }
@@ -572,6 +581,8 @@ impl QueueModule {
                         stats_update.T_s,
                         stats_update.T_q,
                         stats_update.length_packet,
+                        stats_update.sta_src_id,
+                        stats_update.sta_dest_id, 
                     );
                 }
             }
@@ -599,7 +610,7 @@ impl QueueModule {
                 // Process packets that match the AMPDU destination (and source?)
                 while packet_index < self.queue.len() {
                     if let Some(current_packet) = self.queue.get(packet_index) {
-                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id || if current_packet.sta_src_id != self.aux_ampdu_serviced.src_id{ // make sure we select packets at a single interface (sta)
+                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id { // make sure we select packets at a single interface (sta)
                             packet_index += 1;
                             continue;
                         }
@@ -634,6 +645,8 @@ impl QueueModule {
                                     arrived_packet_counter: self.arrived_packet_counter,
                                     queue_length_when_out: packet_rmvd.queue_length_when_out,
                                     sta_src_id: packet_rmvd.sta_src_id as usize,
+                                    sta_dest_id: packet_rmvd.sta_dest_id as usize,
+
                                     packet_id: packet_rmvd.packet_id as i32,
                                     now,
                                     length_packet: packet_rmvd.length_packet,

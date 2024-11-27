@@ -12,7 +12,7 @@ step_bandwidth=2.5E6
 distance=30.0
 
 # Number of parallel jobs to run
-num_jobs=12  # You can change this value to the desired number of parallel jobs
+num_jobs=10  # You can change this value to the desired number of parallel jobs
 
 # Compile the project once
 cargo build --release
