@@ -10,7 +10,7 @@
 // !                     └────────────────────────────────────────────────────┘
 // !```
 #![allow(non_snake_case)]
-
+use std::fs;
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::STA_source;
@@ -29,15 +29,11 @@ use crate::lib::{
 use crate::lib::models_mm1k::{QueueModule, QueueStats, Sink};
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
-
 use std::env;
-
 use asynchronix::model::Model;
-
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////// SIMULATION ////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn simple_MM1K(
     // 1st scenario: Single STA -> Queue -> Sink
@@ -134,15 +130,26 @@ fn simple_MM1K(
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
+
+    // reate the directory if it doesn't exist
+    let dir = "Results/";
+    if !fs::metadata(dir).is_ok() {
+        fs::create_dir_all(dir).expect("Failed to create Results directory");
+    }
+
+    let mbps = rate_bps_in/1e6; 
+    let filename = format!("{:.1}Mbps",mbps);
+
+    
     // After simulation, write the CSV data
     if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv("") {
+        if let Err(e) = data.write_to_csv(&filename) {
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
 
     if let Ok(data) = stats_sta_data_handle.lock() {
-        if let Err(e) = write_all_sta_csvs(&data, "") {
+        if let Err(e) = write_all_sta_csvs(&data, &filename) {
             eprintln!("Error writing STA CSV files: {}", e);
         }
     }
@@ -352,8 +359,19 @@ fn multiple_STA_sim(
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
     // After simulation, write the CSV data
+    let mbps = rate_bps_in/1e6; 
+    let filename = format!("{:.1}Mbps",mbps);
 
-    let filename = format!("MM1K_sim"); 
+    
+    // Ensure the directory exists
+    let dir_path = format!("Results/{}", filename);
+    // Create the directory if it doesn't exist
+    if let Err(e) = fs::create_dir_all(&dir_path) {
+        eprintln!("Failed to create directory: {}", e);
+        return; // Stop execution if the directory creation fails
+    }
+
+
     if let Ok(data) = csv_data_handle.lock() {
         if let Err(e) = data.write_to_csv(&filename) {
             eprintln!("Failed to write CSV file: {}", e);
@@ -412,18 +430,8 @@ fn main() {
     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().expect("Invalid STA distance");
 
-    /// SCENARIO 1: MM1K WITH POISSON, QUEUE, SINK
-    simple_MM1K(
-        stoptime,
-        mean_length,
-        k_queue,
-        rate_bps_in,
-        rate_queue_bps,
-        distance,
-    );
-
-    // multiple_STA_sim(
-    //     3,
+    // /// SCENARIO 1: MM1K WITH POISSON, QUEUE, SINK
+    // simple_MM1K(
     //     stoptime,
     //     mean_length,
     //     k_queue,
@@ -431,4 +439,14 @@ fn main() {
     //     rate_queue_bps,
     //     distance,
     // );
+
+    multiple_STA_sim(
+        3,
+        stoptime,
+        mean_length,
+        k_queue,
+        rate_bps_in,
+        rate_queue_bps,
+        distance,
+    );
 }
