@@ -1,7 +1,5 @@
-
+use crate::lib::alvr_stream_socket::{try_again, BufferedReceiver, ConResult, SocketReader, ToCon};
 use anyhow::Result;
-use crate::lib::alvr_stream_socket::{ConResult, ToCon, 
-            SocketReader, BufferedReceiver, try_again};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     marker::PhantomData,
@@ -14,13 +12,11 @@ use std::{
 
 use std::net::IpAddr;
 
-
-#[derive(Serialize, Deserialize,  Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ControlPacketType {
     // Example fields; replace these with the actual data you want to send
     pub data: Vec<u8>,
 }
-
 
 use crossbeam::channel::{unbounded, Sender};
 // This corresponds to the length of the payload
@@ -56,11 +52,11 @@ pub fn framed_recv<R: DeserializeOwned>(
     loop {
         let count = receiver.recv(buffer).unwrap();
         if count >= FRAMED_PREFIX_LENGTH {
-            let packet_length =
-                FRAMED_PREFIX_LENGTH + u32::from_be_bytes(buffer[0..FRAMED_PREFIX_LENGTH].try_into().unwrap()) as usize;
+            let packet_length = FRAMED_PREFIX_LENGTH
+                + u32::from_be_bytes(buffer[0..FRAMED_PREFIX_LENGTH].try_into().unwrap()) as usize;
             if count >= packet_length {
-                let packet = bincode::deserialize(&buffer[FRAMED_PREFIX_LENGTH..packet_length])
-                    .to_con()?;
+                let packet =
+                    bincode::deserialize(&buffer[FRAMED_PREFIX_LENGTH..packet_length]).to_con()?;
                 return Ok(packet);
             }
         } else if Instant::now() > deadline {
@@ -69,17 +65,14 @@ pub fn framed_recv<R: DeserializeOwned>(
     }
 }
 
-pub fn framed_recv_vec<R: serde::de::DeserializeOwned>(
-    buffer: &[u8],
-) -> Result<R, bincode::Error> {
-
-    // println!("BUFLEN = {} / {}", buffer.len(), FRAMED_PREFIX_LENGTH); 
+pub fn framed_recv_vec<R: serde::de::DeserializeOwned>(buffer: &[u8]) -> Result<R, bincode::Error> {
+    // println!("BUFLEN = {} / {}", buffer.len(), FRAMED_PREFIX_LENGTH);
     if buffer.len() < FRAMED_PREFIX_LENGTH {
         return Err(Box::new(bincode::ErrorKind::SizeLimit));
     }
 
-    let packet_length = 
-        FRAMED_PREFIX_LENGTH + u32::from_be_bytes(buffer[0..FRAMED_PREFIX_LENGTH].try_into().unwrap()) as usize;
+    let packet_length = FRAMED_PREFIX_LENGTH
+        + u32::from_be_bytes(buffer[0..FRAMED_PREFIX_LENGTH].try_into().unwrap()) as usize;
     if buffer.len() < packet_length {
         return Err(Box::new(bincode::ErrorKind::SizeLimit));
     }
@@ -103,7 +96,7 @@ impl<S: Serialize> ControlSocketSender<S> {
 pub struct ControlSocketReceiver<R: DeserializeOwned> {
     inner: BufferedReceiver<Vec<u8>>,
     buffer: Vec<u8>,
-    _phantom: PhantomData<R>, 
+    _phantom: PhantomData<R>,
 }
 #[allow(unused)]
 impl<R: DeserializeOwned> ControlSocketReceiver<R> {
@@ -123,10 +116,7 @@ impl ProtoControlSocket {
         let receiver = BufferedReceiver::new(receiver);
 
         Ok((
-            ProtoControlSocket {
-                sender,
-                receiver,
-            },
+            ProtoControlSocket { sender, receiver },
             "0.0.0.0".parse().unwrap(), // Placeholder for now
         ))
     }
@@ -151,7 +141,7 @@ impl ProtoControlSocket {
             ControlSocketReceiver::<R> {
                 inner: self.receiver,
                 buffer: vec![],
-                _phantom: PhantomData, 
+                _phantom: PhantomData,
             },
         ))
     }

@@ -1,20 +1,21 @@
 use crate::lib::alvr_packets::ClientStatistics;
+use crate::lib::alvr_packets::NetworkStatisticsPacket;
 use crate::lib::SlidingWindowAverage;
-use crate::lib::alvr_packets::NetworkStatisticsPacket; 
-
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::lib::{SlidingWindowWeighted, SlidingWindowTimely, GraphNetworkStatisticsCsv, NominalBitrateStats}; 
+use crate::lib::{
+    GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted,
+};
 // use ::{warn, SlidingWindowAverage};
 use std::{
-    collections::{VecDeque, HashMap},
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 // use serde::{Deserialize, Serialize};
-use tai_time::TaiTime; 
+use tai_time::TaiTime;
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -33,9 +34,6 @@ struct BatteryData {
     gauge_value: f32,
     is_plugged: bool,
 }
-
-
-
 
 #[allow(unused)]
 pub struct StatisticsManager {
@@ -102,8 +100,8 @@ pub struct StatisticsManager {
 
     is_first_stats: bool,
 
-    folder: String, 
-    last_stats: GraphNetworkStatisticsCsv, 
+    folder: String,
+    last_stats: GraphNetworkStatisticsCsv,
 }
 
 #[allow(unused)]
@@ -112,7 +110,7 @@ impl StatisticsManager {
         max_history_size: usize,
         nominal_server_frame_interval: Duration,
         steamvr_pipeline_frames: f32,
-        folder: &str, 
+        folder: &str,
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(),
@@ -191,17 +189,16 @@ impl StatisticsManager {
 
             is_first_stats: true,
 
-            folder: folder.to_string(), 
-            last_stats: GraphNetworkStatisticsCsv::default(), 
+            folder: folder.to_string(),
+            last_stats: GraphNetworkStatisticsCsv::default(),
         }
     }
-     // This statistics are reported for every succesfully received frame
-     pub fn report_network_statistics(
+    // This statistics are reported for every succesfully received frame
+    pub fn report_network_statistics(
         &mut self,
         network_stats: NetworkStatisticsPacket,
         rtt: Duration,
-        now: TaiTime<0>, 
-
+        now: TaiTime<0>,
     ) -> (f32, f32) {
         self.packets_skipped_total += network_stats.frames_skipped as usize;
         self.packets_skipped_partial_sum += network_stats.frames_skipped as usize;
@@ -270,7 +267,7 @@ impl StatisticsManager {
         }
 
         shards_lost = shards_sent as isize - network_stats.rx_shard_counter as isize;
-        
+
         self.prev_highest_frame = network_stats.highest_rx_frame_index as i32;
         self.prev_highest_shard = network_stats.highest_rx_shard_index as i32;
 
@@ -293,7 +290,7 @@ impl StatisticsManager {
         self.last_stats = GraphNetworkStatisticsCsv {
             frame_index: network_stats.frame_index as u32,
 
-            frame_size_bytes: network_stats.bytes_in_frame as usize, 
+            frame_size_bytes: network_stats.bytes_in_frame as usize,
 
             server_fps: 1.
                 / self
@@ -330,11 +327,11 @@ impl StatisticsManager {
             requested_bps: self.last_nominal_bitrate_stats.requested_bps.clone(),
 
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
-        }; 
+        };
 
         // Call method to save data to CSV
-        if self.save_network_stats_to_csv().is_err(){
-            println!("ERROR HERE CSV!!"); 
+        if self.save_network_stats_to_csv().is_err() {
+            println!("ERROR HERE CSV!!");
         }
         return (peak_network_throughput_bps, frame_interarrival);
     }
@@ -344,10 +341,7 @@ impl StatisticsManager {
         let path = Path::new(&file_path);
 
         // Open the CSV file in append mode or create it if it doesn't exist
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
         // Prepare the header if the file is empty
         if file.metadata()?.len() == 0 {
@@ -360,24 +354,24 @@ impl StatisticsManager {
         // Prepare the data line to write to the CSV
         let data_line = format!(
             "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            self.last_stats.frame_index,                                 // frame_index
-            self.last_stats.frame_size_bytes,                            // frame_size_bytes
-            self.last_stats.server_fps,                                  // server_fps
-            self.last_stats.client_fps,                                  // client_fps
-            self.last_stats.frame_span_ms,                               // frame_span_ms
-            self.last_stats.interarrival_jitter_ms,                      // interarrival_jitter_ms
-            self.last_stats.ow_delay_ms,                                 // ow_delay_ms
-            self.last_stats.filtered_ow_delay_ms,                        // filtered_ow_delay_ms
-            self.last_stats.rtt_ms,                                      // rtt_ms
-            self.last_stats.frame_interarrival_ms,                       // frame_interarrival_ms
-            self.last_stats.frame_jitter_ms,                             // frame_jitter_ms
-            self.last_stats.frames_skipped,                              // frames_skipped
-            self.last_stats.shards_lost,                                 // shards_lost
-            self.last_stats.shards_duplicated,                           // shards_duplicated
-            self.last_stats.instant_network_throughput_bps,              // instant_network_throughput_bps
-            self.last_stats.peak_network_throughput_bps,                 // peak_network_throughput_bps
-            self.last_stats.requested_bps,                           // nominal_bitrate
-            self.interval_avg_plot_throughput,                // interval_avg_plot_throughput
+            self.last_stats.frame_index,                    // frame_index
+            self.last_stats.frame_size_bytes,               // frame_size_bytes
+            self.last_stats.server_fps,                     // server_fps
+            self.last_stats.client_fps,                     // client_fps
+            self.last_stats.frame_span_ms,                  // frame_span_ms
+            self.last_stats.interarrival_jitter_ms,         // interarrival_jitter_ms
+            self.last_stats.ow_delay_ms,                    // ow_delay_ms
+            self.last_stats.filtered_ow_delay_ms,           // filtered_ow_delay_ms
+            self.last_stats.rtt_ms,                         // rtt_ms
+            self.last_stats.frame_interarrival_ms,          // frame_interarrival_ms
+            self.last_stats.frame_jitter_ms,                // frame_jitter_ms
+            self.last_stats.frames_skipped,                 // frames_skipped
+            self.last_stats.shards_lost,                    // shards_lost
+            self.last_stats.shards_duplicated,              // shards_duplicated
+            self.last_stats.instant_network_throughput_bps, // instant_network_throughput_bps
+            self.last_stats.peak_network_throughput_bps,    // peak_network_throughput_bps
+            self.last_stats.requested_bps,                  // nominal_bitrate
+            self.interval_avg_plot_throughput,              // interval_avg_plot_throughput
         );
 
         // Write the data line to the CSV file
@@ -386,7 +380,6 @@ impl StatisticsManager {
         Ok(())
     }
 
-    
     pub fn report_input_acquired(&mut self, target_timestamp: Duration) {
         if !self
             .history_buffer

@@ -6,15 +6,15 @@ use std::f64;
 use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
-// use std::sync::atomic::{AtomicBool, Ordering}; 
+// use std::sync::atomic::{AtomicBool, Ordering};
+use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
+use colored::Colorize;
 use rand::Rng;
-use std::time::{Duration, Instant};
-use std::collections::HashMap; 
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use serde::{Deserialize, Serialize};  
-use colored::Colorize;
-use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
+use std::time::{Duration, Instant};
 // use once_cell::sync::Lazy;
 
 const CW_MIN: i32 = 15;
@@ -328,8 +328,8 @@ pub struct CsvData {
     v_queue_tq: Vec<f64>,
     v_packet_l: Vec<usize>,
 
-    v_id_src: Vec<usize>, 
-    v_id_dest: Vec<usize>, 
+    v_id_src: Vec<usize>,
+    v_id_dest: Vec<usize>,
 }
 
 impl CsvData {
@@ -343,18 +343,16 @@ impl CsvData {
             v_packet_l: Vec::new(),
             v_id_src: Vec::new(),
             v_id_dest: Vec::new(),
-
         }
     }
 
     pub fn write_to_csv(&self, folder: &str) -> std::io::Result<()> {
-        
-        let path = format!("Results/{folder}/QUEUE_stats.csv"); 
+        let path = format!("Results/{folder}/QUEUE_stats.csv");
         let file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)?; 
+            .open(path)?;
 
         let mut writer = Writer::from_writer(file);
 
@@ -367,7 +365,7 @@ impl CsvData {
             "T_s",
             "T_q",
             "id_src",
-            "id_dest", 
+            "id_dest",
         ])?;
 
         // Write all stored data at once
@@ -380,7 +378,7 @@ impl CsvData {
                 &self.v_queue_ts[i].to_string(),
                 &self.v_queue_tq[i].to_string(),
                 &self.v_id_src[i].to_string(),
-                &self.v_id_dest[i].to_string(),         
+                &self.v_id_dest[i].to_string(),
             ])?;
         }
 
@@ -414,8 +412,8 @@ impl CsvType {
         Ts: f64,
         Tq: f64,
         length_packet: usize,
-        id_src: usize, 
-        id_dest: usize, 
+        id_src: usize,
+        id_dest: usize,
     ) {
         let formatted_timestamp = format_timestamp!(now);
 
@@ -426,8 +424,8 @@ impl CsvType {
             data.v_queue_ts.push(Ts);
             data.v_queue_tq.push(Tq);
             data.v_packet_l.push(length_packet);
-            data.v_id_src.push(id_src); 
-            data.v_id_dest.push(id_dest); 
+            data.v_id_src.push(id_src);
+            data.v_id_dest.push(id_dest);
         }
     }
 }
@@ -578,7 +576,7 @@ impl perStaStats {
         Tq: f64,
         length_packet: usize,
         sta_src_id: usize,
-        sta_dest_id: usize, 
+        sta_dest_id: usize,
     ) {
         self.q_time_sta_cum.add(Tq);
         self.s_time_sta_cum.add(Ts);
@@ -592,9 +590,8 @@ impl perStaStats {
         self.csv_data.v_queue_ts.push(Ts);
         self.csv_data.v_queue_tq.push(Tq);
         self.csv_data.v_packet_l.push(length_packet);
-        self.csv_data.v_id_src.push(sta_src_id); 
-        self.csv_data.v_id_dest.push(sta_dest_id); 
-
+        self.csv_data.v_id_src.push(sta_src_id);
+        self.csv_data.v_id_dest.push(sta_dest_id);
     }
 }
 #[allow(non_camel_case_types)]
@@ -772,7 +769,7 @@ pub struct MpduPacket {
 
     pub data_inner: Vec<u8>,
     pub header_alvr: HeaderALVRStream,
-    // pub is_alvr_control_packet: bool, 
+    // pub is_alvr_control_packet: bool,
 }
 
 #[allow(unused)]
@@ -794,7 +791,7 @@ impl MpduPacket {
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
-            // is_alvr_control_packet: false, 
+            // is_alvr_control_packet: false,
         }
     }
 
@@ -806,8 +803,8 @@ impl MpduPacket {
 pub struct AmpduPacket {
     pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
     pub total_length: usize,           // Total length of aggregated packets
-    pub sta_src_id: i32, 
-    pub sta_dest_id: i32,                   // ID for the destination STA
+    pub sta_src_id: i32,
+    pub sta_dest_id: i32, // ID for the destination STA
     pub size: i32,
     pub coordinates: Coords,
 }
@@ -820,14 +817,13 @@ impl AmpduPacket {
             sta_src_id: -1,
             sta_dest_id: -1, // Initialize STA_ID to -1 (assuming -1 indicates uninitialized)
 
-            size: 0,    // Initialize size to 0
+            size: 0, // Initialize size to 0
             coordinates: Coords {
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
         }
-
     }
     // Method to print AMPDU_packet values
     pub fn print(&self) {
@@ -840,9 +836,8 @@ impl AmpduPacket {
                 "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}, {:?} \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64(),
-                packet.expected_T_s.as_secs_f64(), 
+                packet.expected_T_s.as_secs_f64(),
                 packet.header_alvr
-
             );
         }
     }
@@ -1015,13 +1010,16 @@ pub fn frametransmission_delay(
     }
 }
 
-pub fn write_all_sta_csvs(sta_stats_vec: &HashMap<usize, perStaLockStats>, folder: &str) -> std::io::Result<()> {
-    for (_index, sta_stats) in sta_stats_vec.iter(){
+pub fn write_all_sta_csvs(
+    sta_stats_vec: &HashMap<usize, perStaLockStats>,
+    folder: &str,
+) -> std::io::Result<()> {
+    for (_index, sta_stats) in sta_stats_vec.iter() {
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
             let filename: String = format!("Results/{folder}/STA{}.csv", stats.sta_id);
-            println!("FILENAMEEE: {filename}"); 
+            println!("FILENAMEEE: {filename}");
             // Open file with write permissions
             let file = OpenOptions::new()
                 .write(true)
@@ -1040,7 +1038,7 @@ pub fn write_all_sta_csvs(sta_stats_vec: &HashMap<usize, perStaLockStats>, folde
                 "T_s",
                 "T_q",
                 "id_src",
-                "id_dest"
+                "id_dest",
             ])?;
 
             // Write all stored data for this station
@@ -1090,7 +1088,7 @@ pub struct NominalBitrateStats {
 pub struct GraphNetworkStatistics {
     pub frame_index: u32,
 
-    pub frame_size_bytes: usize, 
+    pub frame_size_bytes: usize,
 
     pub client_fps: f32,
     pub server_fps: f32,
@@ -1124,7 +1122,7 @@ pub struct GraphNetworkStatistics {
 pub struct GraphNetworkStatisticsCsv {
     pub frame_index: u32,
 
-    pub frame_size_bytes: usize, 
+    pub frame_size_bytes: usize,
 
     pub client_fps: f32,
     pub server_fps: f32,
@@ -1154,10 +1152,7 @@ pub struct GraphNetworkStatisticsCsv {
     pub interval_avg_plot_throughput: f32,
 }
 
-
-#[derive(
-    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogSeverity {
     Error = 3,
     Warning = 2,
@@ -1229,7 +1224,6 @@ pub struct GraphStatistics {
     pub actual_bitrate_bps: f32,
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
 pub struct HeuristicStats {
     pub frame_interval_s: f32,
@@ -1264,7 +1258,6 @@ pub struct TrackingEvent {
     pub htc_eye_expression: Option<Vec<f32>>,
     pub htc_lip_expression: Option<Vec<f32>>,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum EventType {
