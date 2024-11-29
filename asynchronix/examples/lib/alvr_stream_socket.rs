@@ -24,14 +24,11 @@ use std::{
     time::Duration,
 };
 
-use crate::debug_print;
-use crate::lib::models_XR::{
-    XRDevice,
-    XRServer, // ,XRClient
-};
+// use crate::debug_print;
+use crate::lib::models_XR::XRDevice;
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
-use crate::lib::DebugColor;
+// use crate::lib::DebugColor;
 use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -42,7 +39,7 @@ use std::net::IpAddr;
 use std::result::Result::Ok;
 use tai_time::TaiTime;
 
-use super::alvr_packets::NetworkStatisticsPacket;
+// use super::alvr_packets::NetworkStatisticsPacket;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
@@ -57,7 +54,7 @@ pub const STATISTICS: u16 = 4;
 
 pub const CONTROL_STREAM:u16  = 5; 
 
-pub const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
+pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
@@ -191,7 +188,7 @@ pub fn buffered_channel<T>() -> (Sender<T>, BufferedReceiver<T>) {
     let (sender, receiver) = unbounded();
     (sender, BufferedReceiver::new(receiver))
 }
-
+#[allow(unused)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConError {
     WouldBlock,
@@ -254,10 +251,6 @@ pub struct InProgressPacket {
     num_shards_expected: usize, 
     id_frame: u32, 
 }
-pub struct VideoPacket {
-    pub header: VideoPacketHeader,
-    pub payload: Vec<u8>,
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct VideoPacketHeader {
@@ -309,11 +302,6 @@ pub struct Haptics {
     pub amplitude: f32,
 }
 
-pub struct ShardPacket {
-    shard_id: i32,
-    frame_id: i32,
-    length_shard_bits: usize,
-}
 
 /// Memory buffer that contains a hidden prefix
 #[derive(Default, Debug)]
@@ -323,7 +311,7 @@ pub struct Buffer<H = ()> {
     pub length: usize,
     pub _phantom: PhantomData<H>,
 }
-
+#[allow(unused)]
 impl<H> Buffer<H> {
     /// Length of payload (without prefix)
     #[must_use]
@@ -516,10 +504,12 @@ pub enum DropProbability {
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum ConnectionError {
     TryAgain(anyhow::Error),
     Other(anyhow::Error),
 }
+#[allow(unused)]
 pub trait AnyhowToCon<T> {
     fn to_con(self) -> ConResult<T>;
 }
@@ -561,7 +551,7 @@ pub enum DscpTos {
 
     ExpeditedForwarding,
 }
-
+#[allow(unused)]
 pub struct ReceiverData<H> {
     buffer: Option<Vec<u8>>,
     size: usize, // counting the prefix
@@ -587,7 +577,7 @@ pub struct ReceiverData<H> {
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
 }
-
+#[allow(unused)]
 impl<H> ReceiverData<H> {
     pub fn get_buffer(&self) -> Vec<u8> {
         if let Some(buf) = self.buffer.clone() {
@@ -643,7 +633,7 @@ impl<H> ReceiverData<H> {
         self.highest_rx_shard_index
     }
 }
-
+#[allow(unused)]
 impl<H: DeserializeOwned> ReceiverData<H> {
     pub fn get(&self) -> Result<(H, &[u8])> {
         let mut data: &[u8] = &self.buffer.as_ref().unwrap()[SHARD_PREFIX_SIZE..self.size];
@@ -702,7 +692,7 @@ pub struct StreamSocket {
 
     pub lost_shards_deadline_map: HashMap<u32, usize>,  // key: frame_id, val: shard loss  
 }
-
+#[allow(unused)]
 impl StreamSocket {
     pub fn request_stream<T>(&self, stream_id: u16, t0: TaiTime<0>) -> StreamSender<T> {
         StreamSender::<T> {
@@ -1229,6 +1219,8 @@ pub enum StreamSocketBuilder {
     // Udp(UdpSocket),
     Channel(Sender<Vec<u8>>, BufferedReceiver<Vec<u8>>),
 }
+
+#[allow(unused)]
 impl StreamSocketBuilder {
     pub fn build(self, max_packet_size: usize) -> StreamSocket {
         match self {
@@ -1455,6 +1447,8 @@ impl StreamSocketBuilder {
 
 /// Get next packet reconstructing from shards.
 /// Returns true if a packet has been recontructed and copied into the buffer.
+/// 
+#[allow(unused)]
 impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     pub fn recv(&mut self, timeout: Duration) -> ConResult<ReceiverData<H>> {
         // println!("receiving FULL packet from shards!!!");
@@ -1576,6 +1570,7 @@ pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &
         tx_r_instant,
     ))
 }
+#[allow(unused)]
 impl<H> StreamSender<H> {
     pub fn get_shards_count(&self) -> usize {
         self.shards_count
@@ -1646,7 +1641,7 @@ impl<H> StreamSender<H> {
         Ok(())
     }
 }
-
+#[allow(unused)]
 impl<H: Serialize> StreamSender<H> {
     pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
         let mut buffer = generate_random_video_payload(current_bitrate_mbps);
@@ -1761,7 +1756,7 @@ pub struct ReceiverDataStats {
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
 }
-
+#[allow(unused)]
 impl ReceiverDataStats {
     pub fn had_packet_loss(&self) -> bool {
         self.had_packet_loss
@@ -1815,7 +1810,7 @@ pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     let mut rng = rand::thread_rng();
 
     // Generate a random u8
-    let random_u8: u8 = rng.gen();
+    let _random_u8: u8 = rng.gen();
 
     // Calculate the payload size based on bitrate
     let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;

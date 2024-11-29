@@ -1,13 +1,12 @@
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
 
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
-use std::mem::replace; 
 use std::time::{Duration, Instant};
 
 use crate::lib::alvr_stream_socket::parse_shard_data;
@@ -84,7 +83,7 @@ pub struct STA_source {
     pub sta_coordinates: Coords,
     pub does_sta_tx: bool,
 }
-
+#[allow(unused)]
 impl STA_source {
     pub fn new(
         arrival_rate_bps: f64,
@@ -293,6 +292,7 @@ impl QueueStats {
     }
 }
 
+#[allow(unused)]
 #[derive(Clone)]
 pub struct QueueModule {
     pub output_port_sta1: Output<AmpduPacket>,
@@ -322,12 +322,14 @@ pub struct QueueModule {
 
     pub STA_coords_grid: Vec<Coords>,
 
+    pub STA_coords_map: HashMap<usize, Coords>, 
+
     pub cumulative_stats_queue: Arc<Mutex<QueueStats>>,
 
     pub stats_tx : Option<Sender<StatsUpdate>>,
     pub stats_rx : Option<Receiver<StatsUpdate>>,
 
-    pub array_stas_stats: Arc<Mutex<Vec<perStaLockStats>>>,
+    pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
     pub PL_probability: f64, 
 }
@@ -351,22 +353,24 @@ impl QueueModule {
         self.cumulative_stats_queue.clone()
     }
 
-    pub fn get_stas_stats_handle(&self) -> Arc<Mutex<Vec<perStaLockStats>>> {
+    pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
 
-    pub fn new(num_stas: usize, queue_size: usize, rate_departures_bps: f64, PL_prob: f64) -> Self {
+    pub fn new(num_stas: usize, queue_size: usize, rate_departures_bps: f64, PL_prob: f64, vec_ids: Vec<i32>) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
-        let mut stats_vec = Vec::with_capacity(num_stas);
+        let mut stats_vec = HashMap::new();
         
         let (stats_tx, stats_rx) = unbounded(); 
+        
         for i in 0..num_stas {
             let sta_stats = perStaLockStats::new();
             // We need to lock the mutex to modify the sta_id
-            if let Ok(mut stats) = sta_stats.data.lock() {
-                stats.sta_id = i as i32;
+            if let Ok(mut stats) = sta_stats.data.clone().lock() {
+                stats.sta_id = vec_ids[i] as i32;
+                println!("iter: {}, stats id : {:?}", i, stats.sta_id); 
+                stats_vec.insert(stats.sta_id.clone() as usize,sta_stats.clone());
             }
-            stats_vec.push(sta_stats);
         }
         
         Self {
@@ -389,6 +393,8 @@ impl QueueModule {
             coords_queue: Coords::new(),
             p_tx: 20.0,
             STA_coords_grid: Vec::new(),
+            STA_coords_map: HashMap::new(), 
+
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
 
@@ -445,7 +451,7 @@ impl QueueModule {
 
             debug_print!(
                 DebugColor::Green,
-                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
+                "{} [DBG QUEUE UL] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
                 format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
@@ -468,11 +474,9 @@ impl QueueModule {
         }
     }
 
-    pub async fn send_ampdu(&mut self, mut AMPDU_sent: AmpduPacket, context: &Context<Self>) {
+    pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
-        
-       
-        
+          
         debug_print!(
             DebugColor::Red,
             "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
@@ -490,8 +494,8 @@ impl QueueModule {
         match AMPDU_sent.sta_dest_id{
          0 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
          1 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
-         2 =>    {self.output_port_sta2.send(AMPDU_sent).await;}
-         12 =>   {self.output_port_sta2.send(AMPDU_sent).await;}
+         2 =>    {self.output_port_sta1.send(AMPDU_sent).await;}
+         12 =>   {self.output_port_sta1.send(AMPDU_sent).await;}
 
          _ =>    {println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE"); }
         }
@@ -502,9 +506,15 @@ impl QueueModule {
         }
 
         if let Some(stats_rx) = self.stats_rx.as_mut() {
+            // print!("OK1,");
             if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
+                // print!("OK2,");
+
                 if let Ok(array_STAs_stats) = self.array_stas_stats.lock() {
+                    // print!("OK3,");
+
                     while let Ok(stats_update) = stats_rx.try_recv() {
+                        // println!("OK CUM");
                         queue_stats.update_cumstats(
                             stats_update.T_s,
                             stats_update.T_q,
@@ -513,7 +523,9 @@ impl QueueModule {
                             stats_update.queue_length_when_out,
                         );
 
-                        if let Some(stats) = array_STAs_stats.get(stats_update.sta_src_id as usize) {
+                        if let Some(stats) = array_STAs_stats.get(&stats_update.sta_src_id) {
+                            // println!("OK PER STA");
+
                             if let Ok(mut stats_data) = stats.data.lock() {
                                 stats_data.update_stats_per_sta(
                                     stats_update.now,
@@ -527,7 +539,13 @@ impl QueueModule {
                                 );
                             }
                         }
+                        else{
+                            println!("ERROR: No stats found for station {}. Total stations: {}", 
+                            stats_update.sta_src_id, 
+                            array_STAs_stats.len());
 
+                        }
+                        // println!("OK STATS");
                         self.csv_metrics.update_stats(
                             stats_update.now,
                             stats_update.packet_id as usize,
@@ -544,49 +562,6 @@ impl QueueModule {
         }
        
 
-    }
-
-    // Separated stats processing into its own method
-    async fn process_stats(&mut self, stats_rx: &Receiver<StatsUpdate>) {
-        if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
-            if let Ok(array_STAs_stats) = self.array_stas_stats.lock() {
-                while let Ok(stats_update) = stats_rx.try_recv() {
-                    queue_stats.update_cumstats(
-                        stats_update.T_s,
-                        stats_update.T_q,
-                        stats_update.blocked_packet_counter,
-                        stats_update.arrived_packet_counter,
-                        stats_update.queue_length_when_out,
-                    );
-
-                    if let Some(stats) = array_STAs_stats.get(stats_update.sta_src_id as usize) {
-                        if let Ok(mut stats_data) = stats.data.lock() {
-                            stats_data.update_stats_per_sta(
-                                stats_update.now,
-                                stats_update.packet_id as usize,
-                                stats_update.queue_length_when_out,
-                                stats_update.T_s,
-                                stats_update.T_q,
-                                stats_update.length_packet,
-                                stats_update.sta_src_id,
-                                stats_update.sta_dest_id, 
-                            );
-                        }
-                    }
-
-                    self.csv_metrics.update_stats(
-                        stats_update.now,
-                        stats_update.packet_id as usize,
-                        stats_update.queue_length_when_out,
-                        stats_update.T_s,
-                        stats_update.T_q,
-                        stats_update.length_packet,
-                        stats_update.sta_src_id,
-                        stats_update.sta_dest_id, 
-                    );
-                }
-            }
-        }
     }
 
     fn deque_schedule_service<'a>(
@@ -674,7 +649,7 @@ impl QueueModule {
                         format_elapsed!(now + last_service_duration),
                     );
 
-                    if DEBUG_PRINT_ENABLED {
+                    if DEBUG_PRINT_ENABLED == true {
                         self.aux_ampdu_serviced.print();
                     }
 
@@ -719,12 +694,15 @@ impl QueueModule {
 impl Model for QueueModule {}
 
 #[derive(Clone, Default)]
+
+#[allow(unused)]
 pub struct DataSink {
     pub system_time: f64,
     pub av_l: f64,
     pub last_time: f64,
     pub rx_packets_counter: usize,
 }
+#[allow(unused)]
 impl DataSink {
     pub fn new() -> Self {
         Self {
@@ -776,7 +754,7 @@ pub struct Sink {
     pub received_packet_counter: usize,
     pub mutex_data: Arc<Mutex<DataSink>>,
 }
-
+#[allow(unused)]
 impl Sink {
     pub fn new() -> Self {
         Self {

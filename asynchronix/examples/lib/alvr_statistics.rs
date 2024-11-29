@@ -7,15 +7,16 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::lib::{SlidingWindowWeighted, SlidingWindowTimely, EventType, GraphNetworkStatistics, GraphNetworkStatistics_csv, NominalBitrateStats}; 
+use crate::lib::{SlidingWindowWeighted, SlidingWindowTimely, GraphNetworkStatisticsCsv, NominalBitrateStats}; 
 // use ::{warn, SlidingWindowAverage};
 use std::{
     collections::{VecDeque, HashMap},
     time::{Duration, Instant},
 };
-use serde::{Deserialize, Serialize};
-use tai_time::{TaiClock, TaiTime}; 
+// use serde::{Deserialize, Serialize};
+use tai_time::TaiTime; 
 
+#[allow(unused)]
 #[derive(Clone)]
 struct HistoryFrame {
     input_acquired: Instant,
@@ -26,6 +27,7 @@ struct HistoryFrame {
     is_composed: bool,
     is_submitted: bool,
 }
+#[allow(unused)]
 #[derive(Default, Clone)]
 struct BatteryData {
     gauge_value: f32,
@@ -35,7 +37,7 @@ struct BatteryData {
 
 
 
-
+#[allow(unused)]
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>,
     max_history_size: usize,
@@ -101,9 +103,10 @@ pub struct StatisticsManager {
     is_first_stats: bool,
 
     folder: String, 
-    last_stats: GraphNetworkStatistics_csv, 
+    last_stats: GraphNetworkStatisticsCsv, 
 }
 
+#[allow(unused)]
 impl StatisticsManager {
     pub fn new(
         max_history_size: usize,
@@ -189,7 +192,7 @@ impl StatisticsManager {
             is_first_stats: true,
 
             folder: folder.to_string(), 
-            last_stats: GraphNetworkStatistics_csv::default(), 
+            last_stats: GraphNetworkStatisticsCsv::default(), 
         }
     }
      // This statistics are reported for every succesfully received frame
@@ -287,7 +290,7 @@ impl StatisticsManager {
             self.interval_avg_plot_throughput = self.history_throughput_weighted.get_average();
         }
 
-        self.last_stats = GraphNetworkStatistics_csv {
+        self.last_stats = GraphNetworkStatisticsCsv {
             frame_index: network_stats.frame_index as u32,
 
             frame_size_bytes: network_stats.bytes_in_frame as usize, 

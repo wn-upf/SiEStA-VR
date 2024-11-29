@@ -6,16 +6,16 @@ use std::f64;
 use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
-
+// use std::sync::atomic::{AtomicBool, Ordering}; 
 use rand::Rng;
 use std::time::{Duration, Instant};
-
+use std::collections::HashMap; 
 use std::sync::Arc;
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};  
 use colored::Colorize;
 use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
-use once_cell::sync::Lazy;
+// use once_cell::sync::Lazy;
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -30,10 +30,10 @@ pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
-pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
+pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED:bool = true; // Change to false to disable
+// pub const DEBUG_PRINT_ENABLED:bool = false; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;
@@ -43,10 +43,11 @@ pub mod models_mm1k;
 
 pub mod alvr_control_socket;
 
-pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
-pub const fn lazy_mut_none<T>() -> OptLazy<T> {
-    Lazy::new(|| Mutex::new(None))
-}
+// pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
+// pub const fn lazy_mut_none<T>() -> OptLazy<T> {
+//     Lazy::new(|| Mutex::new(None))
+// }
+pub static DEBUG_PRINT_ENABLED: bool = false;
 
 #[macro_export]
 macro_rules! debug_print {
@@ -55,11 +56,9 @@ macro_rules! debug_print {
             let msg = format!($fmt, $($arg)*);
             println!("{}", $color.to_color_fn()(msg));
         }
-        else{
-            
-        }
-    };
+    }
 }
+
 #[macro_export]
 macro_rules! format_elapsed {
     ($elapsed:expr) => {{
@@ -78,7 +77,7 @@ macro_rules! taitime_to_f64 {
 }
 
 // use crate::lib::alvr_stream_socket::ConResult;
-
+#[allow(unused)]
 pub enum DebugColor {
     Red,
     Green,
@@ -93,7 +92,7 @@ pub enum DebugColor {
     Orange,
     Purple,
 }
-
+#[allow(unused)]
 impl DebugColor {
     pub fn to_color_fn(&self) -> fn(String) -> colored::ColoredString {
         match self {
@@ -157,13 +156,13 @@ impl SlidingWindowWeighted<f32> {
     }
 }
 
-
+#[allow(unused)]
 pub struct SlidingWindowTimely<T> {
     history_buffer: VecDeque<T>,
     interval_buffer: VecDeque<f32>,
     max_window_duration: f32,
 }
-
+#[allow(unused)]
 impl<T> SlidingWindowTimely<T> {
     pub fn new(initial_value: T, initial_interval: f32, max_window_duration: f32) -> Self {
         Self {
@@ -209,7 +208,7 @@ impl<T> SlidingWindowTimely<T> {
         self.get_interval_buffer_sum() / self.interval_buffer.len() as f32
     }
 }
-
+#[allow(unused)]
 impl SlidingWindowTimely<f32> {
     pub fn get_average(&self) -> f32 {
         self.history_buffer.iter().sum::<f32>() / self.history_buffer.len() as f32
@@ -239,7 +238,7 @@ pub struct SlidingWindowAverage<T> {
     history_buffer: VecDeque<T>,
     max_history_size: usize,
 }
-
+#[allow(unused)]
 impl<T> SlidingWindowAverage<T> {
     pub fn new(initial_value: T, max_history_size: usize) -> Self {
         Self {
@@ -285,7 +284,7 @@ impl SlidingWindowAverage<f32> {
         variance.sqrt()
     }
 }
-
+#[allow(unused)]
 impl SlidingWindowAverage<Duration> {
     pub fn get_average(&self) -> Duration {
         self.history_buffer.iter().sum::<Duration>() / self.history_buffer.len() as u32
@@ -433,13 +432,14 @@ impl CsvType {
     }
 }
 
+#[allow(unused)]
 #[derive(Clone)]
 pub struct CumulativeStats {
     values: VecDeque<f64>,
     sum: f64,
     sum_of_squares: f64,
 }
-
+#[allow(unused)]
 impl CumulativeStats {
     // Constructor
     pub fn new() -> Self {
@@ -610,6 +610,7 @@ impl perStaLockStats {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct LittleTheoremMM1K {
     // pub k: i32,      // Max capacity of system (u)
@@ -624,6 +625,8 @@ pub struct LittleTheoremMM1K {
     pub t_q: f64,    // avg. Waiting time in queue
     pub t_s: f64,    // avg. Service time
 }
+
+#[allow(unused)]
 impl LittleTheoremMM1K {
     pub fn print_results(&self) {
         let title = "ANALYTICAL RESULTS (M/M/1/K)";
@@ -693,6 +696,7 @@ impl LittleTheoremMM1K {
     }
 }
 
+#[allow(unused)]
 pub fn compute_mm1k_metrics(
     bandwidth_source: f64,
     l_packets: f64,
@@ -738,6 +742,7 @@ pub fn compute_mm1k_metrics(
     }
 }
 
+#[allow(unused)]
 #[derive(Default, Debug, Clone)]
 pub struct HeaderALVRStream {
     pub packet_length: u32,
@@ -748,6 +753,7 @@ pub struct HeaderALVRStream {
     pub tx_instant: f32,
 }
 
+#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct MpduPacket {
     pub packet_id: usize,
@@ -769,6 +775,7 @@ pub struct MpduPacket {
     // pub is_alvr_control_packet: bool, 
 }
 
+#[allow(unused)]
 impl MpduPacket {
     pub fn new() -> Self {
         Self {
@@ -1008,8 +1015,8 @@ pub fn frametransmission_delay(
     }
 }
 
-pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>, folder: &str) -> std::io::Result<()> {
-    for (_index, sta_stats) in sta_stats_vec.iter().enumerate() {
+pub fn write_all_sta_csvs(sta_stats_vec: &HashMap<usize, perStaLockStats>, folder: &str) -> std::io::Result<()> {
+    for (_index, sta_stats) in sta_stats_vec.iter(){
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
@@ -1114,7 +1121,7 @@ pub struct GraphNetworkStatistics {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct GraphNetworkStatistics_csv {
+pub struct GraphNetworkStatisticsCsv {
     pub frame_index: u32,
 
     pub frame_size_bytes: usize, 

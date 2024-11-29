@@ -1,5 +1,7 @@
 #[allow(unused_imports)]
 #[allow(dead_code)]
+#[allow(unused)]
+
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
 ///
 ///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
@@ -12,12 +14,14 @@
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
+use std::collections::HashMap; 
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
 // use tai_time::TaiTime;
-use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 mod lib; // for calling m own local library
+
+use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 use crate::lib::models_mm1k::{QueueModule, QueueStats};
 use crate::lib::{
     exponential,
@@ -39,15 +43,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::lib::models_XR::{STA_extended, XRClient, XRServer, SinkVideo_XR};
+use crate::lib::models_XR::{STA_extended, XRClient, XRServer, SinkVideoXr};
 
-
-use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
-
+#[allow(unused)]
 fn main() {
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
     // std::env::set_var("RUST_BACKTRACE", "full");
@@ -69,7 +71,7 @@ fn main() {
     let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().expect("Invalid STA distance");
     let initial_bitrate: f64 = args[7].parse().expect("Invalid bitrate"); 
-    let PL_prob: f64 = args[8].parse().expect("Invalid PL probability"); 
+    let pl_prob: f64 = args[8].parse().expect("Invalid PL probability"); 
 
     let name_folder = format!(
         "sim_T{:.0}_Plen{:.0}_K{}_Rq{:.0}_D{:.0}_Br{:.0}_PL{:.6}",
@@ -79,10 +81,10 @@ fn main() {
         rate_queue_bps,  // Rq: queue bitrate
         distance,        // D: STA distance
         initial_bitrate,  // Br: initial bitrate
-        PL_prob
+        pl_prob
     );
     println!("NAME_FOLDER: {:?}", name_folder); 
-    println!("PL_probability: {:?}", PL_prob); 
+    println!("PL_probability: {:?}", pl_prob); 
 
     std::thread::sleep(Duration::from_secs(2)); 
 
@@ -96,7 +98,7 @@ fn main() {
         println!("Directory created or exists at {}", output_path);
     }
         
-    const num_STAs: usize = 2;
+    const NUM_STAS: usize = 2;
 
     let v_distance = vec![1.0, distance, distance]; // just some random values
 
@@ -138,7 +140,7 @@ fn main() {
     let effective_rate2 = mean_length / results2.service_delay;
     let effective_rate = (effective_rate1 + effective_rate2) / 2.0;
 
-    let aggregated_rate_in = (num_STAs - NUM_STAS_UL) as f64 * rate_bps_in;
+    let aggregated_rate_in = (NUM_STAS - NUM_STAS_UL) as f64 * rate_bps_in;
 
     println!("*******************************************************************");
     println!(
@@ -153,11 +155,16 @@ fn main() {
     let mut xr_server = XRServer::new(ip_src, ip_dest, t0, INITIAL_FRAMERATE_FPS, initial_bitrate as f32, &name_folder);
     let mut xr_client_app = XRClient::new(ip_src, INITIAL_FRAMERATE_FPS);
 
+
+    let vec_ids = vec![0, 2]; 
+
+
+
     let mut sta1_xr: STA_extended = STA_extended::new(
         initial_bitrate as f64 * 1E6,
         mean_length,
-        0,
-        2,
+        vec_ids[0],
+        vec_ids[1],
         coords_staxr,
         true,
         effective_rate1,
@@ -165,19 +172,31 @@ fn main() {
         false, 
     ); // STAs 0 and 1 send traffic to 5 through AP
 
-    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0, false);
+    let mut sta_client = STA_extended::new(
+        0.0,
+        1.0,
+        vec_ids[1],
+        vec_ids[0],
+        coords_sink,
+        true,
+        effective_rate2,
+        t0,
+        false);
+    
+    
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
 
     println!("STA XR Client PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length);
 
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, PL_prob);
+
+    let mut queue: QueueModule = QueueModule::new(NUM_STAS, k_queue - 1 as usize, rate_queue_bps, pl_prob, vec_ids);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 
-    queue.STA_coords_grid.resize(num_STAs, Coords::new());
-    for i in 0..num_STAs {
+    queue.STA_coords_grid.resize(NUM_STAS, Coords::new());
+    for i in 0..NUM_STAS {
         queue.STA_coords_grid[i] = vec_coords[i];
     }
 
@@ -191,7 +210,7 @@ fn main() {
 
     let xr_server_app_address = mbox_xr_server_app.address();
 
-    let decoder_video_sink = SinkVideo_XR::new(); 
+    let decoder_video_sink = SinkVideoXr::new(); 
     let mbox_decoder_video = Mailbox::new(); 
     let decoded_video_address = mbox_decoder_video.address(); 
 
@@ -202,7 +221,8 @@ fn main() {
 
     let csv_data_handle = queue.csv_metrics.get_data_handle(); // all queue stats for csv (per packet)
     let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle(); // cumulative averages, sliding windows
-    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle(); // cumulative averages, per-sta
+    let stats_sta_data_handle: Arc<Mutex<HashMap<usize, perStaLockStats>>> = queue.get_stas_stats_handle(); // cumulative averages, per-sta
+
                                                                                                  // let sinkstats_data_handle = sink.get_data_handle();               // counters at sink
 
     // CONNECT COMPONENTS
@@ -241,7 +261,7 @@ fn main() {
 
     xr_client_app
         .out_video_decoded
-        .connect(SinkVideo_XR::in_video, &mbox_decoder_video);
+        .connect(SinkVideoXr::in_video, &mbox_decoder_video);
 
     // // connect applications to STAs:
     // sta1_xr.to_app_socket.connect(XRServer::in_from_network, &mbox_sta_xr );
@@ -305,7 +325,7 @@ fn main() {
     }
     if let Ok(stats_vec) = stats_sta_data_handle.lock() {
         // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
-        for sta_stats in stats_vec.iter() {
+        for (id, sta_stats) in stats_vec.iter() {
             if let Ok(sta_data) = sta_stats.data.lock() {
                 sta_data.print_nicely();
             }

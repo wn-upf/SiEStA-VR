@@ -10,7 +10,9 @@
 // !                     └────────────────────────────────────────────────────┘
 // !```
 #![allow(non_snake_case)]
+use std::collections::HashMap;
 use std::fs;
+use std::hash::Hash;
 use asynchronix::simulation::{Mailbox, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::STA_source;
@@ -74,13 +76,17 @@ fn simple_MM1K(
         true,
         rate_service_bps,
     ); // STAs 0
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.00);
+
+    let mut vec_ids_stas = Vec::new(); 
+    vec_ids_stas.push(source.sta_id);
+
+    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.00,vec_ids_stas );
     let sink = Sink::new();
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
     let csv_data_handle: Arc<Mutex<CsvData>> = queue.csv_metrics.get_data_handle();
     let queuestats_data_handle = queue.get_queue_stats_handle();
-    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
+    let stats_sta_data_handle: Arc<Mutex<HashMap<usize, perStaLockStats>>> = queue.get_stas_stats_handle();
 
     let mbox_src = Mailbox::new();
     let mbox_src_address = mbox_src.address();
@@ -277,18 +283,22 @@ fn multiple_STA_sim(
     let sink: Sink = Sink::new();
     let mbox_sink: Mailbox<Sink> = Mailbox::new();
 
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.0);
+    let mut vec_ids_stas = Vec::new(); 
+    vec_ids_stas.push(sta1_bg.sta_id);
+    vec_ids_stas.push(sta2_bg.sta_id);
+
+    let mut queue: QueueModule = QueueModule::new(vec_ids_stas.len(), k_queue - 1 as usize, rate_queue_bps, 0.0, vec_ids_stas);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 
     queue.STA_coords_grid.resize(num_STAs, Coords::new());
     for i in 0..num_STAs {
         queue.STA_coords_grid[i] = vec_coords[i];
-    }
 
+    }
     let csv_data_handle = queue.csv_metrics.get_data_handle();
     let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle();
-    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
+    let stats_sta_data_handle: Arc<Mutex<HashMap<usize,perStaLockStats>>> = queue.get_stas_stats_handle();
     let sinkstats_data_handle = sink.get_data_handle();
 
     let mbox_sta1 = Mailbox::new();
@@ -311,8 +321,8 @@ fn multiple_STA_sim(
     sta2_bg.output_port.connect(QueueModule::input, &mbox_queue);
 
     queue.output_port_sta1.connect(Sink::input, &mbox_sink);
-    queue.output_port_sta2.connect(Sink::input, &mbox_sink);
-
+    // queue.output_port_sta2.connect(Sink::input, &mbox_sink);
+// 
     let t0 = MonotonicTime::EPOCH;
 
     let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
@@ -380,7 +390,7 @@ fn multiple_STA_sim(
     }
     if let Ok(stats_vec) = stats_sta_data_handle.lock() {
         // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
-        for sta_stats in stats_vec.iter() {
+        for (id, sta_stats) in stats_vec.iter() {
             if let Ok(sta_data) = sta_stats.data.lock() {
                 sta_data.print_nicely();
             }
@@ -422,10 +432,10 @@ fn downlink_uplink_scenario(
     rate_bps_in: f64,
     rate_queue_bps: f64,
     distance: f64,
+    is_uplink: bool, 
+    is_downlink: bool, 
 ) {
     let v_distance = vec![1.0, distance, distance]; // just some random values
-
-    const NUM_STAS_UL: usize = 2; //for now
 
     let coords_sta1 = Coords {
         x: v_distance[0],
@@ -437,10 +447,22 @@ fn downlink_uplink_scenario(
         y: 0.0,
         z: 0.0,
     };
-    let coords_sta3 = coords_sta1; 
-    let coords_sta4 = coords_sta2; 
+    let coords_sta3 = Coords::new(); 
+    let coords_sta4 = Coords::new(); 
 
     let vec_coords = vec![coords_sta1, coords_sta2, coords_sta3, coords_sta4];
+    let id_src_coords = vec![0,1, 5, 5]; 
+
+    let mut map_coords : HashMap<usize, Coords> = HashMap::new();
+    assert!(vec_coords.len() == id_src_coords.len());
+
+    let mut ccounter = 0; 
+    for id in id_src_coords{
+        map_coords.insert(id, vec_coords[ccounter]); 
+        ccounter += 1; 
+
+    }
+    
     println!("vec_coords: {:?}\n", vec_coords);
 
     let results1 = frametransmission_delay(
@@ -463,7 +485,7 @@ fn downlink_uplink_scenario(
     let effective_rate2 = mean_length / results2.service_delay;
     let effective_rate = (effective_rate1 + effective_rate2) / 2.0;
 
-    let aggregated_rate_in = (num_STAs - NUM_STAS_UL) as f64 * rate_bps_in;
+    let aggregated_rate_in = (num_STAs) as f64 * rate_bps_in;
 
     println!("*******************************************************************");
     println!(
@@ -482,8 +504,6 @@ fn downlink_uplink_scenario(
     let t0 = MonotonicTime::EPOCH;
     let coords_ap = Coords::new(); 
 
-
-    // UPLINK 
     let mut sta1_bg: STA_extended = STA_extended::new(
         rate_bps_in,
         mean_length, 
@@ -511,7 +531,7 @@ fn downlink_uplink_scenario(
     let mut sta3_bg: STA_extended = STA_extended::new(
         rate_bps_in,
         mean_length, 
-        12, 
+        5, 
         0,
         coords_ap, 
         true,
@@ -522,7 +542,7 @@ fn downlink_uplink_scenario(
     let mut sta4_bg: STA_extended = STA_extended::new(
         rate_bps_in,
         mean_length, 
-        12, 
+        5, 
         1,
         coords_ap, 
         true,
@@ -530,7 +550,6 @@ fn downlink_uplink_scenario(
         t0, 
         true, 
     ); 
-
 
     println!("STA1 PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
@@ -542,18 +561,38 @@ fn downlink_uplink_scenario(
     let sink: Sink = Sink::new();
     let mbox_sink: Mailbox<Sink> = Mailbox::new();
 
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.0);
+    let mut vec_ids_stas = Vec::new(); 
+    let mut num_stas_mod = 0; 
+    
+    
+    if is_uplink{  
+        vec_ids_stas.push(sta1_bg.sta_id);
+        vec_ids_stas.push(sta2_bg.sta_id);
+        num_stas_mod += 2; 
+    }
+    if is_downlink{
+        vec_ids_stas.push(sta3_bg.sta_id); 
+        vec_ids_stas.push(sta4_bg.sta_id);
+        num_stas_mod += 2;  
+    }
+
+    let mut queue: QueueModule = QueueModule::new(num_stas_mod, k_queue - 1 as usize, rate_queue_bps, 0.0, vec_ids_stas);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
+    println!("LEN BEFORE: {}", queue.STA_coords_grid.len()); 
+    queue.STA_coords_grid.resize(num_stas_mod, Coords::new());
+    println!("LEN AFTER: {}", queue.STA_coords_grid.len()); 
 
-    queue.STA_coords_grid.resize(num_STAs, Coords::new());
-    for i in 0..num_STAs {
+    for i in 0..num_stas_mod {
         queue.STA_coords_grid[i] = vec_coords[i];
+        println!("ID {} =  {:?} ", i, vec_coords[i]);
     }
+
+    queue.STA_coords_map = map_coords.clone(); 
 
     let csv_data_handle = queue.csv_metrics.get_data_handle();
     let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle();
-    let stats_sta_data_handle: Arc<Mutex<Vec<perStaLockStats>>> = queue.get_stas_stats_handle();
+    let stats_sta_data_handle: Arc<Mutex<HashMap<usize, perStaLockStats>>> = queue.get_stas_stats_handle();
     let sinkstats_data_handle = sink.get_data_handle();
 
     let mbox_sta1 = Mailbox::new();
@@ -571,15 +610,19 @@ fn downlink_uplink_scenario(
 
     let mbox_queue = Mailbox::new();
     
-    
-    sta1_bg.output_network_port.connect(QueueModule::input, &mbox_queue); // Two DL STAs send
-    sta2_bg.output_network_port.connect(QueueModule::input, &mbox_queue);
-    sta3_bg.output_network_port.connect(QueueModule::input, &mbox_queue); 
-    sta4_bg.output_network_port.connect(QueueModule::input, &mbox_queue); 
+    if(is_uplink){
 
+        sta1_bg.output_network_port.connect(QueueModule::input, &mbox_queue); // Two UL STAs send
+        sta2_bg.output_network_port.connect(QueueModule::input, &mbox_queue);
+        
+    }
+    if(is_downlink){
+        sta3_bg.output_network_port.connect(QueueModule::input, &mbox_queue); 
+        sta4_bg.output_network_port.connect(QueueModule::input, &mbox_queue); 
+    }
 
     queue.output_port_sta1.connect(Sink::input, &mbox_sink);
-    queue.output_port_sta2.connect(Sink::input, &mbox_sink);
+    // queue.output_port_sta2.connect(Sink::input, &mbox_sink);
 
     let t0 = MonotonicTime::EPOCH;
 
@@ -610,7 +653,31 @@ fn downlink_uplink_scenario(
     let duration_scheduled2 = Duration::from_secs(10) + epsilon2;
 
     // Initialize sta3 and 4 for Downlink, 1 and 2 for Uplink
+    if is_uplink{
+        scheduler
+        .schedule_event(
+            duration_scheduled1,
+            STA_extended::send_packet_BG,
+            (),
+            &sta1_address,
+        )
+        .unwrap();
+
     scheduler
+        .schedule_event(
+            duration_scheduled2,
+            STA_extended::send_packet_BG,
+            (),
+            &sta2_address,
+        )
+        .unwrap();
+
+
+
+    }
+    
+    if is_downlink{
+        scheduler
         .schedule_event(
             duration_scheduled1,
             STA_extended::send_packet_BG,
@@ -627,7 +694,8 @@ fn downlink_uplink_scenario(
             &sta4_address,
         )
         .unwrap();
-
+    }
+   
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
     // After simulation, write the CSV data
@@ -651,7 +719,7 @@ fn downlink_uplink_scenario(
     }
     if let Ok(stats_vec) = stats_sta_data_handle.lock() {
         // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
-        for sta_stats in stats_vec.iter() {
+        for (id, sta_stats) in stats_vec.iter() {
             if let Ok(sta_data) = sta_stats.data.lock() {
                 sta_data.print_nicely();
             }
@@ -730,5 +798,8 @@ fn main() {
         rate_bps_in,
         rate_queue_bps,
         distance,
+        true,
+        false,
     );
+    println!("END DLUL scenario");
 }

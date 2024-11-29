@@ -1,14 +1,14 @@
 
 use anyhow::Result;
-use crate::lib::alvr_stream_socket::{ConResult, HandleTryAgain, ToCon, 
-            SocketBufferSize, SocketReader, BufferedReceiver, try_again};
+use crate::lib::alvr_stream_socket::{ConResult, ToCon, 
+            SocketReader, BufferedReceiver, try_again};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     marker::PhantomData,
     mem,
-    sync::{
-        Arc, Mutex,
-    },
+    // sync::{
+    //     Arc, Mutex,
+    // },
     time::{Duration, Instant},
 };
 
@@ -22,9 +22,7 @@ pub struct ControlPacketType {
 }
 
 
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
-
-use super::MpduPacket;
+use crossbeam::channel::{unbounded, Sender};
 // This corresponds to the length of the payload
 const FRAMED_PREFIX_LENGTH: usize = mem::size_of::<u32>();
 
@@ -100,13 +98,14 @@ impl<S: Serialize> ControlSocketSender<S> {
         framed_send(&mut self.inner, &mut self.buffer, packet)
     }
 }
+#[allow(unused)]
 #[derive(Clone)]
 pub struct ControlSocketReceiver<R: DeserializeOwned> {
     inner: BufferedReceiver<Vec<u8>>,
     buffer: Vec<u8>,
     _phantom: PhantomData<R>, 
 }
-
+#[allow(unused)]
 impl<R: DeserializeOwned> ControlSocketReceiver<R> {
     pub fn recv(&mut self, timeout: Duration) -> ConResult<R> {
         framed_recv(&mut self.inner, &mut self.buffer, timeout)
@@ -117,7 +116,7 @@ pub struct ProtoControlSocket {
     sender: Sender<Vec<u8>>,
     receiver: BufferedReceiver<Vec<u8>>,
 }
-
+#[allow(unused)]
 impl ProtoControlSocket {
     pub fn connect(timeout: Duration) -> ConResult<(Self, IpAddr)> {
         let (sender, receiver) = unbounded();

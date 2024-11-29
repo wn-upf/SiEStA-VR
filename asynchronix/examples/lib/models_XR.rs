@@ -1,5 +1,8 @@
-use crate::lib::alvr_control_socket::{framed_recv, framed_recv_vec, ControlSocketReceiver, ControlSocketSender};
-use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
+
+#[allow(unused)]
+
+use crate::lib::alvr_control_socket::{framed_recv_vec, ControlSocketReceiver, ControlSocketSender};
+use crate::lib::alvr_stream_socket::{StreamReceiver};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
@@ -8,9 +11,9 @@ use crate::format_elapsed;
 use crate::lib::HeaderALVRStream;
 
 // use std::intrinsics::size_of;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 
-use core::net;
+// use core::net;
 use std::mem;
 use std::net::IpAddr;
 // use std::process::Output;
@@ -34,7 +37,7 @@ use crate::lib::alvr_stream_socket::{
     VideoPacketHeader,
 };
 
-use crate::lib::alvr_control_socket::{ProtoControlSocket, ControlPacketType}; 
+use crate::lib::alvr_control_socket::{ProtoControlSocket}; 
 use tai_time::TaiTime;
 
 use crate::lib::alvr_stream_socket::{
@@ -55,7 +58,7 @@ pub const DECODER_BUFFERING_FRAMES: usize = 3;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2; 
 
 
-static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
+static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
 
 
@@ -77,7 +80,7 @@ use crate::lib::{
 };
 
 use crate::lib::alvr_statistics::StatisticsManager;
-use crate::lib::INITIAL_BITRATE_MBPS_SIM;
+// use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 use super::alvr_packets::DeadlineShardlossStatPacket;
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
@@ -92,6 +95,7 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
 
 type InstantMap = Arc<RwLock<HashMap<u32, TaiTime<0>>>>;
 
+#[allow(unused)]
 #[derive(Clone)]
 pub struct BitrateManager {
     last_frame_instant: Instant,
@@ -135,8 +139,10 @@ impl BitrateManager{
 // static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> =
 //     Lazy::new(|| Mutex::new(BitrateManager::new(256, 60.0, 30.0)));
 
+#[allow(dead_code)]
 pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 
+#[allow(dead_code)]
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
@@ -167,7 +173,7 @@ impl BitrateManager {
         }
     }
 }
-
+#[allow(unused)]
 pub struct XRServer {
     pub ip_self: IpAddr,
     pub ip_client: IpAddr,
@@ -196,7 +202,7 @@ pub struct XRServer {
     pub map_rtt: InstantMap, 
     pub STATISTICS_MANAGER: StatisticsManager, 
 }
-
+#[allow(unused)]
 impl XRServer {
     pub fn new(ip_self: IpAddr, ip_client: IpAddr, t0_sim: TaiTime<0>, frame_rate: f32, initial_bitrate: f32, name_folder: &str) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
@@ -605,7 +611,7 @@ impl XRServer {
 impl Model for XRServer {}
 
 
-struct DroppingVecDeque<T> {
+pub struct DroppingVecDeque<T> {
     deque: VecDeque<T>,
     capacity: usize,
     dropped_frame_counter: usize, 
@@ -642,7 +648,7 @@ impl<T> DroppingVecDeque<T> {
     }
 }
 
-
+#[allow(unused)]
 pub struct XRClient {
     pub decoder_queue: DroppingVecDeque<Vec<u8>>,
 
@@ -666,7 +672,7 @@ pub struct XRClient {
 
     pub streamsocket_clone: Option<StreamSocket>,
 }
-
+#[allow(unused)]
 impl XRClient {
     pub fn new(server_ip: IpAddr, fps: f32) -> Self {
         Self {
@@ -1039,10 +1045,13 @@ impl XRClient {
 
 impl Model for XRClient {}
 
-pub struct SinkVideo_XR {
+
+
+#[allow(unused)]
+pub struct SinkVideoXr{
     pub counter_decoded: usize, 
 }
-impl SinkVideo_XR{
+impl SinkVideoXr{
     pub fn new() ->  Self{
         Self { counter_decoded: (0) }
     }
@@ -1050,8 +1059,8 @@ impl SinkVideo_XR{
         println!("Reproducing vid {:?}", inpuut); 
     }
 }
-impl Model for SinkVideo_XR{}
-
+impl Model for SinkVideoXr{}
+#[allow(unused)]
 pub trait XRDevice {
     fn some_shared_method(&self);
 }
@@ -1073,6 +1082,8 @@ pub struct TimedFrame{
 
 
 #[allow(non_camel_case_types)]
+#[allow(unused)]
+
 pub struct STA_extended {
     // extended class to PoissonGen
     pub output_network_port: Output<MpduPacket>,
@@ -1095,7 +1106,7 @@ pub struct STA_extended {
 
     pub t_0: TaiTime<0>,
 }
-
+#[allow(unused)]
 impl STA_extended {
     pub fn new(
         arrival_rate_bps: f64,
@@ -1236,9 +1247,8 @@ impl STA_extended {
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
-                let len_random = exponential(self.mean_length_packets_BG as f64) as usize;
-
-                // let len_random = self.mean_length_packets_BG as usize;
+                // let len_random = exponential(self.mean_length_packets_BG as f64) as usize;
+                let len_random = self.mean_length_packets_BG as usize;
 
                 packet.length_packet = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
