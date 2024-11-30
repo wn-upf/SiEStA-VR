@@ -172,6 +172,8 @@ fn main() {
         effective_rate1,
         t0,
         false,
+        0.0, 
+        
     ); // STAs 0 and 1 send traffic to 5 through AP
 
     let mut sta_client = STA_extended::new(
@@ -184,6 +186,7 @@ fn main() {
         effective_rate2,
         t0,
         false,
+        0.0
     );
 
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
@@ -195,7 +198,6 @@ fn main() {
     let mut queue: QueueModule = QueueModule::new(
         NUM_STAS,
         k_queue - 1 as usize,
-        rate_queue_bps,
         pl_prob,
         vec_ids,
     );

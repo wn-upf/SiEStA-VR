@@ -47,7 +47,7 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = false;
+pub static DEBUG_PRINT_ENABLED: bool = true;
 
 #[macro_export]
 macro_rules! debug_print {
@@ -416,7 +416,18 @@ impl CsvType {
         id_dest: usize,
     ) {
         let formatted_timestamp = format_timestamp!(now);
-
+        debug_print!(
+            DebugColor::Purple,
+            "[DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            formatted_timestamp,
+            id_packet,
+            queue_size,
+            Ts,
+            Tq,
+            length_packet,
+            id_src,
+            id_dest
+        );
         if let Ok(mut data) = self.csv_data.lock() {
             data.v_timestamp.push(formatted_timestamp);
             data.v_packet_id.push(id_packet);
@@ -583,6 +594,19 @@ impl perStaStats {
         self.rx_packets_counter += 1;
 
         let formatted_timestamp = format_timestamp!(now);
+
+        debug_print!(
+            DebugColor::Purple,
+            "[DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            formatted_timestamp,
+            id_packet,
+            queue_size,
+            Ts,
+            Tq,
+            length_packet,
+            sta_src_id,
+            sta_dest_id
+        );
 
         self.csv_data.v_timestamp.push(formatted_timestamp);
         self.csv_data.v_packet_id.push(id_packet);
@@ -904,13 +928,12 @@ pub struct ResultsFrameTXDelay {
 }
 
 impl ResultsFrameTXDelay {
-    // pub fn clear(&mut self) {
-    //     self.service_delay = 0.0;
-    //     self.data_service_delay = 0.0;
-    //     self.pathloss = 0.0;
-    //     self.p_rx = 0.0;
-    //     self.o_rate = 0.0;
-    // }
+    pub fn clear(&mut self) {
+        self.service_delay = 0.0;
+        self.data_service_delay = 0.0;
+        self.pathloss = 0.0;
+        self.p_rx = 0.0;
+    }
 }
 
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {

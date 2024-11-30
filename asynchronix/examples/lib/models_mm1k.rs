@@ -4,6 +4,7 @@ use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
+use std::result;
 
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
@@ -18,6 +19,8 @@ use crate::lib::{
     CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
+
+use super::ResultsFrameTXDelay;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -589,6 +592,10 @@ impl QueueModule {
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
 
+                let mut resultz: ResultsFrameTXDelay; 
+
+                resultz.clear();
+
                 // Process packets that match the AMPDU destination (and source?)
                 while packet_index < self.queue.len() {
                     if let Some(current_packet) = self.queue.get(packet_index) {
@@ -604,7 +611,7 @@ impl QueueModule {
                             self.aux_ampdu_serviced.total_length + current_packet.length_packet;
                         let new_size = self.aux_ampdu_serviced.size + 1;
 
-                        let resultz = frametransmission_delay(
+                        resultz = frametransmission_delay(
                             new_total_length as f64,
                             new_size,
                             self.coords_queue,
@@ -621,28 +628,6 @@ impl QueueModule {
                             packet_rmvd.queue_length_when_out = self.queue.len();
                             packet_rmvd.queue_out_instant = now;
 
-                            // Update stats before moving packet
-                            if let Some(stats_tx) = &self.stats_tx {
-                                let stats_update = StatsUpdate {
-                                    T_s: resultz.service_delay,
-                                    T_q: now
-                                        .duration_since(packet_rmvd.queue_in_instant)
-                                        .as_secs_f64(),
-                                    blocked_packet_counter: self.blocked_packet_counter,
-                                    arrived_packet_counter: self.arrived_packet_counter,
-                                    queue_length_when_out: packet_rmvd.queue_length_when_out,
-                                    sta_src_id: packet_rmvd.sta_src_id as usize,
-                                    sta_dest_id: packet_rmvd.sta_dest_id as usize,
-
-                                    packet_id: packet_rmvd.packet_id as i32,
-                                    now,
-                                    length_packet: packet_rmvd.length_packet,
-                                };
-                                stats_tx
-                                    .send(stats_update)
-                                    .expect("Failed to send stats update");
-                            }
-
                             packet_rmvd.T_q = now.duration_since(packet_rmvd.queue_in_instant);
                             packet_rmvd.expected_T_s =
                                 Duration::from_secs_f64(resultz.service_delay);
@@ -656,6 +641,32 @@ impl QueueModule {
                     }
                 }
 
+                for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut(){
+                    packet.T_s = Duration::from_secs_f64( resultz.service_delay); 
+
+                     // Update stats before moving packet
+                     if let Some(stats_tx) = &self.stats_tx {
+                        let stats_update = StatsUpdate {
+                            T_s: resultz.service_delay,
+                            T_q: now
+                                .duration_since(packet.queue_in_instant)
+                                .as_secs_f64(),
+                            blocked_packet_counter: self.blocked_packet_counter,
+                            arrived_packet_counter: self.arrived_packet_counter,
+                            queue_length_when_out: packet.queue_length_when_out,
+                            sta_src_id: packet.sta_src_id as usize,
+                            sta_dest_id: packet.sta_dest_id as usize,
+
+                            packet_id: packet.packet_id as i32,
+                            now,
+                            length_packet: packet.length_packet,
+                        };
+                        stats_tx
+                            .send(stats_update)
+                            .expect("Failed to send stats update");
+                    }
+                }
+
                 if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
                     debug_print!(
                         DebugColor::Yellow,
@@ -663,7 +674,7 @@ impl QueueModule {
                         format_elapsed!(now),
                         format_elapsed!(now + last_service_duration),
                     );
-
+                    
                     if DEBUG_PRINT_ENABLED == true {
                         self.aux_ampdu_serviced.print();
                     }
