@@ -928,6 +928,15 @@ pub struct ResultsFrameTXDelay {
 }
 
 impl ResultsFrameTXDelay {
+    pub fn new() -> Self{
+        Self{
+            service_delay: 0.0,
+            data_service_delay: 0.0, 
+            pathloss: 0.0,
+            p_rx: 0.0, 
+        }
+    }
+
     pub fn clear(&mut self) {
         self.service_delay = 0.0;
         self.data_service_delay = 0.0;

@@ -592,9 +592,7 @@ impl QueueModule {
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
 
-                let mut resultz: ResultsFrameTXDelay; 
-
-                resultz.clear();
+                let mut resultz =  ResultsFrameTXDelay::new(); 
 
                 // Process packets that match the AMPDU destination (and source?)
                 while packet_index < self.queue.len() {
