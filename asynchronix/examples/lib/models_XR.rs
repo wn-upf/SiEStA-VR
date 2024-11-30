@@ -1139,9 +1139,12 @@ impl STA_extended {
         rate_service_bps: f64,
         t0_sim: TaiTime<0>,
         is_bg_sta: bool,
+        arrival_rate_BG: f64, 
+
     ) -> Self {
-        let arrival_rate_BG = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps / mean_length;
+        let arrival_rate_BG_packets = arrival_rate_BG / mean_length;
+
         println!("\n*************************************************");
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t arrival_rate_BG (pack/s): {:.3}, Departure_rate: {:.3},  L = {}, is_BG_STA {}",
                             src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate_BG,effective_mu ,mean_length, is_bg_sta);
@@ -1153,7 +1156,7 @@ impl STA_extended {
             // to_app_socket_end_ampdu: Default::default(),
             sta_id: src,
             destination_id: dest,
-            arrival_rate_BG: arrival_rate_BG,
+            arrival_rate_BG: arrival_rate_BG_packets,
             mean_length_packets_BG: mean_length,
             num_packets_sent: 0,
             sta_coordinates: coordinates,

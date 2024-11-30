@@ -311,7 +311,6 @@ pub struct QueueModule {
     pub queue_length_counter: usize,
     // pub arrival_rate: f64,
     pub service_rate: f64,
-    pub rate_departures_bps: f64,
     pub t0_time: Instant,
 
     pub csv_metrics: CsvType,
@@ -358,7 +357,6 @@ impl QueueModule {
     pub fn new(
         num_stas: usize,
         queue_size: usize,
-        rate_departures_bps: f64,
         PL_prob: f64,
         vec_ids: Vec<i32>,
     ) -> Self {
@@ -389,8 +387,7 @@ impl QueueModule {
             arrived_packet_counter: 0,
             queue_length_counter: 0,
             service_rate: 0.0,
-            rate_departures_bps,
-            t0_time: Instant::now(),
+                        t0_time: Instant::now(),
 
             csv_metrics: CsvType::new(),
 
