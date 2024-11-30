@@ -627,8 +627,7 @@ impl QueueModule {
                             packet_rmvd.queue_out_instant = now;
 
                             packet_rmvd.T_q = now.duration_since(packet_rmvd.queue_in_instant);
-                            packet_rmvd.expected_T_s =
-                                Duration::from_secs_f64(resultz.service_delay);
+                        
 
                             // Move packet into AMPDU without cloning
                             self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
@@ -645,7 +644,7 @@ impl QueueModule {
                      // Update stats before moving packet
                      if let Some(stats_tx) = &self.stats_tx {
                         let stats_update = StatsUpdate {
-                            T_s: resultz.service_delay,
+                            T_s: packet.T_s.as_secs_f64(), 
                             T_q: now
                                 .duration_since(packet.queue_in_instant)
                                 .as_secs_f64(),
@@ -790,17 +789,16 @@ impl Sink {
         let now = context.scheduler.time();
 
         for mut packet in ampdu_packet.mpdu_packets {
-            packet.T_s = now.duration_since(packet.queue_out_instant);
+            // packet.T_s = now.duration_since(packet.queue_out_instant);
 
             debug_print!(
                 DebugColor::Magenta,
-                "{} [DBG SINK ] ---Packet {} arrived from STA{} into Sink (STA{}, T_s = {}, E[T_s] = {})",
+                "{} [DBG SINK ] ---Packet {} arrived from STA{} into Sink (STA{}, T_s = {})",
                 format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
                 packet.sta_dest_id,
                 packet.T_s.as_secs_f64(),
-                packet.expected_T_s.as_secs_f64(),
 
             );
             if packet.data_inner.len() >= 100 {

@@ -784,7 +784,7 @@ pub struct MpduPacket {
     pub sink_in_instant: Instant,
     pub T_q: Duration,
     pub T_s: Duration,
-    pub expected_T_s: Duration,
+    // pub expected_T_s: Duration,
 
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
@@ -807,7 +807,7 @@ impl MpduPacket {
             sink_in_instant: Instant::now(),
             T_q: Duration::ZERO,
             T_s: Duration::ZERO,
-            expected_T_s: Duration::ZERO,
+            // expected_T_s: Duration::ZERO,
 
             sta_src_id: 0,
             sta_dest_id: 0,
@@ -856,12 +856,13 @@ impl AmpduPacket {
             self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
         for packet in &self.mpdu_packets {
+            
             println!(
-                "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}, {:?} \x1b[0m",
+                "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}\x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64(),
-                packet.expected_T_s.as_secs_f64(),
-                packet.header_alvr
+                packet.T_s.as_secs_f64(), 
+                // packet.expected_T_s.as_secs_f64(),
             );
         }
     }
