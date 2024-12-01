@@ -143,7 +143,7 @@ fn simple_MM1K(
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
-    // reate the directory if it doesn't exist
+    // Create the directory if it doesn't exist
     let dir = "Results/";
     if !fs::metadata(dir).is_ok() {
         fs::create_dir_all(dir).expect("Failed to create Results directory");
@@ -351,6 +351,7 @@ fn multiple_STA_sim(
 
     assert_eq!(simu.time(), t);
 
+
     // START WITH FIRST EVENT
     let epsilon1 = Duration::from_secs_f64(exponential(0.9));
     let epsilon2 = Duration::from_secs_f64(exponential(0.9));
@@ -539,7 +540,10 @@ fn downlink_uplink_scenario(
         mean_length,
         5,
         0,
-        coords_ap,
+        coords_sta1, // although not entirely accurate, 'cause frametransmissiondelay is computed
+        //                         between AP coords (0,0,0) and the coords of the source of the packets. 
+        //                         Since the delay is bidirectional, it works although it caused an error before. TODO: REFACTOR! 
+        
         true,
         effective_rate1,
         t0,
@@ -551,7 +555,7 @@ fn downlink_uplink_scenario(
         mean_length,
         5,
         1,
-        coords_ap,
+        coords_sta2,
         true,
         effective_rate2,
         t0,
@@ -642,7 +646,9 @@ fn downlink_uplink_scenario(
 
     queue.output_port_sta1.connect(Sink::input, &mbox_sink);
     // queue.output_port_sta2.connect(Sink::input, &mbox_sink);
+    
 
+    std::thread::sleep(Duration::from_secs(5));
     let t0 = MonotonicTime::EPOCH;
 
     let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
@@ -1078,8 +1084,8 @@ fn main() {
     //         k_queue,
     //         rate_bps_in,
     //         distance,
-    //         false,
     //         true,
+    //         false,
     //         BG_rate
     //     );
 

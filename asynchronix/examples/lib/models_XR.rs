@@ -1287,6 +1287,16 @@ impl STA_extended {
 
                 packet.sta_src_coords = self.sta_coordinates;
 
+
+                debug_print!(
+                    DebugColor::Blue, 
+                    "[TGAPP{}] Packet {} generated, destination STA {}, self.coords = {:?}",
+                    self.sta_id,
+                    packet.packet_id,
+                    packet.sta_dest_id, 
+                    self.sta_coordinates, 
+                ); 
+
                 // self.output_network_port.send(packet).await;
                 context
                     .scheduler
