@@ -236,7 +236,7 @@ impl XRServer {
 
             match packet {    
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-                    println!("{:.9}- Server receving stats\n{:?}",now.duration_since(self.t_0).as_secs_f64(), network_stats);
+                    debug_print!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats: {:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
                     let map_rtt_lock = map_clone.read().unwrap();
                     let mut hashmap = map_rtt_lock.clone();
                     let frame_id = network_stats.frame_index as u32;
@@ -247,7 +247,7 @@ impl XRServer {
                         println!("ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!");
                         rtt = Duration::ZERO;
                     }
-                    println!("RTT = {:.9}", rtt.as_secs_f64()); 
+                    debug_print!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64()); 
                     let (peak_network_throughput_bps, frame_interarrival_s) =
                         self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt, now);
 
@@ -392,14 +392,12 @@ impl XRServer {
 
                                 debug_print!(
                                     DebugColor::DarkGreen,
-                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
-
+                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} ||\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
                                     packet_length,
                                     str_id,
                                     next_packet_index,
                                     shards_count,
                                     shard_index,
-                                    tx_r_instant
                                 );
 
                                 let mut packet = MpduPacket::new();
@@ -608,6 +606,7 @@ struct DroppingVecDeque<T> {
     capacity: usize,
     dropped_frame_counter: usize, 
     ok_dequed_frame_counter: usize, 
+    enqued_frame_counter: usize, 
 }
 
 impl<T> DroppingVecDeque<T> {
@@ -617,10 +616,18 @@ impl<T> DroppingVecDeque<T> {
             capacity,
             dropped_frame_counter: 0,
             ok_dequed_frame_counter: 0,
+            enqued_frame_counter: 0, 
         }
     }
     fn push(&mut self, item: T) {
         // If we are at capacity, pop the oldest frame from the front
+        self.enqued_frame_counter += 1; 
+        debug_print!(DebugColor::Gold, "[VecDecoder]Pushing frame {}, decoder_length: {}, max: {},",
+             self.enqued_frame_counter,
+             self.deque.len(), 
+             self.capacity, 
+             );
+
         if self.deque.len() == self.capacity {
             self.deque.pop_front(); 
             self.dropped_frame_counter += 1; 
@@ -802,7 +809,8 @@ impl XRClient {
                     // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
-         
+                    debug_print!(DebugColor::Gold, "[DBG Client RX frame] Frame {:2.0} received, sending stats packet in UL", data.get_frame_index()); 
+
                     context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_control, ClientControlPacket::NetworkStatistics(net)).unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
@@ -810,7 +818,9 @@ impl XRClient {
                         println!("UNABLE TO GET HEADER NAL? ");
                         return;
                     };
+                    let sized_vec = nal[..20.min(nal.len())].to_vec();
 
+                    debug_print!(DebugColor::Gold, "[DEBUG DECODE] NAL first 20 bytes: {:?}", sized_vec); 
                     self.decoder_queue.push(nal.to_vec());
                     ()
                 }
@@ -1158,8 +1168,8 @@ impl STA_extended {
 
                 debug_print!(
                     DebugColor::Red,
-                    "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
-                    format_elapsed!(now),
+                    "[DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
+                    // format_elapsed!(now),
                     self.sta_id,
                     packet.packet_id,
                     packet.sta_src_id,
@@ -1168,8 +1178,8 @@ impl STA_extended {
                 // if packet.data_inner.len() >= 100 {
                 debug_print!(
                     DebugColor::DarkRed,
-                    "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                    format_elapsed!(now.duration_since(self.t_0)),
+                    "[DBG NET_IN -> APP_OUT] : XR Packet received: ",
+                    // format_elapsed!(now.duration_since(self.t_0)),
                 );
 
                 self.received_packet_counter += 1;

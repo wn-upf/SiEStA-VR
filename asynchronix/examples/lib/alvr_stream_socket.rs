@@ -644,6 +644,7 @@ impl<H> ReceiverData<H> {
 
 impl<H: DeserializeOwned> ReceiverData<H> {
     pub fn get(&self) -> Result<(H, &[u8])> {
+        // println!("[DBG get data]" ); 
         let mut data: &[u8] = &self.buffer.as_ref().unwrap()[SHARD_PREFIX_SIZE..self.size];
         // This will partially consume the slice, leaving only the actual payload
         let header = bincode::deserialize_from(&mut data)?;
@@ -834,7 +835,6 @@ impl StreamSocket {
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
             let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
 
-            // debug_print!(DebugColor::Blue, "[StreamSocket recv] Length: {}, streamID: {}, FrameID: {}, shardID: {} / {}, tx_r_instant: {}", shard_length, stream_id, packet_index, shard_index + 1, shards_count, tx_r_instant );
 
             if stream_id == VIDEO {
                 let rx_instant = now;
@@ -917,7 +917,7 @@ impl StreamSocket {
             return try_again();
         };
 
-        println!("{}[DBG] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index);
+        debug_print!( DebugColor::Orange, "[DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
     
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -1069,7 +1069,7 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            // println!("PACKET IS COMPLETE, SENDING!!");
+            debug_print!(DebugColor::Orange, "FRAME IS COMPLETE!", );
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     let values: Vec<&ShardMapStats> = inner_map.values().collect();
@@ -1257,7 +1257,7 @@ impl StreamSocketBuilder {
             }
         }
     }
-
+    #[allow(unused)]
     pub fn listen_for_server(
         timeout: Duration,
         port: u16,
@@ -1462,7 +1462,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
         //     .handle_try_again()?;
 
         let packet = self.packet_receiver.try_recv().handle_try_again()?;  
-        // println!("receiving packet2!!!");
+        debug_print!(DebugColor::DarkOrange, "[DBG StreamReceiver] Reconstructed frame {}", packet.frame_index);
 
         self.frame_interarrival += packet.frame_interarrival;
 
@@ -1647,7 +1647,9 @@ impl<H> StreamSender<H> {
 
 impl<H: Serialize> StreamSender<H> {
     pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
-        let mut buffer = generate_random_video_payload(current_bitrate_mbps);
+        // let mut buffer = generate_random_video_payload(current_bitrate_mbps);
+        let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
+
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
@@ -1759,7 +1761,7 @@ pub struct ReceiverDataStats {
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
 }
-
+#[allow(unused)]
 impl ReceiverDataStats {
     pub fn had_packet_loss(&self) -> bool {
         self.had_packet_loss
@@ -1806,6 +1808,27 @@ impl ReceiverDataStats {
     pub fn get_highest_rx_shard_index(&self) -> i32 {
         self.highest_rx_shard_index
     }
+}
+
+pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
+    // Calculate the payload size based on bitrate
+    let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;
+
+    // Initialize a vector to hold the Fibonacci sequence
+    let mut buffer_inner = Vec::with_capacity(no_bytes_based_bitrate);
+
+    // Generate the Fibonacci sequence
+    let mut a: u8 = 0;
+    let mut b: u8 = 1;
+
+    for _ in 0..no_bytes_based_bitrate {
+        buffer_inner.push(a); // Add the current value to the payload
+        let next = a.wrapping_add(b); // Use wrapping_add to prevent overflow
+        a = b;
+        b = next;
+    }
+
+    buffer_inner
 }
 
 pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {

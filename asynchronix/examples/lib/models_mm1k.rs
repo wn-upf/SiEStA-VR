@@ -410,7 +410,7 @@ impl QueueModule {
 
             debug_print!(
                 DebugColor::Green,
-                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
+                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
                 format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
@@ -425,7 +425,7 @@ impl QueueModule {
             self.blocked_packet_counter += 1;
             debug_print!(
                 DebugColor::Red,
-                "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {}",
+                "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
                 format_elapsed!(now),
                 packet.packet_id,
                 self.queue.len()
@@ -444,7 +444,7 @@ impl QueueModule {
 
             debug_print!(
                 DebugColor::Green,
-                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
+                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
                 format_elapsed!(now),
                 packet.packet_id,
                 packet.sta_src_id,
@@ -467,21 +467,21 @@ impl QueueModule {
         }
     }
 
-    pub async fn send_ampdu(&mut self, mut AMPDU_sent: AmpduPacket, context: &Context<Self>) {
+    pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
         
        
         
-        debug_print!(
-            DebugColor::Red,
-            "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
-            format_elapsed!(elapsed),
-            AMPDU_sent.sta_dest_id,
-            AMPDU_sent.mpdu_packets.len(),
-            self.queue.len(),
-            AMPDU_sent.total_length,
-            AMPDU_sent.size - 1
-        );
+        // debug_print!(
+        //     DebugColor::Red,
+        //     "{} [DBG TX STA]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
+        //     format_elapsed!(elapsed),
+        //     AMPDU_sent.sta_dest_id,
+        //     AMPDU_sent.mpdu_packets.len(),
+        //     self.queue.len(),
+        //     AMPDU_sent.total_length,
+        //     AMPDU_sent.size - 1
+        // );
         // AMPDU_sent.print();
         self.packet_being_served = false;
 
@@ -674,8 +674,8 @@ impl QueueModule {
                     
                         if random_value <= self.PL_probability {
                             debug_print!(
-                                DebugColor::Purple,
-                                "{} [DBG TX] --packet {:?} dropped due to loss probability", 
+                                DebugColor::Lime,
+                                "{} [DBG QUEUE TX] --packet {:?} dropped due to loss probability", 
                                 format_elapsed!(now),
                                 packet.header_alvr,
                             );

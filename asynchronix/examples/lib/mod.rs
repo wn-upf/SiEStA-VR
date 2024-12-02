@@ -33,7 +33,7 @@ pub const P_TX: f64 = 20.0;
 pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;
@@ -76,20 +76,29 @@ macro_rules! taitime_to_f64 {
 }
 
 // use crate::lib::alvr_stream_socket::ConResult;
-
+#[allow(unused)]
 pub enum DebugColor {
     Red,
     Green,
     Blue,
     Yellow,
     Magenta,
-    DarkGreen,
-    DarkRed,
     Cyan,
     White,
     Black,
     Orange,
     Purple,
+    DarkGreen,
+    DarkRed,
+    DarkBlue,
+    LightGray,
+    DarkGray,
+    LightPink,
+    Teal,
+    Gold,
+    Violet,
+    Lime,
+    DarkOrange
 }
 
 impl DebugColor {
@@ -100,16 +109,26 @@ impl DebugColor {
             DebugColor::Blue => |s| s.blue(),
             DebugColor::Yellow => |s| s.yellow(),
             DebugColor::Magenta => |s| s.magenta(),
-            DebugColor::DarkGreen => |s| s.truecolor(0, 100, 0),
-            DebugColor::DarkRed => |s| s.truecolor(139, 0, 0),
             DebugColor::Cyan => |s| s.cyan(),
             DebugColor::White => |s| s.white(),
             DebugColor::Black => |s| s.black(),
             DebugColor::Orange => |s| s.truecolor(255, 165, 0),
             DebugColor::Purple => |s| s.truecolor(128, 0, 128),
+            DebugColor::DarkGreen => |s| s.truecolor(0, 100, 0),
+            DebugColor::DarkRed => |s| s.truecolor(139, 0, 0),
+            DebugColor::DarkBlue => |s| s.truecolor(0, 0, 139),
+            DebugColor::LightGray => |s| s.truecolor(211, 211, 211),
+            DebugColor::DarkGray => |s| s.truecolor(169, 169, 169),
+            DebugColor::LightPink => |s| s.truecolor(255, 182, 193),
+            DebugColor::Teal => |s| s.truecolor(0, 128, 128),
+            DebugColor::Gold => |s| s.truecolor(255, 215, 0),
+            DebugColor::Violet => |s| s.truecolor(238, 130, 238),
+            DebugColor::Lime => |s| s.truecolor(50, 205, 50),
+            DebugColor::DarkOrange => |s| s.truecolor(255, 140, 0),
         }
     }
 }
+
 #[derive(Clone)]
 pub struct SlidingWindowWeighted<T> {
     history_buffer: VecDeque<T>,

@@ -7,7 +7,7 @@ rate_bps_src=3E6;
 rate_bps_queue=6E5 ## does nothing theoretically 
 
 distance=10.0
-PL=0.1
+PL=0.0
 
 initial_bitrate_mbps=15.0
 
@@ -25,10 +25,10 @@ trap 'echo -e "\nSimulation stopped. Output folder location: $Results/$name_fold
 
 
 # rm out_log.ans
-# script -q -c "cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance" out_log.ans ##                                              # linux dbg output
-./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
+script -q -c "cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL" out_log.ans ##                                              # linux dbg output
+# ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
 
-code Results/$name_folder/out_log.ans
+# code Results/$name_folder/out_log.ans
 
 
 
