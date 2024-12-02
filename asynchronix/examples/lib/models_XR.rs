@@ -395,7 +395,7 @@ impl XRServer {
 
                                 debug_print!(
                                     DebugColor::DarkGreen,
-                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} | Transmit-receive instant: {} |\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
+                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {:2.0} | Transmit-receive instant: {} |",
 
                                     packet_length,
                                     str_id,

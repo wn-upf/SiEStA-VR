@@ -648,7 +648,6 @@ fn downlink_uplink_scenario(
     // queue.output_port_sta2.connect(Sink::input, &mbox_sink);
     
 
-    std::thread::sleep(Duration::from_secs(5));
     let t0 = MonotonicTime::EPOCH;
 
     let mut simu: asynchronix::simulation::Simulation = SimInit::with_num_threads(64)
@@ -851,13 +850,13 @@ fn downlink_uplink_scenario_1BG(
     );
 
 
-    // DOWNLINK DIRECTION (AP IS 2)
+    // DOWNLINK DIRECTION (AP IS 5, dest is 1m away)
     let mut sta3_bg: STA_extended = STA_extended::new(
         rate_bps_in,
         mean_length,
         5,
         0,
-        coords_ap,
+        coords_sta1,
         true,
         effective_rate1,
         t0,
@@ -1065,29 +1064,29 @@ fn main() {
     let distance: f64 = args[5].parse().expect("Invalid STA distance");
     let BG_rate : f64 = args[6].parse().expect("Invalid BG_rate"); 
 
-    downlink_uplink_scenario(
-        4,
-        stoptime,
-        mean_length,
-        k_queue,
-        rate_bps_in,
-        distance,
-        false,
-        true,
-        BG_rate
-    );
+    // downlink_uplink_scenario(
+    //     4,
+    //     stoptime,
+    //     mean_length,
+    //     k_queue,
+    //     rate_bps_in,
+    //     distance,
+    //     true,
+    //     false,
+    //     BG_rate
+    // );
 
-    // downlink_uplink_scenario_1BG( 
-    //         2,
-    //         stoptime,
-    //         mean_length,
-    //         k_queue,
-    //         rate_bps_in,
-    //         distance,
-    //         true,
-    //         false,
-    //         BG_rate
-    //     );
+    downlink_uplink_scenario_1BG( 
+            2,
+            stoptime,
+            mean_length,
+            k_queue,
+            rate_bps_in,
+            distance,
+            false,
+            true,
+            BG_rate
+        );
 
     println!("END DLUL scenario");
 }

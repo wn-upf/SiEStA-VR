@@ -617,7 +617,7 @@ impl QueueModule {
                             P_TX,
                         );
 
-                        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size >= MAX_AMPDU_SIZE {
+                        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
                             break;
                         }
 
