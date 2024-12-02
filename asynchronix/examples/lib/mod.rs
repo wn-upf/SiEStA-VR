@@ -33,7 +33,7 @@ pub const P_TX: f64 = 20.0;
 pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;
@@ -58,6 +58,16 @@ macro_rules! debug_print {
         }
     };
 }
+#[macro_export]
+macro_rules! debug_bgprint {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // Check if debugging is enabled
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+
+    };
+}
+
 #[macro_export]
 macro_rules! format_elapsed {
     ($elapsed:expr) => {{
@@ -125,6 +135,31 @@ impl DebugColor {
             DebugColor::Violet => |s| s.truecolor(238, 130, 238),
             DebugColor::Lime => |s| s.truecolor(50, 205, 50),
             DebugColor::DarkOrange => |s| s.truecolor(255, 140, 0),
+        }
+    }
+    pub fn to_background_fn(&self) -> fn(String) -> colored::ColoredString {
+        match self {
+            DebugColor::Red => |s| s.on_red(),
+            DebugColor::Green => |s| s.on_green(),
+            DebugColor::Blue => |s| s.on_blue(),
+            DebugColor::Yellow => |s| s.on_yellow(),
+            DebugColor::Magenta => |s| s.on_magenta(),
+            DebugColor::Cyan => |s| s.on_cyan(),
+            DebugColor::White => |s| s.on_white(),
+            DebugColor::Black => |s| s.on_black(),
+            DebugColor::Orange => |s| s.on_truecolor(255, 165, 0),
+            DebugColor::Purple => |s| s.on_truecolor(128, 0, 128),
+            DebugColor::DarkGreen => |s| s.on_truecolor(0, 100, 0),
+            DebugColor::DarkRed => |s| s.on_truecolor(139, 0, 0),
+            DebugColor::DarkBlue => |s| s.on_truecolor(0, 0, 139),
+            DebugColor::LightGray => |s| s.on_truecolor(211, 211, 211),
+            DebugColor::DarkGray => |s| s.on_truecolor(169, 169, 169),
+            DebugColor::LightPink => |s| s.on_truecolor(255, 182, 193),
+            DebugColor::Teal => |s| s.on_truecolor(0, 128, 128),
+            DebugColor::Gold => |s| s.on_truecolor(255, 215, 0),
+            DebugColor::Violet => |s| s.on_truecolor(238, 130, 238),
+            DebugColor::Lime => |s| s.on_truecolor(50, 205, 50),
+            DebugColor::DarkOrange => |s| s.on_truecolor(255, 140, 0),
         }
     }
 }
@@ -224,6 +259,9 @@ impl<T> SlidingWindowTimely<T> {
 
     pub fn get_interval_buffer_mean(&self) -> f32 {
         self.get_interval_buffer_sum() / self.interval_buffer.len() as f32
+    }
+    pub fn get_length(&self) -> usize {
+        self.interval_buffer.len()
     }
 }
 
@@ -827,7 +865,7 @@ impl AmpduPacket {
                 "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}, {:?} \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64(),
-                packet.expected_T_s.as_secs_f64(), 
+                packet.T_s.as_secs_f64(), 
                 packet.header_alvr
 
             );

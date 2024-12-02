@@ -9,7 +9,7 @@ use crate::lib::HeaderALVRStream;
 
 // use std::intrinsics::size_of;
 use serde::{de::DeserializeOwned, Serialize};
-
+use crate::debug_bgprint;
 use core::net;
 use std::fmt::Debug;
 use std::mem;
@@ -84,6 +84,7 @@ use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 use super::alvr_packets::DeadlineShardlossStatPacket;
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
+use super::SlidingWindowTimely;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -916,7 +917,7 @@ impl XRClient {
 
             if let Some(video_frame) = self.decoder_queue.pop(){
                 if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant){
-                    debug_print!(DebugColor::Violet, "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {} , data: {:?}", 
+                    debug_bgprint!(DebugColor::Violet, "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {} , data: {:?}", 
                         self.decoder_queue.len(),
                         interarrival.as_secs_f32(),
                         self.decoder_queue.ok_dequed_frame_counter,
@@ -936,12 +937,12 @@ impl XRClient {
             if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE
             {   
                 T_vsync = T_vsync.mul_f64(2.0) ; // duplicate wait so queue can fill
-                debug_print!(DebugColor::Violet, "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
+                debug_bgprint!(DebugColor::Violet, "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
             }
             else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
                 {   
                     T_vsync = T_vsync.mul_f64(0.5); // duplicate wait so queue can fill
-                    debug_print!(DebugColor::Violet, "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
+                    debug_bgprint!(DebugColor::Violet, "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
                 }
             }
             context.scheduler.schedule_event( T_vsync, Self::vsync, ()).unwrap(); 
@@ -1082,17 +1083,28 @@ impl Model for XRClient {}
 
 pub struct SinkVideo_XR {
     pub counter_decoded: usize, 
+    pub last_update: TaiTime<0>, 
+    pub window_timed_fps: SlidingWindowTimely<f64>
+
 }
 impl SinkVideo_XR{
     pub fn new() ->  Self{
-        Self { counter_decoded: (0) }
+            Self { counter_decoded: (0), last_update: TaiTime::EPOCH, window_timed_fps: SlidingWindowTimely::new(1.0 / 60.0, 16., 1.0) , }
     }
-    pub async fn in_video(&mut self, input: Vec<u8>){
+    pub async fn in_video(&mut self, input: Vec<u8>, context: &Context<Self>){
            // Select only the first N bytes
+        let now = context.scheduler.time(); 
         let n = 10; 
         let first_n_bytes = &input[..n.min(input.len())];
+        
+        if let Some(user_interarrival) = now.checked_duration_since(self.last_update){
+            self.window_timed_fps.submit_sample(user_interarrival.as_secs_f64(), user_interarrival.as_secs_f32());
+            let avg_samples = self.window_timed_fps.get_interval_buffer_mean(); 
+            let length_samples = self.window_timed_fps.get_length(); 
 
-        debug_print!(DebugColor::Cyan, "[USER HMD] Reproducing video! {:?}", first_n_bytes); 
+            debug_bgprint!(DebugColor::Cyan, "[USER HMD] Reproducing video! {:?}. video_interarrival: {}, avg_fps: {}, ({:2.0} samples)", first_n_bytes, user_interarrival.as_secs_f32(), 1.0 / avg_samples,length_samples ); 
+        }
+        self.last_update = now; 
         return;
     }
 }

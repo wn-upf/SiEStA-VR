@@ -1,9 +1,11 @@
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
+use core::net;
 use std::cmp::{self, max};
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::future::Future;
+use crate::debug_bgprint;
 
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
@@ -13,6 +15,7 @@ use crate::lib::ResultsFrameTXDelay;
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::DebugColor;
 use std::sync::{Arc, Mutex};
+use tai_time::TaiTime; 
 
 use crate::lib::{
     exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords, CsvType,
@@ -293,6 +296,108 @@ impl QueueStats {
     }
 }
 
+
+#[derive(Clone, Debug)]
+pub enum NetworkPattern {
+    Constant,
+    OnOffPeriodic {
+        on_duration: Duration,
+        off_duration: Duration,
+        current_state: bool,
+        last_state_change: TaiTime<0>,
+    },
+    ProbabilisticDrop {
+        drop_probability: f64,
+    },
+    Bandwidth {
+        max_bps: f64,
+        current_tokens: f64,
+        max_tokens: f64,
+        token_refill_rate: f64,
+    },
+}
+#[derive(Clone, Debug)]
+pub struct NetworkPatternEmulator {
+    patterns: Vec<NetworkPattern>,
+    last_update_time: TaiTime<0>,
+    debug_counter: usize, // Counter to track the calls
+}
+impl NetworkPatternEmulator {
+    pub fn new() -> Self {
+        Self {
+            patterns: Vec::new(),
+            last_update_time: TaiTime::default(),
+            debug_counter: 0, 
+        }
+    }
+
+    pub fn add_pattern(&mut self, pattern: NetworkPattern) {
+        self.patterns.push(pattern);
+    }
+
+    pub fn should_transmit(&mut self, packet: &MpduPacket, current_time: TaiTime<0>) -> bool {
+        // Update time-based patterns
+        if self.last_update_time == TaiTime::default() {
+            self.last_update_time = current_time;
+        }
+
+        let time_delta = current_time.duration_since(self.last_update_time);
+        self.last_update_time = current_time;
+
+        self.patterns.iter_mut().all(|pattern| match pattern {
+            NetworkPattern::Constant => true,
+            
+            NetworkPattern::OnOffPeriodic { 
+                on_duration, 
+                off_duration, 
+                current_state, 
+                last_state_change 
+            } => {
+                let target_duration = if *current_state { *on_duration } else { *off_duration };
+                let state_duration = current_time.duration_since(*last_state_change);
+                
+                if state_duration >= target_duration {
+                    // Toggle state
+                    *current_state = !*current_state;
+                    *last_state_change = current_time;
+                }
+
+                *current_state
+            },
+            
+            NetworkPattern::ProbabilisticDrop { drop_probability } => {
+                let mut rng = rand::thread_rng();
+                rng.gen::<f64>() > *drop_probability
+            },
+            
+            NetworkPattern::Bandwidth { 
+                max_bps, 
+                current_tokens, 
+                max_tokens,
+                token_refill_rate 
+            } => {
+                // Token bucket algorithm
+                let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
+                let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
+                
+                let packet_tokens = (packet.length_packet * 8) as f64;
+                self.debug_counter += 1; 
+                if self.debug_counter >= 1{
+                    debug_bgprint!(DebugColor::DarkBlue, "[DBG NETEM] BW bucket -> available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb", new_tokens / 1e6, packet_tokens/1e6 ); 
+                    self.debug_counter = 0; 
+                }
+                
+                if new_tokens >= packet_tokens {
+                    *current_tokens = new_tokens - packet_tokens;
+                    true
+                } else {
+                    false
+                }
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct QueueModule {
     pub output_port_sta1: Output<AmpduPacket>,
@@ -330,6 +435,7 @@ pub struct QueueModule {
     pub array_stas_stats: Arc<Mutex<Vec<perStaLockStats>>>,
 
     pub PL_probability: f64, 
+    pub network_emulator: NetworkPatternEmulator, 
 }
 
 
@@ -367,7 +473,29 @@ impl QueueModule {
             }
             stats_vec.push(sta_stats);
         }
+        let mut network_emulator = NetworkPatternEmulator::new();
+
+         // Example: Add probabilistic drop
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
+        //     drop_probability: 0.001, // 
+        // });
+
         
+        // network_emulator.add_pattern(NetworkPattern::OnOffPeriodic {
+        //     on_duration: Duration::from_secs(5),
+        //     off_duration: Duration::from_secs(2),
+        //     current_state: true,
+        //     last_state_change: TaiTime::default(),
+        // });
+
+        const BANDWIDTH_LIMIT: f64 = 25.3E6; 
+        // Example: Bandwidth limitation
+        network_emulator.add_pattern(NetworkPattern::Bandwidth {
+            max_bps: BANDWIDTH_LIMIT,
+            current_tokens: BANDWIDTH_LIMIT,
+            max_tokens: BANDWIDTH_LIMIT,
+            token_refill_rate: BANDWIDTH_LIMIT, // Tokens per second
+        });
         Self {
             queue: VecDeque::new(),
             queue_maxsize: queue_size,
@@ -395,40 +523,52 @@ impl QueueModule {
             stats_rx: Some(stats_rx),  
 
             PL_probability: PL_prob, 
-
+            network_emulator: network_emulator,
         }
     }
 
     pub async fn input(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
-        self.arrived_packet_counter += 1;
-        self.queue_length_counter += self.queue.len();
+        let current_time = context.scheduler.time();
+        if self.network_emulator.should_transmit(&packet, current_time) {
+            self.arrived_packet_counter += 1;
+            self.queue_length_counter += self.queue.len();
 
-        let now = context.scheduler.time();
-        if self.queue.len() < self.queue_maxsize {
-            packet.queue_in_instant = now;
-            self.queue.push_back(packet.clone());
+            let now = context.scheduler.time();
+            if self.queue.len() < self.queue_maxsize 
+            {
+                packet.queue_in_instant = now;
+                self.queue.push_back(packet.clone());
 
-            // debug_print!(
-            //     DebugColor::Green,
-            //     "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
-            //     format_elapsed!(now),
-            //     packet.packet_id,
-            //     packet.sta_src_id,
-            //     packet.sta_dest_id,
-            //     self.queue.len()
-            // );
-
-            if self.queue.len() == 1 && !self.packet_being_served {
-                self.deque_schedule_service((), context).await;
+                if self.queue.len() == 1 && !self.packet_being_served {
+                    self.deque_schedule_service((), context).await;
+                }
+                // debug_print!(
+                //     DebugColor::Green,
+                //     "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
+                //     format_elapsed!(now),
+                //     packet.packet_id,
+                //     packet.sta_src_id,
+                //     packet.sta_dest_id,
+                //     self.queue.len()
+                // );
+            } 
+            else {
+                self.blocked_packet_counter += 1;
+                debug_bgprint!(
+                    DebugColor::Red,
+                    "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
+                    format_elapsed!(now),
+                    packet.packet_id,
+                    self.queue.len()
+                );
             }
         } else {
+            // Packet dropped by network pattern
             self.blocked_packet_counter += 1;
-            debug_print!(
+            debug_bgprint!(
                 DebugColor::Red,
-                "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
-                format_elapsed!(now),
-                packet.packet_id,
-                self.queue.len()
+                "Packet {} dropped by network pattern", packet.packet_id, 
+
             );
         }
     }
@@ -666,7 +806,7 @@ impl QueueModule {
                     );
 
                     if DEBUG_PRINT_ENABLED {
-                        self.aux_ampdu_serviced.print();
+                        // self.aux_ampdu_serviced.print();
                     }
 
                     self.packet_being_served = true;
@@ -678,11 +818,16 @@ impl QueueModule {
                         let random_value: f64 = rng.gen();
                     
                         if random_value <= self.PL_probability {
-                            debug_print!(
-                                DebugColor::Lime,
-                                "{} [DBG QUEUE TX] --packet {:?} dropped due to loss probability", 
+                            debug_bgprint!(
+                                DebugColor::Red,
+                                "{} [DBG QUEUE TX] --packet lost: Packet_ID: {}\t ALVR: {}/{} in frame {} due to probability {}/{}", 
                                 format_elapsed!(now),
-                                packet.header_alvr,
+                                packet.packet_id, 
+                                packet.header_alvr.shard_index,
+                                packet.header_alvr.shards_count,
+                                packet.header_alvr.next_packet_index, 
+                                random_value, 
+                                self.PL_probability,
                             );
                             self.blocked_packet_counter += 1;
                             false // Do not retain the packet
