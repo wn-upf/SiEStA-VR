@@ -108,7 +108,23 @@ pub enum DebugColor {
     Gold,
     Violet,
     Lime,
-    DarkOrange
+    DarkOrange,
+    Peach,
+    Coral,
+    Mint,
+    Navy,
+    Lavender,
+    Salmon,
+    Chocolate,
+    Indigo,
+    Turquoise,
+    Maroon,
+    LightBlue,
+    ForestGreen,
+    Azure,
+    Rose,
+    Crimson,
+    Amber,
 }
 
 impl DebugColor {
@@ -135,6 +151,23 @@ impl DebugColor {
             DebugColor::Violet => |s| s.truecolor(238, 130, 238),
             DebugColor::Lime => |s| s.truecolor(50, 205, 50),
             DebugColor::DarkOrange => |s| s.truecolor(255, 140, 0),
+            DebugColor::Peach => |s| s.truecolor(255, 218, 185),
+            DebugColor::Coral => |s| s.truecolor(255, 127, 80),
+            DebugColor::Mint => |s| s.truecolor(189, 252, 201),
+            DebugColor::Navy => |s| s.truecolor(0, 0, 128),
+            DebugColor::Lavender => |s| s.truecolor(230, 230, 250),
+            DebugColor::Salmon => |s| s.truecolor(250, 128, 114),
+            DebugColor::Chocolate => |s| s.truecolor(210, 105, 30),
+            DebugColor::Indigo => |s| s.truecolor(75, 0, 130),
+            DebugColor::Turquoise => |s| s.truecolor(64, 224, 208),
+            DebugColor::Maroon => |s| s.truecolor(128, 0, 0),
+            DebugColor::LightBlue => |s| s.truecolor(173, 216, 230),
+            DebugColor::ForestGreen => |s| s.truecolor(34, 139, 34),
+            DebugColor::Azure => |s| s.truecolor(240, 255, 255),
+            DebugColor::Rose => |s| s.truecolor(255, 228, 225),
+            DebugColor::Crimson => |s| s.truecolor(220, 20, 60),
+            DebugColor::Amber => |s| s.truecolor(255, 191, 0),
+
         }
     }
     pub fn to_background_fn(&self) -> fn(String) -> colored::ColoredString {
@@ -160,6 +193,22 @@ impl DebugColor {
             DebugColor::Violet => |s| s.on_truecolor(238, 130, 238),
             DebugColor::Lime => |s| s.on_truecolor(50, 205, 50),
             DebugColor::DarkOrange => |s| s.on_truecolor(255, 140, 0),
+            DebugColor::Peach => |s| s.on_truecolor(255, 218, 185),
+            DebugColor::Coral => |s| s.on_truecolor(255, 127, 80),
+            DebugColor::Mint => |s| s.on_truecolor(189, 252, 201),
+            DebugColor::Navy => |s| s.on_truecolor(0, 0, 128),
+            DebugColor::Lavender => |s| s.on_truecolor(230, 230, 250),
+            DebugColor::Salmon => |s| s.on_truecolor(250, 128, 114),
+            DebugColor::Chocolate => |s| s.on_truecolor(210, 105, 30),
+            DebugColor::Indigo => |s| s.on_truecolor(75, 0, 130),
+            DebugColor::Turquoise => |s| s.on_truecolor(64, 224, 208),
+            DebugColor::Maroon => |s| s.on_truecolor(128, 0, 0),
+            DebugColor::LightBlue => |s| s.on_truecolor(173, 216, 230),
+            DebugColor::ForestGreen => |s| s.on_truecolor(34, 139, 34),
+            DebugColor::Azure => |s| s.on_truecolor(240, 255, 255),
+            DebugColor::Rose => |s| s.on_truecolor(255, 228, 225),
+            DebugColor::Crimson => |s| s.on_truecolor(220, 20, 60),
+            DebugColor::Amber => |s| s.on_truecolor(255, 191, 0),
         }
     }
 }

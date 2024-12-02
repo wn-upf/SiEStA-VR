@@ -27,8 +27,6 @@ use crate::lib::{
 };
 
 use crate::lib::models_mm1k::{QueueModule, QueueStats, Sink};
-// use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
-// use crate::{debug_print, format_elapsed, format_timestamp};
 
 use std::env;
 
@@ -80,6 +78,8 @@ fn simple_MM1K(
     let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.00);
     let sink = Sink::new();
 
+
+    
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
     let csv_data_handle: Arc<Mutex<CsvData>> = queue.csv_metrics.get_data_handle();
     let queuestats_data_handle = queue.get_queue_stats_handle();

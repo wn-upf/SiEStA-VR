@@ -1,4 +1,5 @@
 use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::queue;
 use rand::Rng;
 use core::net;
 use std::cmp::{self, max};
@@ -316,6 +317,119 @@ pub enum NetworkPattern {
         token_refill_rate: f64,
     },
 }
+
+
+
+impl NetworkPattern {
+    /// Create a new `NetworkPattern` of type Bandwidth
+    pub fn new_bandwidth(max_bps: f64, token_refill_rate: f64) -> Self {
+        Self::Bandwidth {
+            max_bps,
+            current_tokens: max_bps, // Initialize tokens to maximum
+            max_tokens: max_bps,     // Maximum bucket capacity
+            token_refill_rate,
+        }
+    }
+
+    /// Consumes tokens from the bucket and returns `true` if sufficient tokens exist
+    pub fn consume_tokens(&mut self, packet_size: usize) -> bool {
+        match self {
+            Self::Bandwidth {
+                current_tokens,
+                max_tokens,
+                token_refill_rate,
+                ..
+            } => {
+                let packet_tokens = (packet_size * 8) as f64; // Convert packet size to bits
+                let refilled_tokens = token_refill_rate.min(*max_tokens - *current_tokens);
+                *current_tokens += refilled_tokens; // Refill tokens
+                if *current_tokens >= packet_tokens {
+                    *current_tokens -= packet_tokens; // Consume tokens
+                    true
+                } else {
+                    false
+                }
+            }
+            // Other patterns could return `true` or implement specific logic
+            _ => true, // Default to always allowing transmission
+        }
+    }
+
+    /// Placeholder for creating other network patterns
+    pub fn new_constant() -> Self {
+        Self::Constant
+    }
+}
+
+#[derive(Clone)]
+pub struct QueueMechanism {
+    queue: VecDeque<MpduPacket>, // Packet queue
+    network_emulator: NetworkPatternEmulator, // Bandwidth pattern
+}
+
+impl QueueMechanism {
+    pub fn new(bandwidth: f64) -> Self {
+        let mut network_emulator = NetworkPatternEmulator::new();
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(bandwidth, bandwidth));
+        Self {
+            queue: VecDeque::new(),
+            network_emulator,
+        }
+    }
+
+   
+    /// Enqueues a packet or transmits it immediately based on the network pattern
+    pub fn enqueue_or_transmit(
+        &mut self,
+        packet: MpduPacket,
+        context: &Context<QueueModule>,
+    ) -> Option<MpduPacket> {
+        if self
+            .network_emulator
+            .should_transmit(&packet, context.scheduler.time())
+        {
+            // Immediate transmission
+            Some(packet)
+        } else {
+            debug_bgprint!(DebugColor::Chocolate, "[DBG Queue_NETEM] ENQUEUED packet {} (ALVR: frame {} shard {:4.2}/{:4.2})", 
+                packet.packet_id,
+                packet.header_alvr.next_packet_index,
+                packet.header_alvr.shard_index,
+                packet.header_alvr.shards_count
+            ); 
+            // Add to queue
+            self.queue.push_back(packet);
+            None
+        }
+    }
+
+      /// Processes packets in the queue, transmitting those that meet the pattern criteria
+      pub fn process_queued_packets(
+        &mut self,
+        context: &Context<QueueModule>,
+    ) -> Vec<MpduPacket> {
+        let mut transmitted_packets = Vec::new();
+        while let Some(front_packet) = self.queue.front_mut() {
+            if self
+                .network_emulator
+                .should_transmit(front_packet, context.scheduler.time())
+            {
+                // Transmit packet
+                let mut packet = self.queue.pop_front().unwrap();
+                packet.queue_out_instant = context.scheduler.time();
+                packet.T_q = packet.queue_out_instant.duration_since(packet.queue_in_instant);
+                packet.queue_length_when_out = self.queue.len();
+                transmitted_packets.push(packet);
+            } else {
+                // Stop processing if the next packet cannot be transmitted
+                break;
+            }
+        }
+        transmitted_packets
+    }
+}
+    
+
 #[derive(Clone, Debug)]
 pub struct NetworkPatternEmulator {
     patterns: Vec<NetworkPattern>,
@@ -398,6 +512,19 @@ impl NetworkPatternEmulator {
     }
 }
 
+
+#[derive(Debug)]
+pub struct StatsUpdate {
+    pub T_s: f64,
+    pub T_q: f64,
+    pub blocked_packet_counter: usize,
+    pub arrived_packet_counter: usize,
+    pub queue_length_when_out: usize,
+    pub sta_src_id: usize,
+    pub packet_id: i32,
+    pub now: tai_time::TaiTime<0>,
+    pub length_packet: usize,
+}
 #[derive(Clone)]
 pub struct QueueModule {
     pub output_port_sta1: Output<AmpduPacket>,
@@ -436,21 +563,9 @@ pub struct QueueModule {
 
     pub PL_probability: f64, 
     pub network_emulator: NetworkPatternEmulator, 
+    pub queue_network_emulator: QueueMechanism, 
 }
 
-
-#[derive(Debug)]
-pub struct StatsUpdate {
-    pub T_s: f64,
-    pub T_q: f64,
-    pub blocked_packet_counter: usize,
-    pub arrived_packet_counter: usize,
-    pub queue_length_when_out: usize,
-    pub sta_src_id: usize,
-    pub packet_id: i32,
-    pub now: tai_time::TaiTime<0>,
-    pub length_packet: usize,
-}
 impl QueueModule {
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
         self.cumulative_stats_queue.clone()
@@ -475,6 +590,17 @@ impl QueueModule {
         }
         let mut network_emulator = NetworkPatternEmulator::new();
 
+
+        const BANDWIDTH_LIMIT: f64 = 25.3E6; 
+
+        // network_emulator.add_pattern(NetworkPattern::Bandwidth {
+        //     max_bps: BANDWIDTH_LIMIT,
+        //     current_tokens: BANDWIDTH_LIMIT,
+        //     max_tokens: BANDWIDTH_LIMIT,
+        //     token_refill_rate: BANDWIDTH_LIMIT, // Tokens per second
+        // });
+        let queue_mechanism = QueueMechanism::new(BANDWIDTH_LIMIT); 
+
          // Example: Add probabilistic drop
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
         //     drop_probability: 0.001, // 
@@ -488,14 +614,8 @@ impl QueueModule {
         //     last_state_change: TaiTime::default(),
         // });
 
-        const BANDWIDTH_LIMIT: f64 = 25.3E6; 
         // Example: Bandwidth limitation
-        network_emulator.add_pattern(NetworkPattern::Bandwidth {
-            max_bps: BANDWIDTH_LIMIT,
-            current_tokens: BANDWIDTH_LIMIT,
-            max_tokens: BANDWIDTH_LIMIT,
-            token_refill_rate: BANDWIDTH_LIMIT, // Tokens per second
-        });
+       
         Self {
             queue: VecDeque::new(),
             queue_maxsize: queue_size,
@@ -524,12 +644,16 @@ impl QueueModule {
 
             PL_probability: PL_prob, 
             network_emulator: network_emulator,
+            queue_network_emulator: queue_mechanism, 
         }
     }
 
-    pub async fn input(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
+
+    pub async fn input(&mut self, packet_arg: MpduPacket, context: &Context<Self>) {
         let current_time = context.scheduler.time();
-        if self.network_emulator.should_transmit(&packet, current_time) {
+        let id = packet_arg.packet_id.clone(); 
+        // if self.network_emulator.should_transmit(&packet, current_time) { // use this in case we want simpler, working network emulation.    
+        if let Some(packet) = self.queue_network_emulator.enqueue_or_transmit(packet_arg, &context).as_mut(){
             self.arrived_packet_counter += 1;
             self.queue_length_counter += self.queue.len();
 
@@ -542,15 +666,6 @@ impl QueueModule {
                 if self.queue.len() == 1 && !self.packet_being_served {
                     self.deque_schedule_service((), context).await;
                 }
-                // debug_print!(
-                //     DebugColor::Green,
-                //     "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
-                //     format_elapsed!(now),
-                //     packet.packet_id,
-                //     packet.sta_src_id,
-                //     packet.sta_dest_id,
-                //     self.queue.len()
-                // );
             } 
             else {
                 self.blocked_packet_counter += 1;
@@ -567,11 +682,12 @@ impl QueueModule {
             self.blocked_packet_counter += 1;
             debug_bgprint!(
                 DebugColor::Red,
-                "Packet {} dropped by network pattern", packet.packet_id, 
-
+                "Packet {} dropped by network pattern", id, 
             );
         }
     }
+
+ 
 
     pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
