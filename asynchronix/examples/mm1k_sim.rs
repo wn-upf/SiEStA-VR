@@ -77,7 +77,7 @@ fn simple_MM1K(
         true,
         rate_service_bps,
     ); // STAs 0
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps);
+    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.00);
     let sink = Sink::new();
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats

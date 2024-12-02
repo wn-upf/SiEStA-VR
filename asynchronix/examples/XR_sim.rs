@@ -39,10 +39,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
+use crate::lib::models_XR::{STA_extended, XRClient, XRServer, SinkVideo_XR};
 
 
-use crate::lib::INITIAL_BITRATE_MBPS_SIM;
+// use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
@@ -190,6 +190,12 @@ fn main() {
 
     let xr_server_app_address = mbox_xr_server_app.address();
 
+    let decoder_video_sink = SinkVideo_XR::new(); 
+    let mbox_decoder_video = Mailbox::new(); 
+    let decoded_video_address = mbox_decoder_video.address(); 
+
+
+
     let sta1_address = mbox_sta_xr_server.address();
     let queue_address = mbox_queue.address();
     let sta_client_address = mbox_sta_client_xr.address();
@@ -234,6 +240,9 @@ fn main() {
         .output_app_network
         .connect(STA_extended::input_XR_app, &mbox_sta_client_xr);
 
+    xr_client_app
+    .out_video_decoded
+    .connect(SinkVideo_XR::in_video, &mbox_decoder_video);
     // // connect applications to STAs:
     // sta1_xr.to_app_socket.connect(XRServer::in_from_network, &mbox_sta_xr );
     // sta_client.to_app_socket.connect(XRClient::in_from_network, &mbox_sta_client_xr);
@@ -246,6 +255,7 @@ fn main() {
         .add_model(queue, mbox_queue, "Queue")
         .add_model(sta_client, mbox_sta_client_xr, "STA 2 (XR Client)")
         .add_model(xr_client_app, mbox_xr_client_app, "ALVR Client")
+        .add_model(decoder_video_sink, mbox_decoder_video, "Video decode Sink")
         .init(t0);
 
     let scheduler = simu.scheduler();
@@ -281,7 +291,8 @@ fn main() {
             &xr_server_app_address,
         )
         .unwrap();
-
+    
+    scheduler.schedule_event(duration_scheduled1, XRClient::vsync, (), &xr_client_app_address).unwrap(); 
     // scheduler.schedule_periodic_event(Duration::from_millis(10), Duration::from_millis(10), XRClient::video_receive_thread, (), &xr_client_app_address).unwrap();  // video receiver thread of ALVR
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works

@@ -11,6 +11,7 @@ use crate::lib::HeaderALVRStream;
 use serde::{de::DeserializeOwned, Serialize};
 
 use core::net;
+use std::fmt::Debug;
 use std::mem;
 use std::net::IpAddr;
 // use std::process::Output;
@@ -51,7 +52,10 @@ pub const CAPACITY_RX_BUFFER: usize = 2000;
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
-pub const DECODER_BUFFERING_FRAMES: usize = 3;
+pub const DECODER_BUFFERING_FRAMES: usize = 4;
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2; 
+
+
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -622,7 +626,7 @@ impl<T> DroppingVecDeque<T> {
     fn push(&mut self, item: T) {
         // If we are at capacity, pop the oldest frame from the front
         self.enqued_frame_counter += 1; 
-        debug_print!(DebugColor::Gold, "[VecDecoder]Pushing frame {}, decoder_length: {}, max: {},",
+        debug_print!(DebugColor::Gold, "[VecDecoder] Pushing frame {}, decoder_length: {}, max: {},",
              self.enqued_frame_counter,
              self.deque.len(), 
              self.capacity, 
@@ -631,6 +635,7 @@ impl<T> DroppingVecDeque<T> {
         if self.deque.len() == self.capacity {
             self.deque.pop_front(); 
             self.dropped_frame_counter += 1; 
+            println!("DROPPED A FRAME IN DECODER!!"); 
         }
         // Push the new item to the back
         self.deque.push_back(item);
@@ -646,7 +651,7 @@ impl<T> DroppingVecDeque<T> {
     }
 }
 
-
+#[allow(unused)]
 pub struct XRClient {
     pub decoder_queue: DroppingVecDeque<Vec<u8>>,
 
@@ -656,7 +661,10 @@ pub struct XRClient {
     pub input_app_audio: Option<StreamReceiver<()>>,
     pub input_app_haptics: Option<StreamReceiver<Haptics>>,
 
+    pub out_video_decoded: Output<Vec<u8>>, 
     pub framerate: f32,
+    pub last_decoded_frame_instant: TaiTime<0>, 
+
 
     pub output_app_network: Output<MpduPacket>,
 
@@ -667,6 +675,7 @@ pub struct XRClient {
     pub server_ip: IpAddr,
 
     pub streamsocket_clone: Option<StreamSocket>,
+
 }
 
 impl XRClient {
@@ -677,9 +686,9 @@ impl XRClient {
             input_app_video: None,
             input_app_audio: None,
             input_app_haptics: None,
-
+            out_video_decoded: Output::default(), 
             framerate: fps,
-
+            last_decoded_frame_instant: TaiTime::EPOCH, 
             output_app_network: Output::default(),
             // output_tracking: Output::default(),
             coordinates: Coords::new(),
@@ -896,14 +905,46 @@ impl XRClient {
         }
     }
 
-    pub async fn vsync<'a>(
+    pub fn vsync<'a>(
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
     )-> impl Future<Output = ()> + Send + 'a {
         async move{
-            let mut T_vsync = Duration::from_secs_f32(1.0 / self.framerate);
+            let now = context.scheduler.time(); 
+            let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
 
+            if let Some(video_frame) = self.decoder_queue.pop(){
+                if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant){
+                    debug_print!(DebugColor::Violet, "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {} , data: {:?}", 
+                        self.decoder_queue.len(),
+                        interarrival.as_secs_f32(),
+                        self.decoder_queue.ok_dequed_frame_counter,
+                        self.decoder_queue.dropped_frame_counter,
+                        &video_frame[0..10], ); 
+                }
+                else{eprint!("?? VSYNC ??? " );}
+                
+                
+                self.last_decoded_frame_instant = now; 
+                self.out_video_decoded.send(video_frame).await;  
+
+            // self.output_statistics.send(stats);
+            }
+            else{
+            }
+            if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE
+            {   
+                T_vsync = T_vsync.mul_f64(2.0) ; // duplicate wait so queue can fill
+                debug_print!(DebugColor::Violet, "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
+            }
+            else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
+                {   
+                    T_vsync = T_vsync.mul_f64(0.5); // duplicate wait so queue can fill
+                    debug_print!(DebugColor::Violet, "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
+                }
+            }
+            context.scheduler.schedule_event( T_vsync, Self::vsync, ()).unwrap(); 
             // TODO:
             // let video_frame = self.decoder_queue.pop_front();
             // let stats = NetworkStatisticsPacket::new();
@@ -1038,6 +1079,24 @@ impl XRClient {
 }
 
 impl Model for XRClient {}
+
+pub struct SinkVideo_XR {
+    pub counter_decoded: usize, 
+}
+impl SinkVideo_XR{
+    pub fn new() ->  Self{
+        Self { counter_decoded: (0) }
+    }
+    pub async fn in_video(&mut self, input: Vec<u8>){
+           // Select only the first N bytes
+        let n = 10; 
+        let first_n_bytes = &input[..n.min(input.len())];
+
+        debug_print!(DebugColor::Cyan, "[USER HMD] Reproducing video! {:?}", first_n_bytes); 
+        return;
+    }
+}
+impl Model for SinkVideo_XR{}
 
 pub trait XRDevice {
     fn some_shared_method(&self);
@@ -1176,11 +1235,11 @@ impl STA_extended {
                     packet.sta_dest_id,
                 );
                 // if packet.data_inner.len() >= 100 {
-                debug_print!(
-                    DebugColor::DarkRed,
-                    "[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                    // format_elapsed!(now.duration_since(self.t_0)),
-                );
+                // debug_print!(
+                //     DebugColor::DarkRed,
+                //     "[DBG NET_IN -> APP_OUT] : XR Packet received: ",
+                //     // format_elapsed!(now.duration_since(self.t_0)),
+                // );
 
                 self.received_packet_counter += 1;
                 packet_batch.push(packet); 

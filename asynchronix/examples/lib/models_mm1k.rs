@@ -9,7 +9,7 @@ use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::mem::replace; 
 use std::time::{Duration, Instant};
-
+use crate::lib::ResultsFrameTXDelay; 
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::DebugColor;
 use std::sync::{Arc, Mutex};
@@ -408,15 +408,15 @@ impl QueueModule {
             packet.queue_in_instant = now;
             self.queue.push_back(packet.clone());
 
-            debug_print!(
-                DebugColor::Green,
-                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
-                format_elapsed!(now),
-                packet.packet_id,
-                packet.sta_src_id,
-                packet.sta_dest_id,
-                self.queue.len()
-            );
+            // debug_print!(
+            //     DebugColor::Green,
+            //     "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
+            //     format_elapsed!(now),
+            //     packet.packet_id,
+            //     packet.sta_src_id,
+            //     packet.sta_dest_id,
+            //     self.queue.len()
+            // );
 
             if self.queue.len() == 1 && !self.packet_being_served {
                 self.deque_schedule_service((), context).await;
@@ -442,15 +442,15 @@ impl QueueModule {
             packet.queue_in_instant = now;
             self.queue.push_back(packet.clone());
 
-            debug_print!(
-                DebugColor::Green,
-                "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
-                format_elapsed!(now),
-                packet.packet_id,
-                packet.sta_src_id,
-                packet.sta_dest_id,
-                self.queue.len()
-            );
+            // debug_print!(
+            //     DebugColor::Green,
+            //     "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
+            //     format_elapsed!(now),
+            //     packet.packet_id,
+            //     packet.sta_src_id,
+            //     packet.sta_dest_id,
+            //     self.queue.len()
+            // );
 
             if self.queue.len() == 1 && !self.packet_being_served {
                 self.deque_schedule_service((), context).await;
@@ -594,6 +594,7 @@ impl QueueModule {
 
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
+                let mut resultz = ResultsFrameTXDelay::new(); 
 
                 // Process packets that match the AMPDU destination
                 while packet_index < self.queue.len() {
@@ -615,7 +616,7 @@ impl QueueModule {
                             P_TX,
                         );
 
-                        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size >= MAX_AMPDU_SIZE {
+                        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
                             break;
                         }
 
@@ -653,6 +654,10 @@ impl QueueModule {
                 }
 
                 if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
+                   
+                    for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut(){
+                        packet.T_s = Duration::from_secs_f64(resultz.service_delay); 
+                    }
                     debug_print!(
                         DebugColor::Yellow,
                         "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",

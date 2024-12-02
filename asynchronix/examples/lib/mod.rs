@@ -903,6 +903,9 @@ impl ResultsFrameTXDelay {
     //     self.p_rx = 0.0;
     //     self.o_rate = 0.0;
     // }
+    pub fn new() -> Self{
+        Self { service_delay: (0.0), data_service_delay: (0.0), pathloss: (0.0), p_rx: (0.0) }
+    }
 }
 
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
