@@ -35,7 +35,24 @@ pub struct PoissonSource {
 }
 
 pub const MAX_EMULATED_QUEUE_PACKETS: usize =  1000; 
-pub const BANDWIDTH_LIMIT: f64 = 10.1E6; 
+// pub const BANDWIDTH_LIMIT: f64 = 25.01E6; 
+
+// Steps of emulated bandwidth 
+pub const STEP1_TBEGIN :u64 = 30; 
+pub const STEP1_TEND   :u64 = 40; 
+
+pub const STEP2_TBEGIN :u64 = 50; 
+pub const STEP2_TEND   :u64 = 60;
+
+pub const STEP3_TBEGIN :u64 = 70; 
+pub const STEP3_TEND   :u64 = 80; 
+
+pub const BANDWIDTH_LIMIT_S1: f64 = 100.0E6; 
+pub const BANDWIDTH_LIMIT_S2: f64 = 95.0E6; 
+pub const BANDWIDTH_LIMIT_S3: f64 = 90.0E6; 
+
+
+
 
 #[allow(dead_code)]
 impl PoissonSource {
@@ -320,6 +337,9 @@ pub enum NetworkPattern {
         current_tokens: f64,
         max_tokens: f64,
         token_refill_rate: f64,
+        valid_from: TaiTime<0>, 
+        valid_until: TaiTime<0>, 
+
     },
 }
 
@@ -327,12 +347,14 @@ pub enum NetworkPattern {
 
 impl NetworkPattern {
     /// Create a new `NetworkPattern` of type Bandwidth
-    pub fn new_bandwidth(max_bps: f64, token_refill_rate: f64) -> Self {
+    pub fn new_bandwidth(max_bps: f64, token_refill_rate: f64, valid_from: TaiTime<0>, valid_until: TaiTime<0> ) -> Self {
         Self::Bandwidth {
             max_bps,
             current_tokens: max_bps, // Initialize tokens to maximum
             max_tokens: max_bps,     // Maximum bucket capacity
             token_refill_rate,
+            valid_from, 
+            valid_until
         }
     }
 
@@ -381,9 +403,23 @@ pub struct QueueMechanism {
 }
 
 impl QueueMechanism {
-    pub fn new(bandwidth: f64, max_emulated_queue_packets: usize) -> Self {
+    pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(bandwidth, bandwidth));
+
+        let valid_from = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TBEGIN)).unwrap(); 
+        let valid_until = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TEND)).unwrap(); 
+        let valid_from2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TBEGIN)).unwrap(); 
+        let valid_until2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TEND)).unwrap(); 
+
+        let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TBEGIN)).unwrap(); 
+        let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap(); 
+
+
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2, BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3, BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
+
+
         Self {
             queue: VecDeque::new(),
             network_emulator,
@@ -590,39 +626,67 @@ impl NetworkPatternEmulator {
         let time_delta = current_time.duration_since(self.last_update_time);
         self.last_update_time = current_time;
 
-        match self.patterns.iter_mut().find_map(|pattern| {
+                // Find all active bandwidth patterns at the current time
+        let mut active_patterns: Vec<_> = self.patterns.iter_mut()
+        .filter_map(|pattern| {
             if let NetworkPattern::Bandwidth { 
-                max_bps, 
-                current_tokens, 
-                max_tokens,
-                token_refill_rate 
+                valid_from,
+                valid_until,
+                ..
             } = pattern {
-                // Token bucket algorithm
-                let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
-                let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
-                
-                let packet_tokens = (packet.length_packet * 8) as f64;
-                self.debug_counter += 1; 
-                if self.debug_counter >= 3{
-                    debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time), refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
-                    self.debug_counter = 0; 
-                }
-                if new_tokens >= packet_tokens {
-                    // Packet can be transmitted
-                    *current_tokens = new_tokens - packet_tokens;
-                    Some(Duration::ZERO)
+                if current_time >= *valid_from && current_time <= *valid_until {
+                    Some(pattern)
                 } else {
-                    // Calculate delay needed to accumulate enough tokens
-                    let tokens_needed = packet_tokens - new_tokens;
-                    let delay_seconds = tokens_needed / *token_refill_rate;
-                    Some(Duration::from_secs_f64(delay_seconds))
+                    None
                 }
             } else {
                 None
             }
-        }) {
-            Some(delay) => Some(delay),
-            None => Some(Duration::ZERO), // Default to no delay if no bandwidth pattern
+        })
+        .collect();
+         // Warn if multiple active patterns
+        if active_patterns.len() > 1 {
+            debug_bgprint!(
+                DebugColor::Red, 
+                "WARNING: Multiple active bandwidth patterns detected at {:4.9}",
+                format_elapsed!(current_time)
+            );
+        }
+
+        match active_patterns.first_mut() {
+            Some(pattern) => match pattern {
+                NetworkPattern::Bandwidth { 
+                    current_tokens, 
+                    max_tokens,
+                    token_refill_rate,
+                    valid_from,
+                    valid_until,
+                    ..
+                } => {
+                    // Token bucket algorithm
+                    let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
+                    let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
+                    let packet_tokens = (packet.length_packet * 8) as f64;
+                    self.debug_counter += 1; 
+                    if self.debug_counter >= 50{
+                        debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:4.4} -> {:4.4})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time),format_elapsed!(valid_from), format_elapsed!(valid_until),  refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
+                        self.debug_counter = 0; 
+                    }
+
+                    if new_tokens >= packet_tokens {
+                        // Packet can be transmitted
+                        *current_tokens = new_tokens - packet_tokens;
+                        return Some(Duration::ZERO)
+                    } else {
+                        // Calculate delay needed to accumulate enough tokens
+                        let tokens_needed = packet_tokens - new_tokens;
+                        let delay_seconds = tokens_needed / *token_refill_rate;
+                        return Some(Duration::from_secs_f64(delay_seconds))
+                    }
+                },
+                _ => return Some(Duration::ZERO)
+            },
+            None => Some(Duration::ZERO) // No active pattern
         }
     }
 
@@ -666,7 +730,9 @@ impl NetworkPatternEmulator {
                 max_bps, 
                 current_tokens, 
                 max_tokens,
-                token_refill_rate 
+                token_refill_rate ,
+                valid_from,
+                valid_until 
             } => {
                 // Token bucket algorithm
                 let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
@@ -677,7 +743,7 @@ impl NetworkPatternEmulator {
                 let packet_tokens = (packet.length_packet * 8) as f64;
                 self.debug_counter += 1; 
                 if self.debug_counter >= 1000{
-                    debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time), refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
+                    debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:4.4} -> {:4.4})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time), format_elapsed!(valid_from), format_elapsed!(valid_until), refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
                     self.debug_counter = 0; 
                 }
                 
@@ -778,7 +844,7 @@ impl QueueModule {
         //     max_tokens: BANDWIDTH_LIMIT,
         //     token_refill_rate: BANDWIDTH_LIMIT, // Tokens per second
         // });
-        let queue_mechanism = QueueMechanism::new(BANDWIDTH_LIMIT, MAX_EMULATED_QUEUE_PACKETS); 
+        let queue_mechanism = QueueMechanism::new( MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH); 
 
          // Example: Add probabilistic drop
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {

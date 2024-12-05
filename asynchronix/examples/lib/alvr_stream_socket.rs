@@ -7,7 +7,7 @@ use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvE
 use crate::lib::{DEBUG_PRINT_ENABLED}; 
 
 use crate::{debug_bgprint, format_elapsed}; 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(500); 
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(30); 
 pub const MAX_DEADLINE_IN_STATS: usize = 5; 
 
 use rand::Rng;
