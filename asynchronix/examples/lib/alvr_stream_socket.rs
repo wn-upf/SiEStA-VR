@@ -6,13 +6,13 @@ use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvE
 
 use crate::lib::{DEBUG_PRINT_ENABLED}; 
 
-use crate::format_elapsed; 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(20); 
+use crate::{debug_bgprint, format_elapsed}; 
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(500); 
 pub const MAX_DEADLINE_IN_STATS: usize = 5; 
 
 use rand::Rng;
 use std::cell::RefCell;
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
@@ -490,17 +490,19 @@ impl FrameTracker {
         FrameTracker {
             map: HashMap::new(),
             queue: VecDeque::new(),
-            max_size: 256,
+            max_size: 1000,
         }
     }
     pub fn insert(&mut self, frame_id: u32, instant: TaiTime<0>) {
         self.map.insert(frame_id, instant);
         self.queue.push_back(frame_id);
+        debug_bgprint!(DebugColor::Green, "Inserted Frame (K: {} , V: {:.9}) in rtt map", frame_id, format_elapsed!(instant));  
 
         // Drop oldest pairs if size exceeds max_size
         while self.queue.len() > self.max_size {
             if let Some(oldest_frame_id) = self.queue.pop_front() {
                 self.map.remove(&oldest_frame_id);
+                println!("FrameTracker removed {}", oldest_frame_id); 
             }
         }
     }
@@ -584,6 +586,8 @@ pub struct ReceiverData<H> {
 
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
+
+    // tx_instant_first_shard: TaiTime<0>, 
 }
 
 impl<H> ReceiverData<H> {
@@ -640,6 +644,9 @@ impl<H> ReceiverData<H> {
     pub fn get_highest_rx_shard_index(&self) -> i32 {
         self.highest_rx_shard_index
     }
+    // pub fn get_tx_instant(&self)-> TaiTime<0> {
+    //     self.tx_instant_first_shard
+    // }
 }
 
 impl<H: DeserializeOwned> ReceiverData<H> {
@@ -917,7 +924,7 @@ impl StreamSocket {
             return try_again();
         };
 
-        debug_print!( DebugColor::Orange, "[DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
+        debug_print!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
     
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -1072,6 +1079,8 @@ impl StreamSocket {
             debug_print!(DebugColor::Orange, "FRAME IS COMPLETE!", );
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
+                    println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index); 
+
                     let values: Vec<&ShardMapStats> = inner_map.values().collect();
                     let min_time = values.iter().map(|shard| shard.rx_instant).min().unwrap();
                     let max_time = values.iter().map(|shard| shard.rx_instant).max().unwrap();
@@ -1147,6 +1156,7 @@ impl StreamSocket {
 
                 highest_rx_frame_index: self.highest_rx_frame_index,
                 highest_rx_shard_index: self.highest_rx_shard_index,
+                // tx_instant_first_shard: self.first_shard_instant_tx, 
             };
 
             let empty_buffer = Vec::with_capacity(reconstruct.buffer.capacity()); 
@@ -1633,7 +1643,7 @@ impl<H> StreamSender<H> {
 
             // println!("Let's see the output of the channel after sending: *" );
             if idx == 0 {
-                //store next_packet_index - Instant value pair for RTT
+                //store (next_packet_index, Instant) value pair for RTT
                 self.frame_tracker
                     .insert(self.next_packet_index, now);
             }

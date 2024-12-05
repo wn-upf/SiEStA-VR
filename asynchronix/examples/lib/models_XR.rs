@@ -20,7 +20,7 @@ use std::thread::yield_now;
 use std::time::{Duration, Instant};
 
 use std::time::SystemTime;
-
+use dashmap::DashMap;
 
 
 use once_cell::sync::Lazy;
@@ -196,7 +196,7 @@ pub struct XRServer {
     // pub sockets: SimRuntimeSockets,
     pub frames_sent_counter: usize,
 
-    pub map_rtt: InstantMap, 
+    pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>, 
     pub STATISTICS_MANAGER: StatisticsManager, 
 }
 
@@ -228,7 +228,7 @@ impl XRServer {
             // sockets,
             frames_sent_counter: 0,
 
-            map_rtt : Arc::new(RwLock::new(HashMap::new())), 
+            map_rtt : Arc::new(DashMap::new()), 
             STATISTICS_MANAGER: StatisticsManager::new(MAX_HISTORY_SIZE, Duration::from_secs_f32(1.0/frame_rate) , 0.0, name_folder), 
         }
     }
@@ -237,22 +237,44 @@ impl XRServer {
     
         if let Some(mut protorecv) = self.control_socket_receiver.clone(){
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap(); 
-            let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt) ;
+            let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt) ;
 
             match packet {    
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-                    debug_print!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats: {:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
-                    let map_rtt_lock = map_clone.read().unwrap();
-                    let mut hashmap = map_rtt_lock.clone();
+                    
+                    debug_bgprint!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
+                    
+                                        
+                    // let mut map_rtt_lock = map_clone.write().unwrap();
                     let frame_id = network_stats.frame_index as u32;
                     let rtt: Duration;
-                    if let Some(send_instant) = hashmap.remove(&frame_id) {
+                    if let send_instant = map_clone.remove(&frame_id).unwrap().1 {
                         rtt = now.duration_since(send_instant);
-                    } else {
-                        println!("ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!");
-                        rtt = Duration::ZERO;
                     }
-                    debug_print!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64()); 
+
+                    else {
+                        println!("frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",  network_stats.frame_index);
+                        rtt = Duration::ZERO;
+                    }        
+
+                    // // Before removing an entry, check whether its lifetime has exceeded the expected range.
+                    // if let Some(send_instant) = map_rtt_lock.remove(&frame_id) {// Process RTT normally
+                    //         rtt = now.duration_since(send_instant);
+                    // } else {
+                    //     println!("Frame {} missing in map_rtt, possible packet loss or eviction!", frame_id);
+                    //     rtt = Duration::ZERO;
+                    // }
+                    // if let Some(send_instant) = hashmap.remove(&frame_id) {
+                    //     rtt = now.duration_since(send_instant);
+                    //     println!("rtt = {:.9}", rtt.as_secs_f64()); 
+                    // }
+                    // else {
+                    //     println!("frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",  network_stats.frame_index);
+                    //     rtt = Duration::ZERO;
+                    // }
+
+                    debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64()); 
+                    
                     let (peak_network_throughput_bps, frame_interarrival_s) =
                         self.STATISTICS_MANAGER.report_network_statistics(network_stats, rtt, now);
 
@@ -270,6 +292,7 @@ impl XRServer {
                     for (frame,shard) in frames_lost.iter().zip(shards_lost.iter()) {
                         println!("[DBG_DEAD_RX server] Frame {} lost {} shards", frame, shard); 
                     }; 
+                    
                 }
                 
                 _ =>  {println!("UNEXPECTED CONTROL PACKET RECEIVED!!"); }  
@@ -395,15 +418,7 @@ impl XRServer {
                                 };
                                 elapsed = now.duration_since(self.t_0);
 
-                                debug_print!(
-                                    DebugColor::DarkGreen,
-                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} ||\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
-                                    packet_length,
-                                    str_id,
-                                    next_packet_index,
-                                    shards_count,
-                                    shard_index,
-                                );
+                           
 
                                 let mut packet = MpduPacket::new();
 
@@ -420,6 +435,16 @@ impl XRServer {
                                 if packet.header_alvr.shard_index == 0{
                                     println!("\n{:.9}-Server sending {:#?}",now.duration_since(self.t_0).as_secs_f64(), packet.header_alvr);
                                 }
+
+                                debug_print!(
+                                    DebugColor::DarkGreen,
+                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} ||\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
+                                    packet_length,
+                                    str_id,
+                                    next_packet_index,
+                                    shards_count,
+                                    shard_index,
+                                );
                                 self.outport_videoapp_network.send(packet).await;
 
                             } else {
@@ -473,8 +498,9 @@ impl XRServer {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time(); 
-            let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
+            // let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
 
+            let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt) ;
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
             self.frames_sent_counter += 1;
@@ -489,17 +515,21 @@ impl XRServer {
                     send_socket // generate the actual video frame data
                         .get_buffer_emu(&header, current_bitrate_mbps)
                         .unwrap();
+                
 
-                let cloned_socket_map = send_socket.get_frame_tracker_map(); 
-
-                match map_clone.write() {
-                    Ok(mut guard) => {
-                        *guard = cloned_socket_map;
-                    }
-                    Err(_) => {
-                        println!("Failed to acquire write lock in RTT hashmap");
-                    }
-                }                // println!(
+                            // Use DashMap's thread-safe `insert` API instead of write locks
+                let frame_tracker_map = send_socket.get_frame_tracker_map();
+                frame_tracker_map.into_iter().for_each(|(key, value)| {
+                    map_clone.insert(key, value);
+                });
+                // match map_clone.write() {
+                //     Ok(mut guard) => {
+                //         *guard = send_socket.get_frame_tracker_map();
+                //     }
+                //     Err(_) => {
+                //         println!("Failed to acquire write lock in RTT hashmap");
+                //     }
+                // }                // println!(
                 //     "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
                 //     current_bitrate_mbps,
                 //     buffer_emu.inner.len(),
@@ -516,16 +546,11 @@ impl XRServer {
 
                 let send_result = send_socket.send(buffer_emu, now);
 
-                let cloned_socket_map = send_socket.get_frame_tracker_map(); 
-
-                match map_clone.write() {
-                    Ok(mut guard) => {
-                        *guard = cloned_socket_map;
-                    }
-                    Err(_) => {
-                        println!("Failed to acquire write lock in RTT hashmap");
-                    }
-                }        
+                            // Update the DashMap again with any new frame tracker data
+                let cloned_socket_map = send_socket.get_frame_tracker_map();
+                cloned_socket_map.into_iter().for_each(|(key, value)| {
+                    map_clone.insert(key, value);
+                });
 
                 let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 
@@ -534,7 +559,7 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-                let normal = Normal::new(0.0, 5.0).unwrap(); // Mean = 0, Std dev = 5
+                let normal = Normal::new(0.0, 0.3).unwrap(); // Mean = 0, Std dev = 5
                 let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
 
                 let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps + epsilon));
@@ -815,6 +840,8 @@ impl XRClient {
                         highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video frame received during the interval between consecutive frames
                         highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video shard received during the interval between consecutive frames
                         lost_shards_deadline: packets_lost_deadline, 
+                        // tx_instant: data.get_tx_instant(), 
+
                     };
                     // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 

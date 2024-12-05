@@ -3,7 +3,7 @@ use std::{fmt::Debug, net::IpAddr};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{net::TcpListener, time::Duration};
-
+use tai_time::TaiTime;
 /// A 2-dimensional vector.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 // #[cfg_attr(feature = "cuda", repr(align(8)))]
@@ -208,4 +208,5 @@ pub struct NetworkStatisticsPacket {
     pub highest_rx_shard_index: i32,
 
     pub lost_shards_deadline: usize, 
+    // pub tx_instant: f64, 
 }
