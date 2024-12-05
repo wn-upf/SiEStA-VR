@@ -668,7 +668,7 @@ impl NetworkPatternEmulator {
                     let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
                     let packet_tokens = (packet.length_packet * 8) as f64;
                     self.debug_counter += 1; 
-                    if self.debug_counter >= 50{
+                    if self.debug_counter >= 100{
                         debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:4.4} -> {:4.4})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time),format_elapsed!(valid_from), format_elapsed!(valid_until),  refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
                         self.debug_counter = 0; 
                     }
@@ -960,13 +960,13 @@ impl QueueModule {
         self.queue_length_counter += self.queue.len();
         let id = packet.packet_id.clone(); 
         let packet_arg = packet.clone(); 
-        println!("Processing packet from netem"); 
+        debug_print!(DebugColor::DarkBlue, "Processing packet from netem", ); 
         // If an AMPDU is being prepared and has space
 
         // If can't add to AMPDU, add to queue
         if self.queue.len() < self.queue_maxsize {
             self.queue.push_back(packet_arg.clone());
-            println!("Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet_arg.header_alvr.next_packet_index, packet_arg.header_alvr.shard_index, packet_arg.header_alvr.shards_count - 1 ); 
+            debug_print!(DebugColor::DarkBlue, "Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet_arg.header_alvr.next_packet_index, packet_arg.header_alvr.shard_index, packet_arg.header_alvr.shards_count - 1 ); 
 
             // If this is the first packet and no packet is being served, start service
             if self.queue.len() == 1 && !self.packet_being_served {

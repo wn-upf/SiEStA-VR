@@ -1079,7 +1079,7 @@ impl StreamSocket {
             debug_print!(DebugColor::Orange, "FRAME IS COMPLETE!", );
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
-                    println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index); 
+                    // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index); 
 
                     let values: Vec<&ShardMapStats> = inner_map.values().collect();
                     let min_time = values.iter().map(|shard| shard.rx_instant).min().unwrap();

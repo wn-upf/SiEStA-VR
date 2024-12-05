@@ -1195,7 +1195,8 @@ pub struct GraphNetworkStatistics {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GraphNetworkStatistics_csv {
-    pub frame_index: u32,
+    pub timestamp: f64, 
+    pub frame_index: usize,
 
     pub frame_size_bytes: usize, 
 
