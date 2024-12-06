@@ -234,6 +234,7 @@ impl XRServer {
     }
 
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>){
+
     
         if let Some(mut protorecv) = self.control_socket_receiver.clone(){
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap(); 
@@ -248,10 +249,13 @@ impl XRServer {
                     // let mut map_rtt_lock = map_clone.write().unwrap();
                     let frame_id = network_stats.frame_index as u32;
                     let rtt: Duration;
-                    if let send_instant = map_clone.remove(&frame_id).unwrap().1 {
+                    // if let send_instant = map_clone.get(&frame_id).unwrap()
+                    if let send_instant = map_clone.remove(&frame_id).unwrap().1 
+                    {
                         rtt = now.duration_since(send_instant);
-                    }
+                        println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32()); 
 
+                    }
                     else {
                         println!("frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",  network_stats.frame_index);
                         rtt = Duration::ZERO;
@@ -559,7 +563,7 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-                let normal = Normal::new(0.0, 0.3).unwrap(); // Mean = 0, Std dev = 5
+                let normal = Normal::new(0.0, 2.0).unwrap(); // Mean = 0, Std dev = 5
                 let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
 
                 let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps + epsilon));

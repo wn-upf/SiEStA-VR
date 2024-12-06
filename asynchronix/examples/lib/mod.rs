@@ -33,7 +33,6 @@ pub const P_TX: f64 = 20.0;
 pub const INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;
@@ -47,6 +46,7 @@ pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
+pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 #[macro_export]
 macro_rules! debug_print {
@@ -851,6 +851,9 @@ pub struct MpduPacket {
 
     pub data_inner: Vec<u8>,
     pub header_alvr: HeaderALVRStream,
+
+    pub has_consumed_emu_tokens: bool, 
+    pub emulated_delay: Option<f64>, 
     // pub is_alvr_control_packet: bool, 
 }
 
@@ -872,6 +875,8 @@ impl MpduPacket {
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
+            has_consumed_emu_tokens: false, 
+            emulated_delay: None, 
             // is_alvr_control_packet: false, 
         }
     }
