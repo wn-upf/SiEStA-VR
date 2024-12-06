@@ -39,8 +39,8 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize =  1000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6; 
 
 // Steps of emulated bandwidth 
-pub const STEP1_TBEGIN :u64 = 30; 
-pub const STEP1_TEND   :u64 = 150; 
+pub const STEP1_TBEGIN :u64 = 20; 
+pub const STEP1_TEND   :u64 = 100; 
 
 pub const STEP2_TBEGIN :u64 = 60; 
 pub const STEP2_TEND   :u64 = 80;
@@ -48,7 +48,7 @@ pub const STEP2_TEND   :u64 = 80;
 pub const STEP3_TBEGIN :u64 = 90; 
 pub const STEP3_TEND   :u64 = 110; 
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 30.0E6; 
+pub const BANDWIDTH_LIMIT_S1: f64 = 25.0E6; 
 pub const BANDWIDTH_LIMIT_S2: f64 = 25.0E6; 
 pub const BANDWIDTH_LIMIT_S3: f64 = 20.0E6; 
 
@@ -416,7 +416,7 @@ impl QueueMechanism {
         // let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap(); 
 
 
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1.0, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2, BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3, BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
 
@@ -428,20 +428,6 @@ impl QueueMechanism {
             queue_delay_timer: Duration::ZERO, 
         }
     }
-    // fn calculate_queue_delay(&self, packet: &MpduPacket) -> Duration {
-    //     // Calculate how long the packet needs to wait based on current tokens
-    //     let current_tokens = self.network_emulator.get_current_tokens();
-    //     let packet_tokens = (packet.length_packet * 8) as f64;
-        
-    //     if current_tokens >= packet_tokens {
-    //         Duration::ZERO
-    //     } else {
-    //         // Calculate time needed to refill tokens
-    //         let tokens_needed = packet_tokens - current_tokens;
-    //         let refill_rate = self.network_emulator.get_token_refill_rate();
-    //         Duration::from_secs_f64(tokens_needed / refill_rate)
-    //     }
-    // }
    
     pub fn enqueue_or_transmit(
         &mut self,
@@ -457,14 +443,7 @@ impl QueueMechanism {
                 EnqueueResult::Transmitted(packet)
             },
             Some(delay) => {
-            //     // Packet needs to be delayed
-            //     debug_bgprint!(
-            //         DebugColor::Chocolate, 
-            //         "{:9.5}[DBG NETEM] Packet {} delayed by {:.6} seconds", 
-            //         format_elapsed!(now), 
-            //         packet.packet_id, 
-            //         delay.as_secs_f64()
-            //     );
+
                 debug_bgprint!(DebugColor::Chocolate, "[DBG Queue_NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
                             self.queue.len(), 
                             packet.packet_id,
@@ -477,7 +456,8 @@ impl QueueMechanism {
                 // Add the delay to the packet's queue_in_instant
                 let mut delayed_packet = packet;
 
-                delayed_packet.emulated_delay = Some(delay.as_secs_f64());                 
+                delayed_packet.emulated_added_delay_deadline = now.checked_add(delay);     
+
                 // Enqueue the packet
                 if self.queue.len() < self.max_queue_size {
                     self.queue.push_back(delayed_packet);
@@ -499,24 +479,49 @@ impl QueueMechanism {
         let now = context.scheduler.time();
         let mut transmitted_packets = Vec::new();
         let mut index = 0;
-
+        
+  
         while index < self.queue.len() {
             if let Some(packet) = self.queue.get_mut(index){
+                    
+                    if let Some(deadline) = packet.emulated_added_delay_deadline {
+                        if deadline.checked_duration_since(now).is_none() {
+                            debug_bgprint!(DebugColor::DarkGreen, 
+                                "[DBG EMU QUEUE PROCESS] DEADLINE NETEM OUT | Now = {}, Deadline = {} | (F_index: {} , {} / {} )",
+                                now.duration_since(TaiTime::EPOCH).as_secs_f32(), 
+                                deadline.duration_since(TaiTime::EPOCH).as_secs_f32(), 
+                                packet.header_alvr.next_packet_index, 
+                                packet.header_alvr.shard_index, 
+                                packet.header_alvr.shards_count 
+                            );
+                            let packet = self.queue.remove(index).unwrap();
+                            transmitted_packets.push(packet);
+                            continue; // Skip incrementing index
+                        }
+                    }
 
                 match self.network_emulator.should_transmit_with_delay(packet, now) {
                     Some(delay) if delay == Duration::ZERO => {
                         // Remove and process the packet
+                        debug_bgprint!(DebugColor::DarkGreen, "[DBG EMU QUEUE PROCESS] Delay ZERO Packet ALVR: {}. Now = {} | (F_index: {} , {} / {} )", 
+                        delay.as_secs_f32(), now.duration_since(TaiTime::EPOCH).as_secs_f32(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
+
+
                         let packet = self.queue.remove(index).unwrap();
                         transmitted_packets.push(packet);
                         // Don't increment index as we've removed the current element
                     },
                     Some(delay) => {
                         // Packet still needs to wait
+                        // debug_bgprint!(DebugColor::Gold, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {}, deadline = {} | (F_index: {} , {} / {} )", 
+                        //     delay.as_secs_f32(), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
                         index += 1;
+
                     },
                     None => {
                         // Packet dropped
                         self.queue.remove(index);
+                        debug_bgprint!(DebugColor::Red, "[EMU QUEUE DROP] Dropped packet ID {}" , index); 
                     }
                 }
             } else {
@@ -627,6 +632,90 @@ impl NetworkPatternEmulator {
         self.patterns.push(pattern);
     }
 
+    pub fn should_transmit_with_delay_vec_version(&mut self, packets: &mut Vec<MpduPacket>, current_time: TaiTime<0>) -> Vec<Option<Duration>> {
+        if self.last_update_time == TaiTime::default() {
+            self.last_update_time = current_time;
+        }
+    
+        let time_delta = current_time.duration_since(self.last_update_time);
+        self.last_update_time = current_time;
+    
+        // Find all active bandwidth patterns at the current time
+        let mut active_patterns: Vec<_> = self.patterns.iter_mut()
+            .filter_map(|pattern| {
+                if let NetworkPattern::Bandwidth { valid_from, valid_until, .. } = pattern {
+                    if current_time >= *valid_from && current_time <= *valid_until {
+                        Some(pattern)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+    
+        // Warn if multiple active patterns
+        if active_patterns.len() > 1 {
+            debug_bgprint!(
+                DebugColor::Lavender,
+                "WARNING: Multiple active bandwidth patterns detected at {:4.9}",
+                format_elapsed!(current_time)
+            );
+        }
+    
+        let mut delays = Vec::with_capacity(packets.len());
+    
+        match active_patterns.first_mut() {
+            Some(pattern) => match pattern {
+                NetworkPattern::Bandwidth {
+                    current_tokens,
+                    max_tokens,
+                    token_refill_rate,
+                    valid_from,
+                    valid_until,
+                    ..
+                } => {
+                    // Token bucket algorithm
+                    let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
+                    let mut available_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
+    
+                    for packet in packets.iter_mut() {
+                        if packet.has_consumed_emu_tokens {
+                            delays.push(Some(Duration::ZERO));
+                            continue;
+                        }
+    
+                        let packet_tokens = (packet.length_packet * 8) as f64;
+    
+                        if available_tokens >= packet_tokens {
+                            // Packet can be transmitted
+                            available_tokens -= packet_tokens;
+                            packet.has_consumed_emu_tokens = true;
+                            delays.push(Some(Duration::ZERO));
+                        } else {
+                            // Calculate delay needed to accumulate enough tokens
+                            let tokens_needed = packet_tokens - available_tokens;
+                            let delay_seconds = tokens_needed / *token_refill_rate;
+                            delays.push(Some(Duration::from_secs_f64(delay_seconds)));
+                            
+                            // Update available tokens after delay
+                            available_tokens = 0.0;
+                        }
+                    }
+    
+                    // Update the current tokens in the pattern
+                    *current_tokens = available_tokens;
+                }
+                _ => delays.extend(std::iter::repeat(Some(Duration::ZERO)).take(packets.len())),
+            },
+            None => delays.extend(std::iter::repeat(Some(Duration::ZERO)).take(packets.len())),
+        }
+    
+        delays
+    }
+
+
     pub fn should_transmit_with_delay(&mut self, packet: &mut MpduPacket, current_time: TaiTime<0>) -> Option<Duration> {
         // Update time-based patterns
         let alvr_header = packet.header_alvr.clone(); 
@@ -634,7 +723,7 @@ impl NetworkPatternEmulator {
             self.last_update_time = current_time;
         }
 
-        if packet.has_consumed_emu_tokens == true{
+        if packet.has_consumed_emu_tokens == true {
             return Some(Duration::ZERO);
         }
 
@@ -662,7 +751,7 @@ impl NetworkPatternEmulator {
          // Warn if multiple active patterns
         if active_patterns.len() > 1 {
             debug_bgprint!(
-                DebugColor::Red, 
+                DebugColor::Lavender, 
                 "WARNING: Multiple active bandwidth patterns detected at {:4.9}",
                 format_elapsed!(current_time)
             );
@@ -685,7 +774,7 @@ impl NetworkPatternEmulator {
                     self.debug_counter += 1; 
 
                     if self.debug_counter >= 100{
-                        debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:4.4} -> {:4.4})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb (ALVR F_id: {} -  {}/{})" , format_elapsed!(current_time),format_elapsed!(valid_from), format_elapsed!(valid_until),  refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6, alvr_header.next_packet_index, alvr_header.shard_index, alvr_header.shards_count - 1 ); 
+                        debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:3.0} -> {:3.0})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb | (ALVR F_id: {} -  {}/{})" , format_elapsed!(current_time),format_elapsed!(valid_from), format_elapsed!(valid_until),  refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6, alvr_header.next_packet_index, alvr_header.shard_index, alvr_header.shards_count - 1 ); 
                         self.debug_counter = 0; 
                     }
 
@@ -708,71 +797,71 @@ impl NetworkPatternEmulator {
     }
 
 
-    pub fn should_transmit(&mut self, packet: &MpduPacket, current_time: TaiTime<0>) -> bool {
-        // Update time-based patterns
-        if self.last_update_time == TaiTime::default() {
-            self.last_update_time = current_time;
-        }
+    // pub fn should_transmit(&mut self, packet: &MpduPacket, current_time: TaiTime<0>) -> bool {
+    //     // Update time-based patterns
+    //     if self.last_update_time == TaiTime::default() {
+    //         self.last_update_time = current_time;
+    //     }
 
-        let time_delta = current_time.duration_since(self.last_update_time);
-        self.last_update_time = current_time;
+    //     let time_delta = current_time.duration_since(self.last_update_time);
+    //     self.last_update_time = current_time;
 
-        self.patterns.iter_mut().all(|pattern| match pattern {
-            NetworkPattern::Constant => true,
+    //     self.patterns.iter_mut().all(|pattern| match pattern {
+    //         NetworkPattern::Constant => true,
             
-            NetworkPattern::OnOffPeriodic { 
-                on_duration, 
-                off_duration, 
-                current_state, 
-                last_state_change 
-            } => {
-                let target_duration = if *current_state { *on_duration } else { *off_duration };
-                let state_duration = current_time.duration_since(*last_state_change);
+    //         NetworkPattern::OnOffPeriodic { 
+    //             on_duration, 
+    //             off_duration, 
+    //             current_state, 
+    //             last_state_change 
+    //         } => {
+    //             let target_duration = if *current_state { *on_duration } else { *off_duration };
+    //             let state_duration = current_time.duration_since(*last_state_change);
                 
-                if state_duration >= target_duration {
-                    // Toggle state
-                    *current_state = !*current_state;
-                    *last_state_change = current_time;
-                }
+    //             if state_duration >= target_duration {
+    //                 // Toggle state
+    //                 *current_state = !*current_state;
+    //                 *last_state_change = current_time;
+    //             }
 
-                *current_state
-            },
+    //             *current_state
+    //         },
             
-            NetworkPattern::ProbabilisticDrop { drop_probability } => {
-                let mut rng = rand::thread_rng();
-                rng.gen::<f64>() > *drop_probability
-            },
+    //         NetworkPattern::ProbabilisticDrop { drop_probability } => {
+    //             let mut rng = rand::thread_rng();
+    //             rng.gen::<f64>() > *drop_probability
+    //         },
             
-            NetworkPattern::Bandwidth { 
-                max_bps, 
-                current_tokens, 
-                max_tokens,
-                token_refill_rate ,
-                valid_from,
-                valid_until 
-            } => {
-                // Token bucket algorithm
-                let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
-                // println!(" *token_refill: ({}) * time_delta ({}) = {}", *token_refill_rate, time_delta.as_secs_f64(), refilled_tokens); 
+    //         NetworkPattern::Bandwidth { 
+    //             max_bps, 
+    //             current_tokens, 
+    //             max_tokens,
+    //             token_refill_rate ,
+    //             valid_from,
+    //             valid_until 
+    //         } => {
+    //             // Token bucket algorithm
+    //             let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
+    //             // println!(" *token_refill: ({}) * time_delta ({}) = {}", *token_refill_rate, time_delta.as_secs_f64(), refilled_tokens); 
 
-                let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
+    //             let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
                 
-                let packet_tokens = (packet.length_packet * 8) as f64;
-                self.debug_counter += 1; 
-                if self.debug_counter >= 1000{
-                    debug_bgprint!(DebugColor::DarkRed, "{:4.9} [DBG NETEM ({:4.4} -> {:4.4})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time), format_elapsed!(valid_from), format_elapsed!(valid_until), refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
-                    self.debug_counter = 0; 
-                }
+    //             let packet_tokens = (packet.length_packet * 8) as f64;
+    //             self.debug_counter += 1; 
+    //             if self.debug_counter >= 1{
+    //                 debug_bgprint!(DebugColor::DarkRed, "{:4.9} [DBG NETEM ({:4.4} -> {:4.4})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb" , format_elapsed!(current_time), format_elapsed!(valid_from), format_elapsed!(valid_until), refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6 ); 
+    //                 self.debug_counter = 0; 
+    //             }
                 
-                if new_tokens >= packet_tokens {
-                    *current_tokens = new_tokens - packet_tokens;
-                    true
-                } else {
-                    false
-                }
-            }
-        })
-    }
+    //             if new_tokens >= packet_tokens {
+    //                 *current_tokens = new_tokens - packet_tokens;
+    //                 true
+    //             } else {
+    //                 false
+    //             }
+    //         }
+    //     })
+    // }
 }
 
 
@@ -918,8 +1007,8 @@ impl QueueModule {
         packet_arg.queue_in_instant = now;
         let cloned_dbg = packet_arg.clone(); 
 
-        if self.network_emulator.should_transmit(&packet_arg, now) {
-            match self.queue_network_emulator.enqueue_or_transmit(packet_arg, &context) {
+        // if self.network_emulator.should_transmit(&packet_arg, now) {
+        match self.queue_network_emulator.enqueue_or_transmit(packet_arg, &context) {
                 EnqueueResult::Transmitted(packet) => {
                     self.arrived_packet_counter += 1;
                     self.queue_length_counter += self.queue.len();
@@ -959,46 +1048,52 @@ impl QueueModule {
                     );
                 }
             }
-        }
+        
         let processed_packets = self.queue_network_emulator.process_emu_queued_packets(context);
         if !processed_packets.is_empty(){
-            {debug_bgprint!(DebugColor::Azure, "{}[DBG PROCESS NETEM] Processed packets:", format_elapsed!(now));}
-        
-            for mut packet in processed_packets {
-                debug_bgprint!(DebugColor::Azure, "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 );
-                self.process_transmitted_packet(packet, context).await;
-            }
+            {debug_bgprint!(DebugColor::Azure, "{} - [DBG PROCESS NETEM] Processed packets:", format_elapsed!(now));}
+            // for mut packet in processed_packets.clone() {
+            //     debug_bgprint!(DebugColor::Azure, "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 ); 
+            // }
+            self.process_transmitted_packets(processed_packets, context).await;
+       
         }
     }
 
         // New helper method to process transmitted packets
-    async fn process_transmitted_packet(&mut self, packet: MpduPacket, context: &Context<Self>) {
+    async fn process_transmitted_packets(&mut self, packets: Vec<MpduPacket>, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
-        let id = packet.packet_id.clone(); 
-        let packet_arg = packet.clone(); 
-        debug_print!(DebugColor::DarkBlue, "Processing packet from netem", ); 
-        // If an AMPDU is being prepared and has space
+        // let id = packet.packet_id.clone(); 
+        // let packet_arg = packet.clone(); 
+        // debug_print!(DebugColor::DarkBlue, "Processing packet from netem", ); 
+        for packet in packets{
+            // If can't add to AMPDU, add to queue
+            let id = packet.packet_id.clone(); 
+            debug_bgprint!(DebugColor::Azure, "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 ); 
 
-        // If can't add to AMPDU, add to queue
-        if self.queue.len() < self.queue_maxsize {
-            self.queue.push_back(packet_arg.clone());
-            debug_print!(DebugColor::DarkBlue, "Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet_arg.header_alvr.next_packet_index, packet_arg.header_alvr.shard_index, packet_arg.header_alvr.shards_count - 1 ); 
-
-            // If this is the first packet and no packet is being served, start service
-            if self.queue.len() == 1 && !self.packet_being_served {
-                self.deque_schedule_service((), context).await;
+            if self.queue.len() < self.queue_maxsize {
+                self.queue.push_back(packet.clone());
+                
+                // debug_bgprint!(DebugColor::DarkBlue, "Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count - 1 );                
+            } else {
+                self.blocked_packet_counter += 1;
+                debug_bgprint!(
+                    DebugColor::Red,
+                    "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
+                    format_elapsed!(context.scheduler.time()),
+                    id, 
+                    self.queue.len()
+                );
             }
-        } else {
-            self.blocked_packet_counter += 1;
-            debug_bgprint!(
-                DebugColor::Red,
-                "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
-                format_elapsed!(context.scheduler.time()),
-                id, 
-                self.queue.len()
-            );
         }
+         // If this is the first packet and no packet is being served, start service
+         if self.queue.len() >= 1 && !self.packet_being_served {
+            self.deque_schedule_service((), context).await;
+        }
+    
+    
+    
     }
 
     // New method to try adding packet to current AMPDU
@@ -1290,16 +1385,16 @@ impl QueueModule {
                     for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut(){
                         packet.T_s = Duration::from_secs_f64(resultz.service_delay); 
                     }
-                    debug_print!(
-                        DebugColor::Yellow,
-                        "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                        format_elapsed!(now),
-                        format_elapsed!(now + last_service_duration),
-                    );
+                    // debug_bgprint!(
+                    //     DebugColor::Yellow,
+                    //     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
+                    //     format_elapsed!(now),
+                    //     format_elapsed!(now + last_service_duration),
+                    // );
+                    self.aux_ampdu_serviced.print();
 
-                    if DEBUG_PRINT_ENABLED {
-                        self.aux_ampdu_serviced.print();
-                    }
+                    // if DEBUG_PRINT_ENABLED {
+                    // }
 
                     self.packet_being_served = true;
                     

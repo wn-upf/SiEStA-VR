@@ -7,8 +7,8 @@ use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvE
 use crate::lib::{DEBUG_PRINT_ENABLED}; 
 
 use crate::{debug_bgprint, format_elapsed}; 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(50); 
-pub const MAX_DEADLINE_IN_STATS: usize = 5; 
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100); 
+pub const MAX_DEADLINE_IN_STATS: usize = 10; 
 
 use rand::Rng;
 use std::cell::RefCell;
@@ -496,7 +496,7 @@ impl FrameTracker {
     pub fn insert(&mut self, frame_id: u32, instant: TaiTime<0>) {
         self.map.insert(frame_id, instant);
         self.queue.push_back(frame_id);
-        debug_bgprint!(DebugColor::Green, "Inserted Frame (K: {} , V: {:.9}) in rtt map", frame_id, format_elapsed!(instant));  
+        // debug_bgprint!(DebugColor::Green, "Inserted Frame (K: {} , V: {:.9}) in rtt map", frame_id, format_elapsed!(instant));  
 
         // Drop oldest pairs if size exceeds max_size
         while self.queue.len() > self.max_size {
@@ -797,11 +797,11 @@ impl StreamSocket {
 
         // Now you can iterate over the keys and remove them from the map
         for frame_deadlined in keys {
-            println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
             vec_keys.push(frame_deadlined);
 
             let lost_in_frame = self.lost_shards_deadline_map.remove(&frame_deadlined).unwrap(); 
-            println!("Lost in frame: {:?}", lost_in_frame); 
+            // println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
+            debug_bgprint!(DebugColor::Red, "[Flush deadline] Packets lost in frame {}: {:?}", frame_deadlined,lost_in_frame); 
             vec_lost.push(lost_in_frame); 
             total_lost_deadline += lost_in_frame; 
         }

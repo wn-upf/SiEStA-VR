@@ -46,7 +46,18 @@ pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
+
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+
+#[macro_export]
+macro_rules! debug_bgprint {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // Check if debugging is enabled
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        
+    };
+}
 
 #[macro_export]
 macro_rules! debug_print {
@@ -56,15 +67,6 @@ macro_rules! debug_print {
             let msg = format!($fmt, $($arg)*);
             println!("{}", $color.to_color_fn()(msg));
         }
-    };
-}
-#[macro_export]
-macro_rules! debug_bgprint {
-    ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // Check if debugging is enabled
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
-
     };
 }
 
@@ -853,7 +855,7 @@ pub struct MpduPacket {
     pub header_alvr: HeaderALVRStream,
 
     pub has_consumed_emu_tokens: bool, 
-    pub emulated_delay: Option<f64>, 
+    pub emulated_added_delay_deadline: Option<TaiTime<0>>, 
     // pub is_alvr_control_packet: bool, 
 }
 
@@ -876,7 +878,7 @@ impl MpduPacket {
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
             has_consumed_emu_tokens: false, 
-            emulated_delay: None, 
+            emulated_added_delay_deadline: None, 
             // is_alvr_control_packet: false, 
         }
     }
@@ -914,6 +916,7 @@ impl AmpduPacket {
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_dest_id, self.total_length
         );
+        let mut i = 0; 
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}, {:?} \x1b[0m",
@@ -923,6 +926,11 @@ impl AmpduPacket {
                 packet.header_alvr
 
             );
+            i +=1; 
+            if i >10 {
+                println!( "\x1b[33m\t..."); 
+                break; 
+            }
         }
     }
 

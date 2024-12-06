@@ -243,7 +243,7 @@ impl XRServer {
             match packet {    
                 ClientControlPacket::NetworkStatistics(network_stats) => {
                     
-                    debug_bgprint!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
+                    // debug_bgprint!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
                     
                                         
                     // let mut map_rtt_lock = map_clone.write().unwrap();
@@ -253,7 +253,7 @@ impl XRServer {
                     if let send_instant = map_clone.remove(&frame_id).unwrap().1 
                     {
                         rtt = now.duration_since(send_instant);
-                        println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32()); 
+                        // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32()); 
 
                     }
                     else {
