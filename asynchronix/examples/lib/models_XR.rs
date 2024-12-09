@@ -440,7 +440,7 @@ impl XRServer {
                                     println!("\n{:.9}-Server sending {:#?}",now.duration_since(self.t_0).as_secs_f64(), packet.header_alvr);
                                 }
 
-                                debug_print!(
+                                debug_bgprint!(
                                     DebugColor::DarkGreen,
                                     "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} ||\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
                                     packet_length,

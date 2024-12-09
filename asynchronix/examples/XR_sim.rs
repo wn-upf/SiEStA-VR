@@ -5,9 +5,6 @@
 ///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
 ///     * Will try to stay accurate to packet latencies in all parts of the pipeline ( for now, linear terms with maybe some randomness)
 ///
-/// TODO:   
-///     * XRServer sending packets , rate corresponding to FPS and bitrate (90 fps, 100 Mbps) to sink, with correct headers.
-//      * Decoder queue of XRClient
 
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};

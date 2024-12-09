@@ -919,7 +919,7 @@ impl AmpduPacket {
         let mut i = 0; 
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}, {:?} \x1b[0m",
+                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.8}, T_s: {:.8}, {:?} \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64(),
                 packet.T_s.as_secs_f64(), 

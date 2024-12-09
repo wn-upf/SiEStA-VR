@@ -416,7 +416,7 @@ impl QueueMechanism {
         // let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap(); 
 
 
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1.0, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1E5, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2, BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3, BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
 
@@ -444,19 +444,23 @@ impl QueueMechanism {
             },
             Some(delay) => {
 
+                let delay_dependent_on_shard_index = Duration::from_micros(1).mul_f32(packet.header_alvr.shard_index.clone() as f32);  // TODO: not this :D 
+
                 debug_bgprint!(DebugColor::Chocolate, "[DBG Queue_NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
                             self.queue.len(), 
                             packet.packet_id,
-                            delay.as_secs_f64(),
+                            delay_dependent_on_shard_index.as_secs_f64(),
                             packet.header_alvr.next_packet_index,
                             packet.header_alvr.shard_index,
                             packet.header_alvr.shards_count,
                         ); 
-                
+
+
                 // Add the delay to the packet's queue_in_instant
                 let mut delayed_packet = packet;
 
-                delayed_packet.emulated_added_delay_deadline = now.checked_add(delay);     
+
+                delayed_packet.emulated_added_delay_deadline = now.checked_add(delay_dependent_on_shard_index);     
 
                 // Enqueue the packet
                 if self.queue.len() < self.max_queue_size {
@@ -500,12 +504,11 @@ impl QueueMechanism {
                         }
                     }
 
-                match self.network_emulator.should_transmit_with_delay(packet, now) {
-                    Some(delay) if delay == Duration::ZERO => {
+                match packet.emulated_added_delay_deadline {
+                    Some(delay) if delay == TaiTime::EPOCH => {
                         // Remove and process the packet
                         debug_bgprint!(DebugColor::DarkGreen, "[DBG EMU QUEUE PROCESS] Delay ZERO Packet ALVR: {}. Now = {} | (F_index: {} , {} / {} )", 
-                        delay.as_secs_f32(), now.duration_since(TaiTime::EPOCH).as_secs_f32(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
-
+                        format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
 
                         let packet = self.queue.remove(index).unwrap();
                         transmitted_packets.push(packet);
@@ -513,8 +516,8 @@ impl QueueMechanism {
                     },
                     Some(delay) => {
                         // Packet still needs to wait
-                        // debug_bgprint!(DebugColor::Gold, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {}, deadline = {} | (F_index: {} , {} / {} )", 
-                        //     delay.as_secs_f32(), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
+                        debug_bgprint!(DebugColor::Mint, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {}, deadline = {} | (F_index: {} , {} / {} )", 
+                        format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
                         index += 1;
 
                     },
@@ -773,8 +776,8 @@ impl NetworkPatternEmulator {
                     let packet_tokens = (packet.length_packet * 8) as f64;
                     self.debug_counter += 1; 
 
-                    if self.debug_counter >= 100{
-                        debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:3.0} -> {:3.0})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb | (ALVR F_id: {} -  {}/{})" , format_elapsed!(current_time),format_elapsed!(valid_from), format_elapsed!(valid_until),  refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6, alvr_header.next_packet_index, alvr_header.shard_index, alvr_header.shards_count - 1 ); 
+                    if self.debug_counter >= 1{
+                        debug_bgprint!(DebugColor::DarkBlue, "{:4.9} [DBG NETEM ({:.5} -> {:.5})] BW bucket -> refill: {}, available_tokens: {:.3} Mbps, packet_tokens: {:.3} Mb | (ALVR F_id: {} -  {}/{})" , format_elapsed!(current_time),format_elapsed!(valid_from), format_elapsed!(valid_until),  refilled_tokens/1e6,  new_tokens / 1e6, packet_tokens/1e6, alvr_header.next_packet_index, alvr_header.shard_index, alvr_header.shards_count - 1 ); 
                         self.debug_counter = 0; 
                     }
 
@@ -1096,82 +1099,79 @@ impl QueueModule {
     
     }
 
-    // New method to try adding packet to current AMPDU
-    async fn try_add_to_ampdu(&mut self, packet: MpduPacket, context: &Context<Self>) -> bool {
-        let now = context.scheduler.time();
+    // // New method to try adding packet to current AMPDU
+    // async fn try_add_to_ampdu(&mut self, packet: MpduPacket, context: &Context<Self>) -> bool {
+    //     let now = context.scheduler.time();
 
-        // Initial AMPDU setup if empty
-        if self.aux_ampdu_serviced.mpdu_packets.is_empty() {
-            self.aux_ampdu_serviced.reset();
-            self.aux_ampdu_serviced.sta_dest_id = packet.sta_dest_id;
-            self.aux_ampdu_serviced.coordinates = packet.sta_src_coords.clone();
-        }
+    //     // Initial AMPDU setup if empty
+    //     if self.aux_ampdu_serviced.mpdu_packets.is_empty() {
+    //         self.aux_ampdu_serviced.reset();
+    //         self.aux_ampdu_serviced.sta_dest_id = packet.sta_dest_id;
+    //         self.aux_ampdu_serviced.coordinates = packet.sta_src_coords.clone();
+    //     }
 
-        // Calculate potential new AMPDU length and service time
-        let new_total_length = 
-            self.aux_ampdu_serviced.total_length + packet.length_packet;
-        let new_size = self.aux_ampdu_serviced.size + 1;
+    //     // Calculate potential new AMPDU length and service time
+    //     let new_total_length = 
+    //         self.aux_ampdu_serviced.total_length + packet.length_packet;
+    //     let new_size = self.aux_ampdu_serviced.size + 1;
 
-        let resultz = frametransmission_delay(
-            new_total_length as f64,
-            new_size,
-            self.coords_queue,
-            packet.sta_src_coords,
-            P_TX,
-        );
+    //     let resultz = frametransmission_delay(
+    //         new_total_length as f64,
+    //         new_size,
+    //         self.coords_queue,
+    //         packet.sta_src_coords,
+    //         P_TX,
+    //     );
 
-        // Check if adding packet would exceed AMPDU constraints
-        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
-            return false;
-        }
+    //     // Check if adding packet would exceed AMPDU constraints
+    //     if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+    //         return false;
+    //     }
 
-        // Add packet to AMPDU
-        let mut processed_packet = packet;
-        processed_packet.queue_length_when_out = self.queue.len();
-        processed_packet.queue_out_instant = now;
-        processed_packet.T_q = now.duration_since(processed_packet.queue_in_instant);
-        processed_packet.expected_T_s = Duration::from_secs_f64(resultz.service_delay);
+    //     // Add packet to AMPDU
+    //     let mut processed_packet = packet;
+    //     processed_packet.queue_length_when_out = self.queue.len();
+    //     processed_packet.queue_out_instant = now;
+    //     processed_packet.T_q = now.duration_since(processed_packet.queue_in_instant);
+    //     processed_packet.expected_T_s = Duration::from_secs_f64(resultz.service_delay);
 
-        // Send stats if needed
-        if let Some(stats_tx) = &self.stats_tx {
-            let stats_update = StatsUpdate {
-                T_s: resultz.service_delay,
-                T_q: processed_packet.T_q.as_secs_f64(),
-                blocked_packet_counter: self.blocked_packet_counter,
-                arrived_packet_counter: self.arrived_packet_counter,
-                queue_length_when_out: processed_packet.queue_length_when_out,
-                sta_src_id: processed_packet.sta_src_id as usize,
-                packet_id: processed_packet.packet_id as i32,
-                now,
-                length_packet: processed_packet.length_packet,
-            };
-            stats_tx.send(stats_update).expect("Failed to send stats update");
-        }
+    //     // Send stats if needed
+    //     if let Some(stats_tx) = &self.stats_tx {
+    //         let stats_update = StatsUpdate {
+    //             T_s: resultz.service_delay,
+    //             T_q: processed_packet.T_q.as_secs_f64(),
+    //             blocked_packet_counter: self.blocked_packet_counter,
+    //             arrived_packet_counter: self.arrived_packet_counter,
+    //             queue_length_when_out: processed_packet.queue_length_when_out,
+    //             sta_src_id: processed_packet.sta_src_id as usize,
+    //             packet_id: processed_packet.packet_id as i32,
+    //             now,
+    //             length_packet: processed_packet.length_packet,
+    //         };
+    //         stats_tx.send(stats_update).expect("Failed to send stats update");
+    //     }
 
-        // Add to AMPDU
-        self.aux_ampdu_serviced.mpdu_packets.push(processed_packet);
-        self.aux_ampdu_serviced.total_length = new_total_length;
-        self.aux_ampdu_serviced.size = new_size;
+    //     // Add to AMPDU
+    //     self.aux_ampdu_serviced.mpdu_packets.push(processed_packet);
+    //     self.aux_ampdu_serviced.total_length = new_total_length;
+    //     self.aux_ampdu_serviced.size = new_size;
 
-        true
-    }
+    //     true
+    // }
 
-    // Helper method to handle dropped packets
-    fn handle_dropped_packet(&mut self, packet: MpduPacket, id: i32) {
-        self.blocked_packet_counter += 1;
-        debug_bgprint!(
-            DebugColor::Red,
-            "Packet {} dropped by network pattern (ALVR: frame {} shard {:4.0}/{:4.0})", 
-            id, 
-            packet.header_alvr.next_packet_index,
-            packet.header_alvr.shard_index,
-            packet.header_alvr.shards_count, 
-        );
-    }
+    // // Helper method to handle dropped packets
+    // fn handle_dropped_packet(&mut self, packet: MpduPacket, id: i32) {
+    //     self.blocked_packet_counter += 1;
+    //     debug_bgprint!(
+    //         DebugColor::Red,
+    //         "Packet {} dropped by network pattern (ALVR: frame {} shard {:4.0}/{:4.0})", 
+    //         id, 
+    //         packet.header_alvr.next_packet_index,
+    //         packet.header_alvr.shard_index,
+    //         packet.header_alvr.shards_count, 
+    //     );
+    // }
 
-
-
- 
 
     pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
@@ -1335,15 +1335,17 @@ impl QueueModule {
                             self.aux_ampdu_serviced.total_length + current_packet.length_packet;
                         let new_size = self.aux_ampdu_serviced.size + 1;
 
-                        let resultz = frametransmission_delay(
+                        resultz = frametransmission_delay(
                             new_total_length as f64,
                             new_size,
                             self.coords_queue,
                             current_packet.sta_src_coords,
                             P_TX,
                         );
+                        println!("RESULTZ {} frame {} shard {}/{} ", resultz.service_delay, current_packet.header_alvr.next_packet_index, current_packet.header_alvr.shard_index, current_packet.header_alvr.shards_count - 1); 
 
                         if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+                            println!("BREAKOUTTTT!!!!"); 
                             break;
                         }
 
@@ -1381,7 +1383,7 @@ impl QueueModule {
                 }
 
                 if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
-                   
+                    println!("ITERATING!! delay is: {}",  resultz.service_delay ); 
                     for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut(){
                         packet.T_s = Duration::from_secs_f64(resultz.service_delay); 
                     }
