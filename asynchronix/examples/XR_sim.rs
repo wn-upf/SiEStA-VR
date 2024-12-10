@@ -1,3 +1,4 @@
+use asynchronix::model::Context;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
@@ -168,7 +169,7 @@ fn main() {
     println!("STA XR Client PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length);
 
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, PL_prob);
+    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, PL_prob );
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 
@@ -291,6 +292,10 @@ fn main() {
     
     scheduler.schedule_event(duration_scheduled1, XRClient::vsync, (), &xr_client_app_address).unwrap(); 
     // scheduler.schedule_periodic_event(Duration::from_millis(10), Duration::from_millis(10), XRClient::video_receive_thread, (), &xr_client_app_address).unwrap();  // video receiver thread of ALVR
+
+
+    println!("Scheduling EMULATOR TX"); 
+    scheduler.schedule_event(duration_scheduled1, QueueModule::self_scheduled_emu_queue_tx, (), &queue_address).unwrap(); 
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
     

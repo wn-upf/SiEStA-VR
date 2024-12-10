@@ -26,14 +26,6 @@ use crate::lib::{
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
-pub struct PoissonSource {
-    pub arrival_rate: f64,
-    pub mean_length_packets: f64,
-
-    pub output_port: Output<MpduPacket>,
-
-    pub num_packets_sent: usize,
-}
 
 pub const MAX_EMULATED_QUEUE_PACKETS: usize =  1000; 
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6; 
@@ -52,8 +44,14 @@ pub const BANDWIDTH_LIMIT_S1: f64 = 25.0E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 25.0E6; 
 pub const BANDWIDTH_LIMIT_S3: f64 = 20.0E6; 
 
+pub struct PoissonSource {
+    pub arrival_rate: f64,
+    pub mean_length_packets: f64,
 
+    pub output_port: Output<MpduPacket>,
 
+    pub num_packets_sent: usize,
+}
 
 #[allow(dead_code)]
 impl PoissonSource {
@@ -416,7 +414,7 @@ impl QueueMechanism {
         // let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap(); 
 
 
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1E5, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(5E5, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2, BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3, BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
 
@@ -455,11 +453,8 @@ impl QueueMechanism {
                             packet.header_alvr.shards_count,
                         ); 
 
-
                 // Add the delay to the packet's queue_in_instant
-                let mut delayed_packet = packet;
-
-
+                let mut delayed_packet = packet.clone();
                 delayed_packet.emulated_added_delay_deadline = now.checked_add(delay_dependent_on_shard_index);     
 
                 // Enqueue the packet
@@ -482,14 +477,12 @@ impl QueueMechanism {
     ) -> Vec<MpduPacket> {
         let now = context.scheduler.time();
         let mut transmitted_packets = Vec::new();
-        let mut index = 0;
-        
+        let mut index = 0;   
   
         while index < self.queue.len() {
             if let Some(packet) = self.queue.get_mut(index){
-                    
                     if let Some(deadline) = packet.emulated_added_delay_deadline {
-                        if deadline.checked_duration_since(now).is_none() {
+                        if deadline.checked_duration_since(now).is_none() { // if deadline expired
                             debug_bgprint!(DebugColor::DarkGreen, 
                                 "[DBG EMU QUEUE PROCESS] DEADLINE NETEM OUT | Now = {}, Deadline = {} | (F_index: {} , {} / {} )",
                                 now.duration_since(TaiTime::EPOCH).as_secs_f32(), 
@@ -516,10 +509,9 @@ impl QueueMechanism {
                     },
                     Some(delay) => {
                         // Packet still needs to wait
-                        debug_bgprint!(DebugColor::Mint, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {}, deadline = {} | (F_index: {} , {} / {} )", 
-                        format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
+                        debug_bgprint!(DebugColor::Mint, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {}, deadline = {} | (F_index: {} , {}/{} )", 
+                        format_elapsed!(delay.checked_sub(now.duration_since(TaiTime::EPOCH)).unwrap()), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count ); 
                         index += 1;
-
                     },
                     None => {
                         // Packet dropped
@@ -945,8 +937,7 @@ impl QueueModule {
         }
         let network_emulator = NetworkPatternEmulator::new();
 
-
-
+        println!("Scheduling EMU TX daemon in 1 second"); 
         // network_emulator.add_pattern(NetworkPattern::Bandwidth {
         //     max_bps: BANDWIDTH_LIMIT,
         //     current_tokens: BANDWIDTH_LIMIT,
@@ -954,6 +945,7 @@ impl QueueModule {
         //     token_refill_rate: BANDWIDTH_LIMIT, // Tokens per second
         // });
         let queue_mechanism = QueueMechanism::new( MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH); 
+
 
          // Example: Add probabilistic drop
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
@@ -1010,6 +1002,10 @@ impl QueueModule {
         packet_arg.queue_in_instant = now;
         let cloned_dbg = packet_arg.clone(); 
 
+        if !self.queue_network_emulator.queue.is_empty(){
+            context.scheduler.schedule_event(Duration::from_micros(1), QueueModule::self_scheduled_emu_queue_tx, ()).unwrap(); 
+        }
+
         // if self.network_emulator.should_transmit(&packet_arg, now) {
         match self.queue_network_emulator.enqueue_or_transmit(packet_arg, &context) {
                 EnqueueResult::Transmitted(packet) => {
@@ -1036,6 +1032,12 @@ impl QueueModule {
                 EnqueueResult::Queued => {
                     self.arrived_packet_counter += 1;
                     self.queue_length_counter += self.queue.len();
+                    if let Some(delay) = cloned_dbg.emulated_added_delay_deadline{
+                        let delay_until_tx = delay.duration_since(now) ; 
+                        println!("Scheduling transmission of F: {} S: {}/{} in {} seconds", cloned_dbg.header_alvr.next_packet_index, cloned_dbg.header_alvr.shard_index, cloned_dbg.header_alvr.shards_count - 1, delay_until_tx.as_secs_f64() ); 
+                        context.scheduler.schedule_event(delay_until_tx, Self::self_scheduled_emu_queue_tx, ()).unwrap(); 
+                    }
+                    
                 },
                 EnqueueResult::Dropped => {
                     // Packet dropped by network pattern
@@ -1052,51 +1054,69 @@ impl QueueModule {
                 }
             }
         
-        let processed_packets = self.queue_network_emulator.process_emu_queued_packets(context);
-        if !processed_packets.is_empty(){
-            {debug_bgprint!(DebugColor::Azure, "{} - [DBG PROCESS NETEM] Processed packets:", format_elapsed!(now));}
-            // for mut packet in processed_packets.clone() {
-            //     debug_bgprint!(DebugColor::Azure, "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 ); 
-            // }
-            self.process_transmitted_packets(processed_packets, context).await;
-       
-        }
+
     }
 
+    pub fn self_scheduled_emu_queue_tx<'a>(&'a mut self, _: (), context: &'a Context<Self>) -> impl Future<Output=()> + Send + 'a {
+        async move {
+            let now = context.scheduler.time(); 
+            let processed_packets = self.queue_network_emulator.process_emu_queued_packets(context);
+            if !processed_packets.is_empty(){
+
+                let mut min_delay_self_schedule = now.checked_add(Duration::from_micros(50)).unwrap();         
+                for packet in processed_packets.clone(){
+                    if let Some(low_delay) = packet.emulated_added_delay_deadline{
+                        min_delay_self_schedule = min_delay_self_schedule.max(low_delay); 
+                        println!("Now: {} -> low_delay = {}, min = {}",format_elapsed!(now), format_elapsed!(low_delay), format_elapsed!(min_delay_self_schedule)); 
+                    }
+                    println!("[Self-scheduled TX] Min is {}", format_elapsed!(min_delay_self_schedule)); 
+                }
+                
+                if !processed_packets.is_empty(){
+                    {debug_bgprint!(DebugColor::Azure, "{} - [DBG PROCESS NETEM] Processed packets:", format_elapsed!(now));}
+                    // for mut packet in processed_packets.clone() {
+                    //     debug_bgprint!(DebugColor::Azure, "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 ); 
+                    // }
+                    self.process_transmitted_packets(processed_packets).await;
+                }
+        
+                let delay_to_schedule = min_delay_self_schedule.duration_since(now); 
+                
+                context.scheduler.schedule_event(delay_to_schedule, QueueModule::self_scheduled_emu_queue_tx, ()).unwrap(); 
+            }
+            else{
+                // print!(".");  
+            }
+             
+        }
+       
+    }
         // New helper method to process transmitted packets
-    async fn process_transmitted_packets(&mut self, packets: Vec<MpduPacket>, context: &Context<Self>) {
+    async fn process_transmitted_packets(&mut self, packets: Vec<MpduPacket>) {
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
         // let id = packet.packet_id.clone(); 
         // let packet_arg = packet.clone(); 
-        // debug_print!(DebugColor::DarkBlue, "Processing packet from netem", ); 
+        debug_print!(DebugColor::DarkBlue, "Processing packet from netem", ); 
         for packet in packets{
             // If can't add to AMPDU, add to queue
             let id = packet.packet_id.clone(); 
-            debug_bgprint!(DebugColor::Azure, "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 ); 
+            debug_bgprint!(DebugColor::Azure, "\t\t[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})", packet.packet_id,  packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 ); 
 
             if self.queue.len() < self.queue_maxsize {
                 self.queue.push_back(packet.clone());
                 
-                // debug_bgprint!(DebugColor::DarkBlue, "Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count - 1 );                
+                debug_bgprint!(DebugColor::DarkBlue, "Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count - 1 );                
             } else {
                 self.blocked_packet_counter += 1;
                 debug_bgprint!(
                     DebugColor::Red,
-                    "{} [DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
-                    format_elapsed!(context.scheduler.time()),
+                    "[DBG FULL QUEUE] Packet {} DROPPED!! , Q_size = {:2.0}",
                     id, 
                     self.queue.len()
                 );
             }
-        }
-         // If this is the first packet and no packet is being served, start service
-         if self.queue.len() >= 1 && !self.packet_being_served {
-            self.deque_schedule_service((), context).await;
-        }
-    
-    
-    
+        } 
     }
 
     // // New method to try adding packet to current AMPDU
@@ -1182,7 +1202,7 @@ impl QueueModule {
             packet.queue_in_instant = now;
             self.queue.push_back(packet.clone());
 
-            // debug_print!(
+            // debug_bgprint!(
             //     DebugColor::Green,
             //     "{} [DBG QUEUE] -Packet {} arrives from STA{} destined to STA{}, Q_size = {:2.0}",
             //     format_elapsed!(now),
@@ -1342,7 +1362,7 @@ impl QueueModule {
                             current_packet.sta_src_coords,
                             P_TX,
                         );
-                        println!("RESULTZ {} frame {} shard {}/{} ", resultz.service_delay, current_packet.header_alvr.next_packet_index, current_packet.header_alvr.shard_index, current_packet.header_alvr.shards_count - 1); 
+                        // println!("RESULTZ {} frame {} shard {}/{} ", resultz.service_delay, current_packet.header_alvr.next_packet_index, current_packet.header_alvr.shard_index, current_packet.header_alvr.shards_count - 1); 
 
                         if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
                             println!("BREAKOUTTTT!!!!"); 
@@ -1383,7 +1403,7 @@ impl QueueModule {
                 }
 
                 if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
-                    println!("ITERATING!! delay is: {}",  resultz.service_delay ); 
+                    // println!("ITERATING!! delay is: {}",  resultz.service_delay ); 
                     for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut(){
                         packet.T_s = Duration::from_secs_f64(resultz.service_delay); 
                     }
