@@ -52,8 +52,8 @@ pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        let msg = format!($fmt, $($arg)*);
-        println!("{}", $color.to_background_fn()(msg));
+        // let msg = format!($fmt, $($arg)*);
+        // println!("{}", $color.to_background_fn()(msg));
         
     };
 }

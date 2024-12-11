@@ -27,7 +27,7 @@ use crate::lib::{
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
 
-pub const MAX_EMULATED_QUEUE_PACKETS: usize =  1000; 
+pub const MAX_EMULATED_QUEUE_PACKETS: usize =  100000; 
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6; 
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0; 
 // Steps of emulated bandwidth 
@@ -415,10 +415,9 @@ impl QueueMechanism {
         let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap(); 
 
 
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1E3, BANDWIDTH_LIMIT_S1, valid_from, valid_until));
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1E3, BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(1E3, BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
-
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
         let bandwidth_limit = BANDWIDTH_LIMIT_S1; 
 
         Self {
@@ -657,13 +656,13 @@ impl NetworkPatternEmulator {
 
                     if self.debug_counter >= 1{
                         debug_bgprint!(DebugColor::DarkBlue, 
-                        "{:4.9} [DBG NETEM ({:.5} -> {:.5})] BW bucket -> ΔT: {} - [DBG]Δt2 : {}, BW: {}| refill: {} Mb, available: {:.5} Mbps, packet cost: {:.5} Mb | (ALVR F_id: {} -  {}/{})" , 
+                        "{:4.9} [DBG NETEM ({:.5} -> {:.5})] BW bucket -> ΔT: {} - [DBG]Δt2 : {}, BW: {} Mbps| refill: {} Mb, available: {:.5} Mbps, packet cost: {:.5} Mb | (ALVR F_id: {} -  {}/{})" , 
                         format_elapsed!(current_time),
                         format_elapsed!(valid_from),
                         format_elapsed!(valid_until),
                         time_delta.as_secs_f64(), 
                         time_delta_dbg.as_secs_f64(),
-                        bandwidth_limit_bps_parent, 
+                        bandwidth_limit_bps_parent / 1e6, 
                         refilled_tokens/1e6,
                         new_tokens / 1e6,
                         packet_tokens/1e6,
@@ -682,7 +681,8 @@ impl NetworkPatternEmulator {
                         // Calculate delay needed to accumulate enough tokens
                         let tokens_needed = packet_tokens - new_tokens;
                         let delay_seconds = tokens_needed / *token_refill_rate;
-                        // *current_tokens = 0.0; 
+                        // println!("Tokens needed: packet({}) - new({}) =  {} -> Delay = {} ", packet_tokens, new_tokens, tokens_needed , delay_seconds); 
+                        *current_tokens = new_tokens - packet_tokens; 
                         return Some(Duration::from_secs_f64(delay_seconds))
                     }
                 },
