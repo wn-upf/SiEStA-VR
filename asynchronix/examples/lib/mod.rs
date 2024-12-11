@@ -883,8 +883,8 @@ impl MpduPacket {
         }
     }
 
-    pub fn print(&self) {
-        println!("Packet ID: {}, L: {}", self.packet_id, self.length_packet);
+    pub fn print(&self, color: DebugColor) {
+        debug_bgprint!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
     }
 }
 #[derive(Debug, Clone)]
@@ -926,11 +926,11 @@ impl AmpduPacket {
                 packet.header_alvr
 
             );
-            // i +=1; 
-            // if i >10 {
-            //     println!( "\x1b[33m\t..."); 
-            //     break; 
-            // }
+            i +=1; 
+            if i >10 {
+                println!( "\x1b[33m\t..."); 
+                break; 
+            }
         }
     }
 

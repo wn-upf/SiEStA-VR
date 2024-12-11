@@ -442,7 +442,7 @@ impl XRServer {
 
                                 debug_print!(
                                     DebugColor::DarkGreen,
-                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {} ||\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------",
+                                    "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {}",
                                     packet_length,
                                     str_id,
                                     next_packet_index,
@@ -1243,8 +1243,10 @@ impl STA_extended {
 
     pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         // do everything else to the packet:
+        
+        packet.length_packet = (packet.header_alvr.packet_length + 100) as usize;
+        // println!("Length packet XR {}", packet.length_packet); 
 
-        packet.length_packet = packet.header_alvr.packet_length as usize;
         packet.packet_id = self.num_packets_sent;
 
         packet.sta_src_id = self.sta_id;

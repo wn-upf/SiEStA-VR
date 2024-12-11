@@ -46,11 +46,13 @@ use crate::lib::models_XR::{STA_extended, XRClient, XRServer, SinkVideo_XR};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
 
-fn main() {
+fn main() { 
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
     // std::env::set_var("RUST_BACKTRACE", "full");
     // READ COMMAND-LINE ARGUMENTS
     let args: Vec<String> = env::args().collect();
+
+
     if args.len() != 9 {
         eprintln!(
             "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate> <PL_prob>",
