@@ -57,6 +57,7 @@ tokio = { version = "1.0", features=["net", "rt-multi-thread"], optional = true 
 tonic = { version = "0.12", default-features = false, features=["codegen", "prost", "server"], optional = true }
 tracing = { version= "0.1.40", default-features = false, features=["std"], optional = true }
 tracing-subscriber = { version= "0.3.18", optional = true }
+xkbcommon = "0.8.0"
 
 [dev-dependencies]
 atomic-wait = "1.1"
@@ -78,6 +79,8 @@ crossbeam = "0.8.4"
 dashmap = "6.1.0"
 ffmpeg-next = "6.0"
 image = "0.24"
+sdl2 = "0.35"
+minifb = "0.22"
 
 [target.'cfg(asynchronix_loom)'.dev-dependencies]
 loom = "0.5"
