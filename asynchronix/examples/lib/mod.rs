@@ -9,7 +9,7 @@ use tai_time::TaiTime;
 
 use rand::Rng;
 use std::time::{Duration, Instant};
-
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};  
@@ -52,9 +52,8 @@ pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // Check if debugging is enabled
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_background_fn()(msg));
         
     };
 }
@@ -835,6 +834,24 @@ pub struct HeaderALVRStream {
     pub tx_instant: f32,
 }
 
+// Implementing Display for HeaderALVRStream
+impl fmt::Display for HeaderALVRStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.next_packet_index == 0{
+            write!(f, "") 
+        }
+        else{
+            write!(
+                f,
+                "(ALVR F: {}, S: {}/{})",
+                self.next_packet_index,
+                self.shard_index,
+                self.shards_count - 1
+            )
+        }
+        
+    }
+}
 #[derive(Debug, Clone)]
 pub struct MpduPacket {
     pub packet_id: usize,
@@ -919,7 +936,7 @@ impl AmpduPacket {
         let mut i = 0; 
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.8}, T_s: {:.8}, {:?} \x1b[0m",
+                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.8}, T_s: {:.8}, {} \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64(),
                 packet.T_s.as_secs_f64(), 
