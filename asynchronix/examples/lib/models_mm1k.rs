@@ -32,13 +32,13 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize =  100000;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0; 
 // Steps of emulated bandwidth 
 pub const STEP1_TBEGIN :u64 = 20; 
-pub const STEP1_TEND   :u64 = 40; 
+pub const STEP1_TEND   :u64 = 30; º
 
-pub const STEP2_TBEGIN :u64 = 50; 
-pub const STEP2_TEND   :u64 = 70;
+pub const STEP2_TBEGIN :u64 = 40; 
+pub const STEP2_TEND   :u64 = 50;
 
-pub const STEP3_TBEGIN :u64 = 80; 
-pub const STEP3_TEND   :u64 = 100; 
+pub const STEP3_TBEGIN :u64 = 60; 
+pub const STEP3_TEND   :u64 = 70; 
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 100E6; 
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6; 
