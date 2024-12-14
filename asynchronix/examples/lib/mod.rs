@@ -59,6 +59,14 @@ macro_rules! debug_bgprint {
 }
 
 #[macro_export]
+macro_rules! print_pretty {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_background_fn()(msg));
+    };
+}
+
+#[macro_export]
 macro_rules! debug_print {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // Check if debugging is enabled

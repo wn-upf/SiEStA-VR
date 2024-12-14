@@ -4,8 +4,19 @@ use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvE
 #[allow(unused_imports)]
 #[allow(dead_code)]
 
+use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+
+use ffmpeg_sidecar::{
+    command::FfmpegCommand,
+    event::{FfmpegEvent, LogLevel},
+  };
+  
+
 use crate::lib::{DEBUG_PRINT_ENABLED}; 
 
+pub const WIDTH_ENCODER : u32  = 640;
+pub const HEIGHT_DECODER : u32 = 320; 
 use crate::{debug_bgprint, format_elapsed}; 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100); 
 pub const MAX_DEADLINE_IN_STATS: usize = 10; 
@@ -1656,10 +1667,10 @@ impl<H> StreamSender<H> {
 }
 
 impl<H: Serialize> StreamSender<H> {
-    pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32) -> Result<Buffer<H>> {
+    pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32, now: TaiTime<0>) -> Result<Buffer<H>> {
         // let mut buffer = generate_random_video_payload(current_bitrate_mbps);
-        let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
-
+        // let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
+        let mut buffer = generate_sample_ffmpeg(current_bitrate_mbps, now); 
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
@@ -1682,7 +1693,7 @@ impl<H: Serialize> StreamSender<H> {
 
     pub fn send_header(&mut self, header: &H, now:TaiTime<0> ) -> Result<()> {
 
-        let buffer = self.get_buffer_emu(header, 20.0 as f32)?;
+        let buffer = self.get_buffer_emu(header, 20.0 as f32, now)?;
 
         println!("WATCHOUT, using 20 as default!!");
         self.send(buffer, now)
@@ -1840,6 +1851,47 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
 
     buffer_inner
 }
+
+
+pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, now: TaiTime<0>) -> Vec<u8> {
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4"; 
+
+    let timestamp = now.duration_since(TaiTime::EPOCH); 
+    // Spawn the FFmpeg process to output encoded video frame
+    let stri = format!("{:.5}", timestamp.as_secs_f64()); // Ensures seconds as integer
+
+    let mut ffmpeg = match FfmpegCommand::new()
+        .args([
+            "-hwaccel", "cuda",                // Use CUDA acceleration for encoding
+            "-ss", &stri, // Seek to the timestamp
+            "-i", input_path,                 // Input file
+            "-c:v", "hevc_nvenc",             // Use NVIDIA H.265 encoder
+            "-b:v", &format!("{}M", current_bitrate_mbps), // Set bitrate
+            "-frames:v", "1",                 // Process a single frame
+            "-f", "hevc",                     // Output format (H.265 bitstream)
+            "-an",                            // Disable audio
+            "-"],                             // Output to stdout
+        )
+        .size(WIDTH_ENCODER, HEIGHT_DECODER)
+        .spawn(){ Ok(cmd) => cmd,
+            Err(e) => {
+                eprintln!("Failed to spawn FFmpeg: {}", e);
+                return Vec::new();
+            }
+        };
+    let mut ffmpeg_stdout = ffmpeg.take_stdout().unwrap(); 
+    
+    let buf = &mut [0u8; 5E5 as usize]; 
+    
+    let n = ffmpeg_stdout.read(buf).unwrap(); 
+    let mut encoded_frame = Vec::new(); 
+    encoded_frame.write_all(&buf[..n]).unwrap(); 
+    
+    println!("Wrote {} bytes to the video frame out of buf {} ", n, buf.len()); 
+    encoded_frame
+
+}
+
 
 pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Initialize the random number generator

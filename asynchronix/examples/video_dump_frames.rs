@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_path = "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/output_video.mp4";
     let temp_frame_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/frames/";
 
-    let max_timestamp = 10; 
+    let max_timestamp = 60; 
     // Check if input file exists
     if !PathBuf::from(input_path).exists() {
         return Err("Input file does not exist.".into());
@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     .arg("-c:v")
     .arg("libx265")  // Video codec (e.g., H.265)
     .arg("-b:v")
-    .arg("100M")  // Set the video bitrate (e.g., 100 Mbps)
+    .arg("10K")  // Set the video bitrate (e.g., 100 Mbps)
     .arg("-preset")
     .arg("fast")  // Encoding preset (fast, medium, slow)
     .arg("-y")  // Overwrite output file without asking

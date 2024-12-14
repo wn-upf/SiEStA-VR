@@ -3,6 +3,14 @@ use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
+use std::{
+    io::{Read, Write},
+    process::{Command, Stdio},
+};
+use minifb::{Window, WindowOptions};
+use std::{fs::File, thread};
+
+use ffmpeg_sidecar::command::FfmpegCommand;
 use crate::debug_print;
 use crate::format_elapsed;
 use crate::lib::HeaderALVRStream;
@@ -10,9 +18,10 @@ use crate::lib::HeaderALVRStream;
 // use std::intrinsics::size_of;
 use serde::{de::DeserializeOwned, Serialize};
 use crate::debug_bgprint;
+use crate::print_pretty; 
 use core::net;
 use std::fmt::Debug;
-use std::mem;
+use std::{mem, vec};
 use std::net::IpAddr;
 // use std::process::Output;
 use std::sync::{Arc, Mutex};
@@ -517,7 +526,7 @@ impl XRServer {
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
-                        .get_buffer_emu(&header, current_bitrate_mbps)
+                        .get_buffer_emu(&header, current_bitrate_mbps, now)
                         .unwrap();
                 
 
@@ -870,72 +879,106 @@ impl XRClient {
                 //     }
                 // }
             }
-            //// TODO IN THE FUTURE? :)
-            // periodically request an IDR frame using the settings' client_idr_refresh_interval_ms
-            // if settings.connection.idr_periodic_bool {
-            //     if Instant::now()
-            //         .saturating_duration_since(last_instant_IDR_client)
-            //         .as_secs_f32()
-            //         >= interval_IDR_seconds_f32
-            //     {
-            //         if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //             sender.send(&ClientControlPacket::RequestIdr).ok();
-            //         }
-            //         last_instant_IDR_client = Instant::now();
-            //     }
-            // }
-
-            // if header.is_idr {
-            //     stream_corrupted = false;
-            // } else if data.had_packet_loss() {
-            //     stream_corrupted = true;
-            //     if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //         sender.send(&ClientControlPacket::RequestIdr).ok();
-            //     }
-            //     warn!(
-            //         "Network skipped {} video packets",
-            //         data.get_frames_skipped()
-            //     );
-            // }
-            // if !stream_corrupted || !settings.connection.avoid_video_glitching {
-            //     if !decoder::push_nal(header.timestamp, nal) {
-            //         stream_corrupted = true;
-            //         if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //             sender.send(&ClientControlPacket::RequestIdr).ok();
-            //         }
-            //         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            //             stats.report_video_packet_dropped(data.get_frame_index());
-            //         }
-            //         warn!(
-            //             "Dropped video packet {}. Reason: Decoder saturation",
-            //             data.get_frame_index()
-            //         );
-            //         frames_dropped += 1;
-            //     } else {
-            //         // frame is decoded correctly
-            //         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            //             stats.report_video_packet_data(
-            //                 header.timestamp,
-            //                 data.get_frame_index(),
-            //                 frames_dropped,
-            //             );
-            //         }
-            //         frames_dropped = 0;
-            //     }
-            // } else {
-            //     if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //         sender.send(&ClientControlPacket::RequestIdr).ok();
-            //     }
-            //     if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            //         stats.report_video_packet_dropped(data.get_frame_index());
-            //     }
-            //     warn!(
-            //         "Dropped video packet {}. Reason: Waiting for IDR frame",
-            //         data.get_frame_index()
-            //     );
-            //     frames_dropped += 1;
+           
         }
     }
+       
+    fn decode_and_display_frame(frame: Vec<u8>) {
+        // Assuming the frame is RGB24, the width and height are extracted from the input video
+        let width = 1920;
+        let height = 1080;
+
+        // Ensure the frame data is the correct size (width * height * 3 for RGB24)
+        if frame.len() != (width * height * 3) {
+            eprintln!("Error: Frame data size ({}) does not match expected size ({}).", frame.len(), (width * height * 3) );
+            return;
+        }
+
+        // Create the window using minifb
+        let mut window = Window::new(
+            "Video Frame", 
+            width as usize, height as usize, 
+            WindowOptions {
+                scale: minifb::Scale::X1,  // No scaling, 1:1 pixel ratio
+                ..WindowOptions::default()
+            })
+            .unwrap_or_else(|e| {
+                panic!("Window creation failed: {}", e);
+            });
+
+        // Set the window buffer with the frame data
+        let mut buffer: Vec<u32> = Vec::with_capacity(width * height);
+        
+        for chunk in frame.chunks(3) {
+            // Convert RGB24 (u8) to RGBA (u32), as minifb uses 32-bit color values
+            if chunk.len() == 3 {
+                let r = chunk[0] as u32;
+                let g = chunk[1] as u32;
+                let b = chunk[2] as u32;
+                let rgba = (r << 16) | (g << 8) | b;
+                buffer.push(rgba);
+            }
+        }
+
+        // Update the window with the new frame
+        window.update_with_buffer(&buffer, width as usize, height as usize)
+            .unwrap();
+
+        // Wait a little before showing the next frame, you can adjust the duration
+        // std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    
+    pub fn convert_rgb_to_u32(rgb: &[u8], width: usize, height: usize) -> Vec<u32> {
+        let mut buffer = Vec::with_capacity(width * height);
+    
+        for y in 0..height {
+            for x in 0..width {
+                let r = rgb[(y * width + x) * 3] as u32;
+                let g = rgb[(y * width + x) * 3 + 1] as u32;
+                let b = rgb[(y * width + x) * 3 + 2] as u32;
+                let a = 255u32; // Assume full alpha for RGB to RGBA conversion
+                buffer.push((a << 24) | (r << 16) | (g << 8) | b); // ARGB format
+            }
+        }
+    
+        buffer
+    }
+    
+    // Function to convert YUV420p to RGB
+    pub fn yuv420_to_rgb(yuv: &[u8], width: usize, height: usize) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(width * height * 3);
+
+        let y_size = width * height;
+        let uv_size = (width / 2) * (height / 2);
+
+        let y_plane = &yuv[0..y_size];
+        let u_plane = &yuv[y_size..y_size + uv_size];
+        let v_plane = &yuv[y_size + uv_size..];
+
+        for i in 0..height {
+            for j in 0..width {
+                let y_index = i * width + j;
+                let u_index = ((i / 2) * (width / 2)) + (j / 2);
+                let v_index = ((i / 2) * (width / 2)) + (j / 2);
+
+                let y = y_plane[y_index] as f32;
+                let u = u_plane[u_index] as f32 - 128.0;
+                let v = v_plane[v_index] as f32 - 128.0;
+
+                // RGB conversion formula
+                let r = (y + 1.402 * v).max(0.0).min(255.0) as u8;
+                let g = (y - 0.344136 * u - 0.714136 * v).max(0.0).min(255.0) as u8;
+                let b = (y + 1.772 * u).max(0.0).min(255.0) as u8;
+
+                rgb.push(r);
+                rgb.push(g);
+                rgb.push(b);
+            }
+        }
+
+        rgb
+    }
+
 
     pub fn vsync<'a>(
         &'a mut self,
@@ -947,19 +990,29 @@ impl XRClient {
             let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
 
             if let Some(video_frame) = self.decoder_queue.pop(){
+                let subsample = video_frame[0..10].to_vec(); 
+
                 if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant){
-                    debug_bgprint!(DebugColor::Violet, "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {} , data: {:?}", 
+                    
+                    // TODO: ACTUALLY DECODE VIDEO AND SHOW IT!!
+
+                    // let frame = XRClient::decode_video_frame(video_frame.clone(), 1920, 1080); 
+                    // XRClient::display_frame(frame); 
+                    XRClient::decode_and_display_frame(video_frame.clone()); 
+                    print_pretty!(DebugColor::Violet,
+                        // println!(
+                        "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
                         self.decoder_queue.len(),
                         interarrival.as_secs_f32(),
                         self.decoder_queue.ok_dequed_frame_counter,
                         self.decoder_queue.dropped_frame_counter,
-                        &video_frame[0..10], ); 
+                        &video_frame[0..50], ); 
                 }
                 else{eprint!("?? VSYNC ??? " );}
                 
                 
                 self.last_decoded_frame_instant = now; 
-                self.out_video_decoded.send(video_frame).await;  
+                self.out_video_decoded.send(subsample).await;  
 
             // self.output_statistics.send(stats);
             }
