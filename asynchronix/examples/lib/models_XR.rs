@@ -2,13 +2,21 @@ use crate::lib::alvr_control_socket::{framed_recv, framed_recv_vec, ControlSocke
 use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-
 use std::{
     io::{Read, Write},
-    process::{Command, Stdio},
+    process::{Stdio},
+    fs::write, 
 };
+use std::fs; 
+use tempfile::{NamedTempFile, Builder};
+use std::error::Error;
+use std::process::Command;
+
+
+use futures::io::{AsyncWriteExt, AsyncReadExt};
+
 use minifb::{Window, WindowOptions};
-use std::{fs::File, thread};
+use std::{fs::File, thread, write};
 
 use ffmpeg_sidecar::command::FfmpegCommand;
 use crate::debug_print;
@@ -30,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use std::time::SystemTime;
 use dashmap::DashMap;
-
+use minifb::Scale; 
 
 use once_cell::sync::Lazy;
 
@@ -51,6 +59,11 @@ use crate::lib::alvr_stream_socket::{
     AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
 };
 use crate::lib::DEBUG_PRINT_ENABLED;
+
+
+pub const WIDTH_ENCODER : usize = 1920;
+pub const HEIGHT_ENCODER: usize = 1080;
+
 
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -715,6 +728,8 @@ pub struct XRClient {
 
     pub streamsocket_clone: Option<StreamSocket>,
 
+    // pub visualize_decoder_window: Option<Window>, 
+
 }
 
 impl XRClient {
@@ -735,6 +750,7 @@ impl XRClient {
             frames_dropped_counter: 0,
             server_ip,
             streamsocket_clone: None,
+            // visualize_decoder_window: None, 
         }
     }
 
@@ -762,6 +778,7 @@ impl XRClient {
         let mut packetz = MpduPacket::new();
         packetz.data_inner = buffer[0..packet_size].to_vec();
         packetz.header_alvr.stream_id = CONTROL_STREAM;
+        packetz.header_alvr.next_packet_index = 2; 
         
         context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_app_network_send , packetz).unwrap(); 
         Ok(())
@@ -777,6 +794,7 @@ impl XRClient {
         let pack = packet.clone(); 
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
+                println!("sending stats packet!"); 
                 let result = Self::framed_send(self, &pack, context).await;
                 // println!("result of output control: {:?}", result); 
             }
@@ -864,14 +882,17 @@ impl XRClient {
                     context.scheduler.schedule_event(Duration::from_nanos(10), Self::output_control, ClientControlPacket::NetworkStatistics(net)).unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
-                    let Ok((_header, nal)) = data.get() else {
+                    let Ok((nal)) = data.get() else {
                         println!("UNABLE TO GET HEADER NAL? ");
                         return;
                     };
                     let sized_vec = nal[..20.min(nal.len())].to_vec();
 
                     debug_print!(DebugColor::Gold, "[DEBUG DECODE] NAL first 20 bytes: {:?}", sized_vec); 
+                    
+                    
                     self.decoder_queue.push(nal.to_vec());
+                    
                     ()
                 }
                 // if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
@@ -882,68 +903,31 @@ impl XRClient {
            
         }
     }
-       
-    fn decode_and_display_frame(frame: Vec<u8>) {
-        // Assuming the frame is RGB24, the width and height are extracted from the input video
-        let width = 1920;
-        let height = 1080;
+   
 
-        // Ensure the frame data is the correct size (width * height * 3 for RGB24)
-        if frame.len() != (width * height * 3) {
-            eprintln!("Error: Frame data size ({}) does not match expected size ({}).", frame.len(), (width * height * 3) );
-            return;
+   
+    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> {
+        if rgb_data.len() != width * height * 3 {
+            eprintln!(
+                "Unexpected RGB data length. Expected {}, got {}",
+                width * height * 3,
+                rgb_data.len()
+            );
+            return Vec::new();
         }
 
-        // Create the window using minifb
-        let mut window = Window::new(
-            "Video Frame", 
-            width as usize, height as usize, 
-            WindowOptions {
-                scale: minifb::Scale::X1,  // No scaling, 1:1 pixel ratio
-                ..WindowOptions::default()
-            })
-            .unwrap_or_else(|e| {
-                panic!("Window creation failed: {}", e);
-            });
-
-        // Set the window buffer with the frame data
-        let mut buffer: Vec<u32> = Vec::with_capacity(width * height);
-        
-        for chunk in frame.chunks(3) {
-            // Convert RGB24 (u8) to RGBA (u32), as minifb uses 32-bit color values
-            if chunk.len() == 3 {
+        rgb_data
+            .chunks_exact(3)
+            .map(|chunk| {
                 let r = chunk[0] as u32;
                 let g = chunk[1] as u32;
                 let b = chunk[2] as u32;
-                let rgba = (r << 16) | (g << 8) | b;
-                buffer.push(rgba);
-            }
-        }
-
-        // Update the window with the new frame
-        window.update_with_buffer(&buffer, width as usize, height as usize)
-            .unwrap();
-
-        // Wait a little before showing the next frame, you can adjust the duration
-        // std::thread::sleep(std::time::Duration::from_millis(1));
+                (r << 16) | (g << 8) | b
+            })
+            .collect()
     }
-    
-    pub fn convert_rgb_to_u32(rgb: &[u8], width: usize, height: usize) -> Vec<u32> {
-        let mut buffer = Vec::with_capacity(width * height);
-    
-        for y in 0..height {
-            for x in 0..width {
-                let r = rgb[(y * width + x) * 3] as u32;
-                let g = rgb[(y * width + x) * 3 + 1] as u32;
-                let b = rgb[(y * width + x) * 3 + 2] as u32;
-                let a = 255u32; // Assume full alpha for RGB to RGBA conversion
-                buffer.push((a << 24) | (r << 16) | (g << 8) | b); // ARGB format
-            }
-        }
-    
-        buffer
-    }
-    
+
+
     // Function to convert YUV420p to RGB
     pub fn yuv420_to_rgb(yuv: &[u8], width: usize, height: usize) -> Vec<u8> {
         let mut rgb = Vec::with_capacity(width * height * 3);
@@ -979,6 +963,58 @@ impl XRClient {
         rgb
     }
 
+  
+pub fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>) -> Vec<u32> {
+    fs::write("encoded_frame.hevc", &encoded_buffer).unwrap();
+    print_pretty!(
+        DebugColor::Turquoise,
+        "Decoded frame size: {} bytes ({} KB)\nData = {:?}",
+        encoded_buffer.len(),
+        encoded_buffer.len() / 1024, 
+        &encoded_buffer[..200]
+    );
+    
+   let mut ffmpeg = Command::new("ffmpeg")
+    .args([
+        "-loglevel", "debug", // Keep for debugging
+        "-c:v", "hevc",       // Use generic HEVC decoder
+        "-i", "pipe:0",           // Read from stdin
+        "-pix_fmt", "rgb24",
+        "-f", "rawvideo",   // Output raw RGB24
+        "-vf", &format!("scale={}:{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+        "-",                // Output to stdout
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn().unwrap();
+    {
+        let mut stdin = ffmpeg.stdin.take().unwrap();
+        stdin.write_all(&encoded_buffer).unwrap();
+    }
+    let mut buf: Vec<u8> = Vec::new();
+
+    let read_result = ffmpeg.stdout.take().unwrap().read_to_end(&mut buf);
+    
+    match read_result {
+        Ok(n) => {
+            println!("Decoded frame data length: {}", n);
+            
+            if buf.is_empty() {
+                eprintln!("Warning: Decoded frame is empty");
+                return Vec::new();
+            }
+
+            // Convert to u32 buffer for minifb
+            XRClient::convert_rgb_to_u32(&buf, WIDTH_ENCODER,HEIGHT_ENCODER)
+        },
+        Err(e) => {
+            eprintln!("Error reading FFmpeg output: {}", e);
+            Vec::new()
+        }
+    }
+}
+
 
     pub fn vsync<'a>(
         &'a mut self,
@@ -996,9 +1032,26 @@ impl XRClient {
                     
                     // TODO: ACTUALLY DECODE VIDEO AND SHOW IT!!
 
-                    // let frame = XRClient::decode_video_frame(video_frame.clone(), 1920, 1080); 
                     // XRClient::display_frame(frame); 
-                    XRClient::decode_and_display_frame(video_frame.clone()); 
+                    let frame = XRClient::decode_hevc_to_rgb(video_frame.clone()); 
+                    
+
+                    // let mut window = Window::new(
+                    //     "FFmpeg Video Stream",
+                    //     WIDTH_ENCODER,
+                    //     HEIGHT_ENCODER,
+                    //     WindowOptions {
+                    //         scale: Scale::X2,
+                    //         ..WindowOptions::default()
+                    //     },
+                    // )
+                    // .expect("Unable to create window");
+
+                    // window.
+                    //     update_with_buffer(&frame, WIDTH_ENCODER,HEIGHT_ENCODER)
+                    //     .unwrap();
+
+                   
                     print_pretty!(DebugColor::Violet,
                         // println!(
                         "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
@@ -1234,6 +1287,8 @@ pub struct STA_extended {
     pub does_sta_tx: bool,
 
     pub t_0: TaiTime<0>,
+    pub is_BG: bool, 
+
 }
 
 impl STA_extended {
@@ -1246,6 +1301,7 @@ impl STA_extended {
         does_sta_transmit: bool,
         rate_service_bps: f64,
         t0_sim: TaiTime<0>,
+        is_BG: bool, 
     ) -> Self {
         let arrival_rate_BG = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps / mean_length;
@@ -1269,6 +1325,7 @@ impl STA_extended {
             received_packet_counter: 0,
             does_sta_tx: does_sta_transmit,
             t_0: t0_sim,
+            is_BG, 
         }
     }
 
@@ -1365,7 +1422,7 @@ impl STA_extended {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            if self.does_sta_tx {
+            if self.is_BG {
                 // if STA is "TX type"         (and not "RX only")
 
                 let mut packet = MpduPacket::new();

@@ -13,10 +13,13 @@ use ffmpeg_sidecar::{
   };
   
 
-use crate::lib::{DEBUG_PRINT_ENABLED}; 
 
-pub const WIDTH_ENCODER : u32  = 640;
-pub const HEIGHT_DECODER : u32 = 320; 
+static mut COUNTER_FIBONACCI: usize = 0; 
+
+
+use crate::{lib::DEBUG_PRINT_ENABLED, print_pretty}; 
+
+
 use crate::{debug_bgprint, format_elapsed}; 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100); 
 pub const MAX_DEADLINE_IN_STATS: usize = 10; 
@@ -39,6 +42,8 @@ use crate::debug_print;
 use crate::lib::models_XR::{
     XRDevice,
     XRServer, // ,XRClient
+    HEIGHT_ENCODER,
+    WIDTH_ENCODER, 
 };
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
@@ -661,17 +666,26 @@ impl<H> ReceiverData<H> {
 }
 
 impl<H: DeserializeOwned> ReceiverData<H> {
-    pub fn get(&self) -> Result<(H, &[u8])> {
+    pub fn get(&self) -> Result<(&[u8])> {
         // println!("[DBG get data]" ); 
-        let mut data: &[u8] = &self.buffer.as_ref().unwrap()[SHARD_PREFIX_SIZE..self.size];
-        // This will partially consume the slice, leaving only the actual payload
-        let header = bincode::deserialize_from(&mut data)?;
+        let mut data: &[u8] = &self.buffer.as_ref().unwrap()[(SHARD_PREFIX_SIZE + 13)..self.size];
 
-        Ok((header, data))
+        print_pretty!(
+            DebugColor::Purple,
+            "\t[CLIENT DCD ] .get() at client frame size: {} bytes ({} KB)\nData = {:?}",
+            data.len(),
+            data.len() / 1024, 
+            &data[..200]
+        );
+        // This will partially consume the slice, leaving only the actual payload
+        // match header = bincode::deserialize_from(&mut data){
+
+
+        Ok(( data))
     }
-    pub fn get_header(&self) -> Result<H> {
-        Ok(self.get()?.0)
-    }
+    // pub fn get_header(&self) -> Result<H> {
+    //     Ok(self.get()?.0)
+    // }
 }
 #[derive(Clone)]
 pub struct StreamReceiver<H> {
@@ -1483,7 +1497,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
         //     .handle_try_again()?;
 
         let packet = self.packet_receiver.try_recv().handle_try_again()?;  
-        debug_print!(DebugColor::DarkOrange, "[DBG StreamReceiver] Reconstructed frame {}", packet.frame_index);
+        print_pretty!(DebugColor::DarkOrange, "[DBG StreamReceiver] Reconstructed frame {}, buffer: L = header+data:{}, data {},\nData = {:?}", packet.frame_index, packet.buffer.len() ,packet.buffer.len() - SHARD_PREFIX_SIZE - 13,&packet.buffer[(SHARD_PREFIX_SIZE + 13)..( 200 + SHARD_PREFIX_SIZE ) ] );
 
         self.frame_interarrival += packet.frame_interarrival;
 
@@ -1669,20 +1683,38 @@ impl<H> StreamSender<H> {
 impl<H: Serialize> StreamSender<H> {
     pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32, now: TaiTime<0>) -> Result<Buffer<H>> {
         // let mut buffer = generate_random_video_payload(current_bitrate_mbps);
-        // let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
-        let mut buffer = generate_sample_ffmpeg(current_bitrate_mbps, now); 
+        let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
+        
+        // let mut buffer = generate_sample_ffmpeg(current_bitrate_mbps, now.duration_since(TaiTime::EPOCH).as_secs_f64(),INITIAL_FRAMERATE_FPS as f64); 
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
+        // print_pretty!(
+        //     DebugColor::Navy,
+        //     "[BEFORE] Get_buffer_emu frame size: {} bytes ({} KB)\nData = {:?}",
+        //     buffer.len(),
+        //     buffer.len() / 1024, 
+        //     &buffer[..200]
+        // );
 
         if buffer.len() < hidden_offset {
             buffer.resize(hidden_offset, 0);
         }
 
-        bincode::serialize_into(&mut buffer[SHARD_PREFIX_SIZE..hidden_offset], header)?;
+        // bincode::serialize_into(&mut buffer[SHARD_PREFIX_SIZE..hidden_offset], header)?;
         let buffer_len = buffer.len();
 
         self.next_packet_index += 1;
+
+        // print_pretty!(
+        //     DebugColor::Navy,
+        //     "\t[AFTEEER ]Get_buffer_emu frame size: {} bytes ({} KB)\nData = {:?}",
+        //     buffer.len(),
+        //     buffer.len() / 1024, 
+        //     &buffer[..200]
+        // );
+
+
         Ok(Buffer {
             inner: buffer,
             hidden_offset,
@@ -1841,6 +1873,15 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Generate the Fibonacci sequence
     let mut a: u8 = 0;
     let mut b: u8 = 1;
+    unsafe{
+
+        let s = COUNTER_FIBONACCI as u8; 
+        println!("*********COUNTER FIBONACCI = {} *********\n", s); 
+
+        buffer_inner.push(s);  // first byte is pseudo-counter of packet
+        COUNTER_FIBONACCI += 1; 
+    }
+
 
     for _ in 0..no_bytes_based_bitrate {
         buffer_inner.push(a); // Add the current value to the payload
@@ -1849,47 +1890,65 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
         b = next;
     }
 
+
+    print_pretty!(
+        DebugColor::Salmon,
+        "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
+        buffer_inner.len(),
+        buffer_inner.len() / 1024, 
+        &buffer_inner[..200]
+    );
+
     buffer_inner
 }
 
+pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
+    let hours = (timestamp / 3600.0) as u32;
+    let minutes = ((timestamp % 3600.0) / 60.0) as u32;
+    let seconds = timestamp % 60.0;
 
-pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, now: TaiTime<0>) -> Vec<u8> {
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4"; 
+    let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds - 10.0);
+    print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
 
-    let timestamp = now.duration_since(TaiTime::EPOCH); 
-    // Spawn the FFmpeg process to output encoded video frame
-    let stri = format!("{:.5}", timestamp.as_secs_f64()); // Ensures seconds as integer
-
-    let mut ffmpeg = match FfmpegCommand::new()
+    let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",                // Use CUDA acceleration for encoding
-            "-ss", &stri, // Seek to the timestamp
-            "-i", input_path,                 // Input file
-            "-c:v", "hevc_nvenc",             // Use NVIDIA H.265 encoder
-            "-b:v", &format!("{}M", current_bitrate_mbps), // Set bitrate
-            "-frames:v", "1",                 // Process a single frame
-            "-f", "hevc",                     // Output format (H.265 bitstream)
-            "-an",                            // Disable audio
-            "-"],                             // Output to stdout
-        )
-        .size(WIDTH_ENCODER, HEIGHT_DECODER)
-        .spawn(){ Ok(cmd) => cmd,
-            Err(e) => {
-                eprintln!("Failed to spawn FFmpeg: {}", e);
-                return Vec::new();
-            }
-        };
-    let mut ffmpeg_stdout = ffmpeg.take_stdout().unwrap(); 
-    
-    let buf = &mut [0u8; 5E5 as usize]; 
-    
-    let n = ffmpeg_stdout.read(buf).unwrap(); 
-    let mut encoded_frame = Vec::new(); 
-    encoded_frame.write_all(&buf[..n]).unwrap(); 
-    
-    println!("Wrote {} bytes to the video frame out of buf {} ", n, buf.len()); 
-    encoded_frame
+        "-hwaccel", "cuda",
+        "-ss", &formatted_timestamp,
+        "-i", input_path,
+        "-pix_fmt", "yuv420p",
+        "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+        "-c:v", "hevc_nvenc",
+        "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 / 30.0 * 1000.0),
+        "-frames:v", "1",
+        "-an",
+        "-f", "mp4", // Output as mp4 container
+        "-bsf:v", "hevc_mp4toannexb", // Crucial: Add this filter
+        "-movflags", "+frag_keyframe+empty_moov",
+        "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn FFMPEG");
 
+    let mut ffmpeg_stdout = ffmpeg.stdout.take().unwrap();
+    let mut buf = Vec::new();
+    ffmpeg_stdout.read_to_end(&mut buf).expect("Failed to read encoded buffer");
+
+    // Save for debugging
+    std::fs::write("sample_frame_encoded.hevc", &buf.clone()).expect("Failed to write debug file");
+
+    print_pretty!(
+        DebugColor::Salmon,
+        "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
+        buf.len(),
+        buf.len() / 1024, 
+        &buf[..200]
+    );
+
+    buf
 }
 
 

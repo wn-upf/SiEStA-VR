@@ -53,12 +53,15 @@ ciborium = { version = "0.2.2", optional = true }
 prost = { version = "0.13", optional = true }
 prost-types = { version = "0.13", optional = true }
 serde = { version = "1", optional = true }
-tokio = { version = "1.0", features=["net", "rt-multi-thread"], optional = true }
+tokio = { version = "1.0", features = ["net", "rt-multi-thread"], optional = true }
 tonic = { version = "0.12", default-features = false, features=["codegen", "prost", "server"], optional = true }
 tracing = { version= "0.1.40", default-features = false, features=["std"], optional = true }
 tracing-subscriber = { version= "0.3.18", optional = true }
 xkbcommon = "0.8.0"
 ffmpeg-sidecar = "2.0.0"
+async-process = "2.3.0"
+futures = "0.3.31"
+tempfile = "3.14.0"
 
 [dev-dependencies]
 atomic-wait = "1.1"

@@ -47,13 +47,13 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // let msg = format!($fmt, $($arg)*);
-        // println!("{}", $color.to_background_fn()(msg));
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_background_fn()(msg));
         
     };
 }
@@ -909,7 +909,7 @@ impl MpduPacket {
     }
 
     pub fn print(&self, color: DebugColor) {
-        debug_bgprint!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
+        // debug_bgprint!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
     }
 }
 #[derive(Debug, Clone)]
@@ -949,13 +949,12 @@ impl AmpduPacket {
                 packet.T_q.as_secs_f64(),
                 packet.T_s.as_secs_f64(), 
                 packet.header_alvr
-
             );
-            i +=1; 
-            if i >10 {
-                println!( "\x1b[33m\t..."); 
-                break; 
-            }
+            // i +=1; 
+            // if i >10 {
+            //     println!( "\x1b[33m\t..."); 
+            //     break; 
+            // }
         }
     }
 

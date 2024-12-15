@@ -6,7 +6,6 @@ use asynchronix::model::Context;
 ///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
 ///     * Will try to stay accurate to packet latencies in all parts of the pipeline ( for now, linear terms with maybe some randomness)
 ///
-
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
@@ -162,9 +161,10 @@ fn main() {
         true,
         effective_rate1,
         t0,
+        false,
     ); // STAs 0 and 1 send traffic to 5 through AP
 
-    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0);
+    let mut sta_client = STA_extended::new(0.0, 1.0, 2, 0, coords_sink, true, effective_rate2, t0, false);
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
 
@@ -271,7 +271,7 @@ fn main() {
     // START WITH FIRST EVENT
     let epsilon1 = Duration::from_secs_f64(exponential(0.9));
 
-    let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
+    let duration_scheduled1 = Duration::from_secs(10);
 
 
     scheduler // Configure XRClient before sending packets to it

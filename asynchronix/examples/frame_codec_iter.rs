@@ -103,14 +103,20 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<
     let n = ffmpeg_stdout.read_to_end(&mut buf).unwrap(); // Read until EOF
     println!("Frame data length: {}", n); // Debugging the actual frame data length
 
+    std::fs::write("iter_encoded_frame.mp4", &buf).unwrap();
+
     // Return only the data read from FFmpeg
     buf
 }
 
 fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
-   
+    std::fs::write("iter_decoded_frame.mp4", &encoded_data).unwrap();
+
+    println!("Decoded buffer size: {}", encoded_data.len());
+
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
+            "-loglevel" ,"debug",
             "-hwaccel", "cuda",
             "-c:v", "hevc_cuvid",
             "-f", "rawvideo",  // Explicitly specify input format
@@ -133,7 +139,7 @@ fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
     }
 
     // Capture FFmpeg stdout
-    let mut buf = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
     let read_result = ffmpeg.stdout.take().unwrap().read_to_end(&mut buf);
     
     match read_result {
