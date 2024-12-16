@@ -816,7 +816,7 @@ impl XRClient {
     pub fn report_frame_lost( mut frames:  Vec<u32>, mut shards_lost: Vec<usize>, context: &Context<Self> ) {
         frames.truncate(MAX_DEADLINE_IN_STATS);
         shards_lost.truncate(MAX_DEADLINE_IN_STATS);
-
+        println!("REPORT FRAME LOSt"); 
         let net = DeadlineShardlossStatPacket{
             frame_indexes: frames, 
             shards_lost: shards_lost, 
@@ -838,9 +838,11 @@ impl XRClient {
                     if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
                         let mut counter = 0;                     
                         (frames_lost, shards_lost) =StreamSocket::flush_shards_lost_deadline(&mut ssocket); 
-                        XRClient::report_frame_lost(frames_lost, shards_lost, context); 
 
-                        
+                        if !frames_lost.is_empty(){
+                            println!("FRAMES LOST {:?}, SHARDS LOST {:?}", &frames_lost[..], &shards_lost[..]); 
+                            XRClient::report_frame_lost(frames_lost, shards_lost, context); 
+                        }
                     }
 
                     let data: ReceiverData<VideoPacketHeader> =
