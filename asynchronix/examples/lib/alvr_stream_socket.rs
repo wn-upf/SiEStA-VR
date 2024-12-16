@@ -1683,9 +1683,9 @@ impl<H> StreamSender<H> {
 impl<H: Serialize> StreamSender<H> {
     pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32, now: TaiTime<0>) -> Result<Buffer<H>> {
         // let mut buffer = generate_random_video_payload(current_bitrate_mbps);
-        let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
+        // let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
         
-        // let mut buffer = generate_sample_ffmpeg(current_bitrate_mbps, now.duration_since(TaiTime::EPOCH).as_secs_f64(),INITIAL_FRAMERATE_FPS as f64); 
+        let mut buffer = generate_sample_ffmpeg(current_bitrate_mbps, now.duration_since(TaiTime::EPOCH).as_secs_f64(),INITIAL_FRAMERATE_FPS as f64); 
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
@@ -1919,7 +1919,7 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
         "-pix_fmt", "yuv420p",
         "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
         "-c:v", "hevc_nvenc",
-        "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 / 30.0 * 1000.0),
+        "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
         "-frames:v", "1",
         "-an",
         "-f", "mp4", // Output as mp4 container

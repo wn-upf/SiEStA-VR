@@ -7,12 +7,17 @@ use std::{
     process::{Stdio},
     fs::write, 
 };
+
+
+use std::cell::RefCell;
+use std::thread_local;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::fs; 
 use tempfile::{NamedTempFile, Builder};
 use std::error::Error;
 use std::process::Command;
 
-
+use minifb::Key;
 use futures::io::{AsyncWriteExt, AsyncReadExt};
 
 use minifb::{Window, WindowOptions};
@@ -32,7 +37,6 @@ use std::fmt::Debug;
 use std::{mem, vec};
 use std::net::IpAddr;
 // use std::process::Output;
-use std::sync::{Arc, Mutex};
 use std::thread::yield_now;
 use std::time::{Duration, Instant};
 
@@ -976,7 +980,7 @@ pub fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>) -> Vec<u32> {
     
    let mut ffmpeg = Command::new("ffmpeg")
     .args([
-        "-loglevel", "debug", // Keep for debugging
+        "-hwaccel", "cuda",
         "-c:v", "hevc",       // Use generic HEVC decoder
         "-i", "pipe:0",           // Read from stdin
         "-pix_fmt", "rgb24",
@@ -1011,91 +1015,88 @@ pub fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>) -> Vec<u32> {
         Err(e) => {
             eprintln!("Error reading FFmpeg output: {}", e);
             Vec::new()
-        }
-    }
-}
-
-
-    pub fn vsync<'a>(
-        &'a mut self,
-        _: (),
-        context: &'a Context<Self>,
-    )-> impl Future<Output = ()> + Send + 'a {
-        async move{
-            let now = context.scheduler.time(); 
-            let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-
-            if let Some(video_frame) = self.decoder_queue.pop(){
-                let subsample = video_frame[0..10].to_vec(); 
-
-                if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant){
-                    
-                    // TODO: ACTUALLY DECODE VIDEO AND SHOW IT!!
-
-                    // XRClient::display_frame(frame); 
-                    let frame = XRClient::decode_hevc_to_rgb(video_frame.clone()); 
-                    
-
-                    // let mut window = Window::new(
-                    //     "FFmpeg Video Stream",
-                    //     WIDTH_ENCODER,
-                    //     HEIGHT_ENCODER,
-                    //     WindowOptions {
-                    //         scale: Scale::X2,
-                    //         ..WindowOptions::default()
-                    //     },
-                    // )
-                    // .expect("Unable to create window");
-
-                    // window.
-                    //     update_with_buffer(&frame, WIDTH_ENCODER,HEIGHT_ENCODER)
-                    //     .unwrap();
-
-                   
-                    print_pretty!(DebugColor::Violet,
-                        // println!(
-                        "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
-                        self.decoder_queue.len(),
-                        interarrival.as_secs_f32(),
-                        self.decoder_queue.ok_dequed_frame_counter,
-                        self.decoder_queue.dropped_frame_counter,
-                        &video_frame[0..50], ); 
-                }
-                else{eprint!("?? VSYNC ??? " );}
-                
-                
-                self.last_decoded_frame_instant = now; 
-                self.out_video_decoded.send(subsample).await;  
-
-            // self.output_statistics.send(stats);
             }
-            else{
-            }
-            if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE
-            {   
-                T_vsync = T_vsync.mul_f64(2.0) ; // duplicate wait so queue can fill
-                debug_bgprint!(DebugColor::Violet, "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
-            }
-            else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
-                {   
-                    T_vsync = T_vsync.mul_f64(0.5); // duplicate wait so queue can fill
-                    debug_bgprint!(DebugColor::Violet, "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", T_vsync.as_secs_f32(), self.decoder_queue.len(), TARGET_FRAMES_DECODER_QUEUE  ); 
-                }
-            }
-            context.scheduler.schedule_event( T_vsync, Self::vsync, ()).unwrap(); 
-            // TODO:
-            // let video_frame = self.decoder_queue.pop_front();
-            // let stats = NetworkStatisticsPacket::new();
-
-            // self.output_statistics.send(stats);
-
-            // context
-            //     .scheduler
-            //     .schedule_event(T_vsync, Self::vsync, ())
-            //     .unwrap();
         }
     }
 
+
+pub fn vsync<'a>(
+    &'a mut self,
+    _: (),
+    context: &'a Context<Self>,
+) -> impl Future<Output = ()> + Send + 'a {
+    async move {
+        let now = context.scheduler.time();
+        let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
+
+        // Thread-local static for window management
+        thread_local! {
+            static DISPLAY_WINDOW: RefCell<Option<Window>> = RefCell::new(None);
+        }
+
+        if let Some(video_frame) = self.decoder_queue.pop() {
+            let subsample = video_frame[0..10].to_vec();
+
+            if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
+                let frame = XRClient::decode_hevc_to_rgb(video_frame.clone());
+
+                // Initialize or update the window
+                DISPLAY_WINDOW.with(|window_cell| {
+                    let mut window_opt = window_cell.borrow_mut();
+                    
+                    // Create window if it doesn't exist
+                    if window_opt.is_none() {
+                        *window_opt = Some(Window::new(
+                            "Decoded HEVC Frame",
+                            WIDTH_ENCODER,
+                            HEIGHT_ENCODER,
+                            WindowOptions::default()
+                        ).expect("Failed to create window"));
+                    }
+                    
+                    // Update the window with the new frame
+                    if let Some(window) = window_opt.as_mut() {
+                        window.update_with_buffer(&frame, WIDTH_ENCODER, HEIGHT_ENCODER)
+                            .expect("Failed to update window buffer");
+                    }
+                });
+
+                print_pretty!(DebugColor::Violet,
+                    "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
+                    self.decoder_queue.len(),
+                    interarrival.as_secs_f32(),
+                    self.decoder_queue.ok_dequed_frame_counter,
+                    self.decoder_queue.dropped_frame_counter,
+                    &video_frame[0..50]
+                );
+            }
+            
+            self.last_decoded_frame_instant = now;
+            self.out_video_decoded.send(subsample).await;
+        }
+
+        // Adjust wait time based on queue length
+        if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {   
+            T_vsync = T_vsync.mul_f64(2.0);
+            debug_bgprint!(DebugColor::Violet, 
+                "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", 
+                T_vsync.as_secs_f32(), 
+                self.decoder_queue.len(), 
+                TARGET_FRAMES_DECODER_QUEUE
+            ); 
+        } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
+            T_vsync = T_vsync.mul_f64(0.5);
+            debug_bgprint!(DebugColor::Violet, 
+                "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", 
+                T_vsync.as_secs_f32(), 
+                self.decoder_queue.len(), 
+                TARGET_FRAMES_DECODER_QUEUE
+            ); 
+        }
+
+        context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap(); 
+      }
+    }
 
     pub async fn configure_streams(&mut self) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
@@ -1380,15 +1381,15 @@ impl STA_extended {
         if ampdu_packet.sta_dest_id == self.sta_id { // make sure we ignore packets not corresponding to STA
             for packet in ampdu_packet.mpdu_packets { // iterate through whole AMPDU
 
-                debug_print!(
-                    DebugColor::Red,
-                    "[DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
-                    // format_elapsed!(now),
-                    self.sta_id,
-                    packet.packet_id,
-                    packet.sta_src_id,
-                    packet.sta_dest_id,
-                );
+                // debug_print!(
+                //     DebugColor::Red,
+                //     "[DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
+                //     // format_elapsed!(now),
+                //     self.sta_id,
+                //     packet.packet_id,
+                //     packet.sta_src_id,
+                //     packet.sta_dest_id,
+                // );
                 // if packet.data_inner.len() >= 100 {
                 // debug_print!(
                 //     DebugColor::DarkRed,

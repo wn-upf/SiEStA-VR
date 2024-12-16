@@ -62,6 +62,9 @@ ffmpeg-sidecar = "2.0.0"
 async-process = "2.3.0"
 futures = "0.3.31"
 tempfile = "3.14.0"
+winit = "0.30.5"
+softbuffer = "0.4.6"
+pixels = "0.14.0"
 
 [dev-dependencies]
 atomic-wait = "1.1"
