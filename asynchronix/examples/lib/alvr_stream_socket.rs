@@ -64,7 +64,7 @@ use super::alvr_packets::NetworkStatisticsPacket;
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-pub const MAX_PACKET_SIZE_RECV: usize = 2000;
+pub const MAX_PACKET_SIZE_RECV: usize = 2000*8;
 pub const TRACKING: u16 = 0;
 pub const HAPTICS: u16 = 1;
 pub const AUDIO: u16 = 2;
@@ -1907,31 +1907,84 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     let hours = (timestamp / 3600.0) as u32;
     let minutes = ((timestamp % 3600.0) / 60.0) as u32;
     let seconds = timestamp % 60.0;
-
     let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds - 10.0);
+    
+
+    let current_bitrate_mbps = current_bitrate_mbps / 90.0; // fps
+
     print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
 
-    let mut ffmpeg = Command::new("ffmpeg")
+    // First pass: Analysis (multi-pass encoding)
+    let first_pass_log = "/tmp/ffmpeg_first_pass.log";
+    let mut first_pass = Command::new("ffmpeg")
         .args([
-        "-hwaccel", "cuda",
-        "-ss", &formatted_timestamp,
-        "-i", input_path,
-        "-pix_fmt", "yuv420p",
-        "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-        "-c:v", "hevc_nvenc",
-        "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-        "-frames:v", "1",
-        "-an",
-        "-f", "mp4", // Output as mp4 container
-        "-bsf:v", "hevc_mp4toannexb", // Crucial: Add this filter
-        "-movflags", "+frag_keyframe+empty_moov",
-        "-",
+            "-hwaccel", "cuda",
+            "-ss", &formatted_timestamp,
+            "-i", input_path,
+            "-pix_fmt", "yuv420p",
+            "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-c:v", "hevc_nvenc",
+            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-preset", "medium",  // Higher quality preset
+            "-rc", "vbr_hq",    // Variable Bitrate High Quality mode
+            "-cq", "19",        // Constant Quality level (lower is higher quality)
+            "-b_ref_mode", "2", // Enable B-frame reference mode
+            "-bf", "3",         // Number of B-frames (0-3)
+            "-temporal-aq", "1", // Temporal Adaptive Quantization
+            "-spatial-aq", "1",  // Spatial Adaptive Quantization
+            "-aq-strength", "8", // Adaptive Quantization strength
+            "-frames:v", "1",
+            "-an",
+            "-pass", "1",
+            "-passlogfile", first_pass_log,
+            "-f", "null",
+            "/dev/null"
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to spawn FFMPEG");
+        .expect("Failed to spawn first pass FFMPEG");
+
+    let first_pass_status = first_pass.wait().expect("Failed to wait for first pass");
+    
+    if !first_pass_status.success() {
+        eprintln!("First pass encoding failed");
+        return Vec::new();
+    }
+
+    // Second pass: Actual encoding with analysis from first pass
+    let mut ffmpeg = Command::new("ffmpeg")
+        .args([
+            "-hwaccel", "cuda",
+            "-ss", &formatted_timestamp,
+            "-i", input_path,
+            "-pix_fmt", "yuv420p",
+            "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-c:v", "hevc_nvenc",
+            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-preset", "medium",  // Higher quality preset
+            "-rc", "vbr_hq",    // Variable Bitrate High Quality mode
+            "-cq", "19",        // Constant Quality level (lower is higher quality)
+            "-b_ref_mode", "2", // Enable B-frame reference mode
+            "-bf", "3",         // Number of B-frames (0-3)
+            "-temporal-aq", "1", // Temporal Adaptive Quantization
+            "-spatial-aq", "1",  // Spatial Adaptive Quantization
+            "-aq-strength", "8", // Adaptive Quantization strength
+            "-frames:v", "1",
+            "-an",
+            "-pass", "2",
+            "-passlogfile", first_pass_log,
+            "-f", "mp4",        // Output as mp4 container
+            "-bsf:v", "hevc_mp4toannexb", // Crucial: Add this filter
+            "-movflags", "+frag_keyframe+empty_moov",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn second pass FFMPEG");
 
     let mut ffmpeg_stdout = ffmpeg.stdout.take().unwrap();
     let mut buf = Vec::new();
@@ -1939,18 +1992,17 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
 
     // Save for debugging
     std::fs::write("sample_frame_encoded.hevc", &buf.clone()).expect("Failed to write debug file");
-
+    
     print_pretty!(
         DebugColor::Salmon,
         "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
         buf.len(),
-        buf.len() / 1024, 
+        buf.len() / 1024,
         &buf[..200]
     );
 
     buf
 }
-
 
 pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Initialize the random number generator

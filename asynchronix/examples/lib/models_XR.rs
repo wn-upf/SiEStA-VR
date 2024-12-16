@@ -769,6 +769,8 @@ impl XRClient {
         let serialized_size = bincode::serialized_size(&packet)? as usize;
         let packet_size = serialized_size + FRAMED_PREFIX_CONTROL_LENGTH;
 
+        println!("Framed send!"); 
+
         if buffer.len() < packet_size {
             buffer.resize(packet_size, 0);
         }
@@ -803,6 +805,7 @@ impl XRClient {
                 // println!("result of output control: {:?}", result); 
             }
             ClientControlPacket::DeadlineShardLossStat(inner) => {
+                println!("Shardloss packet sent"); 
                 let result = Self::framed_send(self, &pack, context).await;
 
             }
@@ -1040,6 +1043,9 @@ pub fn vsync<'a>(
             if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                 let frame = XRClient::decode_hevc_to_rgb(video_frame.clone());
 
+            let scale_factor = 0.35;
+            let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+            let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
                 // Initialize or update the window
                 DISPLAY_WINDOW.with(|window_cell| {
                     let mut window_opt = window_cell.borrow_mut();
@@ -1048,8 +1054,8 @@ pub fn vsync<'a>(
                     if window_opt.is_none() {
                         *window_opt = Some(Window::new(
                             "Decoded HEVC Frame",
-                            WIDTH_ENCODER,
-                            HEIGHT_ENCODER,
+                            scaled_width,
+                            scaled_height,
                             WindowOptions::default()
                         ).expect("Failed to create window"));
                     }

@@ -1178,7 +1178,7 @@ impl QueueModule {
                     // );
 
                     // if DEBUG_PRINT_ENABLED {
-                    self.aux_ampdu_serviced.print();
+                    // self.aux_ampdu_serviced.print();
                     // }
 
                     self.packet_being_served = true;

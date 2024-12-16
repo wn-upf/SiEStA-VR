@@ -269,9 +269,9 @@ fn main() {
     assert_eq!(simu.time(), t);
 
     // START WITH FIRST EVENT
-    let epsilon1 = Duration::from_secs_f64(exponential(0.9));
+    let epsilon1 = Duration::from_secs_f64(exponential(12.0));
 
-    let duration_scheduled1 = Duration::from_secs(10);
+    let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
 
 
     scheduler // Configure XRClient before sending packets to it
