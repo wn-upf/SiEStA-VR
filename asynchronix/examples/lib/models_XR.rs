@@ -3,19 +3,18 @@ use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    io::{Read, Write},
-    process::{Stdio},
+    io,
+    process::{Stdio, ChildStdin, ChildStdout},
     fs::write, 
 };
-
-
+use std::io::{Write, Read, BufReader, BufWriter};
 use std::cell::RefCell;
 use std::thread_local;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::fs; 
 use tempfile::{NamedTempFile, Builder};
 use std::error::Error;
-use std::process::Command;
+use std::process::{Command, Child};
 
 use minifb::Key;
 use futures::io::{AsyncWriteExt, AsyncReadExt};
@@ -27,8 +26,6 @@ use ffmpeg_sidecar::command::FfmpegCommand;
 use crate::debug_print;
 use crate::format_elapsed;
 use crate::lib::HeaderALVRStream;
-
-// use std::intrinsics::size_of;
 use serde::{de::DeserializeOwned, Serialize};
 use crate::debug_bgprint;
 use crate::print_pretty; 
@@ -43,49 +40,13 @@ use std::time::{Duration, Instant};
 use std::time::SystemTime;
 use dashmap::DashMap;
 use minifb::Scale; 
-
 use once_cell::sync::Lazy;
-
-// mod mm1k_sim;
-// use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink};
-
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData,
     SocketBufferSize, SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking,
     VideoPacketHeader,
 };
-
-use crate::lib::alvr_control_socket::{ProtoControlSocket, ControlPacketType}; 
-use tai_time::TaiTime;
-
-use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
-};
-use crate::lib::DEBUG_PRINT_ENABLED;
-
-
-pub const WIDTH_ENCODER : usize = 1920;
-pub const HEIGHT_ENCODER: usize = 1080;
-
-
-
-pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
-
-pub const CAPACITY_RX_BUFFER: usize = 2000;
-pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
-pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
-
-pub const DECODER_BUFFERING_FRAMES: usize = 4;
-pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2; 
-
-
-
-static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
-
-
 
 
 use std::cmp::{self, max};
@@ -111,6 +72,34 @@ use super::alvr_packets::DeadlineShardlossStatPacket;
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 use super::SlidingWindowTimely;
+// use async_process::Child;
+use lazy_static::lazy_static; 
+
+use crate::lib::alvr_control_socket::{ProtoControlSocket, ControlPacketType}; 
+use tai_time::TaiTime;
+
+use crate::lib::alvr_stream_socket::{
+    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
+};
+use crate::lib::DEBUG_PRINT_ENABLED;
+
+
+pub const WIDTH_ENCODER : usize = 1920;
+pub const HEIGHT_ENCODER: usize = 1080;
+pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
+
+pub const CAPACITY_RX_BUFFER: usize = 2000;
+pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
+
+pub const DECODER_BUFFERING_FRAMES: usize = 4;
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2; 
+
+
+static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
+
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -120,6 +109,7 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<f32>(); // tx relative timestamp
 
 type InstantMap = Arc<RwLock<HashMap<u32, TaiTime<0>>>>;
+
 
 #[derive(Clone)]
 pub struct BitrateManager {
@@ -732,6 +722,8 @@ pub struct XRClient {
 
     pub streamsocket_clone: Option<StreamSocket>,
 
+    pub decoded_frame_index: usize, 
+
     // pub visualize_decoder_window: Option<Window>, 
 
 }
@@ -754,6 +746,7 @@ impl XRClient {
             frames_dropped_counter: 0,
             server_ip,
             streamsocket_clone: None,
+            decoded_frame_index: 0, 
             // visualize_decoder_window: None, 
         }
     }
@@ -769,7 +762,7 @@ impl XRClient {
         let serialized_size = bincode::serialized_size(&packet)? as usize;
         let packet_size = serialized_size + FRAMED_PREFIX_CONTROL_LENGTH;
 
-        println!("Framed send!"); 
+        // println!("Framed send!"); 
 
         if buffer.len() < packet_size {
             buffer.resize(packet_size, 0);
@@ -800,7 +793,7 @@ impl XRClient {
         let pack = packet.clone(); 
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
-                println!("sending stats packet!"); 
+                // println!("sending stats packet!"); 
                 let result = Self::framed_send(self, &pack, context).await;
                 // println!("result of output control: {:?}", result); 
             }
@@ -915,17 +908,17 @@ impl XRClient {
    
 
    
-    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> {
+    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
         if rgb_data.len() != width * height * 3 {
             eprintln!(
                 "Unexpected RGB data length. Expected {}, got {}",
                 width * height * 3,
                 rgb_data.len()
             );
-            return Vec::new();
+            return None;
         }
 
-        rgb_data
+        let rgb= rgb_data
             .chunks_exact(3)
             .map(|chunk| {
                 let r = chunk[0] as u32;
@@ -933,7 +926,9 @@ impl XRClient {
                 let b = chunk[2] as u32;
                 (r << 16) | (g << 8) | b
             })
-            .collect()
+            .collect(); 
+
+        Some(rgb)
     }
 
 
@@ -972,56 +967,90 @@ impl XRClient {
         rgb
     }
 
-  
-pub fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>) -> Vec<u32> {
-    fs::write("encoded_frame.hevc", &encoded_buffer).unwrap();
-    print_pretty!(
-        DebugColor::Turquoise,
-        "Decoded frame size: {} bytes ({} KB)\nData = {:?}",
-        encoded_buffer.len(),
-        encoded_buffer.len() / 1024, 
-        &encoded_buffer[..200]
-    );
-    
-   let mut ffmpeg = Command::new("ffmpeg")
-    .args([
-        "-hwaccel", "cuda",
-        "-c:v", "hevc",       // Use generic HEVC decoder
-        "-i", "pipe:0",           // Read from stdin
-        "-pix_fmt", "rgb24",
-        "-f", "rawvideo",   // Output raw RGB24
-        "-vf", &format!("scale={}:{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-        "-",                // Output to stdout
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn().unwrap();
-    {
-        let mut stdin = ffmpeg.stdin.take().unwrap();
-        stdin.write_all(&encoded_buffer).unwrap();
-    }
-    let mut buf: Vec<u8> = Vec::new();
 
-    let read_result = ffmpeg.stdout.take().unwrap().read_to_end(&mut buf);
+    pub fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>, frame_index: usize ) -> Vec<u32> {
+        // Save the encoded buffer to a file (for debugging or reuse purposes)
+        let input_file = format!("simu_decode_samples/encoded_frame{:03}.hevc", frame_index); 
+        if let Err(e) = fs::write(input_file, &encoded_buffer) {
+            eprintln!("Failed to write encoded frame to file: {}", e);
+            return Vec::new();
+        }
+
+        // println!(
+        //     "Decoded frame size: {} bytes ({} KB)\nData preview: {:?}",
+        //     encoded_buffer.len(),
+        //     encoded_buffer.len() / 1024,
+        //     &encoded_buffer[..std::cmp::min(50, encoded_buffer.len())]
+        // );
     
-    match read_result {
-        Ok(n) => {
-            println!("Decoded frame data length: {}", n);
-            
-            if buf.is_empty() {
-                eprintln!("Warning: Decoded frame is empty");
+        // Launch FFmpeg process
+        let mut ffmpeg = match Command::new("ffmpeg")
+            .args(&[
+                "-hwaccel", "cuda",             // Use hardware acceleration if available
+                "-c:v", "hevc",                 // Specify HEVC codec
+                "-i", "pipe:0",                 // Read input from stdin
+                "-pix_fmt", "rgb24",            // Convert to RGB pixel format
+                "-f", "rawvideo",               // Raw video output format
+                "-vf", &format!("scale={}:{}", WIDTH_ENCODER, HEIGHT_ENCODER), // Resize output
+                "-",                            // Write output to stdout
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()) // Suppress FFmpeg logs
+            .spawn()
+        {
+            Ok(process) => process,
+            Err(e) => {
+                eprintln!("Failed to start FFmpeg: {}", e);
                 return Vec::new();
             }
-
-            // Convert to u32 buffer for minifb
-            XRClient::convert_rgb_to_u32(&buf, WIDTH_ENCODER,HEIGHT_ENCODER)
-        },
-        Err(e) => {
-            eprintln!("Error reading FFmpeg output: {}", e);
-            Vec::new()
+        };
+    
+        // Write encoded buffer to FFmpeg's stdin
+        if let Some(mut stdin) = ffmpeg.stdin.take() {
+            if let Err(e) = stdin.write_all(&encoded_buffer) {
+                eprintln!("Failed to write to FFmpeg stdin: {}", e);
+                return Vec::new();
             }
+        } else {
+            eprintln!("Failed to open FFmpeg stdin");
+            return Vec::new();
         }
+    
+        // Read FFmpeg's output from stdout
+        let mut buf: Vec<u8> = Vec::new();
+        if let Some(mut stdout) = ffmpeg.stdout.take() {
+            if let Err(e) = stdout.read_to_end(&mut buf) {
+                eprintln!("Failed to read FFmpeg stdout: {}", e);
+                return Vec::new();
+            }
+        } else {
+            eprintln!("Failed to open FFmpeg stdout");
+            return Vec::new();
+        }
+    
+        // Handle the output buffer
+        if buf.is_empty() {
+            eprintln!("Warning: Decoded frame is empty");
+            return Vec::new();
+        }
+    
+        println!("Decoded frame data length: {}", buf.len());
+        
+        
+        let output_file = format!("simu_decode_samples/decoded_frame_{:04}.rgb", frame_index);
+        if let Err(e) = fs::write(&output_file, &buf) {
+            eprintln!("Failed to write decoded frame to file: {}", e);
+        } else {
+            println!("Frame saved to {}", output_file);
+        }
+
+
+        // Convert raw RGB bytes to a Vec<u32> for rendering
+        XRClient::convert_rgb_to_u32(&buf, WIDTH_ENCODER, HEIGHT_ENCODER).unwrap_or_else(|| {
+            eprintln!("Failed to convert RGB data to u32 buffer");
+            Vec::new()
+        })
     }
 
 
@@ -1043,9 +1072,9 @@ pub fn vsync<'a>(
             let subsample = video_frame[0..10].to_vec();
 
             if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
-                let frame = XRClient::decode_hevc_to_rgb(video_frame.clone());
-
-            let scale_factor = 0.35;
+                let frame = XRClient::decode_hevc_to_rgb(video_frame.clone(), self.decoded_frame_index);
+                self.decoded_frame_index += 1; 
+            let scale_factor = 0.5;
             let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
             let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
                 // Initialize or update the window
