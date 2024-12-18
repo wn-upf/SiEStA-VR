@@ -26,22 +26,22 @@ cargo build --release --example XR_sim
 # rm out_log.ans
 # script -q -c "cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL" out_log.ans ##                                              # linux dbg output
 # script -q -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL" out_log.ans ##                                              # linux dbg output
-# cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL
+cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL
 
 # samply record cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL 
 # ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
 
 # code Results/$name_folder/out_log.ans
 
-trap 'echo -e "\nSimulation stopped. Killing all simulations..."; kill 0; exit' SIGINT
-# Example: Run multiple simulations in parallel
-for i in {1..10}; do
-  echo "Starting simulation $i..."
-  ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL &
-done
+# trap 'echo -e "\nSimulation stopped. Killing all simulations..."; kill 0; exit' SIGINT
+# # Example: Run multiple simulations in parallel
+# for i in {1..10}; do
+#   echo "Starting simulation $i..."
+#   ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL &
+# done
 
-# Wait for all background processes to finish
-wait
+# # Wait for all background processes to finish
+# wait
 
 echo "All simulations completed."
 

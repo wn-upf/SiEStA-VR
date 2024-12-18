@@ -61,7 +61,7 @@ use super::alvr_packets::NetworkStatisticsPacket;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
-pub const INITIAL_FRAMERATE_FPS: f32 = 30.0;
+pub const INITIAL_FRAMERATE_FPS: f32 = 60.0;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000*8;
 pub const TRACKING: u16 = 0;
@@ -1816,9 +1816,10 @@ impl<H> StreamSender<H> {
 
 impl<H: Serialize> StreamSender<H> {
     pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32, now: TaiTime<0>) -> Result<Buffer<H>> {
+        
+        
         // let mut buffer = generate_random_video_payload(current_bitrate_mbps);
         // let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
-        
         let mut buffer = generate_sample_ffmpeg(current_bitrate_mbps, now.duration_since(TaiTime::EPOCH).as_secs_f64(),INITIAL_FRAMERATE_FPS as f64); 
 
 
@@ -2139,56 +2140,13 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
 //     buf
 // }
 
-
-    pub fn generate_sample_ffmpeg_pooling( 
-        current_bitrate_mbps: f32, 
-        timestamp: f64, 
-        fps: f64,
-        pool_tx: mpsc::Sender<EncodingTask>  // Pass pool_tx as an argument
-    ) -> Vec<u8> {
-    
-        // Create a unique key for the encoding configuration
-        let config_key = format!(
-            "{}_{}_{}_{}_{}", 
-            "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4",
-            current_bitrate_mbps, 
-            timestamp, 
-            1280, 
-            720,
-        );
-    
-        // Create a channel for receiving the result
-        let (result_tx, result_rx) = mpsc::channel::<Vec<u8>>();
-    
-        // Submit the encoding task to the pool
-        let task = EncodingTask {
-            current_bitrate_mbps,
-            timestamp,
-            fps,
-            config_key,
-            result_tx,
-        };
-    
-        // Send the task to the worker pool (this won't block)
-        pool_tx.send(task).expect("Failed to send task to pool");
-    
-        // Check if the result is ready without blocking
-        match result_rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok(buf) => buf,  // Return the encoded frame if ready
-            Err(_) => Vec::new(),  // Return an empty vector if no result within timeout
-        }
-    }
-
-
-
-   // Optimized generate_sample method with process pooling
    pub fn generate_sample_ffmpeg( 
     current_bitrate_mbps: f32, 
     timestamp: f64, 
     fps: f64
 ) -> Vec<u8> {
 
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
 
     // Create a unique key for this specific encoding configuration
     let config_key = format!(

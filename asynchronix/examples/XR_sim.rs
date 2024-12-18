@@ -271,7 +271,7 @@ fn main() {
     // START WITH FIRST EVENT
     let epsilon1 = Duration::from_secs_f64(exponential(12.0));
 
-    let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
+    let duration_scheduled1 = Duration::from_secs(10);
 
 
     scheduler // Configure XRClient before sending packets to it

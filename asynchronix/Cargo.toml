@@ -66,6 +66,7 @@ winit = "0.30.5"
 softbuffer = "0.4.6"
 pixels = "0.14.0"
 lazy_static = "1.5.0"
+threadpool = "1.8.1"
 
 [dev-dependencies]
 atomic-wait = "1.1"
@@ -89,6 +90,7 @@ dashmap = "6.1.0"
 image = "0.24"
 sdl2 = "0.35"
 minifb = "0.22"
+tokio = { version = "1.0", features = ["net", "rt-multi-thread"]}
 
 [target.'cfg(asynchronix_loom)'.dev-dependencies]
 loom = "0.5"
