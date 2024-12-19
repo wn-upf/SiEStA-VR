@@ -32,7 +32,6 @@ ffmpeg -hwaccel cuda -i first_10sec.mkv -i second_10sec.mkv -i third_10sec.mkv -
 rm first_10sec.mkv second_10sec.mkv third_10sec.mkv fourth_10sec.mkv
 ffmpeg -hwaccel cuda -i final_variable_bitrate.mkv -acodec copy -vcodec copy fixed_output.mkv
 
-
 vlc fixed_output.mkv
 
 

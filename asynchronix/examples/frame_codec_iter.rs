@@ -144,7 +144,7 @@ fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
     
     match read_result {
         Ok(n) => {
-            println!("Decoded frame data length: {}", n);
+            println!("Decoded frame data length: {} Kb", n / 1000);
             
             if buf.is_empty() {
                 eprintln!("Warning: Decoded frame is empty");

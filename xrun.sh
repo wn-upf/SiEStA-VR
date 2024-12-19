@@ -1,5 +1,5 @@
 
-simTime=100
+simTime=75.0
 k_queue=10000
 mean_length=12000.0
 rate_bps_src=3E6; 
@@ -7,7 +7,7 @@ rate_bps_src=3E6;
 rate_bps_queue=6E5 ## does nothing theoretically 
 
 distance=10.0
-PL=0.003
+PL=0.00
 
 initial_bitrate_mbps=10
 
@@ -29,6 +29,7 @@ cargo build --release --example XR_sim
 cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL
 
 # samply record cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL 
+
 # ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL | tee "Results/$name_folder/out_log.ans" ## windows option dbg output
 
 # code Results/$name_folder/out_log.ans
@@ -45,9 +46,28 @@ cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_sr
 
 echo "All simulations completed."
 
+cd simu_decode_samples
 
-# echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
-# samply record cargo run --profile profiling --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL 
-# code Results/$name_folder/out_log.ans
-# samply record cargo run --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance # for Tracing syscalls
+echo "EXTRACTING VMAF"
 
+ffmpeg -y -hwaccel cuda -f concat -safe 0 -i <(for f in $(ls encoded_frame*.hevc | sort -V); do echo "file '$PWD/$f'"; done) -c:v hevc -preset fast -crf 23 output_video.mp4
+
+cp -r output_video.mp4 vmaf_comparison/output_video.mp4  
+
+cd vmaf_comparison
+
+offset_video=360.0
+# Extract duration of output_video.mp4
+duration=$(ffprobe -v error -select_streams v:0 -show_entries format=duration -of csv=p=0 output_video.mp4)
+
+ffmpeg -y -hwaccel cuda -ss $offset_video -i bbb_1080p60fps.mp4 -t $duration -c:v hevc_nvenc -an -b:v 20M output_sample.mp4
+
+ffmpeg -y -hwaccel cuda -i output_sample.mp4 -i output_video.mp4 \
+    -filter_complex "[0:v][1:v]libvmaf=log_fmt=json:log_path=vmaf.json" \
+    -filter_complex "[0:v][1:v]psnr=stats_file=psnr.log" \
+    -filter_complex "[0:v][1:v]ssim=stats_file=ssim.log" \
+    -f null -
+
+
+
+echo "ALL JOBS FINISHED!!!"
