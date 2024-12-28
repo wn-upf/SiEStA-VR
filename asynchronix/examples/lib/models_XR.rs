@@ -160,8 +160,8 @@ impl BitrateManager {
         // else if 5.0 <= dur && dur < 10.0 {
         //     self.last_target_bitrate_mbps = 0.01;
         // }
-        if 10.0 <= dur && dur < 15.0 {
-            self.last_target_bitrate_mbps = 10.0;
+        if 10.0 <= dur && dur < 11.0 {
+            self.last_target_bitrate_mbps = 0.001;
         } else if 15.0 <= dur && dur < 25.0 {
             self.last_target_bitrate_mbps = 0.05;
         } else if 25.0 <= dur && dur < 30.0 {
@@ -1136,6 +1136,7 @@ impl XRClient {
                 if let Some(interarrival) =
                     now.checked_duration_since(self.last_decoded_frame_instant)
                 {
+                    let miin: usize = usize::min(video_frame.len(), 50);
                     print_pretty!(
                     DebugColor::Violet,
                     "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
@@ -1143,7 +1144,7 @@ impl XRClient {
                     interarrival.as_secs_f32(),
                     self.decoder_queue.ok_dequed_frame_counter,
                     self.decoder_queue.dropped_frame_counter,
-                    &video_frame[0..50]
+                    &video_frame[0..miin]
                 );
 
                     if USE_FFMPEG == true {

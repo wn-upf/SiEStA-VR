@@ -1,3 +1,4 @@
+use bincode::de;
 use ffmpeg_sidecar::{
     command::FfmpegCommand,
     event::{FfmpegEvent, LogLevel},
@@ -6,6 +7,7 @@ use std::{
     io::{Read, Write},
     process::Command,
     thread,
+    fs, 
 };
 // use sdl2::pixels::Color;
 // use sdl2::render::Canvas;
@@ -21,9 +23,12 @@ pub const OFFSET_VIDEO_TIMESTAMP: f64 = 40.0;
 pub const WIDTH_ENCODER_: usize = 720;
 pub const HEIGHT_DECODER_: usize = 480;
 
+pub const WIDTH_ENCODER: usize = 1280;
+pub const HEIGHT_ENCODER: usize = 720;
+
 fn main() {
-    let current_bitrate_mbps = 20.0;
-    let mut timestamp = 0.0;
+    let mut current_bitrate_mbps = 20.0;
+    let mut timestamp = 2.0;
 
     // Create a persistent window
     let mut window = Window::new(
@@ -41,7 +46,17 @@ fn main() {
     // window.limit_update_rate(Some(Duration::from_millis(33)));
 
     // Main loop
+    let mut decoded_index = 0; 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        timestamp += 1.0 / 30.0; // For 30 FPS
+        println!("TIMESTAMP: {}", timestamp);
+        if timestamp >= 2.0 && timestamp < 3.0 {
+            current_bitrate_mbps = 0.01; 
+        }
+        else if timestamp >= 3.0 && timestamp < 3.5{
+            current_bitrate_mbps = 2.0; 
+        }
+
         // Process a new frame
         let frame = generate_sample_ffmpeg(current_bitrate_mbps, timestamp);
 
@@ -58,7 +73,6 @@ fn main() {
         }
 
         // Increment timestamp for the next frame
-        timestamp += 1.0 / 30.0; // For 30 FPS
 
         // Allow the program to pause or quit if desired (optional feature)
         if window.is_key_down(Key::Q) {
@@ -87,28 +101,19 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<
     // println!("STRI: {}", stri);
     let mut ffmpeg = match FfmpegCommand::new()
         .args([
-            "-hwaccel",
-            "cuda",
-            "-ss",
-            &formatted_timestamp,
-            "-i",
-            input_path,
-            "-pix_fmt",
-            "yuv420p",
-            "-vf",
-            &format!(
+            "-hwaccel", "cuda",
+            "-ss", &formatted_timestamp,
+            "-i", input_path,
+            "-pix_fmt", "yuv420p",
+            "-vf", &format!(
                 "scale={}:{},format=yuv420p",
                 WIDTH_ENCODER_, HEIGHT_DECODER_
             ),
-            "-c:v",
-            "hevc_nvenc",
-            "-b:v",
-            &format!("{:.0}K", current_bitrate_mbps as f64 / 30.0 * 1000.0),
-            "-frames:v",
-            "1",
-            "-f",
-            "rawvideo",
-            "-an",
+            "-c:v", "hevc_nvenc",
+            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-frames:v", "1",
+            "-f", "rawvideo",
+            "-an", 
             "-",
         ])
         .spawn()
@@ -126,39 +131,30 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<
     let n = ffmpeg_stdout.read_to_end(&mut buf).unwrap(); // Read until EOF
     println!("Frame data length: {}", n); // Debugging the actual frame data length
 
-    std::fs::write("iter_encoded_frame.mp4", &buf).unwrap();
+    // std::fs::write("iter_encoded_frame.mp4", &buf).unwrap();
 
     // Return only the data read from FFmpeg
     buf
 }
 
 fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
-    std::fs::write("iter_decoded_frame.mp4", &encoded_data).unwrap();
+    // std::fs::write("iter_decoded_frame.mp4", &encoded_data).unwrap();
 
     println!("Decoded buffer size: {}", encoded_data.len());
 
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-loglevel",
-            "debug",
-            "-hwaccel",
-            "cuda",
-            "-c:v",
-            "hevc_cuvid",
-            "-f",
-            "rawvideo", // Explicitly specify input format
-            "-pix_fmt",
-            "yuv420p", // Match input pixel format
-            "-s",
-            &format!("{}x{}", WIDTH_ENCODER_, HEIGHT_DECODER_), // Specify input dimensions
-            "-i",
-            "pipe:0",
-            "-f",
-            "rawvideo", // Specify output format explicitly
-            "-pix_fmt",
-            "rgb24", // Force RGB output
-            "-vf",
-            &format!("scale={}:{}", WIDTH_ENCODER_, HEIGHT_DECODER_),
+            // "-loglevel",
+            // "debug",
+            "-hwaccel", "cuda",
+            "-c:v","hevc_cuvid",
+            "-f", "rawvideo", // Explicitly specify input format
+            "-pix_fmt", "yuv420p", // Match input pixel format
+            "-s", &format!("{}x{}", WIDTH_ENCODER_, HEIGHT_DECODER_), // Specify input dimensions
+            "-i", "pipe:0",
+            "-f", "rawvideo", // Specify output format explicitly
+            "-pix_fmt", "rgb24", // Force RGB output
+            "-vf", &format!("scale={}:{}", WIDTH_ENCODER_, HEIGHT_DECODER_),
             "-", // Output to stdout
         ])
         .stdin(Stdio::piped())
