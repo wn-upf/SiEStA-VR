@@ -7,15 +7,15 @@ use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
+use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
+use colored::Colorize;
+use once_cell::sync::Lazy;
 use rand::Rng;
-use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
-use serde::{Deserialize, Serialize};  
-use colored::Colorize;
-use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
-use once_cell::sync::Lazy;
+use std::time::{Duration, Instant};
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -49,12 +49,13 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
+pub const USE_FFMPEG: bool = false;
+
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // let msg = format!($fmt, $($arg)*);
         // println!("{}", $color.to_background_fn()(msg));
-        
     };
 }
 
@@ -176,7 +177,6 @@ impl DebugColor {
             DebugColor::Rose => |s| s.truecolor(255, 228, 225),
             DebugColor::Crimson => |s| s.truecolor(220, 20, 60),
             DebugColor::Amber => |s| s.truecolor(255, 191, 0),
-
         }
     }
     pub fn to_background_fn(&self) -> fn(String) -> colored::ColoredString {
@@ -266,7 +266,6 @@ impl SlidingWindowWeighted<f32> {
         return average;
     }
 }
-
 
 pub struct SlidingWindowTimely<T> {
     history_buffer: VecDeque<T>,
@@ -456,13 +455,12 @@ impl CsvData {
     }
 
     pub fn write_to_csv(&self, folder: &str) -> std::io::Result<()> {
-        
-        let path = format!("Results/{folder}/QUEUE_stats.csv"); 
+        let path = format!("Results/{folder}/QUEUE_stats.csv");
         let file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)?; 
+            .open(path)?;
 
         let mut writer = Writer::from_writer(file);
 
@@ -845,10 +843,9 @@ pub struct HeaderALVRStream {
 // Implementing Display for HeaderALVRStream
 impl fmt::Display for HeaderALVRStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.next_packet_index == 0{
-            write!(f, "") 
-        }
-        else{
+        if self.next_packet_index == 0 {
+            write!(f, "")
+        } else {
             write!(
                 f,
                 "(ALVR F: {}, S: {}/{})",
@@ -857,7 +854,6 @@ impl fmt::Display for HeaderALVRStream {
                 self.shards_count - 1
             )
         }
-        
     }
 }
 #[derive(Debug, Clone)]
@@ -879,9 +875,9 @@ pub struct MpduPacket {
     pub data_inner: Vec<u8>,
     pub header_alvr: HeaderALVRStream,
 
-    pub has_consumed_emu_tokens: bool, 
-    pub emulated_added_delay_deadline: Option<TaiTime<0>>, 
-    // pub is_alvr_control_packet: bool, 
+    pub has_consumed_emu_tokens: bool,
+    pub emulated_added_delay_deadline: Option<TaiTime<0>>,
+    // pub is_alvr_control_packet: bool,
 }
 
 impl MpduPacket {
@@ -902,9 +898,9 @@ impl MpduPacket {
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
-            has_consumed_emu_tokens: false, 
-            emulated_added_delay_deadline: None, 
-            // is_alvr_control_packet: false, 
+            has_consumed_emu_tokens: false,
+            emulated_added_delay_deadline: None,
+            // is_alvr_control_packet: false,
         }
     }
 
@@ -916,7 +912,7 @@ impl MpduPacket {
 pub struct AmpduPacket {
     pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
     pub total_length: usize,           // Total length of aggregated packets
-    pub sta_dest_id: i32,                   // ID for the source STA
+    pub sta_dest_id: i32,              // ID for the source STA
     pub size: i32,
     pub coordinates: Coords,
 }
@@ -927,7 +923,7 @@ impl AmpduPacket {
             mpdu_packets: Vec::new(), // Initialize an empty vector for MPDU packets
             total_length: 0,          // Initialize total length to 0
             sta_dest_id: -1, // Initialize STA_ID to -1 (assuming -1 indicates uninitialized)
-            size: 0,    // Initialize size to 0
+            size: 0,         // Initialize size to 0
             coordinates: Coords {
                 x: 0.0,
                 y: 0.0,
@@ -941,19 +937,19 @@ impl AmpduPacket {
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_dest_id, self.total_length
         );
-        let mut i = 0; 
+        let mut i = 0;
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.8}, T_s: {:.8}, {} \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64(),
-                packet.T_s.as_secs_f64(), 
+                packet.T_s.as_secs_f64(),
                 packet.header_alvr
             );
-            // i +=1; 
+            // i +=1;
             // if i >10 {
-            //     println!( "\x1b[33m\t..."); 
-            //     break; 
+            //     println!( "\x1b[33m\t...");
+            //     break;
             // }
         }
     }
@@ -1027,8 +1023,13 @@ impl ResultsFrameTXDelay {
     //     self.p_rx = 0.0;
     //     self.o_rate = 0.0;
     // }
-    pub fn new() -> Self{
-        Self { service_delay: (0.0), data_service_delay: (0.0), pathloss: (0.0), p_rx: (0.0) }
+    pub fn new() -> Self {
+        Self {
+            service_delay: (0.0),
+            data_service_delay: (0.0),
+            pathloss: (0.0),
+            p_rx: (0.0),
+        }
     }
 }
 
@@ -1129,13 +1130,16 @@ pub fn frametransmission_delay(
     }
 }
 
-pub fn write_all_sta_csvs(sta_stats_vec: &Vec<perStaLockStats>, folder: &str) -> std::io::Result<()> {
+pub fn write_all_sta_csvs(
+    sta_stats_vec: &Vec<perStaLockStats>,
+    folder: &str,
+) -> std::io::Result<()> {
     for (_index, sta_stats) in sta_stats_vec.iter().enumerate() {
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
             let filename: String = format!("Results/{folder}/STA{}.csv", stats.sta_id);
-            println!("FILENAMEEE: {filename}"); 
+            println!("FILENAMEEE: {filename}");
             // Open file with write permissions
             let file = OpenOptions::new()
                 .write(true)
@@ -1200,7 +1204,7 @@ pub struct NominalBitrateStats {
 pub struct GraphNetworkStatistics {
     pub frame_index: u32,
 
-    pub frame_size_bytes: usize, 
+    pub frame_size_bytes: usize,
 
     pub client_fps: f32,
     pub server_fps: f32,
@@ -1232,10 +1236,10 @@ pub struct GraphNetworkStatistics {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GraphNetworkStatistics_csv {
-    pub timestamp: f64, 
+    pub timestamp: f64,
     pub frame_index: usize,
 
-    pub frame_size_bytes: usize, 
+    pub frame_size_bytes: usize,
 
     pub client_fps: f32,
     pub server_fps: f32,
@@ -1265,10 +1269,7 @@ pub struct GraphNetworkStatistics_csv {
     pub interval_avg_plot_throughput: f32,
 }
 
-
-#[derive(
-    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogSeverity {
     Error = 3,
     Warning = 2,
@@ -1340,7 +1341,6 @@ pub struct GraphStatistics {
     pub actual_bitrate_bps: f32,
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
 pub struct HeuristicStats {
     pub frame_interval_s: f32,
@@ -1375,7 +1375,6 @@ pub struct TrackingEvent {
     pub htc_eye_expression: Option<Vec<f32>>,
     pub htc_lip_expression: Option<Vec<f32>>,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum EventType {

@@ -1,7 +1,7 @@
 use glam::{Quat, Vec3};
 use std::{fmt::Debug, net::IpAddr};
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{net::TcpListener, time::Duration};
 use tai_time::TaiTime;
 /// A 2-dimensional vector.
@@ -56,7 +56,7 @@ pub enum LogSeverity {
     Debug = 0,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug )]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ClientControlPacket {
     PlayspaceSync(Option<Vec2>),
     RequestIdr,
@@ -72,7 +72,7 @@ pub enum ClientControlPacket {
     ReservedBuffer(Vec<u8>),
 
     NetworkStatistics(NetworkStatisticsPacket),
-    DeadlineShardLossStat(DeadlineShardlossStatPacket), 
+    DeadlineShardLossStat(DeadlineShardlossStatPacket),
 }
 
 // pub struct ProtoControlSocket {
@@ -174,14 +174,11 @@ pub struct ClientStatistics {
     pub frames_dropped: u32,
 }
 
-
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct DeadlineShardlossStatPacket{
-    pub frame_indexes: Vec<u32>, 
-    pub shards_lost: Vec<usize>, 
-} 
-
+pub struct DeadlineShardlossStatPacket {
+    pub frame_indexes: Vec<u32>,
+    pub shards_lost: Vec<usize>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkStatisticsPacket {
@@ -207,6 +204,6 @@ pub struct NetworkStatisticsPacket {
     pub highest_rx_frame_index: i32,
     pub highest_rx_shard_index: i32,
 
-    pub lost_shards_deadline: usize, 
-    // pub tx_instant: f64, 
+    pub lost_shards_deadline: usize,
+    // pub tx_instant: f64,
 }

@@ -27,12 +27,11 @@ fn convert_rgb_to_u32(rgb: &[u8], width: usize, height: usize) -> Vec<u32> {
     buffer
 }
 
-
-
 fn main() -> Result<(), ffmpeg::Error> {
     ffmpeg::init().unwrap();
-    if let Ok(mut ictx) = input(&PathBuf::from("/home/boris/Desktop/Rust_MG1/asynchronix/BigBuckBunny.mp4")) {
-
+    if let Ok(mut ictx) = input(&PathBuf::from(
+        "/home/boris/Desktop/Rust_MG1/asynchronix/BigBuckBunny.mp4",
+    )) {
         let input = ictx
             .streams()
             .best(Type::Video)
@@ -54,15 +53,25 @@ fn main() -> Result<(), ffmpeg::Error> {
 
         let mut frame_index = 0;
 
-        let mut input_window = match Window::new("Input Video", decoder.width() as usize, decoder.height() as usize, WindowOptions::default()) {
+        let mut input_window = match Window::new(
+            "Input Video",
+            decoder.width() as usize,
+            decoder.height() as usize,
+            WindowOptions::default(),
+        ) {
             Ok(window) => window,
             Err(e) => {
                 eprintln!("Error creating input window: {}", e);
                 return Err(ffmpeg::Error::DecoderNotFound); // Or another appropriate error
             }
         };
-        
-        let mut output_window = match Window::new("Decoded Video", decoder.width() as usize, decoder.height() as usize, WindowOptions::default()) {
+
+        let mut output_window = match Window::new(
+            "Decoded Video",
+            decoder.width() as usize,
+            decoder.height() as usize,
+            WindowOptions::default(),
+        ) {
             Ok(window) => window,
             Err(e) => {
                 eprintln!("Error creating output window: {}", e);
@@ -72,12 +81,26 @@ fn main() -> Result<(), ffmpeg::Error> {
         // Store frames as RGB data for both windows
         let mut input_frame_rgb = vec![0u8; (decoder.width() * decoder.height() * 3) as usize];
         let mut decoded_frame_rgb = vec![0u8; (decoder.width() * decoder.height() * 3) as usize];
-        
-        // Convert RGB frame to u32 format for minifb
-        let input_frame_u32 = convert_rgb_to_u32(&input_frame_rgb, decoder.width() as usize, decoder.height() as usize);
 
-        let decoded_frame_u32 = convert_rgb_to_u32(&decoded_frame_rgb, decoder.width() as usize, decoder.height() as usize);
-        output_window.update_with_buffer(&decoded_frame_u32, decoder.width() as usize, decoder.height() as usize).unwrap();
+        // Convert RGB frame to u32 format for minifb
+        let input_frame_u32 = convert_rgb_to_u32(
+            &input_frame_rgb,
+            decoder.width() as usize,
+            decoder.height() as usize,
+        );
+
+        let decoded_frame_u32 = convert_rgb_to_u32(
+            &decoded_frame_rgb,
+            decoder.width() as usize,
+            decoder.height() as usize,
+        );
+        output_window
+            .update_with_buffer(
+                &decoded_frame_u32,
+                decoder.width() as usize,
+                decoder.height() as usize,
+            )
+            .unwrap();
 
         let mut receive_and_process_decoded_frames =
             |decoder: &mut ffmpeg::decoder::Video| -> Result<(), ffmpeg::Error> {
@@ -90,19 +113,39 @@ fn main() -> Result<(), ffmpeg::Error> {
                     // Copy input frame to the input window buffer
                     input_frame_rgb.copy_from_slice(rgb_frame.data(0));
 
-                                // Convert RGB frame to u32 format for minifb
-                    let input_frame_u32 = convert_rgb_to_u32(&input_frame_rgb, decoder.width() as usize, decoder.height() as usize);
+                    // Convert RGB frame to u32 format for minifb
+                    let input_frame_u32 = convert_rgb_to_u32(
+                        &input_frame_rgb,
+                        decoder.width() as usize,
+                        decoder.height() as usize,
+                    );
 
                     // Display the input video in the window
-                    input_window.update_with_buffer(&input_frame_u32, decoder.width() as usize, decoder.height() as usize).unwrap();
+                    input_window
+                        .update_with_buffer(
+                            &input_frame_u32,
+                            decoder.width() as usize,
+                            decoder.height() as usize,
+                        )
+                        .unwrap();
 
                     // Copy decoded frame to the output window buffer
                     decoded_frame_rgb.copy_from_slice(rgb_frame.data(0));
-                    
-                    let decoded_frame_u32 = convert_rgb_to_u32(&decoded_frame_rgb, decoder.width() as usize, decoder.height() as usize);
+
+                    let decoded_frame_u32 = convert_rgb_to_u32(
+                        &decoded_frame_rgb,
+                        decoder.width() as usize,
+                        decoder.height() as usize,
+                    );
 
                     // Display the decoded video in the second window
-                    output_window.update_with_buffer(&decoded_frame_u32, decoder.width() as usize, decoder.height() as usize).unwrap();
+                    output_window
+                        .update_with_buffer(
+                            &decoded_frame_u32,
+                            decoder.width() as usize,
+                            decoder.height() as usize,
+                        )
+                        .unwrap();
                     frame_index += 1;
                 }
                 Ok(())
@@ -122,7 +165,10 @@ fn main() -> Result<(), ffmpeg::Error> {
 }
 
 fn save_file(frame: &Video, index: usize) -> std::result::Result<(), std::io::Error> {
-    let mut file = File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/frame{}.ppm", index))?;
+    let mut file = File::create(format!(
+        "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/frame{}.ppm",
+        index
+    ))?;
     file.write_all(format!("P6\n{} {}\n255\n", frame.width(), frame.height()).as_bytes())?;
     file.write_all(frame.data(0))?;
     Ok(())

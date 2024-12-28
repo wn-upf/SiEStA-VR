@@ -32,7 +32,6 @@ use std::env;
 
 use asynchronix::model::Model;
 
-
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////// SIMULATION ////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -75,11 +74,10 @@ fn simple_MM1K(
         true,
         rate_service_bps,
     ); // STAs 0
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.00);
+    let mut queue: QueueModule =
+        QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.00);
     let sink = Sink::new();
 
-
-    
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
     let csv_data_handle: Arc<Mutex<CsvData>> = queue.csv_metrics.get_data_handle();
     let queuestats_data_handle = queue.get_queue_stats_handle();
@@ -100,7 +98,6 @@ fn simple_MM1K(
     source.output_port.connect(QueueModule::input, &mbox_queue);
     queue.output_port_sta1.connect(Sink::input, &sink_mbox);
     queue.output_port_sta2.connect(Sink::input, &sink_mbox);
-
 
     let t0 = MonotonicTime::EPOCH;
 
@@ -269,7 +266,8 @@ fn multiple_STA_sim(
     let sink: Sink = Sink::new();
     let mbox_sink: Mailbox<Sink> = Mailbox::new();
 
-    let mut queue: QueueModule = QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.0);
+    let mut queue: QueueModule =
+        QueueModule::new(num_STAs, k_queue - 1 as usize, rate_queue_bps, 0.0);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 
@@ -353,7 +351,7 @@ fn multiple_STA_sim(
 
     // After simulation, write the CSV data
 
-    let filename = format!("MM1K_sim"); 
+    let filename = format!("MM1K_sim");
     if let Ok(data) = csv_data_handle.lock() {
         if let Err(e) = data.write_to_csv(&filename) {
             eprintln!("Failed to write CSV file: {}", e);
@@ -402,7 +400,7 @@ fn main() {
             "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance>",
             args[0]
         );
-        println!("ARGS: {:#?}", args); 
+        println!("ARGS: {:#?}", args);
         return;
     }
     let stoptime: f64 = args[1].parse().expect("Invalid T_END");

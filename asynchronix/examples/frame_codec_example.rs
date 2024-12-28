@@ -1,8 +1,12 @@
-use std::sync::mpsc::{self, Sender, Receiver};
-use std::{io::{Read, Write}, thread, time::Duration};
-use std::process::{Command, Stdio};
-use minifb::{Key, Window, WindowOptions, Scale};
 use ffmpeg_sidecar::command::FfmpegCommand;
+use minifb::{Key, Scale, Window, WindowOptions};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::{
+    io::{Read, Write},
+    thread,
+    time::Duration,
+};
 
 pub const OFFSET_VIDEO_TIMESTAMP: f64 = 10.0;
 pub const WIDTH_ENCODER_: usize = 720;
@@ -69,8 +73,12 @@ fn main() {
     }
 }
 
-pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Result<Vec<u8>, String> {
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+pub fn generate_sample_ffmpeg(
+    current_bitrate_mbps: f32,
+    timestamp: f64,
+) -> Result<Vec<u8>, String> {
+    let input_path =
+        "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
 
     let hours = (timestamp / 3600.0) as u32;
     let minutes = ((timestamp % 3600.0) / 60.0) as u32;
@@ -84,17 +92,27 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Resu
 
     let mut ffmpeg = match FfmpegCommand::new()
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
             "-vf",
-            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER_, HEIGHT_DECODER_),
-            "-c:v", "hevc_nvenc",
+            &format!(
+                "scale={}:{},format=yuv420p",
+                WIDTH_ENCODER_, HEIGHT_DECODER_
+            ),
+            "-c:v",
+            "hevc_nvenc",
             "-b:v",
             &format!("{:.0}K", current_bitrate_mbps as f64 / 30.0 * 1000.0),
-            "-frames:v", "",
-            "-f", "rawvideo",
+            "-frames:v",
+            "",
+            "-f",
+            "rawvideo",
             "-an",
             "-",
         ])
@@ -117,15 +135,22 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Resu
 fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",
-            "-c:v", "hevc_cuvid",
-            "-f", "rawvideo",
-            "-pix_fmt", "yuv420p",
+            "-hwaccel",
+            "cuda",
+            "-c:v",
+            "hevc_cuvid",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             "-s",
             &format!("{}x{}", WIDTH_ENCODER_, HEIGHT_DECODER_),
-            "-i", "pipe:0",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgb24",
+            "-i",
+            "pipe:0",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
             "-vf",
             &format!("scale={}:{}", WIDTH_ENCODER_, HEIGHT_DECODER_),
             "-",
@@ -141,12 +166,7 @@ fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
     }
 
     let mut buf = Vec::new();
-    ffmpeg
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_end(&mut buf)
-        .unwrap();
+    ffmpeg.stdout.take().unwrap().read_to_end(&mut buf).unwrap();
 
     convert_rgb_to_u32(&buf, WIDTH_ENCODER_, HEIGHT_DECODER_)
 }

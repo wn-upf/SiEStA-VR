@@ -1,32 +1,29 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 // use futures_util::stream::empty;
+use std::io::{Read, Write};
 #[allow(unused_imports)]
 #[allow(dead_code)]
+use std::process::{Child, Command, Stdio};
 
-use std::process::{Command, Stdio, Child};
-use std::io::{Read, Write};
-
-use std::sync::{Arc, Mutex, mpsc};
 use std::collections::HashMap;
+use std::sync::{mpsc, Arc, Mutex};
 use tokio::io::{AsyncReadExt, BufReader};
 
-
-use lazy_static::lazy_static; 
-use std::thread; 
+use lazy_static::lazy_static;
+use std::thread;
 lazy_static! {
     // Thread-safe FFmpeg process pool
     static ref FFMPEG_ENCODE_POOL: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
     // static ref FFMPEG_DECODE_POOL: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
-use crate::{lib::DEBUG_PRINT_ENABLED, print_pretty}; 
+use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
 
-
-use crate::{debug_bgprint, format_elapsed}; 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100); 
-pub const MAX_DEADLINE_IN_STATS: usize = 10; 
-pub const OFFSET_VIDEO: f64 = 350.0; 
+use crate::{debug_bgprint, format_elapsed};
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
+pub const MAX_DEADLINE_IN_STATS: usize = 10;
+pub const OFFSET_VIDEO: f64 = 350.0;
 use rand::Rng;
 use std::cell::RefCell;
 use std::fmt::{self, Debug};
@@ -45,7 +42,7 @@ use crate::lib::models_XR::{
     XRDevice,
     XRServer, // ,XRClient
     HEIGHT_ENCODER,
-    WIDTH_ENCODER, 
+    WIDTH_ENCODER,
 };
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
@@ -66,49 +63,52 @@ use super::alvr_packets::NetworkStatisticsPacket;
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 60.0;
 
-pub const MAX_PACKET_SIZE_RECV: usize = 2000*8;
+pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
 pub const HAPTICS: u16 = 1;
 pub const AUDIO: u16 = 2;
 pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 
-pub const CONTROL_STREAM:u16  = 5; 
+pub const CONTROL_STREAM: u16 = 5;
 
 pub const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
+#[derive(Clone)]
+pub struct EncodingTask {
+    pub current_bitrate_mbps: f32,
+    pub timestamp: f64,
+    pub fps: f64,
+    pub config_key: String,
+    pub result_tx: mpsc::Sender<Vec<u8>>,
+}
+static mut COUNTER_FIBONACCI: usize = 0;
 
+pub fn spawn_encoding_pool(
+    pool_size: usize,
+) -> (
+    mpsc::Sender<EncodingTask>,
+    Arc<Mutex<mpsc::Receiver<EncodingTask>>>,
+) {
+    let (tx, rx) = mpsc::channel::<EncodingTask>();
+    let rx = Arc::new(Mutex::new(rx)); // Wrap the receiver in Arc<Mutex> for shared access
 
-  #[derive(Clone)]
-  pub struct EncodingTask {
-      pub current_bitrate_mbps: f32,
-      pub timestamp: f64,
-      pub fps: f64,
-      pub config_key: String,
-      pub result_tx: mpsc::Sender<Vec<u8>>,
-  }
-  static mut COUNTER_FIBONACCI: usize = 0; 
+    for _ in 0..pool_size {
+        let receiver = Arc::clone(&rx); // Clone the Arc, not the Receiver
 
+        // Create a new worker thread that processes the tasks
+        thread::spawn(move || loop {
+            let task = receiver
+                .lock()
+                .unwrap()
+                .recv()
+                .expect("Failed to receive task");
+            process_task(task);
+        });
+    }
 
-  pub fn spawn_encoding_pool(pool_size: usize) -> (mpsc::Sender<EncodingTask>, Arc<Mutex<mpsc::Receiver<EncodingTask>>>) {
-      let (tx, rx) = mpsc::channel::<EncodingTask>();
-      let rx = Arc::new(Mutex::new(rx)); // Wrap the receiver in Arc<Mutex> for shared access
-  
-      for _ in 0..pool_size {
-          let receiver = Arc::clone(&rx); // Clone the Arc, not the Receiver
-  
-          // Create a new worker thread that processes the tasks
-          thread::spawn(move || {
-              loop {
-                  let task = receiver.lock().unwrap().recv().expect("Failed to receive task");
-                  process_task(task);
-              }
-          });
-      }
-  
-      (tx, rx) // Return both the sender and the shared receiver
-  }
-  
+    (tx, rx) // Return both the sender and the shared receiver
+}
 
 // fn process_task(task: EncodingTask) {
 //     let EncodingTask { current_bitrate_mbps, timestamp, fps, config_key, result_tx } = task;
@@ -162,7 +162,13 @@ pub const SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 fn process_task(task: EncodingTask) {
     // Process the task (same as before)
-    let EncodingTask { current_bitrate_mbps, timestamp, fps, config_key, result_tx } = task;
+    let EncodingTask {
+        current_bitrate_mbps,
+        timestamp,
+        fps,
+        config_key,
+        result_tx,
+    } = task;
 
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
     let hours = (timestamp / 3600.0) as u32;
@@ -175,27 +181,46 @@ fn process_task(task: EncodingTask) {
     // Spawn FFmpeg process
     let mut process = std::process::Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
-            "-vf", &format!("scale={}:{},format=yuv420p", 1280, 720),
-            "-c:v", "hevc_nvenc",
-            "-b:v", &format!("{:.0}K", current_bitrate_mbps * 1000.0),
-            "-preset", "medium",
-            "-rc", "vbr_hq",
-            "-cq", "19",
-            "-b_ref_mode", "2",
-            "-bf", "3",
-            "-temporal-aq", "1",
-            "-spatial-aq", "1",
-            "-aq-strength", "8",
-            "-frames:v", "1",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            &format!("scale={}:{},format=yuv420p", 1280, 720),
+            "-c:v",
+            "hevc_nvenc",
+            "-b:v",
+            &format!("{:.0}K", current_bitrate_mbps * 1000.0),
+            "-preset",
+            "medium",
+            "-rc",
+            "vbr_hq",
+            "-cq",
+            "19",
+            "-b_ref_mode",
+            "2",
+            "-bf",
+            "3",
+            "-temporal-aq",
+            "1",
+            "-spatial-aq",
+            "1",
+            "-aq-strength",
+            "8",
+            "-frames:v",
+            "1",
             "-an",
-            "-f", "mp4",
-            "-bsf:v", "hevc_mp4toannexb",
-            "-movflags", "+frag_keyframe+empty_moov",
-            "-"
+            "-f",
+            "mp4",
+            "-bsf:v",
+            "hevc_mp4toannexb",
+            "-movflags",
+            "+frag_keyframe+empty_moov",
+            "-",
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -204,13 +229,18 @@ fn process_task(task: EncodingTask) {
         .expect("Failed to spawn FFmpeg encoder");
 
     let mut buf = Vec::new();
-    process.stdout.as_mut().unwrap().read_to_end(&mut buf)
+    process
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_to_end(&mut buf)
         .expect("Failed to read encoded buffer");
 
     // Send result through the channel
-    result_tx.send(buf).expect("Failed to send data through channel");
+    result_tx
+        .send(buf)
+        .expect("Failed to send data through channel");
 }
-
 
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
@@ -403,9 +433,9 @@ pub struct InProgressPacket {
     buffer: Vec<u8>,
     buffer_length: usize,
     received_shard_indices: HashSet<usize>,
-    deadline: Option<TaiTime<0>>, 
-    num_shards_expected: usize, 
-    id_frame: u32, 
+    deadline: Option<TaiTime<0>>,
+    num_shards_expected: usize,
+    id_frame: u32,
 }
 pub struct VideoPacket {
     pub header: VideoPacketHeader,
@@ -573,7 +603,7 @@ struct RecvState {
     packet_cursor: usize, // counts also the prefix bytes
     overwritten_data_backup: Option<[u8; SHARD_PREFIX_SIZE]>,
     should_discard: bool,
-    frame_first_shard_deadline: Option<TaiTime<0>>, 
+    frame_first_shard_deadline: Option<TaiTime<0>>,
 }
 
 #[derive(Clone)]
@@ -649,13 +679,13 @@ impl FrameTracker {
     pub fn insert(&mut self, frame_id: u32, instant: TaiTime<0>) {
         self.map.insert(frame_id, instant);
         self.queue.push_back(frame_id);
-        // debug_bgprint!(DebugColor::Green, "Inserted Frame (K: {} , V: {:.9}) in rtt map", frame_id, format_elapsed!(instant));  
+        // debug_bgprint!(DebugColor::Green, "Inserted Frame (K: {} , V: {:.9}) in rtt map", frame_id, format_elapsed!(instant));
 
         // Drop oldest pairs if size exceeds max_size
         while self.queue.len() > self.max_size {
             if let Some(oldest_frame_id) = self.queue.pop_front() {
                 self.map.remove(&oldest_frame_id);
-                println!("FrameTracker removed {}", oldest_frame_id); 
+                println!("FrameTracker removed {}", oldest_frame_id);
             }
         }
     }
@@ -739,8 +769,7 @@ pub struct ReceiverData<H> {
 
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
-
-    // tx_instant_first_shard: TaiTime<0>, 
+    // tx_instant_first_shard: TaiTime<0>,
 }
 
 impl<H> ReceiverData<H> {
@@ -804,21 +833,20 @@ impl<H> ReceiverData<H> {
 
 impl<H: DeserializeOwned> ReceiverData<H> {
     pub fn get(&self) -> Result<(&[u8])> {
-        // println!("[DBG get data]" ); 
+        // println!("[DBG get data]" );
         let mut data: &[u8] = &self.buffer.as_ref().unwrap()[(SHARD_PREFIX_SIZE + 13)..self.size];
 
         // print_pretty!(
         //     DebugColor::Purple,
         //     "\t[CLIENT DCD ] .get() at client frame size: {} bytes ({} KB)\nData = {:?}",
         //     data.len(),
-        //     data.len() / 1024, 
+        //     data.len() / 1024,
         //     &data[..200]
         // );
         // // This will partially consume the slice, leaving only the actual payload
         // match header = bincode::deserialize_from(&mut data){
 
-
-        Ok(( data))
+        Ok((data))
     }
     // pub fn get_header(&self) -> Result<H> {
     //     Ok(self.get()?.0)
@@ -868,7 +896,7 @@ pub struct StreamSocket {
     highest_rx_shard_index: i32,
     highest_rx_frame_index: i32,
 
-    pub lost_shards_deadline_map: HashMap<u32, usize>,  // key: frame_id, val: shard loss  
+    pub lost_shards_deadline_map: HashMap<u32, usize>, // key: frame_id, val: shard loss
 }
 
 impl StreamSocket {
@@ -900,16 +928,15 @@ impl StreamSocket {
         let (used_buffer_sender, used_buffer_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
             unbounded();
 
-
-        // let EXPECTED_NO_PACKETS = match stream_id{ // TODO: 
-        //     VIDEO => let bitrate = .... 
-        //     AUDIO => 
-        //     STATISTICS => 
-        //     HAPTICS => 
-        //     TRACKING => 
+        // let EXPECTED_NO_PACKETS = match stream_id{ // TODO:
+        //     VIDEO => let bitrate = ....
+        //     AUDIO =>
+        //     STATISTICS =>
+        //     HAPTICS =>
+        //     TRACKING =>
         // }
-        let EXPECTED_NO_PACKETS: usize = 100; 
-        
+        let EXPECTED_NO_PACKETS: usize = 100;
+
         // Initialize the used buffers
         for _ in 0..max_concurrent_buffers {
             used_buffer_sender.send(vec![]).unwrap(); // Ignoring the result as in the original code
@@ -926,9 +953,9 @@ impl StreamSocket {
                     buffer: vec![],
                     buffer_length: 0,
                     received_shard_indices: HashSet::new(),
-                    deadline: None, 
-                    num_shards_expected: 0, 
-                    id_frame: 0, 
+                    deadline: None,
+                    num_shards_expected: 0,
+                    id_frame: 0,
                 },
             },
         );
@@ -949,37 +976,41 @@ impl StreamSocket {
     }
 
     pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
-
-        let mut total_lost_deadline = 0; 
+        let mut total_lost_deadline = 0;
         // Collect keys into a vector before modifying the map
         let keys: Vec<_> = self.lost_shards_deadline_map.keys().cloned().collect();
 
-        let mut vec_keys = vec![]; 
-        let mut vec_lost = vec![]; 
+        let mut vec_keys = vec![];
+        let mut vec_lost = vec![];
 
         // Now you can iterate over the keys and remove them from the map
         for frame_deadlined in keys {
             vec_keys.push(frame_deadlined);
 
-            let lost_in_frame = self.lost_shards_deadline_map.remove(&frame_deadlined).unwrap(); 
+            let lost_in_frame = self
+                .lost_shards_deadline_map
+                .remove(&frame_deadlined)
+                .unwrap();
             // println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
-            debug_bgprint!(DebugColor::Red, "[Flush deadline] Packets lost in frame {}: {:?}", frame_deadlined,lost_in_frame); 
-            vec_lost.push(lost_in_frame); 
-            total_lost_deadline += lost_in_frame; 
+            debug_bgprint!(
+                DebugColor::Red,
+                "[Flush deadline] Packets lost in frame {}: {:?}",
+                frame_deadlined,
+                lost_in_frame
+            );
+            vec_lost.push(lost_in_frame);
+            total_lost_deadline += lost_in_frame;
         }
         (vec_keys, vec_lost)
-
     }
-
 
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
         arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
         context: &Context<T>,
     ) -> ConResult {
+        let now = context.scheduler.time();
 
-        let now = context.scheduler.time(); 
-        
         // println!("Recv function of shards!");
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
@@ -1003,7 +1034,6 @@ impl StreamSocket {
             let shards_count = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
             let tx_r_instant = f32::from_be_bytes(bytes[18..22].try_into().unwrap());
-
 
             if stream_id == VIDEO {
                 let rx_instant = now;
@@ -1066,14 +1096,13 @@ impl StreamSocket {
                 packet_cursor: 0,
                 overwritten_data_backup: None,
                 should_discard: false,
-                frame_first_shard_deadline: None, 
+                frame_first_shard_deadline: None,
             })
         };
 
-        if shard_recv_state_mut.frame_first_shard_deadline.is_none(){
-            shard_recv_state_mut.frame_first_shard_deadline = now.checked_add(DEADLINE_PACKETS_S); 
+        if shard_recv_state_mut.frame_first_shard_deadline.is_none() {
+            shard_recv_state_mut.frame_first_shard_deadline = now.checked_add(DEADLINE_PACKETS_S);
         }
-
 
         let Some(components) = self
             .stream_recv_components
@@ -1087,7 +1116,7 @@ impl StreamSocket {
         };
 
         debug_print!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
-    
+
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
         } else if let Some(packet) = components
@@ -1102,7 +1131,7 @@ impl StreamSocket {
                 .try_recv()
                 .ok()
                 .or_else(|| {
-                    println!("First fallback"); 
+                    println!("First fallback");
                     // First fallback: Try to recycle old packets
                     let recyclable = components
                         .in_progress_packets
@@ -1125,7 +1154,6 @@ impl StreamSocket {
                             .in_progress_packets
                             .remove(&idx)
                             .map(|packet| packet.buffer)
-                    
                     })
                 })
                 .or_else(|| {
@@ -1153,9 +1181,9 @@ impl StreamSocket {
                     received_shard_indices: HashSet::with_capacity(
                         shard_recv_state_mut.shards_count,
                     ),
-                    deadline: shard_recv_state_mut.frame_first_shard_deadline, 
+                    deadline: shard_recv_state_mut.frame_first_shard_deadline,
                     num_shards_expected: shard_recv_state_mut.shards_count,
-                    id_frame: shard_recv_state_mut.packet_index, 
+                    id_frame: shard_recv_state_mut.packet_index,
                 },
             );
             components
@@ -1163,8 +1191,6 @@ impl StreamSocket {
                 .get_mut(&shard_recv_state_mut.packet_index)
                 .unwrap()
         };
-
-        
 
         let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
         // Note: there is no prefix offset, since we want to write the prefix too.
@@ -1209,14 +1235,12 @@ impl StreamSocket {
                     )
                     .unwrap();
                 shard_recv_state_mut.packet_cursor += size;
-
             }
             // Restore backed up bytes
             // Safety: overwritten_data_backup is always set just before receiving the packet
             sub_buffer[..SHARD_PREFIX_SIZE]
                 .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
         }
-
 
         if !shard_recv_state_mut.should_discard {
             if !in_progress_packet
@@ -1238,10 +1262,10 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            debug_print!(DebugColor::Orange, "FRAME IS COMPLETE!", );
+            debug_print!(DebugColor::Orange, "FRAME IS COMPLETE!",);
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
-                    // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index); 
+                    // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index);
 
                     let values: Vec<&ShardMapStats> = inner_map.values().collect();
                     let min_time = values.iter().map(|shard| shard.rx_instant).min().unwrap();
@@ -1318,12 +1342,12 @@ impl StreamSocket {
 
                 highest_rx_frame_index: self.highest_rx_frame_index,
                 highest_rx_shard_index: self.highest_rx_shard_index,
-                // tx_instant_first_shard: self.first_shard_instant_tx, 
+                // tx_instant_first_shard: self.first_shard_instant_tx,
             };
 
-            let empty_buffer = Vec::with_capacity(reconstruct.buffer.capacity()); 
-            // println!("capacity of empty buffer! {}, len : {}", empty_buffer.capacity(), empty_buffer.len()); 
-            
+            let empty_buffer = Vec::with_capacity(reconstruct.buffer.capacity());
+            // println!("capacity of empty buffer! {}, len : {}", empty_buffer.capacity(), empty_buffer.len());
+
             // println!("{:?} Reconstructed packet!!", reconstruct);
             components.packet_queue.send(reconstruct).ok();
 
@@ -1331,7 +1355,6 @@ impl StreamSocket {
             components.used_buffer_sender.send(empty_buffer).ok();
 
             if shard_recv_state_mut.stream_id == VIDEO {
-
                 self.rx_bytes = 0;
                 self.rx_shard_counter = 0;
                 self.duplicated_shard_counter = 0;
@@ -1350,14 +1373,14 @@ impl StreamSocket {
                 }
             }
         } // if len == shard_count END
-            // Initialize a counter to track the total loss
+          // Initialize a counter to track the total loss
         let mut total_loss = 0;
 
         // Create a vector to store the keys of expired packets (to remove them later)
         let mut expired_keys = Vec::new();
 
         // Iterate through in_progress_packets to identify expired packets
-      // In the deadline check section:
+        // In the deadline check section:
         for (id, shard) in components.in_progress_packets.iter_mut() {
             if let Some(deadline) = shard.deadline {
                 if deadline <= now {
@@ -1366,15 +1389,14 @@ impl StreamSocket {
                     let shards_lost = expected_shards - shards_arrived;
 
                     // Store stats
-                    self.lost_shards_deadline_map.insert(shard.id_frame, shards_lost);
+                    self.lost_shards_deadline_map
+                        .insert(shard.id_frame, shards_lost);
 
                     // Mark for removal
                     expired_keys.push(*id);
                 }
             }
         }
-
-
 
         // Remove expired packets and cleanup
         for key in expired_keys {
@@ -1424,7 +1446,7 @@ impl StreamSocketBuilder {
                     duplicated_shard_counter: 0,
                     highest_rx_shard_index: -1,
                     highest_rx_frame_index: -1,
-                    lost_shards_deadline_map: HashMap::new(), 
+                    lost_shards_deadline_map: HashMap::new(),
                 }
             }
         }
@@ -1516,7 +1538,7 @@ impl StreamSocketBuilder {
 
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
-            lost_shards_deadline_map: HashMap::new(), 
+            lost_shards_deadline_map: HashMap::new(),
         })
     }
 
@@ -1633,7 +1655,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
         //     .recv_timeout(timeout)
         //     .handle_try_again()?;
 
-        let packet = self.packet_receiver.try_recv().handle_try_again()?;  
+        let packet = self.packet_receiver.try_recv().handle_try_again()?;
         // print_pretty!(DebugColor::DarkOrange, "[DBG StreamReceiver] Reconstructed frame {}, buffer: L = header+data:{}, data {},\nData = {:?}", packet.frame_index, packet.buffer.len() ,packet.buffer.len() - SHARD_PREFIX_SIZE - 13,&packet.buffer[(SHARD_PREFIX_SIZE + 13)..( 200 + SHARD_PREFIX_SIZE ) ] );
 
         self.frame_interarrival += packet.frame_interarrival;
@@ -1782,9 +1804,7 @@ impl<H> StreamSender<H> {
 
             // let tx_r_instant: f32 = Instant::now().duration_since(self.ref_time).as_secs_f32();
 
-            let tx_r_instant = now
-                .duration_since(self.ref_time)
-                .as_secs_f32();
+            let tx_r_instant = now.duration_since(self.ref_time).as_secs_f32();
 
             // todo: switch to little endian
             // todo: do not remove sizeof<u32> for packet length
@@ -1806,8 +1826,7 @@ impl<H> StreamSender<H> {
             // println!("Let's see the output of the channel after sending: *" );
             if idx == 0 {
                 //store (next_packet_index, Instant) value pair for RTT
-                self.frame_tracker
-                    .insert(self.next_packet_index, now);
+                self.frame_tracker.insert(self.next_packet_index, now);
             }
         }
         self.shards_count = shards_count;
@@ -1818,13 +1837,23 @@ impl<H> StreamSender<H> {
 }
 
 impl<H: Serialize> StreamSender<H> {
-    pub fn get_buffer_emu(&mut self, header: &H, current_bitrate_mbps: f32, now: TaiTime<0>) -> Result<Buffer<H>> {
-        
-        
-        // let mut buffer = generate_random_video_payload(current_bitrate_mbps);
-        // let mut buffer = generate_fibonacci_video_payload(current_bitrate_mbps); // 
-        let mut buffer = generate_sample_ffmpeg_opti(current_bitrate_mbps, now.duration_since(TaiTime::EPOCH).as_secs_f64(),INITIAL_FRAMERATE_FPS as f64); 
+    pub fn get_buffer_emu(
+        &mut self,
+        header: &H,
+        current_bitrate_mbps: f32,
+        now: TaiTime<0>,
+    ) -> Result<Buffer<H>> {
+        let mut buffer: Vec<u8>;
 
+        if USE_FFMPEG == true {
+            buffer = generate_sample_ffmpeg_opti(
+                current_bitrate_mbps,
+                now.duration_since(TaiTime::EPOCH).as_secs_f64(),
+                INITIAL_FRAMERATE_FPS as f64,
+            );
+        } else {
+            buffer = generate_fibonacci_video_payload(current_bitrate_mbps); //
+        }
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
@@ -1832,7 +1861,7 @@ impl<H: Serialize> StreamSender<H> {
         //     DebugColor::Navy,
         //     "[BEFORE] Get_buffer_emu frame size: {} bytes ({} KB)\nData = {:?}",
         //     buffer.len(),
-        //     buffer.len() / 1024, 
+        //     buffer.len() / 1024,
         //     &buffer[..200]
         // );
 
@@ -1849,10 +1878,9 @@ impl<H: Serialize> StreamSender<H> {
         //     DebugColor::Navy,
         //     "\t[AFTEEER ]Get_buffer_emu frame size: {} bytes ({} KB)\nData = {:?}",
         //     buffer.len(),
-        //     buffer.len() / 1024, 
+        //     buffer.len() / 1024,
         //     &buffer[..200]
         // );
-
 
         Ok(Buffer {
             inner: buffer,
@@ -1862,8 +1890,7 @@ impl<H: Serialize> StreamSender<H> {
         })
     }
 
-    pub fn send_header(&mut self, header: &H, now:TaiTime<0> ) -> Result<()> {
-
+    pub fn send_header(&mut self, header: &H, now: TaiTime<0>) -> Result<()> {
         let buffer = self.get_buffer_emu(header, 20.0 as f32, now)?;
 
         println!("WATCHOUT, using 20 as default!!");
@@ -2012,15 +2039,13 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Generate the Fibonacci sequence
     let mut a: u8 = 0;
     let mut b: u8 = 1;
-    unsafe{
+    unsafe {
+        let s = COUNTER_FIBONACCI as u8;
+        println!("*********COUNTER FIBONACCI = {} *********\n", s);
 
-        let s = COUNTER_FIBONACCI as u8; 
-        println!("*********COUNTER FIBONACCI = {} *********\n", s); 
-
-        buffer_inner.push(s);  // first byte is pseudo-counter of packet
-        COUNTER_FIBONACCI += 1; 
+        buffer_inner.push(s); // first byte is pseudo-counter of packet
+        COUNTER_FIBONACCI += 1;
     }
-
 
     for _ in 0..no_bytes_based_bitrate {
         buffer_inner.push(a); // Add the current value to the payload
@@ -2029,12 +2054,11 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
         b = next;
     }
 
-
     print_pretty!(
         DebugColor::Salmon,
         "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
         buffer_inner.len(),
-        buffer_inner.len() / 1024, 
+        buffer_inner.len() / 1024,
         &buffer_inner[..50]
     );
 
@@ -2047,7 +2071,6 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     let minutes = ((timestamp % 3600.0) / 60.0) as u32;
     let seconds = timestamp % 60.0;
     let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds - 10.0);
-    
 
     let current_bitrate_mbps = current_bitrate_mbps / 90.0; // fps
 
@@ -2057,27 +2080,46 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     let first_pass_log = "/tmp/ffmpeg_first_pass.log";
     let mut first_pass = Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
-            "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-c:v", "hevc_nvenc",
-            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset", "medium",  // Higher quality preset
-            "-rc", "vbr_hq",    // Variable Bitrate High Quality mode
-            "-cq", "19",        // Constant Quality level (lower is higher quality)
-            "-b_ref_mode", "2", // Enable B-frame reference mode
-            "-bf", "3",         // Number of B-frames (0-3)
-            "-temporal-aq", "1", // Temporal Adaptive Quantization
-            "-spatial-aq", "1",  // Spatial Adaptive Quantization
-            "-aq-strength", "8", // Adaptive Quantization strength
-            "-frames:v", "1",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-c:v",
+            "hevc_nvenc",
+            "-b:v",
+            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-preset",
+            "medium", // Higher quality preset
+            "-rc",
+            "vbr_hq", // Variable Bitrate High Quality mode
+            "-cq",
+            "19", // Constant Quality level (lower is higher quality)
+            "-b_ref_mode",
+            "2", // Enable B-frame reference mode
+            "-bf",
+            "3", // Number of B-frames (0-3)
+            "-temporal-aq",
+            "1", // Temporal Adaptive Quantization
+            "-spatial-aq",
+            "1", // Spatial Adaptive Quantization
+            "-aq-strength",
+            "8", // Adaptive Quantization strength
+            "-frames:v",
+            "1",
             "-an",
-            "-pass", "1",
-            "-passlogfile", first_pass_log,
-            "-f", "null",
-            "/dev/null"
+            "-pass",
+            "1",
+            "-passlogfile",
+            first_pass_log,
+            "-f",
+            "null",
+            "/dev/null",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2086,7 +2128,7 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
         .expect("Failed to spawn first pass FFMPEG");
 
     let first_pass_status = first_pass.wait().expect("Failed to wait for first pass");
-    
+
     if !first_pass_status.success() {
         eprintln!("First pass encoding failed");
         return Vec::new();
@@ -2095,28 +2137,49 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     // Second pass: Actual encoding with analysis from first pass
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
-            "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-c:v", "hevc_nvenc",
-            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset", "medium",  // Higher quality preset
-            "-rc", "vbr_hq",    // Variable Bitrate High Quality mode
-            "-cq", "19",        // Constant Quality level (lower is higher quality)
-            "-b_ref_mode", "2", // Enable B-frame reference mode
-            "-bf", "3",         // Number of B-frames (0-3)
-            "-temporal-aq", "1", // Temporal Adaptive Quantization
-            "-spatial-aq", "1",  // Spatial Adaptive Quantization
-            "-aq-strength", "8", // Adaptive Quantization strength
-            "-frames:v", "1",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-c:v",
+            "hevc_nvenc",
+            "-b:v",
+            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-preset",
+            "medium", // Higher quality preset
+            "-rc",
+            "vbr_hq", // Variable Bitrate High Quality mode
+            "-cq",
+            "19", // Constant Quality level (lower is higher quality)
+            "-b_ref_mode",
+            "2", // Enable B-frame reference mode
+            "-bf",
+            "3", // Number of B-frames (0-3)
+            "-temporal-aq",
+            "1", // Temporal Adaptive Quantization
+            "-spatial-aq",
+            "1", // Spatial Adaptive Quantization
+            "-aq-strength",
+            "8", // Adaptive Quantization strength
+            "-frames:v",
+            "1",
             "-an",
-            "-pass", "2",
-            "-passlogfile", first_pass_log,
-            "-f", "mp4",        // Output as mp4 container
-            "-bsf:v", "hevc_mp4toannexb", // Crucial: Add this filter
-            "-movflags", "+frag_keyframe+empty_moov",
+            "-pass",
+            "2",
+            "-passlogfile",
+            first_pass_log,
+            "-f",
+            "mp4", // Output as mp4 container
+            "-bsf:v",
+            "hevc_mp4toannexb", // Crucial: Add this filter
+            "-movflags",
+            "+frag_keyframe+empty_moov",
             "-",
         ])
         .stdin(Stdio::piped())
@@ -2127,11 +2190,13 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
 
     let mut ffmpeg_stdout = ffmpeg.stdout.take().unwrap();
     let mut buf = Vec::new();
-    ffmpeg_stdout.read_to_end(&mut buf).expect("Failed to read encoded buffer");
+    ffmpeg_stdout
+        .read_to_end(&mut buf)
+        .expect("Failed to read encoded buffer");
 
     // Save for debugging
     std::fs::write("sample_frame_encoded.hevc", &buf.clone()).expect("Failed to write debug file");
-    
+
     print_pretty!(
         DebugColor::Salmon,
         "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
@@ -2143,24 +2208,14 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     buf
 }
 
-
-
-   pub fn generate_sample_ffmpeg_opti( 
-    current_bitrate_mbps: f32, 
-    timestamp: f64, 
-    fps: f64
-) -> Vec<u8> {
-
-    let input_path: &str = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
+    let input_path: &str =
+        "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
 
     // Create a unique key for this specific encoding configuration
     let config_key = format!(
-        "{}_{}_{}_{}_{}", 
-        input_path,
-        current_bitrate_mbps, 
-        timestamp, 
-        WIDTH_ENCODER, 
-        HEIGHT_ENCODER, 
+        "{}_{}_{}_{}_{}",
+        input_path, current_bitrate_mbps, timestamp, WIDTH_ENCODER, HEIGHT_ENCODER,
     );
 
     let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
@@ -2169,42 +2224,67 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     let ffmpeg = if let Some(process) = pool.get_mut(&config_key) {
         process
     } else {
-        let timestamp_ = timestamp + OFFSET_VIDEO; 
+        let timestamp_ = timestamp + OFFSET_VIDEO;
         // If no existing process, create a new one
         let hours = (timestamp_ / 3600.0) as u32;
         let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
         let seconds = timestamp_ % 60.0;
-        let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds );
+        let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
         print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
 
         let current_bitrate_mbps = current_bitrate_mbps / INITIAL_FRAMERATE_FPS; // fps adjusted
         let bitrate_command: String = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
 
-        print_pretty!(DebugColor::DarkBlue, "[DBG bitrate] frame: {}, per second: {}; command {}", current_bitrate_mbps, current_bitrate_mbps* INITIAL_FRAMERATE_FPS, bitrate_command);
+        print_pretty!(
+            DebugColor::DarkBlue,
+            "[DBG bitrate] frame: {}, per second: {}; command {}",
+            current_bitrate_mbps,
+            current_bitrate_mbps * INITIAL_FRAMERATE_FPS,
+            bitrate_command
+        );
 
         let process = Command::new("ffmpeg")
             .args([
-                "-hwaccel", "cuda",
-                "-ss", &formatted_timestamp,
-                "-i", &input_path,
-                "-pix_fmt", "yuv420p",
-                "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-c:v", "hevc_nvenc",
-                "-b:v", &bitrate_command,
-                "-preset", "fast", // Prioritize speed over compression
-                "-rc", "vbr_hq",
-                "-cq", "19",
-                "-b_ref_mode", "2",
-                "-bf", "3",
-                "-temporal-aq", "1",
-                "-spatial-aq", "1",
-                "-aq-strength", "8",
-                "-frames:v", "1",
+                "-hwaccel",
+                "cuda",
+                "-ss",
+                &formatted_timestamp,
+                "-i",
+                &input_path,
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-c:v",
+                "hevc_nvenc",
+                "-b:v",
+                &bitrate_command,
+                "-preset",
+                "fast", // Prioritize speed over compression
+                "-rc",
+                "vbr_hq",
+                "-cq",
+                "19",
+                "-b_ref_mode",
+                "2",
+                "-bf",
+                "3",
+                "-temporal-aq",
+                "1",
+                "-spatial-aq",
+                "1",
+                "-aq-strength",
+                "8",
+                "-frames:v",
+                "1",
                 "-an",
-                "-f", "mp4",
-                "-bsf:v", "hevc_mp4toannexb",
-                "-movflags", "+frag_keyframe+empty_moov",
-                "-"
+                "-f",
+                "mp4",
+                "-bsf:v",
+                "hevc_mp4toannexb",
+                "-movflags",
+                "+frag_keyframe+empty_moov",
+                "-",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -2218,10 +2298,14 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
 
     // Read the encoded buffer
     let mut buf = Vec::new();
-    
-    ffmpeg.stdout.as_mut().unwrap().read_to_end(&mut buf)
+
+    ffmpeg
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_to_end(&mut buf)
         .expect("Failed to read encoded buffer");
-    
+
     print_pretty!(
         DebugColor::Salmon,
         "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
@@ -2230,11 +2314,8 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
         &buf[..50]
     );
 
-
     buf
 }
-
-
 
 pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Initialize the random number generator
