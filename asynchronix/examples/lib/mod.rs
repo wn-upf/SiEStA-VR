@@ -47,7 +47,7 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = true;
+pub static DEBUG_PRINT_ENABLED: bool = false;
 
 #[macro_export]
 macro_rules! debug_print {
@@ -346,8 +346,8 @@ impl CsvData {
         }
     }
 
-    pub fn write_to_csv(&self, folder: &str) -> std::io::Result<()> {
-        let path = format!("Results/{folder}/QUEUE_stats.csv");
+    pub fn write_to_csv(&self, folder: &str, dir_path: &str) -> std::io::Result<()> {
+        let path = format!("{dir_path}/QUEUE_stats.csv");
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -1046,13 +1046,17 @@ pub fn frametransmission_delay(
 pub fn write_all_sta_csvs(
     sta_stats_vec: &HashMap<usize, perStaLockStats>,
     folder: &str,
+    results_folder: &str, 
 ) -> std::io::Result<()> {
     for (_index, sta_stats) in sta_stats_vec.iter() {
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
-            let filename: String = format!("Results/{folder}/STA{}.csv", stats.sta_id);
-            println!("FILENAMEEE: {filename}");
+            
+            
+            
+            let filename: String = format!("{results_folder}/STA{}.csv", stats.sta_id);      
+            println!("FILENAME222: {filename}");
             // Open file with write permissions
             let file = OpenOptions::new()
                 .write(true)

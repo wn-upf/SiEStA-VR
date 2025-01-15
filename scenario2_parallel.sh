@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NUMBER_OF_JOBS=25
+NUMBER_OF_JOBS=15
 simTime=1000
 k_queue=1000
 mean_length=12000.0
@@ -8,13 +8,14 @@ rate_bps_queue=1 ## does nothing theoretically
 rate_bps_in=100 ## does nothing theoretically 
 
 start_bandwidth=2.5E6
-end_bandwidth=40E6
+end_bandwidth=80E6
 step_bandwidth=2.5E6
+
+N_BG=(1 2)
+IS_UL=(1)
 
 distance=30.0
 
-# Number of parallel jobs to run
-num_jobs=10  # You can change this value to the desired number of parallel jobs
 
 # Create an array of bandwidth values
 temp_file=$(mktemp)
@@ -28,12 +29,14 @@ handle_interrupt() {
 
 # Set up the trap for SIGINT (Ctrl+C)
 trap handle_interrupt SIGINT
-
-
-for bandwidth_STA in $(seq $start_bandwidth $step_bandwidth $end_bandwidth); do
-    echo ./target/release/examples/mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA >> "$temp_file"
+for is_ul in "${IS_UL[@]}"; do 
+    for num_stas in "${N_BG[@]}"; do 
+        for bandwidth_STA in $(seq $start_bandwidth $step_bandwidth $end_bandwidth); do
+            echo "IS_UL = $is_ul, N_BG = $num_stas"
+            echo ./target/release/examples/mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA $is_ul $num_stas>> "$temp_file"
+        done
+    done
 done
-
 parallel -j "$NUMBER_OF_JOBS" < "$temp_file"
 rm "$temp_file"
 
