@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize FFmpeg library
     ffmpeg::init().unwrap();
 
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/BigBuckBunny.mp4";
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4"; 
     let output_path = "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/output_video.mp4";
     let temp_frame_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/frames/";
 

@@ -7,8 +7,12 @@ use std::{
     io::{Read, Write},
     process::Command,
     thread,
-    fs, 
+    fs,
+    error::Error,    
 };
+use rayon::prelude::*;
+use std::fs::File;
+use std::io::{BufWriter};
 // use sdl2::pixels::Color;
 // use sdl2::render::Canvas;
 // use sdl2::video::Window;
@@ -17,6 +21,11 @@ use minifb::Scale;
 use minifb::{Key, Window, WindowOptions};
 use std::process::Stdio;
 use std::time::Duration;
+use std::fs::{create_dir_all};
+use std::path::Path;
+
+use std::collections::HashMap;
+
 
 pub const OFFSET_VIDEO_TIMESTAMP: f64 = 40.0;
 
@@ -26,6 +35,132 @@ pub const HEIGHT_DECODER_: usize = 480;
 pub const WIDTH_ENCODER: usize = 1280;
 pub const HEIGHT_ENCODER: usize = 720;
 
+static mut FRAME_INDEX_multibitrate: u32 = 0;
+
+pub fn generate_multi_bitrate_frames(
+    timestamp: f64,
+    fps: f64,
+    bitrate_ladder: &[f32], // Array of bitrates in Mbps
+    output_dir: &str,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+    let base_output_dir = Path::new(output_dir);
+    create_dir_all(base_output_dir)?;
+
+    // Precompute timestamp format once
+    let timestamp_ = timestamp + OFFSET_VIDEO_TIMESTAMP;
+    let hours = (timestamp_ / 3600.0) as u32;
+    let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
+    let seconds = timestamp_ % 60.0;
+    let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
+
+    // Use Rayon for parallel processing
+    let encoded_files: Vec<_> = bitrate_ladder
+        .par_iter()
+        .filter_map(|&current_bitrate_mbps| {
+            let output_filename: String; 
+            unsafe{
+                output_filename = format!(
+                    "frame_{}_{:.1}mbps.mp4",
+                    FRAME_INDEX_multibitrate, 
+                    current_bitrate_mbps,
+                    
+                );    
+            }
+            
+            let output_path = base_output_dir.join(&output_filename);
+
+            let bitrate_command = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
+            println!(
+                "Encoding frame at timestamp {} with bitrate {}",
+                formatted_timestamp, bitrate_command
+            );
+
+            let process = Command::new("ffmpeg")
+                .args([
+                    "-hwaccel", "cuda",
+                    "-ss", &formatted_timestamp,
+                    "-i", input_path,
+                    "-pix_fmt", "yuv420p",
+                    "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                    "-c:v", "hevc_nvenc",
+                    "-preset", "fast",
+                    "-rc", "vbr_hq",
+                    "-b_ref_mode", "2",
+                    "-bf", "3",
+                    "-temporal-aq", "1",
+                    "-spatial-aq", "1",
+                    "-aq-strength", "8",
+                    "-frames:v", "1",
+                    "-b:v", &bitrate_command,
+                    "-an",
+                    "-y", // Overwrite output files
+                    output_path.to_str().unwrap(),
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            match process {
+                Ok(mut proc) => match proc.wait_with_output() {
+                    Ok(output) if output.status.success() => {
+                        if output_path.exists() {
+                            Some(output_filename)
+                        } else {
+                            None
+                        }
+                    }
+                    Ok(output) => {
+                        eprintln!(
+                            "FFmpeg error: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to wait for process: {}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to spawn ffmpeg: {}", e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    Ok(encoded_files)
+}
+
+pub fn encode_frame_sequence(
+    start_timestamp: f64,
+    frame_count: u32,
+    fps: f64,
+    output_dir: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bitrate_ladder = vec![0.5, 1.0, 2.0, 4.0, 8.0]; // Bitrates in Mbps
+    
+    for frame_idx in 0..frame_count {
+        let timestamp = start_timestamp + (frame_idx as f64 / fps);
+
+        match generate_multi_bitrate_frames(timestamp, fps, &bitrate_ladder, output_dir) {
+            Ok(files) => {
+                println!("Successfully encoded frame at {} with {} variations:", timestamp, files.len());
+                for file in files {
+                    println!("  - {}", file);
+                }
+            },
+            Err(e) => eprintln!("Error encoding frame at {}: {}", timestamp, e),
+        }
+        unsafe{
+            FRAME_INDEX_multibitrate += 1;     
+        }
+    }
+    
+    Ok(())
+}
 fn main() {
     let mut current_bitrate_mbps = 20.0;
     let mut timestamp = 2.0;
@@ -44,6 +179,26 @@ fn main() {
 
     // Limit the update rate to ~30 FPS (adjust as needed)
     // window.limit_update_rate(Some(Duration::from_millis(33)));
+
+    println!("pregenerating video"); 
+
+    let bitrates = vec![1.0, 2.0, 4.0, 8.0]; // Bitrates in Mbps
+    let fps = 30.0;
+
+    let start_timestamp = 2.0;
+    let frame_count = 100;
+    let base_output_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates";
+
+
+    match encode_frame_sequence(start_timestamp, frame_count, fps, base_output_dir) {
+        Ok(_) => println!("Successfully encoded all frames"),
+        Err(e) => eprintln!("Error during encoding: {}", e),
+    }
+
+    // match generate_all_bitrates_all_frames(bitrates, fps) {
+    //     Ok(_) => println!("Successfully encoded all frames"),
+    //     Err(e) => eprintln!("Error encoding frames: {}", e),
+    // }
 
     // Main loop
     let mut decoded_index = 0; 
@@ -81,6 +236,84 @@ fn main() {
         }
     }
 }
+
+pub fn generate_all_bitrates_all_frames(
+    list_bitrates: Vec<f32>,
+    fps: f64,
+) -> Result<(), std::io::Error> {
+    let max_duration_movie = 30.0;
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+    let base_output_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates";
+    let frame_size = WIDTH_ENCODER * HEIGHT_ENCODER * 3 / 2; // Assuming YUV420p
+
+    // Create output directory if it doesn't exist
+    fs::create_dir_all(base_output_dir)?;
+
+    for bitrate in list_bitrates {
+        println!("Encoding movie with bitrate: {} Mbps", bitrate);
+
+        let bitrate_command = format!("{:.0}K", bitrate as f64 * 1000.0);
+        let output_dir = format!("{}/bitrate_{}", base_output_dir, bitrate);
+        fs::create_dir_all(&output_dir)?;
+
+        let mut ffmpeg = Command::new("ffmpeg")
+            .args([
+                "-hwaccel", "cuda",
+                "-i", input_path,
+                "-t", &max_duration_movie.to_string(),
+                "-pix_fmt", "yuv420p",
+                "-vf",
+                &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-c:v", "hevc_nvenc",
+                "-b:v", &bitrate_command,
+                "-an",
+                "-f", "rawvideo",
+                "-",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()?;
+
+        let stdout = ffmpeg.stdout.as_mut().unwrap();
+        let mut buffer = vec![0u8; frame_size];
+        let mut frame_index = 0;
+
+  
+        loop {
+            match stdout.read_exact(&mut buffer) {
+                Ok(()) => {
+                    // Successfully read a frame
+                    let frame_path = format!("{}/frame_{:05}.raw", output_dir, frame_index);
+                    let mut file = BufWriter::new(File::create(frame_path)?);
+                    file.write_all(&buffer)?;
+
+                    frame_index += 1;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // End of file reached
+                    break;
+                }
+                Err(e) => {
+                    // Other error
+                    return Err(e);
+                }
+            }
+        }
+
+
+        let status = ffmpeg.wait()?;
+        if !status.success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("FFmpeg failed for bitrate {}", bitrate),
+            ));
+        }
+
+        println!("Completed encoding for bitrate: {} Mbps", bitrate);
+    }
+
+    Ok(())
+}
+
 
 pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<u8> {
     let input_path =

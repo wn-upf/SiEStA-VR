@@ -1,6 +1,7 @@
 use asynchronix::model::Context;
 #[allow(unused_imports)]
 #[allow(dead_code)]
+#[allow(unused)]
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
 ///
 ///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
@@ -13,6 +14,7 @@ use asynchronix::time::MonotonicTime;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
 // use tai_time::TaiTime;
+
 use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 mod lib; // for calling m own local library
 use crate::lib::models_mm1k::{QueueModule, QueueStats};

@@ -2162,6 +2162,33 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     buf
 }
 
+pub fn generate_all_bitrates_all_frames(list_bitrates: Vec<f32>, fps: f64) {
+
+
+    let MAX_DURATION_MOVIE = 30.0; 
+
+    for bitrate in list_bitrates{
+
+        let num_frames = MAX_DURATION_MOVIE * fps; 
+        for frame in 0..num_frames as usize {
+            
+
+
+
+        }
+        println!("Encoding movie with bitrate: {}", bitrate); 
+
+        let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
+
+        let output_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates/f{}_{}.mp4",  ,bitrate);
+
+
+    }
+
+}
+
+
+
 pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
     let input_path: &str =
         "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
