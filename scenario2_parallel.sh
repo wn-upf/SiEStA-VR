@@ -7,14 +7,14 @@ mean_length=12000.0
 rate_bps_queue=1 ## does nothing theoretically
 rate_bps_in=100 ## does nothing theoretically 
 
-start_bandwidth=2.5E6
+start_bandwidth=10E6
 end_bandwidth=80E6
-step_bandwidth=2.5E6
+step_bandwidth=10E6
 
 N_BG=(1 2)
-IS_UL=(1)
+IS_UL=(0 1)
 
-distance=30.0
+distance=20.0
 
 
 # Create an array of bandwidth values

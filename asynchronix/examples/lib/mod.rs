@@ -47,7 +47,7 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = false;
+pub static DEBUG_PRINT_ENABLED: bool = true;
 
 #[macro_export]
 macro_rules! debug_print {
@@ -418,7 +418,8 @@ impl CsvType {
         let formatted_timestamp = format_timestamp!(now);
         debug_print!(
             DebugColor::Purple,
-            "[DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            "{} [DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            format_elapsed!(now),
             formatted_timestamp,
             id_packet,
             queue_size,
@@ -597,7 +598,8 @@ impl perStaStats {
 
         debug_print!(
             DebugColor::Purple,
-            "[DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            format_elapsed!(now), 
             formatted_timestamp,
             id_packet,
             queue_size,

@@ -1287,10 +1287,10 @@ impl STA_extended {
 
                 packet.sta_src_coords = self.sta_coordinates;
 
-
                 debug_print!(
                     DebugColor::Blue, 
-                    "[TGAPP{}] Packet {} generated, destination STA {}, self.coords = {:?}",
+                    "{} [TGAPP{}] Packet {} generated, destination STA {}, self.coords = {:?}",
+                    format_elapsed!(context.scheduler.time()), 
                     self.sta_id,
                     packet.packet_id,
                     packet.sta_dest_id, 
