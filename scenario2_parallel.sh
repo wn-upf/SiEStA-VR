@@ -1,8 +1,8 @@
 #!/bin/bash
 
-NUMBER_OF_JOBS=15
+NUMBER_OF_JOBS=10
 simTime=1000
-k_queue=1000
+k_queue=10000
 mean_length=12000.0
 rate_bps_queue=1 ## does nothing theoretically
 rate_bps_in=100 ## does nothing theoretically 

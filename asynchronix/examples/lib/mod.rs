@@ -47,7 +47,7 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = true;
+pub static DEBUG_PRINT_ENABLED: bool = false;
 
 #[macro_export]
 macro_rules! debug_print {
