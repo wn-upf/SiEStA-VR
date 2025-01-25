@@ -582,6 +582,240 @@ use std::env;
 // }
 
 // SCENARIO 3: selectable downlink,uplink or both ways traffic using extended_sta
+fn downlink_uplink_scenario_flexible(
+    num_STAs: usize,
+    stoptime: f64,
+    mean_length: f64,
+    k_queue: usize,
+    rate_bps_in: f64,
+    distance: f64,
+    is_uplink: bool,
+    is_downlink: bool,
+    BG_rate: f64, 
+) {
+
+    const UPLINK_CONSTANT :usize = 20; 
+
+
+    // Generate coordinates for STAs
+    let mut vec_coords = Vec::with_capacity(num_STAs);
+    let mut id_src_coords = Vec::with_capacity(num_STAs);
+    let mut map_coords: HashMap<usize, Coords> = HashMap::new();
+    println!("\n\n----------------------\nnum_STAs: {}", num_STAs);
+    for i in 0..num_STAs {
+        let coords = Coords {
+            x: if i == 0 { 1.0 } else { distance as f64 },
+            y: 0.0,
+            z: 0.0,
+        };
+        println!("i = {}, coords: {:?}", i, coords);
+        vec_coords.push(coords);
+
+
+        id_src_coords.push(
+            // if i == 0 { 0 } else { 5 }
+            if is_downlink{
+                UPLINK_CONSTANT
+            }
+            else if is_uplink{
+                i                
+            }
+            else{
+                999
+            }
+        );
+        map_coords.insert(id_src_coords[i], coords);
+    }
+
+    // Compute frame transmission delays and effective rates
+    let mut results_vec = Vec::with_capacity(num_STAs);
+    let mut effective_rates = Vec::with_capacity(num_STAs);
+
+    for coords in &vec_coords {
+        let results = frametransmission_delay(
+            mean_length * MAX_AMPDU_SIZE as f64,
+            MAX_AMPDU_SIZE,
+            Coords::new(),
+            *coords,
+            P_TX,
+        );
+        results_vec.push(results.clone());
+        effective_rates.push(mean_length / results.service_delay);
+    }
+
+    let aggregated_rate_in = num_STAs as f64 * rate_bps_in;
+    let effective_rate = effective_rates.iter().sum::<f64>() / effective_rates.len() as f64;
+
+    let LT = compute_mm1k_metrics(
+        aggregated_rate_in,
+        mean_length as f64,
+        effective_rate,
+        k_queue,
+    );
+
+    let t0 = MonotonicTime::EPOCH;
+
+    // Prepare STAs based on uplink/downlink configuration
+    let mut sta_bg_models: Vec<STA_extended> = Vec::with_capacity(num_STAs);
+    let mut mbox_stas: Vec<Mailbox<STA_extended>> = Vec::with_capacity(num_STAs);
+    let mut sta_addresses = Vec::with_capacity(num_STAs);
+
+    for (i, coords) in vec_coords.iter().enumerate() {
+        // Determine if this STA should be used based on uplink/downlink
+        // let is_valid_uplink = is_uplink && i < num_STAs / 2;
+        // let is_valid_downlink = is_downlink && i >= num_STAs / 2;
+        let is_valid_uplink = is_uplink; 
+        let is_valid_downlink = is_downlink;
+        println!("STA {} is valid uplink: {}, is valid downlink: {}", i, is_valid_uplink, is_valid_downlink);
+
+        if is_valid_uplink || is_valid_downlink {
+            
+            let sta = STA_extended::new(
+                rate_bps_in,
+                mean_length,
+                i as i32,
+                2,
+                *coords,
+                true,
+                effective_rates[i],
+                t0,
+                true,
+                BG_rate,
+            );
+
+            let mbox_sta = Mailbox::new();
+            sta_addresses.push(mbox_sta.address());
+            mbox_stas.push(mbox_sta);
+            sta_bg_models.push(sta);
+        }
+    }
+
+    // Prepare queue
+    let vec_ids_stas: Vec<i32> = sta_bg_models.iter().map(|sta| sta.sta_id).collect();
+    let num_stas_mod = vec_ids_stas.len();
+
+    let mut queue: QueueModule = QueueModule::new(
+        num_stas_mod,
+        k_queue - 1,
+        0.0,
+        vec_ids_stas,
+    );
+
+    // Setup coordinates
+    queue.STA_coords_grid.resize(num_stas_mod, Coords::new());
+    for i in 0..num_stas_mod {
+        queue.STA_coords_grid[i] = vec_coords[i];
+    }
+    queue.STA_coords_map = map_coords.clone();
+
+    let csv_data_handle = queue.csv_metrics.get_data_handle();
+    let queuestats_data_handle: Arc<Mutex<QueueStats>> = queue.get_queue_stats_handle();
+    let stats_sta_data_handle: Arc<Mutex<HashMap<usize, perStaLockStats>>> =
+        queue.get_stas_stats_handle();
+
+    // Prepare other components
+    let sink = Sink::new();
+    let mbox_sink: Mailbox<Sink> = Mailbox::new();
+    let mbox_queue = Mailbox::new();
+    let sinkstats_data_handle = sink.get_data_handle();
+
+
+    // With this:
+    for sta in &mut sta_bg_models {
+        sta.output_network_port.connect(QueueModule::input, &mbox_queue);
+    }
+    queue.output_port_sta1.connect(Sink::input, &mbox_sink);
+
+
+
+    // Initialize simulation dynamically
+    let mut simu_builder = SimInit::with_num_threads(64);
+    
+    
+    // Add all STAs dynamically
+    for (i, (sta, mbox)) in sta_bg_models.into_iter().zip(mbox_stas).enumerate() {
+        simu_builder = simu_builder.add_model(sta, mbox, &format!("STA{} (BG)", i));
+    }
+
+    let mut simu = simu_builder
+        .add_model(queue, mbox_queue, "Queue")
+        .add_model(sink, mbox_sink, "SINK")
+        .init(t0);
+
+    let scheduler = simu.scheduler();
+
+    // Schedule first events with random delays
+    for address in sta_addresses {
+        let epsilon = Duration::from_secs_f64(exponential(0.1));
+        let duration_scheduled = epsilon;
+
+        scheduler
+            .schedule_event(
+                duration_scheduled,
+                STA_extended::send_packet_BG,
+                (),
+                &address,
+            )
+            .unwrap();
+    }
+
+    // Run simulation
+    simu.step_by(Duration::from_secs_f64(stoptime));
+
+    // Data handling and output (similar to previous implementation)
+    let mbps =BG_rate / 1e6;
+    let filename = format!("{:.1}Mbps", mbps);
+    
+    let mut dir_path = String::new();
+    if is_uplink {
+        dir_path = format!("Results_NBG{:.0}_UL/{:.1}Mbps/", num_STAs, mbps);
+    } else if is_downlink {
+        dir_path = format!("Results_NBG{:.0}_DL/{:.1}Mbps/", num_STAs, mbps);
+    }
+
+    // fs::create_dir_all(&dir_path).expect("Failed to create Results directory");
+    if let Err(e) = fs::create_dir_all(&dir_path) {
+        eprintln!("Failed to create directory: {}", e);
+        return;
+    }
+    
+    if let Ok(data) = csv_data_handle.lock() {
+        if let Err(e) = data.write_to_csv(&filename, &dir_path) {
+            eprintln!("Failed to write CSV file: {}", e);
+        }
+    }
+
+
+    if let Ok(data) = csv_data_handle.lock() {
+        if let Err(e) = data.write_to_csv(&filename, &dir_path) {
+            eprintln!("Failed to write CSV file: {}", e);
+        }
+    }
+    if let Ok(stats_vec) = stats_sta_data_handle.lock() {
+        // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
+        for (id, sta_stats) in stats_vec.iter() {
+            if let Ok(sta_data) = sta_stats.data.lock() {
+                sta_data.print_nicely();
+            }
+        }
+
+        if let Err(e) = write_all_sta_csvs(&stats_vec, &filename, &dir_path){
+            eprintln!("Error writing STA CSV files: {}", e);
+        }
+    }
+
+    if let Ok(queue_stats) = queuestats_data_handle.lock() {
+        // println!("[DEBUGDEBUGDEBU]!!!! T_s : {}, T_q : {} !", T_s_f64, T_q_f64);
+        queue_stats.print_nicely();
+    }
+
+    if let Ok(sink_stats) = sinkstats_data_handle.lock() {
+        sink_stats.print_nicely();
+    }
+    LT.print_results();
+}
+
+
 
 fn downlink_uplink_scenario(
     num_STAs: usize,
@@ -660,6 +894,8 @@ fn downlink_uplink_scenario(
 
     let t0 = MonotonicTime::EPOCH;
     let coords_ap = Coords::new();
+    
+
 
     let mut sta1_bg: STA_extended = STA_extended::new(
         rate_bps_in,
@@ -1268,18 +1504,29 @@ fn main() {
                 BG_rate,
             );
     }
-    else if N_BG == 2 {
-        downlink_uplink_scenario(
-            N_BG, 
-                stoptime,
-                mean_length,
-                k_queue,
-                rate_bps_in,
-                distance,
-                is_ul_arg ,
-                is_downlink,
-                BG_rate,
-        )
+    else if N_BG >= 2 {
+        // downlink_uplink_scenario(
+        //     N_BG, 
+        //         stoptime,
+        //         mean_length,
+        //         k_queue,
+        //         rate_bps_in,
+        //         distance,
+        //         is_ul_arg ,
+        //         is_downlink,
+        //         BG_rate,
+        // )
+        downlink_uplink_scenario_flexible(
+            N_BG,
+            stoptime,
+            mean_length,
+            k_queue,
+            rate_bps_in,
+            distance,
+            is_uplink == 1,
+            is_downlink,
+            BG_rate,
+        );
     }
    
 

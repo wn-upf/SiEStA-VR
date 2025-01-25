@@ -111,6 +111,21 @@ impl DebugColor {
         }
     }
 }
+// int AccessPoint :: BinaryExponentialBackoff(int attempt)
+// {
+// 	int CW = Random(MIN(pow(2,attempt),pow(2,max_BEB_stages))*(CWmin+1));
+// 	return CW;	
+// };
+
+pub fn time_of_BinaryExponentialBackoff() -> f64{
+    let CW_MIN_var: i32 = 15;
+    let CW = rand::thread_rng().gen_range(0..=1);
+    let CW = (2_i32.pow(0) * (CW_MIN_var + 1)) as i32;
+    let time = CW as f64 * SLOT as f64;
+    time
+} 
+
+
 #[derive(Clone)]
 pub struct SlidingWindowWeighted<T> {
     history_buffer: VecDeque<T>,
@@ -416,19 +431,19 @@ impl CsvType {
         id_dest: usize,
     ) {
         let formatted_timestamp = format_timestamp!(now);
-        debug_print!(
-            DebugColor::Purple,
-            "{} [DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-            format_elapsed!(now),
-            formatted_timestamp,
-            id_packet,
-            queue_size,
-            Ts,
-            Tq,
-            length_packet,
-            id_src,
-            id_dest
-        );
+        // debug_print!(
+        //     DebugColor::Purple,
+        //     "{} [DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+        //     format_elapsed!(now),
+        //     formatted_timestamp,
+        //     id_packet,
+        //     queue_size,
+        //     Ts,
+        //     Tq,
+        //     length_packet,
+        //     id_src,
+        //     id_dest
+        // );
         if let Ok(mut data) = self.csv_data.lock() {
             data.v_timestamp.push(formatted_timestamp);
             data.v_packet_id.push(id_packet);
@@ -596,19 +611,19 @@ impl perStaStats {
 
         let formatted_timestamp = format_timestamp!(now);
 
-        debug_print!(
-            DebugColor::Purple,
-            "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-            format_elapsed!(now), 
-            formatted_timestamp,
-            id_packet,
-            queue_size,
-            Ts,
-            Tq,
-            length_packet,
-            sta_src_id,
-            sta_dest_id
-        );
+        // debug_print!(
+        //     DebugColor::Purple,
+        //     "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+        //     format_elapsed!(now), 
+        //     formatted_timestamp,
+        //     id_packet,
+        //     queue_size,
+        //     Ts,
+        //     Tq,
+        //     length_packet,
+        //     sta_src_id,
+        //     sta_dest_id
+        // );
 
         self.csv_data.v_timestamp.push(formatted_timestamp);
         self.csv_data.v_packet_id.push(id_packet);
@@ -921,7 +936,7 @@ impl Coords {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ResultsFrameTXDelay {
     pub service_delay: f64,
     pub data_service_delay: f64,
@@ -967,10 +982,18 @@ pub fn frametransmission_delay(
     coords_dest: Coords,
     p_tx: f64,
 ) -> ResultsFrameTXDelay {
+
+    let mut effPt = p_tx;
+
+    let SU_spatial_streams = 2.0;    
+
+    if (SU_spatial_streams > 1.0) {effPt = effPt - 3.0 *SU_spatial_streams };
+
     let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
-    let mut effPt = p_tx;
+
+
     if channel_width > 20 {
         effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
     }
@@ -985,6 +1008,10 @@ pub fn frametransmission_delay(
 
     let PL = path_loss(distance);
     let Pr = effPt - PL;
+
+    // printf("AP to STA %d: I'm at %.0f,%.0f,%.0f and you are at %.0f,%.0f,%.0f | Distance = %f | PL = %.2f, P_rx = %.1f\n",station_id,x,y,z,x_[station_id],y_[station_id],z_[station_id],distance,PL, Pr);
+    println!("AP to STA: Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", distance, PL, Pr);
+
 
     let (bits_symbol, coding_rate) = match Pr {
         _ if Pr < -82.0 => (1, 1.0 / 2.0),
@@ -1011,7 +1038,6 @@ pub fn frametransmission_delay(
         _ => 0, // Default case,  fallback
     };
 
-    let SU_spatial_streams = 2.0;
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
@@ -1029,10 +1055,11 @@ pub fn frametransmission_delay(
         PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6;
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
-    let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    // let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    let T_BACKOFF =  time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time 
 
     let T =
-        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
+        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
 
     // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
 

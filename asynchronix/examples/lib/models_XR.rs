@@ -1142,12 +1142,11 @@ impl STA_extended {
         arrival_rate_BG: f64, 
 
     ) -> Self {
-        let effective_mu = rate_service_bps / mean_length;
         let arrival_rate_BG_packets = arrival_rate_BG / mean_length;
 
         println!("\n*************************************************");
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t arrival_rate_BG (pack/s): {:.3}, Departure_rate: {:.3},  L = {}, is_BG_STA {}",
-                            src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate_BG,effective_mu ,mean_length, is_bg_sta);
+                            src, coordinates, dest, arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate_BG, rate_service_bps / mean_length , mean_length, is_bg_sta);
 
         Self {
             output_network_port: Default::default(),

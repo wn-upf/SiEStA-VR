@@ -1,8 +1,8 @@
 #!/bin/bash
 
 
-simTime=1E3
-k_queue=1000
+simTime=100
+k_queue=10000
 mean_length=12000.0
 # rate_bps_src=3E6; 
 # rate_bps_src=6.5E8 ## loads the queue
@@ -17,14 +17,14 @@ handle_interrupt() {
 trap handle_interrupt SIGINT
 
 
-start_bandwidth=50E6
-end_bandwidth=55E6
+start_bandwidth=60E6
+end_bandwidth=65E6
 step_bandwidth=2.5E6
 
 
-distance=20.0
+distance=10.0
 
-is_ul=1
+is_ul=0
 n_bg=2
 
 cargo build --release --example mm1k_sim
