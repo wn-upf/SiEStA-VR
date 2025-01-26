@@ -837,7 +837,7 @@ impl MpduPacket {
     }
 
     pub fn print(&self) {
-        println!("Packet ID: {}, L: {}", self.packet_id, self.length_packet);
+        println!("Packet ID:{} | L: {}", self.packet_id, self.length_packet);
     }
 }
 #[derive(Debug, Clone)]
@@ -875,10 +875,10 @@ impl AmpduPacket {
         for packet in &self.mpdu_packets {
             
             println!(
-                "\x1b[33m\t - Packet ID: {:.0},T_q: {:.8} , T_s: {:.8}\x1b[0m",
+                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms \x1b[0m",
                 packet.packet_id,
-                packet.T_q.as_secs_f64(),
-                packet.T_s.as_secs_f64(), 
+                packet.T_q.as_secs_f64() * 1000.0,
+                packet.T_s.as_secs_f64() * 1000.0, 
                 // packet.expected_T_s.as_secs_f64(),
             );
         }
@@ -1009,8 +1009,7 @@ pub fn frametransmission_delay(
     let PL = path_loss(distance);
     let Pr = effPt - PL;
 
-    // printf("AP to STA %d: I'm at %.0f,%.0f,%.0f and you are at %.0f,%.0f,%.0f | Distance = %f | PL = %.2f, P_rx = %.1f\n",station_id,x,y,z,x_[station_id],y_[station_id],z_[station_id],distance,PL, Pr);
-    println!("AP to STA: Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", distance, PL, Pr);
+    // println!("AP to STA: Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", distance, PL, Pr);
 
 
     let (bits_symbol, coding_rate) = match Pr {
