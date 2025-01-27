@@ -47,7 +47,7 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = false;
+pub static DEBUG_PRINT_ENABLED: bool = true;
 
 #[macro_export]
 macro_rules! debug_print {
@@ -1081,9 +1081,7 @@ pub fn write_all_sta_csvs(
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
             
-            
-            
-            let filename: String = format!("{results_folder}/STA{}.csv", stats.sta_id);      
+            let filename: String = format!("{results_folder}STA{}.csv", stats.sta_id);      
             println!("FILENAME222: {filename}");
             // Open file with write permissions
             let file = OpenOptions::new()

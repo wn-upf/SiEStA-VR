@@ -686,15 +686,15 @@ impl QueueModule {
                 entry.expected_queue_delivery_ms = entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;               // how long it would take to transmit all packets in the queue at current rate.
             }
 
-            // print!("\n******************* STA packets *******************\n");
+            print!("\n******************* STA packets *******************\n");
             
-            // for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-            //     println!("src: {}, dest: {} | queue_packets: {} | (N=1) T_s = {:.3} ms, EWMA(T_s) = {:.3} ms | (N={}) T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count, packets.total_transmission_delay_single * 1000.0 ,packets.weighted_rate_single * 1000.0, packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
+            for ((sta_src, sta_dest), packets) in sta_packets.iter() {
+                println!("src: {}, dest: {} | queue_packets: {} | (N=1) T_s = {:.3} ms, EWMA(T_s) = {:.3} ms | (N={}) T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count, packets.total_transmission_delay_single * 1000.0 ,packets.weighted_rate_single * 1000.0, packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
                 
-            //     println!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
+                println!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
 
-            // }
-            // println!("*************************************");
+            }
+            println!("*************************************");
             let mut key_softmax = (0, 0);
             
             
@@ -702,12 +702,12 @@ impl QueueModule {
                 let mut softmax_values: Vec<f64> = Vec::new();
                 let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
                 for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                    softmax_values.push(packets.expected_queue_delivery_ms * 1000.0); // multiplied to be in microseconds, as the softmax function is sensitive to scale we ensure values at least are > 1
+                    softmax_values.push(packets.expected_queue_delivery_ms); // multiplied to be in microseconds, as the softmax function is sensitive to scale we ensure values at least are > 1
                     softmax_keys.push((*sta_src, *sta_dest));
                 }
                 // println!("Expected queue delivery values: {:?} in microseconds", softmax_values);
                 
-                pub const SOFTMAX_TEMP: f64 = 5E5; 
+                pub const SOFTMAX_TEMP: f64 = 1000.0; 
 
                 let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
                 
@@ -737,7 +737,7 @@ impl QueueModule {
                     let packet_with_id = self.queue.iter().find(|&packet| packet.sta_src_id == key_softmax.0 && packet.sta_dest_id == key_softmax.1).unwrap(); // retrieve a packet that would match
                     self.aux_ampdu_serviced.coordinates = packet_with_id.sta_src_coords.clone();
 
-                    println!("Selected STA: {:?}, src: {}, dest: {}", key_softmax, self.aux_ampdu_serviced.sta_src_id, self.aux_ampdu_serviced.sta_dest_id);
+                    // println!("Selected STA: {:?}, src: {}, dest: {}", key_softmax, self.aux_ampdu_serviced.sta_src_id, self.aux_ampdu_serviced.sta_dest_id);
 
                 }
                 else{ // DEFAULT POLICY
