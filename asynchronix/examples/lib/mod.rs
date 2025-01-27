@@ -47,7 +47,7 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = true;
+pub static DEBUG_PRINT_ENABLED: bool = false;
 
 #[macro_export]
 macro_rules! debug_print {
@@ -1009,7 +1009,7 @@ pub fn frametransmission_delay(
     let PL = path_loss(distance);
     let Pr = effPt - PL;
 
-    // println!("AP to STA: Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", distance, PL, Pr);
+    // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
 
 
     let (bits_symbol, coding_rate) = match Pr {

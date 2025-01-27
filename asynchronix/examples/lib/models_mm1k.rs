@@ -21,7 +21,21 @@ use crate::lib::{
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
+
 use super::ResultsFrameTXDelay;
+
+
+
+//////////// CONST DEFINES ///////////
+
+pub const SOFTMAX_POLICY: bool = false;
+pub const LYAPUNOV_ROUTING: bool = true; 
+
+
+pub const LYAPUNOV_V: f64 = 10.0; // Lyapunov optimization parameter
+
+
+
 struct StaRateInfo {
     total_transmission_delay_single: f64,
     total_transmission_delay_fullampdu: f64, 
@@ -47,7 +61,6 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
 
-pub const SOFTMAX_POLICY: bool = true;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -601,6 +614,81 @@ impl QueueModule {
         }
     }
 
+    fn select_next_sta(&self) -> HashMap<(i32, i32), StaRateInfo> {
+        let mut sta_packets: HashMap<(i32, i32), StaRateInfo> = HashMap::new();
+
+        // Iterate over packets in the queue to compute STA metrics
+        for packet in self.queue.iter() {
+            let key = (packet.sta_src_id, packet.sta_dest_id);
+
+            // Calculate transmission delay for a single packet
+            let resultz = frametransmission_delay(
+                packet.length_packet as f64,
+                1,
+                self.coords_queue,
+                packet.sta_src_coords,
+                self.p_tx,
+            );
+
+            // Binary search to find the maximum number of packets that fit within T_MAX_AGG
+            let mut low = 1;
+            let mut high = MAX_AMPDU_SIZE;
+            let mut optimal_n_packets = 0;
+            let mut resultz_full_ampdu = frametransmission_delay(
+                packet.length_packet as f64 * high as f64,
+                high,
+                self.coords_queue,
+                packet.sta_src_coords,
+                self.p_tx,
+            );
+
+            while low <= high {
+                let mid = (low + high) / 2;
+                let test_resultz = frametransmission_delay(
+                    packet.length_packet as f64 * mid as f64,
+                    mid,
+                    self.coords_queue,
+                    packet.sta_src_coords,
+                    self.p_tx,
+                );
+
+                if test_resultz.service_delay <= DEFAULT_TMAX_AGG {
+                    optimal_n_packets = mid;
+                    resultz_full_ampdu = test_resultz;
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+
+            // Update STA rate information
+            let entry = sta_packets.entry(key).or_insert(StaRateInfo {
+                total_transmission_delay_single: 0.0,
+                total_transmission_delay_fullampdu: 0.0,
+                fullampdu_max_size: 0,
+                packet_count: 0,
+                weighted_rate_single: 0.0,
+                weighted_rate_fullampdu: 0.0,
+                per_packet_channel_access_efficiency: 0.0,
+                expected_queue_delivery_ms: 0.0,
+            });
+
+            entry.total_transmission_delay_single = resultz.service_delay;
+            entry.total_transmission_delay_fullampdu = resultz_full_ampdu.service_delay;
+            entry.fullampdu_max_size = optimal_n_packets as usize;
+            entry.packet_count += 1;
+            entry.weighted_rate_single = 0.2 * resultz.service_delay + 0.8 * entry.weighted_rate_single;
+            entry.weighted_rate_fullampdu = 0.2 * resultz_full_ampdu.service_delay + 0.8 * entry.weighted_rate_fullampdu;
+            entry.per_packet_channel_access_efficiency = entry.total_transmission_delay_fullampdu / entry.fullampdu_max_size as f64;
+            entry.expected_queue_delivery_ms = entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+        }
+
+        sta_packets
+    }
+
+
+
+
     fn deque_schedule_service<'a>(
         &'a mut self,
         _: (),
@@ -612,82 +700,11 @@ impl QueueModule {
             // We need to consider the rate of each STA and the queue length of each STA to select the next packet to serve.
 
             // enumerate STAs in the packet queue and the quantity of packets for each STA: 
-            let mut sta_packets: HashMap<(i32, i32), StaRateInfo> = HashMap::new();
-            for packet in self.queue.iter() {
-                let key = (packet.sta_src_id, packet.sta_dest_id);
-    
-                let resultz = frametransmission_delay(
-                    packet.length_packet as f64,
-                    1, // single packet
-                    self.coords_queue,
-                    packet.sta_src_coords,
-                    P_TX,
-                );
-                
-                // Initialize binary search for max packets
-                let mut low = 1; // Minimum number of packets
-                let mut high = MAX_AMPDU_SIZE; // Maximum allowed packets
-                let mut optimal_n_packets = 0; // Result to store the max valid packets
-                let mut resultz_full_ampdu = frametransmission_delay(
-                    packet.length_packet as f64 * high as f64,
-                    high,
-                    self.coords_queue,
-                    packet.sta_src_coords,
-                    P_TX,
-                );
-
-                while low <= high {
-                    let mid = (low + high) / 2;
-
-                    let test_resultz = frametransmission_delay(
-                        packet.length_packet as f64 * mid as f64,
-                        mid,
-                        self.coords_queue,
-                        packet.sta_src_coords,
-                        P_TX,
-                    );
-
-                    if test_resultz.service_delay <= DEFAULT_TMAX_AGG {
-                        // Valid delay, store result and try for more packets
-                        optimal_n_packets = mid;
-                        resultz_full_ampdu = test_resultz; // Save the best result
-                        low = mid + 1; // Increase the search range
-                    } else {
-                        // Delay too high, try fewer packets
-                        high = mid - 1;
-                    }
-                }
-                // `optimal_n_packets` now contains the maximum number of packets that fit within T_MAX_AGG
-                // println!(
-                //     "Optimal N_AMPDU: {}, delay = {:.3}/{:.3} ms",
-                //     optimal_n_packets, resultz_full_ampdu.service_delay * 1000.0, DEFAULT_TMAX_AGG * 1000.0
-                // );
-
-
-                let entry = sta_packets.entry(key).or_insert(StaRateInfo {
-                    total_transmission_delay_single: 0.0,
-                    total_transmission_delay_fullampdu: 0.0,
-                    fullampdu_max_size: 0 as usize,
-                    packet_count: 0,
-                    weighted_rate_single: 0.0,
-                    weighted_rate_fullampdu: 0.0, 
-                    per_packet_channel_access_efficiency: 0.0, 
-                    expected_queue_delivery_ms: 0.0,
-                });
-
-                entry.total_transmission_delay_single = resultz.service_delay;
-                entry.total_transmission_delay_fullampdu = resultz_full_ampdu.service_delay;
-                entry.fullampdu_max_size = optimal_n_packets as usize;
-                entry.packet_count += 1;
-                entry.weighted_rate_single =     0.2 * resultz.service_delay            + 0.8 * entry.weighted_rate_single; // EWMA of ~20 samples
-                entry.weighted_rate_fullampdu =  0.2 * resultz_full_ampdu.service_delay + 0.8 * entry.weighted_rate_fullampdu; // EWMA of ~20 samples
-
-                entry.per_packet_channel_access_efficiency = entry.total_transmission_delay_fullampdu / entry.fullampdu_max_size as f64 ; // how long it takes in avg to transmit each packet in an AMPDU, similar to a measure of throughput considering aggregation. 
-                entry.expected_queue_delivery_ms = entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;               // how long it would take to transmit all packets in the queue at current rate.
-            }
-
-            print!("\n******************* STA packets *******************\n");
+            let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
+               // Select the STA with the highest priority based on Lyapunov optimization
             
+            print!("\n******************* STA packets *******************\n");
+        
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
                 println!("src: {}, dest: {} | queue_packets: {} | (N=1) T_s = {:.3} ms, EWMA(T_s) = {:.3} ms | (N={}) T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count, packets.total_transmission_delay_single * 1000.0 ,packets.weighted_rate_single * 1000.0, packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
                 
@@ -695,10 +712,28 @@ impl QueueModule {
 
             }
             println!("*************************************");
-            let mut key_softmax = (0, 0);
+
+            let mut selected_sta = None;
+
+            if LYAPUNOV_ROUTING == true {
+                let mut max_priority = f64::MIN;
+                println!("LYAPUNOV ROUTING POLICY");
+                
+                for (key, info) in sta_packets.iter() {
+                    // Priority = Queue Length - V * Channel Time per Packet
+                    println!("STA: {:?} | Priority: {:.3}", key, info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency);
+                    let priority = info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency;
+
+                    if priority > max_priority {
+                        max_priority = priority;
+                        selected_sta = Some(*key);
+                    }
+                }
+            }
             
-            
-            if SOFTMAX_POLICY{
+            else if SOFTMAX_POLICY == true {
+                // let key_softmax: (i32, i32);
+                println!("SOFTMAX POLICY");
                 let mut softmax_values: Vec<f64> = Vec::new();
                 let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
                 for ((sta_src, sta_dest), packets) in sta_packets.iter() {
@@ -720,31 +755,35 @@ impl QueueModule {
                     .position(|&p| (1.0 - p ) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
                     .unwrap_or(softmax_probs.len() - 1);
                 let selected_key = softmax_keys[selected_index];
-                key_softmax = selected_key.clone(); 
-                // println!("Selected STA: {:?}", selected_key);
+                // key_softmax = selected_key.clone(); 
+
+                selected_sta = Some(selected_key);
+                println!("Selected STA: {:?}", selected_key);
             }
+            else {                 // NORMAL POLICY: FIFO
+                // selected_sta = self.queue.front().map(|packet| (packet.sta_src_id, packet.sta_dest_id)); // just use the front of the queue as usual
+            }
+
+            let mut  packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
             
-            if let Some(first_packet) = self.queue.front() {
+            if let Some(key) = selected_sta { // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
+                //
+                packet_with_id = Some(self.queue.iter().find(|&packet| packet.sta_src_id == key.0 && packet.sta_dest_id == key.1).unwrap()); // retrieve a packet that would match
+            }
+            else {
+                println!("ERROR: No STA selected for service!!!");
+            }
+
+            if let Some(first_packet) = packet_with_id {
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
                 // Initialize AMPDU with first packet's info
                 self.aux_ampdu_serviced.reset();
                 
-                if SOFTMAX_POLICY{
-                    self.aux_ampdu_serviced.sta_dest_id = key_softmax.1;
-                    self.aux_ampdu_serviced.sta_src_id = key_softmax.0;
-
-                    let packet_with_id = self.queue.iter().find(|&packet| packet.sta_src_id == key_softmax.0 && packet.sta_dest_id == key_softmax.1).unwrap(); // retrieve a packet that would match
-                    self.aux_ampdu_serviced.coordinates = packet_with_id.sta_src_coords.clone();
-
-                    // println!("Selected STA: {:?}, src: {}, dest: {}", key_softmax, self.aux_ampdu_serviced.sta_src_id, self.aux_ampdu_serviced.sta_dest_id);
-
-                }
-                else{ // DEFAULT POLICY
-                    self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
-                    self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
-                    self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
-                }
+                self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
+                self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
+                self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
+                
         
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
