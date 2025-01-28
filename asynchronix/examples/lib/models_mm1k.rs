@@ -30,8 +30,6 @@ use super::ResultsFrameTXDelay;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_ROUTING: bool = true; 
-
-
 pub const LYAPUNOV_V: f64 = 10.0; // Lyapunov optimization parameter
 
 
@@ -721,7 +719,7 @@ impl QueueModule {
                 
                 for (key, info) in sta_packets.iter() {
                     // Priority = Queue Length - V * Channel Time per Packet
-                    println!("STA: {:?} | Priority: {:.3}", key, info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency);
+                    println!("STA: {:?} | Q = {}, Q² = {}, ppcae = {} ->  Priority: {:.3}", key, info.packet_count, info.packet_count.pow(2),  info.per_packet_channel_access_efficiency , info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency);
                     let priority = info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency;
 
                     if priority > max_priority {
@@ -869,9 +867,9 @@ impl QueueModule {
                         format_elapsed!(now + last_service_duration),
                     );
                     
-                    if DEBUG_PRINT_ENABLED == true {
+                    // if DEBUG_PRINT_ENABLED == true {
                         self.aux_ampdu_serviced.print();
-                    }
+                    // }
 
                     self.packet_being_served = true;
 
