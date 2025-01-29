@@ -30,7 +30,7 @@ use super::ResultsFrameTXDelay;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_ROUTING: bool = true; 
-pub const LYAPUNOV_V: f64 = 10.0; // Lyapunov optimization parameter
+pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
 
 
@@ -693,7 +693,7 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
+            let now = context.scheduler.time(); 
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, select first packet fairly to ensure channel access with reduced backlog for each user.
             // We need to consider the rate of each STA and the queue length of each STA to select the next packet to serve.
 
@@ -704,7 +704,7 @@ impl QueueModule {
             print!("\n******************* STA packets *******************\n");
         
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                println!("src: {}, dest: {} | queue_packets: {} | (N=1) T_s = {:.3} ms, EWMA(T_s) = {:.3} ms | (N={}) T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count, packets.total_transmission_delay_single * 1000.0 ,packets.weighted_rate_single * 1000.0, packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
+                println!("src: {}, dest: {} | queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
                 
                 println!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
 
@@ -714,16 +714,29 @@ impl QueueModule {
             let mut selected_sta = None;
 
             if LYAPUNOV_ROUTING == true {
-                let mut max_priority = f64::MIN;
-                println!("LYAPUNOV ROUTING POLICY");
+                let mut min_priority = f64::MAX;
+                println!("T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:", format_elapsed!(now));
                 
-                for (key, info) in sta_packets.iter() {
-                    // Priority = Queue Length - V * Channel Time per Packet
-                    println!("STA: {:?} | Q = {}, Q² = {}, ppcae = {} ->  Priority: {:.3}", key, info.packet_count, info.packet_count.pow(2),  info.per_packet_channel_access_efficiency , info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency);
-                    let priority = info.packet_count as f64 - LYAPUNOV_V * info.per_packet_channel_access_efficiency;
+                for (key, info) in sta_packets.iter() { // iterate through all STAs present in queue
+                    
+                    // FIRST APPROACH: works well, but can be improved by only considering right hand term if queue size is greater than AMPDU size
+                    // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms; 
+                    // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
+                    
 
-                    if priority > max_priority {
-                        max_priority = priority;
+                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; 
+                    let rhs = info.expected_queue_delivery_ms; 
+                    let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize{ // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
+                            lhs - rhs
+                        }
+                        else {
+                            1E12 as f64
+                        }; 
+
+                    println!("Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | ", key.0, info.packet_count, key.0,  priority, lhs, rhs);
+   
+                    if priority < min_priority {
+                        min_priority = priority;
                         selected_sta = Some(*key);
                     }
                 }
@@ -756,14 +769,14 @@ impl QueueModule {
                 // key_softmax = selected_key.clone(); 
 
                 selected_sta = Some(selected_key);
-                println!("Selected STA: {:?}", selected_key);
+                // println!("Selected STA: {:?}", selected_key);
             }
             else {                 // NORMAL POLICY: FIFO
                 // selected_sta = self.queue.front().map(|packet| (packet.sta_src_id, packet.sta_dest_id)); // just use the front of the queue as usual
             }
 
             let mut  packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
-            
+
             if let Some(key) = selected_sta { // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
                 //
                 packet_with_id = Some(self.queue.iter().find(|&packet| packet.sta_src_id == key.0 && packet.sta_dest_id == key.1).unwrap()); // retrieve a packet that would match
@@ -772,7 +785,10 @@ impl QueueModule {
                 println!("ERROR: No STA selected for service!!!");
             }
 
+
             if let Some(first_packet) = packet_with_id {
+                println!("***Selected STA: Src{:.0} ,Dest{:.0}", first_packet.sta_src_id, first_packet.sta_dest_id);
+
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
                 // Initialize AMPDU with first packet's info
