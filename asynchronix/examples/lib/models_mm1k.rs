@@ -28,8 +28,19 @@ use super::ResultsFrameTXDelay;
 
 //////////// CONST DEFINES ///////////
 
-pub const SOFTMAX_POLICY: bool = false;
-pub const LYAPUNOV_ROUTING: bool = true; 
+pub const DEBUG_SCHEDULING: bool = false; 
+
+#[macro_export]
+macro_rules! debug_schedule {
+    ($fmt:expr,$($arg:tt)*) => {
+        if DEBUG_SCHEDULING == true {
+            println!($fmt, $($arg)*);
+        }
+    }
+}
+
+pub const SOFTMAX_POLICY: bool = true;
+pub const LYAPUNOV_ROUTING: bool = false; 
 pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
 
@@ -701,21 +712,21 @@ impl QueueModule {
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
                // Select the STA with the highest priority based on Lyapunov optimization
             
-            print!("\n******************* STA packets *******************\n");
+               debug_schedule!("\n******************* STA packets *******************\n", );
         
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                println!("src: {}, dest: {} | queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
+                debug_schedule!("src: {}, dest: {} | queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
                 
-                println!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
+                debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
 
             }
-            println!("*************************************");
+            debug_schedule!("*************************************", );
 
             let mut selected_sta = None;
 
             if LYAPUNOV_ROUTING == true {
                 let mut min_priority = f64::MAX;
-                println!("T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:", format_elapsed!(now));
+                debug_schedule!("T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:", format_elapsed!(now));
                 
                 for (key, info) in sta_packets.iter() { // iterate through all STAs present in queue
                     
@@ -724,16 +735,16 @@ impl QueueModule {
                     // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
                     
 
-                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; 
-                    let rhs = info.expected_queue_delivery_ms; 
+                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how fast we can transmit each packet
+                    let rhs = info.expected_queue_delivery_ms;                        // max-weight scheduling (Q_i * rate_i) 
                     let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize{ // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
                             lhs - rhs
                         }
                         else {
-                            1E12 as f64
+                            1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet
                         }; 
 
-                    println!("Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | ", key.0, info.packet_count, key.0,  priority, lhs, rhs);
+                        debug_schedule!("Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | ", key.0, info.packet_count, key.0,  priority, lhs, rhs);
    
                     if priority < min_priority {
                         min_priority = priority;
@@ -744,7 +755,7 @@ impl QueueModule {
             
             else if SOFTMAX_POLICY == true {
                 // let key_softmax: (i32, i32);
-                println!("SOFTMAX POLICY");
+                debug_schedule!("SOFTMAX POLICY", );
                 let mut softmax_values: Vec<f64> = Vec::new();
                 let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
                 for ((sta_src, sta_dest), packets) in sta_packets.iter() {
@@ -787,7 +798,7 @@ impl QueueModule {
 
 
             if let Some(first_packet) = packet_with_id {
-                println!("***Selected STA: Src{:.0} ,Dest{:.0}", first_packet.sta_src_id, first_packet.sta_dest_id);
+                debug_schedule!("***Selected STA: Src{:.0} ,Dest{:.0}", first_packet.sta_src_id, first_packet.sta_dest_id);
 
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
@@ -883,9 +894,9 @@ impl QueueModule {
                         format_elapsed!(now + last_service_duration),
                     );
                     
-                    // if DEBUG_PRINT_ENABLED == true {
+                    if DEBUG_PRINT_ENABLED == true {
                         self.aux_ampdu_serviced.print();
-                    // }
+                    }
 
                     self.packet_being_served = true;
 
