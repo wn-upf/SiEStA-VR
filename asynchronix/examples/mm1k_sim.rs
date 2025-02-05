@@ -592,6 +592,7 @@ fn downlink_uplink_scenario_flexible(
     is_uplink: bool,
     is_downlink: bool,
     BG_rate: f64, 
+    distance_sta0: f64, 
 ) {
 
     const UPLINK_CONSTANT :usize = 20; 
@@ -604,7 +605,7 @@ fn downlink_uplink_scenario_flexible(
     println!("\n\n----------------------\nnum_STAs: {}", num_STAs);
     for i in 0..num_STAs {
         let coords = Coords {
-            x: if i == 0 { 1.0 } else { distance as f64 },
+            x: if i == 0 { distance_sta0 } else { distance as f64 },
             y: 0.0,
             z: 0.0,
         };
@@ -1176,8 +1177,9 @@ fn downlink_uplink_scenario_1BG(
     is_uplink: bool,
     is_downlink: bool,
     BG_rate_bps: f64, 
+    distance_sta0: f64, 
 ) {
-    let v_distance = vec![1.0, distance, distance]; // just some random values
+    let v_distance = vec![distance_sta0, distance, distance]; // just some random values
 
     let coords_sta1 = Coords {
         x: v_distance[0],
@@ -1475,6 +1477,7 @@ fn main() {
 
     let is_uplink: usize = args[7].parse().expect("Invalid is_UL"); 
     let N_BG: usize = args[8].parse().expect("Invalid N_BG"); 
+    let distance_sta0: f64 =  args[9].parse().expect("Invalid STA distance");
     
 
     println!("is_uplink: {}, N_BG: {}", is_uplink, N_BG);
@@ -1502,6 +1505,7 @@ fn main() {
                 is_ul_arg ,
                 is_downlink,
                 BG_rate,
+                distance_sta0, 
             );
     }
     else if N_BG >= 2 {
@@ -1526,6 +1530,7 @@ fn main() {
             is_uplink == 1,
             is_downlink,
             BG_rate,
+            distance_sta0, 
         );
     }
    

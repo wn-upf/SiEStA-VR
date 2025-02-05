@@ -39,7 +39,7 @@ macro_rules! debug_schedule {
     }
 }
 
-pub const SOFTMAX_POLICY: bool = true;
+pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_ROUTING: bool = false; 
 pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
