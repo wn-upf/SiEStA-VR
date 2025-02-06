@@ -21,13 +21,9 @@ use crate::lib::{
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
-
 use super::ResultsFrameTXDelay;
 
-
-
 //////////// CONST DEFINES ///////////
-
 
 #[macro_export]
 macro_rules! debug_schedule {
@@ -37,19 +33,15 @@ macro_rules! debug_schedule {
         }
     }
 }
-pub const DEBUG_SCHEDULING: bool = false; 
-
-
+pub const DEBUG_SCHEDULING: bool = false;
 
 pub const SOFTMAX_POLICY: bool = false;
-pub const LYAPUNOV_POLICY: bool = false; 
+pub const LYAPUNOV_POLICY: bool = false;
 pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
-
-
 
 struct StaRateInfo {
     total_transmission_delay_single: f64,
-    total_transmission_delay_fullampdu: f64, 
+    total_transmission_delay_fullampdu: f64,
     fullampdu_max_size: usize,
     packet_count: usize,
     weighted_rate_single: f64,
@@ -71,7 +63,6 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     let sum_exp: f64 = exp_values.iter().sum();
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
-
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -408,12 +399,7 @@ impl QueueModule {
         self.array_stas_stats.clone()
     }
 
-    pub fn new(
-        num_stas: usize,
-        queue_size: usize,
-        PL_prob: f64,
-        vec_ids: Vec<i32>,
-    ) -> Self {
+    pub fn new(num_stas: usize, queue_size: usize, PL_prob: f64, vec_ids: Vec<i32>) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
 
@@ -441,7 +427,7 @@ impl QueueModule {
             arrived_packet_counter: 0,
             queue_length_counter: 0,
             service_rate: 0.0,
-                        t0_time: Instant::now(),
+            t0_time: Instant::now(),
 
             csv_metrics: CsvType::new(),
 
@@ -688,17 +674,18 @@ impl QueueModule {
             entry.total_transmission_delay_fullampdu = resultz_full_ampdu.service_delay;
             entry.fullampdu_max_size = optimal_n_packets as usize;
             entry.packet_count += 1;
-            entry.weighted_rate_single = 0.2 * resultz.service_delay + 0.8 * entry.weighted_rate_single;
-            entry.weighted_rate_fullampdu = 0.2 * resultz_full_ampdu.service_delay + 0.8 * entry.weighted_rate_fullampdu;
-            entry.per_packet_channel_access_efficiency = entry.total_transmission_delay_fullampdu / entry.fullampdu_max_size as f64;
-            entry.expected_queue_delivery_ms = entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+            entry.weighted_rate_single =
+                0.2 * resultz.service_delay + 0.8 * entry.weighted_rate_single;
+            entry.weighted_rate_fullampdu =
+                0.2 * resultz_full_ampdu.service_delay + 0.8 * entry.weighted_rate_fullampdu;
+            entry.per_packet_channel_access_efficiency =
+                entry.total_transmission_delay_fullampdu / entry.fullampdu_max_size as f64;
+            entry.expected_queue_delivery_ms =
+                entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
         }
 
         sta_packets
     }
-
-
-
 
     fn deque_schedule_service<'a>(
         &'a mut self,
@@ -706,57 +693,65 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            let now = context.scheduler.time(); 
+            let now = context.scheduler.time();
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, select first packet fairly to ensure channel access with reduced backlog for each user.
             // We need to consider the rate of each STA and the queue length of each STA to select the next packet to serve.
 
-            // enumerate STAs in the packet queue and the quantity of packets for each STA: 
+            // enumerate STAs in the packet queue and the quantity of packets for each STA:
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
-               // Select the STA with the highest priority based on Lyapunov optimization
-            
-               debug_schedule!("\n******************* STA packets *******************\n", );
-        
+            // Select the STA with the highest priority based on Lyapunov optimization
+
+            debug_schedule!("\n******************* STA packets *******************\n",);
+
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
                 debug_schedule!("src: {}, dest: {} | queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
-                
-                debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
 
+                debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms);
             }
 
             let mut selected_sta = None;
 
             if LYAPUNOV_POLICY == true {
                 let mut min_priority = f64::MAX;
-                debug_schedule!("T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:", format_elapsed!(now));
-                
-                for (key, info) in sta_packets.iter() { // iterate through all STAs present in queue
-                    
+                debug_schedule!(
+                    "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
+                    format_elapsed!(now)
+                );
+
+                for (key, info) in sta_packets.iter() {
+                    // iterate through all STAs present in queue
+
                     // FIRST APPROACH: works well, but can be improved by only considering right hand term if queue size is greater than AMPDU size
-                    // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms; 
+                    // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms;
                     // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
-                    
 
-                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i 
-                    let rhs = info.expected_queue_delivery_ms;                        // max-weight scheduling (Q_i * rate_i) 
-                    let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize{ // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
-                            lhs - rhs
-                        }
-                        else {
-                            1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet
-                        }; 
+                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i
+                    let rhs = info.expected_queue_delivery_ms; // max-weight scheduling (Q_i * rate_i)
+                    let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
+                        // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
+                        lhs - rhs
+                    } else {
+                        1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet
+                    };
 
-                        debug_schedule!("Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | ", key.0, info.packet_count, key.0,  priority, lhs, rhs);
-   
+                    debug_schedule!(
+                        "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | ",
+                        key.0,
+                        info.packet_count,
+                        key.0,
+                        priority,
+                        lhs,
+                        rhs
+                    );
+
                     if priority < min_priority {
                         min_priority = priority;
                         selected_sta = Some(*key);
                     }
                 }
-            }
-            
-            else if SOFTMAX_POLICY == true {
+            } else if SOFTMAX_POLICY == true {
                 // let key_softmax: (i32, i32);
-                debug_schedule!("SOFTMAX POLICY", );
+                debug_schedule!("SOFTMAX POLICY",);
                 let mut softmax_values: Vec<f64> = Vec::new();
                 let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
                 for ((sta_src, sta_dest), packets) in sta_packets.iter() {
@@ -764,61 +759,74 @@ impl QueueModule {
                     softmax_keys.push((*sta_src, *sta_dest));
                 }
                 // println!("Expected queue delivery values: {:?} in microseconds", softmax_values);
-                
-                pub const SOFTMAX_TEMP: f64 = 1000.0; 
+
+                pub const SOFTMAX_TEMP: f64 = 1000.0;
 
                 let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
-                
+
                 let mut rng = rand::thread_rng();
 
                 // println!("RNG = {}, Softmax probabilities: {:?}", rng.gen::<f64>(), softmax_probs);
-                
+
                 let selected_index = softmax_probs
                     .iter()
-                    .position(|&p| (1.0 - p ) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
+                    .position(|&p| (1.0 - p) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
                     .unwrap_or(softmax_probs.len() - 1);
                 let selected_key = softmax_keys[selected_index];
-                // key_softmax = selected_key.clone(); 
+                // key_softmax = selected_key.clone();
 
                 selected_sta = Some(selected_key);
-            }
-            else {                 // NORMAL POLICY: FIFO
+            } else { // NORMAL POLICY: FIFO
             }
 
             let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
-            if let Some(packet) = packet_with_id{
-                debug_schedule!("QUEUE FRONT: SRC {}, DEST: {}", packet.sta_src_id, packet.sta_dest_id); 
+            if let Some(packet) = packet_with_id {
+                debug_schedule!(
+                    "QUEUE FRONT: SRC {}, DEST: {}",
+                    packet.sta_src_id,
+                    packet.sta_dest_id
+                );
             }
-            if let Some(key) = selected_sta { // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
+            if let Some(key) = selected_sta {
+                // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
                 //
-                if LYAPUNOV_POLICY || SOFTMAX_POLICY { // redundant if, might delete
-                    packet_with_id = Some(self.queue.iter().find(|&packet| packet.sta_src_id == key.0 && packet.sta_dest_id == key.1).unwrap()); // retrieve a packet that would match
+                if LYAPUNOV_POLICY || SOFTMAX_POLICY {
+                    // redundant if, might delete
+                    packet_with_id = Some(
+                        self.queue
+                            .iter()
+                            .find(|&packet| {
+                                packet.sta_src_id == key.0 && packet.sta_dest_id == key.1
+                            })
+                            .unwrap(),
+                    ); // retrieve a packet that would match
                 }
+            } else {
+                // no error if no scheduling algorithm is used
+                // println!("{} - ERROR: No STA selected! | Q_len = {}", format_elapsed!(now), self.queue.len());
             }
-            else {
-                    // no error if no scheduling algorithm is used
-                    // println!("{} - ERROR: No STA selected! | Q_len = {}", format_elapsed!(now), self.queue.len());
-            }
-
 
             if let Some(first_packet) = packet_with_id {
-                debug_schedule!("Selected STA: Src{:.0} ,Dest{:.0}", first_packet.sta_src_id, first_packet.sta_dest_id);
-                debug_schedule!("*************************************\n", );
+                debug_schedule!(
+                    "Selected STA: Src{:.0} ,Dest{:.0}",
+                    first_packet.sta_src_id,
+                    first_packet.sta_dest_id
+                );
+                debug_schedule!("*************************************\n",);
 
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 
                 // Initialize AMPDU with first packet's info
                 self.aux_ampdu_serviced.reset();
-                
+
                 self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
                 self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
                 self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
-                
-        
+
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
 
-                let mut resultz =  ResultsFrameTXDelay::new(); 
+                let mut resultz = ResultsFrameTXDelay::new();
 
                 // Process packets that match the AMPDU destination (and source?)
                 while packet_index < self.queue.len() {
@@ -844,7 +852,14 @@ impl QueueModule {
                         );
 
                         if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
-                            debug_print!(DebugColor::DarkRed ,"AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}", new_size, MAX_AMPDU_SIZE, resultz.service_delay * 1000.0, DEFAULT_TMAX_AGG * 1000.0);
+                            debug_print!(
+                                DebugColor::DarkRed,
+                                "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
+                                new_size,
+                                MAX_AMPDU_SIZE,
+                                resultz.service_delay * 1000.0,
+                                DEFAULT_TMAX_AGG * 1000.0
+                            );
                             break;
                         }
 
@@ -854,7 +869,6 @@ impl QueueModule {
                             packet_rmvd.queue_out_instant = now;
 
                             packet_rmvd.T_q = now.duration_since(packet_rmvd.queue_in_instant);
-                        
 
                             // Move packet into AMPDU without cloning
                             self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
@@ -865,16 +879,14 @@ impl QueueModule {
                     }
                 }
 
-                for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut(){
-                    packet.T_s = Duration::from_secs_f64( resultz.service_delay); 
+                for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
+                    packet.T_s = Duration::from_secs_f64(resultz.service_delay);
 
-                     // Update stats before moving packet
-                     if let Some(stats_tx) = &self.stats_tx {
+                    // Update stats before moving packet
+                    if let Some(stats_tx) = &self.stats_tx {
                         let stats_update = StatsUpdate {
-                            T_s: packet.T_s.as_secs_f64(), 
-                            T_q: now
-                                .duration_since(packet.queue_in_instant)
-                                .as_secs_f64(),
+                            T_s: packet.T_s.as_secs_f64(),
+                            T_q: now.duration_since(packet.queue_in_instant).as_secs_f64(),
                             blocked_packet_counter: self.blocked_packet_counter,
                             arrived_packet_counter: self.arrived_packet_counter,
                             queue_length_when_out: packet.queue_length_when_out,
@@ -898,7 +910,7 @@ impl QueueModule {
                         format_elapsed!(now),
                         format_elapsed!(now + last_service_duration),
                     );
-                    
+
                     if DEBUG_PRINT_ENABLED == true {
                         self.aux_ampdu_serviced.print();
                     }

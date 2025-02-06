@@ -114,17 +114,16 @@ impl DebugColor {
 // int AccessPoint :: BinaryExponentialBackoff(int attempt)
 // {
 // 	int CW = Random(MIN(pow(2,attempt),pow(2,max_BEB_stages))*(CWmin+1));
-// 	return CW;	
+// 	return CW;
 // };
 
-pub fn time_of_BinaryExponentialBackoff() -> f64{
+pub fn time_of_BinaryExponentialBackoff() -> f64 {
     let CW_MIN_var: i32 = 15;
     let CW = rand::thread_rng().gen_range(0..=1);
     let CW = (2_i32.pow(0) * (CW_MIN_var + 1)) as i32;
     let time = CW as f64 * SLOT as f64;
     time
-} 
-
+}
 
 #[derive(Clone)]
 pub struct SlidingWindowWeighted<T> {
@@ -614,7 +613,7 @@ impl perStaStats {
         // debug_print!(
         //     DebugColor::Purple,
         //     "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-        //     format_elapsed!(now), 
+        //     format_elapsed!(now),
         //     formatted_timestamp,
         //     id_packet,
         //     queue_size,
@@ -802,7 +801,6 @@ pub struct MpduPacket {
     pub T_q: Duration,
     pub T_s: Duration,
     // pub expected_T_s: Duration,
-
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_src_coords: Coords,
@@ -825,7 +823,6 @@ impl MpduPacket {
             T_q: Duration::ZERO,
             T_s: Duration::ZERO,
             // expected_T_s: Duration::ZERO,
-
             sta_src_id: 0,
             sta_dest_id: 0,
             sta_src_coords: Coords::new(),
@@ -873,12 +870,11 @@ impl AmpduPacket {
             self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
         for packet in &self.mpdu_packets {
-            
             println!(
                 "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64() * 1000.0,
-                packet.T_s.as_secs_f64() * 1000.0, 
+                packet.T_s.as_secs_f64() * 1000.0,
                 // packet.expected_T_s.as_secs_f64(),
             );
         }
@@ -946,12 +942,12 @@ pub struct ResultsFrameTXDelay {
 }
 
 impl ResultsFrameTXDelay {
-    pub fn new() -> Self{
-        Self{
+    pub fn new() -> Self {
+        Self {
             service_delay: 0.0,
-            data_service_delay: 0.0, 
+            data_service_delay: 0.0,
             pathloss: 0.0,
-            p_rx: 0.0, 
+            p_rx: 0.0,
         }
     }
 
@@ -982,17 +978,17 @@ pub fn frametransmission_delay(
     coords_dest: Coords,
     p_tx: f64,
 ) -> ResultsFrameTXDelay {
-
     let mut effPt = p_tx;
 
-    let SU_spatial_streams = 2.0;    
+    let SU_spatial_streams = 2.0;
 
-    if (SU_spatial_streams > 1.0) {effPt = effPt - 3.0 *SU_spatial_streams };
+    if (SU_spatial_streams > 1.0) {
+        effPt = effPt - 3.0 * SU_spatial_streams
+    };
 
     let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
-
 
     if channel_width > 20 {
         effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
@@ -1010,7 +1006,6 @@ pub fn frametransmission_delay(
     let Pr = effPt - PL;
 
     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
-
 
     let (bits_symbol, coding_rate) = match Pr {
         _ if Pr < -82.0 => (1, 1.0 / 2.0),
@@ -1055,10 +1050,9 @@ pub fn frametransmission_delay(
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
     // let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
-    let T_BACKOFF =  time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time 
+    let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
 
-    let T =
-        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
+    let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
 
     // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
 
@@ -1074,14 +1068,14 @@ pub fn frametransmission_delay(
 pub fn write_all_sta_csvs(
     sta_stats_vec: &HashMap<usize, perStaLockStats>,
     folder: &str,
-    results_folder: &str, 
+    results_folder: &str,
 ) -> std::io::Result<()> {
     for (_index, sta_stats) in sta_stats_vec.iter() {
         // Lock the mutex to access the data
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
-            
-            let filename: String = format!("{results_folder}STA{}.csv", stats.sta_id);      
+
+            let filename: String = format!("{results_folder}STA{}.csv", stats.sta_id);
             println!("FILENAME222: {filename}");
             // Open file with write permissions
             let file = OpenOptions::new()

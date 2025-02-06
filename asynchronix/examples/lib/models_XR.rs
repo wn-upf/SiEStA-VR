@@ -1139,8 +1139,7 @@ impl STA_extended {
         rate_service_bps: f64,
         t0_sim: TaiTime<0>,
         is_bg_sta: bool,
-        arrival_rate_BG: f64, 
-
+        arrival_rate_BG: f64,
     ) -> Self {
         let arrival_rate_BG_packets = arrival_rate_BG / mean_length;
 
@@ -1287,14 +1286,14 @@ impl STA_extended {
                 packet.sta_src_coords = self.sta_coordinates;
 
                 debug_print!(
-                    DebugColor::Blue, 
+                    DebugColor::Blue,
                     "{} [TGAPP{}] Packet {} generated, destination STA {}, self.coords = {:?}",
-                    format_elapsed!(context.scheduler.time()), 
+                    format_elapsed!(context.scheduler.time()),
                     self.sta_id,
                     packet.packet_id,
-                    packet.sta_dest_id, 
-                    self.sta_coordinates, 
-                ); 
+                    packet.sta_dest_id,
+                    self.sta_coordinates,
+                );
 
                 // self.output_network_port.send(packet).await;
                 context

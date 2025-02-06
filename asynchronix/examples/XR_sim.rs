@@ -172,8 +172,7 @@ fn main() {
         effective_rate1,
         t0,
         false,
-        0.0, 
-        
+        0.0,
     ); // STAs 0 and 1 send traffic to 5 through AP
 
     let mut sta_client = STA_extended::new(
@@ -186,7 +185,7 @@ fn main() {
         effective_rate2,
         t0,
         false,
-        0.0
+        0.0,
     );
 
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
@@ -195,12 +194,7 @@ fn main() {
     println!("STA XR Client PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length);
 
-    let mut queue: QueueModule = QueueModule::new(
-        NUM_STAS,
-        k_queue - 1 as usize,
-        pl_prob,
-        vec_ids,
-    );
+    let mut queue: QueueModule = QueueModule::new(NUM_STAS, k_queue - 1 as usize, pl_prob, vec_ids);
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 
