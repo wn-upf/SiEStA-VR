@@ -5,3 +5,14 @@ Cargo.lock
 profile.json
 
 Results/*
+
+*.mkv
+*.mp4
+*.hevc
+video_samples_vmaf/*
+.vscode/
+*.log
+*.txt
+*.zip
+
+simu_decode_samples/*

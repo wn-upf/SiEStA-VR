@@ -17,21 +17,21 @@ handle_interrupt() {
 trap handle_interrupt SIGINT
 
 
-start_bandwidth=50E6
+start_bandwidth=10E6
 end_bandwidth=65E6
 step_bandwidth=2.5E6
 
 
-distance=20.0
+distance=10.0
 
-is_ul=0
-n_bg=2
+is_ul=1
+n_bg=5
 
 cargo build --release --example mm1k_sim
 for bandwidth_STA in $(seq $start_bandwidth $step_bandwidth $end_bandwidth); do
         echo -e "\n\n********************************** RUST results for bandwidth_STA = $bandwidth_STA **********************************\n"
 
-        script -c "./target/release/examples/mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA $is_ul $n_bg" "out_log.ans"
+        script -c "./target/release/examples/mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA $is_ul $n_bg $distance" "out_log.ans"
 
         # Create a directory named after the current bandwidth_STA value with reduced decimals
         folder_name=$(echo "$bandwidth_STA" | awk '{printf "%.1fMbps\n", $1/1E6}')

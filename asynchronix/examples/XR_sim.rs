@@ -1,3 +1,4 @@
+use asynchronix::model::Context;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 #[allow(unused)]
@@ -6,10 +7,6 @@
 ///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
 ///     * Will try to stay accurate to packet latencies in all parts of the pipeline ( for now, linear terms with maybe some randomness)
 ///
-/// TODO:   
-///     * XRServer sending packets , rate corresponding to FPS and bitrate (90 fps, 100 Mbps) to sink, with correct headers.
-//      * Decoder queue of XRClient
-
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
@@ -18,9 +15,10 @@ use std::collections::HashMap;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
 // use tai_time::TaiTime;
-mod lib; // for calling m own local library
 
 use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
+mod lib; // for calling m own local library
+
 use crate::lib::models_mm1k::{QueueModule, QueueStats};
 use crate::lib::{
     exponential,
@@ -42,17 +40,19 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::lib::models_XR::{STA_extended, SinkVideoXr, XRClient, XRServer};
+use crate::lib::models_XR::{STA_extended, SinkVideo_XR, XRClient, XRServer};
+
+// use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
-#[allow(unused)]
 fn main() {
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
                                          // std::env::set_var("RUST_BACKTRACE", "full");
                                          // READ COMMAND-LINE ARGUMENTS
     let args: Vec<String> = env::args().collect();
+
     if args.len() != 9 {
         eprintln!(
             "Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate> <PL_prob>",
@@ -172,29 +172,46 @@ fn main() {
         effective_rate1,
         t0,
         false,
-        0.0,
+        0.0, 
+        
+
     ); // STAs 0 and 1 send traffic to 5 through AP
+    // pub fn new(
+    //     arrival_rate_bps: f64,
+    //     mean_length: f64,
+    //     src: i32,
+    //     dest: i32,
+    //     coordinates: Coords,
+    //     does_sta_transmit: bool,
+    //     rate_service_bps: f64,
+    //     t0_sim: TaiTime<0>,
+    //     is_bg_sta: bool,
+    //     arrival_rate_BG: f64,
+
+
 
     let mut sta_client = STA_extended::new(
         0.0,
         1.0,
-        vec_ids[1],
-        vec_ids[0],
+        2,
+        0,
         coords_sink,
         true,
         effective_rate2,
         t0,
         false,
-        0.0,
+        0.0, 
     );
-
     println!("STA XR Server PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results1.pathloss, results1.p_rx, results1.service_delay * 1000.0, results1.data_service_delay * 1000.0, (1.0 / results1.service_delay) * mean_length);
 
     println!("STA XR Client PathLoss: {:.2}, P_rx : {:.2}, T_total: {:.3} ms, T_s(data): {:.3} ms , rate_total: {:.2} \n\n",
         results2.pathloss, results2.p_rx, results2.service_delay * 1000.0, results2.data_service_delay * 1000.0, (1.0 / results2.service_delay) * mean_length);
 
-    let mut queue: QueueModule = QueueModule::new(NUM_STAS, k_queue - 1 as usize, pl_prob, vec_ids);
+    let mut queue: QueueModule =
+        QueueModule::new(NUM_STAS, k_queue - 1 as usize, pl_prob, vec_ids.clone());
+        // pub fn new(num_stas: usize, queue_size: usize, PL_prob: f64, vec_ids: Vec<i32>) -> Self {
+
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
 
@@ -213,7 +230,7 @@ fn main() {
 
     let xr_server_app_address = mbox_xr_server_app.address();
 
-    let decoder_video_sink = SinkVideoXr::new();
+    let decoder_video_sink = SinkVideo_XR::new();
     let mbox_decoder_video = Mailbox::new();
     let decoded_video_address = mbox_decoder_video.address();
 
@@ -264,8 +281,7 @@ fn main() {
 
     xr_client_app
         .out_video_decoded
-        .connect(SinkVideoXr::in_video, &mbox_decoder_video);
-
+        .connect(SinkVideo_XR::in_video, &mbox_decoder_video);
     // // connect applications to STAs:
     // sta1_xr.to_app_socket.connect(XRServer::in_from_network, &mbox_sta_xr );
     // sta_client.to_app_socket.connect(XRClient::in_from_network, &mbox_sta_client_xr);
@@ -278,6 +294,7 @@ fn main() {
         .add_model(queue, mbox_queue, "Queue")
         .add_model(sta_client, mbox_sta_client_xr, "STA 2 (XR Client)")
         .add_model(xr_client_app, mbox_xr_client_app, "ALVR Client")
+        .add_model(decoder_video_sink, mbox_decoder_video, "Video decode Sink")
         .init(t0);
 
     let scheduler = simu.scheduler();
@@ -291,9 +308,9 @@ fn main() {
     assert_eq!(simu.time(), t);
 
     // START WITH FIRST EVENT
-    let epsilon1 = Duration::from_secs_f64(exponential(0.9));
+    let epsilon1 = Duration::from_secs_f64(exponential(12.0));
 
-    let duration_scheduled1 = Duration::from_secs(10) + epsilon1;
+    let duration_scheduled1 = Duration::from_secs(10);
 
     scheduler // Configure XRClient before sending packets to it
         .schedule_event(
@@ -321,14 +338,25 @@ fn main() {
             &xr_client_app_address,
         )
         .unwrap();
-
     // scheduler.schedule_periodic_event(Duration::from_millis(10), Duration::from_millis(10), XRClient::video_receive_thread, (), &xr_client_app_address).unwrap();  // video receiver thread of ALVR
+
+    println!("Scheduling EMULATOR TX");
+    scheduler
+        .schedule_event(
+            duration_scheduled1,
+            QueueModule::self_scheduled_emu_queue_tx,
+            (),
+            &queue_address,
+        )
+        .unwrap();
 
     simu.step_by(Duration::from_secs_f64(stoptime)); //works
 
+    let path_inter = format!("XR RESULTS");
+
     // After simulation, write the CSV data
     if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv(&name_folder) {
+        if let Err(e) = data.write_to_csv(&name_folder, &path_inter ) {
             eprintln!("Failed to write CSV file: {}", e);
         }
     }
@@ -340,7 +368,7 @@ fn main() {
             }
         }
 
-        if let Err(e) = write_all_sta_csvs(&stats_vec, &name_folder) {
+        if let Err(e) = write_all_sta_csvs(&stats_vec, &name_folder, &path_inter) {
             println!("name_folder: {name_folder}");
             eprintln!("Error writing STA CSV files: {}", e);
         }
