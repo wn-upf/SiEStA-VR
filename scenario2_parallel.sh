@@ -18,14 +18,14 @@ N_BG=(2 3 4)
 IS_UL=(0 1)
 
 #### 2nd paper scenario ####
-# N_BG=(1 4 8 12 16)
-
+N_BG=(1 2 3 4 5 6 7 8 9 10)
+alt_bandwidths=(7.5E6 15E6 30E6)
 
 # N_BG=(3)
 # IS_UL=(0)
 # IS_UL=1
 
-distance=10.0
+distance=20.0
 BG_distance_STA0=1.0 ## if we want asymetric MCS for scheduling, use this as last input argument
 
 
@@ -46,7 +46,7 @@ for is_ul in "${IS_UL[@]}"; do
         # for bandwidth_STA in $(seq $start_bandwidth $step_bandwidth $end_bandwidth); do
         for bandwidth_STA in "${alt_bandwidths[@]}"; do
             echo "IS_UL = $is_ul, N_BG = $num_stas", bandwidth_STA = $bandwidth_STA
-            echo ./target/release/examples/mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA $is_ul $num_stas $distance $distance >> "$temp_file"
+            echo ./target/release/examples/mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA $is_ul $num_stas $distance >> "$temp_file"
             # echo cargo run --release --example mm1k_sim $simTime $mean_length $k_queue $rate_bps_in $distance $bandwidth_STA $is_ul $num_stas>> "$temp_file"
         done
     done

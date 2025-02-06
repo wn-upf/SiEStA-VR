@@ -28,7 +28,6 @@ use super::ResultsFrameTXDelay;
 
 //////////// CONST DEFINES ///////////
 
-pub const DEBUG_SCHEDULING: bool = false; 
 
 #[macro_export]
 macro_rules! debug_schedule {
@@ -38,9 +37,12 @@ macro_rules! debug_schedule {
         }
     }
 }
+pub const DEBUG_SCHEDULING: bool = false; 
+
+
 
 pub const SOFTMAX_POLICY: bool = false;
-pub const LYAPUNOV_ROUTING: bool = false; 
+pub const LYAPUNOV_POLICY: bool = false; 
 pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
 
@@ -720,11 +722,10 @@ impl QueueModule {
                 debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms); 
 
             }
-            debug_schedule!("*************************************", );
 
             let mut selected_sta = None;
 
-            if LYAPUNOV_ROUTING == true {
+            if LYAPUNOV_POLICY == true {
                 let mut min_priority = f64::MAX;
                 debug_schedule!("T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:", format_elapsed!(now));
                 
@@ -735,7 +736,7 @@ impl QueueModule {
                     // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
                     
 
-                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how fast we can transmit each packet
+                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i 
                     let rhs = info.expected_queue_delivery_ms;                        // max-weight scheduling (Q_i * rate_i) 
                     let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize{ // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
                             lhs - rhs
@@ -780,25 +781,29 @@ impl QueueModule {
                 // key_softmax = selected_key.clone(); 
 
                 selected_sta = Some(selected_key);
-                // println!("Selected STA: {:?}", selected_key);
             }
             else {                 // NORMAL POLICY: FIFO
-                // selected_sta = self.queue.front().map(|packet| (packet.sta_src_id, packet.sta_dest_id)); // just use the front of the queue as usual
             }
 
-            let mut  packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
-
+            let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
+            if let Some(packet) = packet_with_id{
+                debug_schedule!("QUEUE FRONT: SRC {}, DEST: {}", packet.sta_src_id, packet.sta_dest_id); 
+            }
             if let Some(key) = selected_sta { // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
                 //
-                packet_with_id = Some(self.queue.iter().find(|&packet| packet.sta_src_id == key.0 && packet.sta_dest_id == key.1).unwrap()); // retrieve a packet that would match
+                if LYAPUNOV_POLICY || SOFTMAX_POLICY { // redundant if, might delete
+                    packet_with_id = Some(self.queue.iter().find(|&packet| packet.sta_src_id == key.0 && packet.sta_dest_id == key.1).unwrap()); // retrieve a packet that would match
+                }
             }
             else {
-                println!("ERROR: No STA selected for service!!!");
+                    // no error if no scheduling algorithm is used
+                    // println!("{} - ERROR: No STA selected! | Q_len = {}", format_elapsed!(now), self.queue.len());
             }
 
 
             if let Some(first_packet) = packet_with_id {
-                debug_schedule!("***Selected STA: Src{:.0} ,Dest{:.0}", first_packet.sta_src_id, first_packet.sta_dest_id);
+                debug_schedule!("Selected STA: Src{:.0} ,Dest{:.0}", first_packet.sta_src_id, first_packet.sta_dest_id);
+                debug_schedule!("*************************************\n", );
 
                 let now: tai_time::TaiTime<0> = context.scheduler.time();
 

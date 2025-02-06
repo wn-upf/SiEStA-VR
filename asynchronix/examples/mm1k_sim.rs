@@ -1460,9 +1460,9 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
 
-    if args.len() != 9 {
+    if args.len() != 10 {
         eprintln!(
-            "Usage: {} <mean_length> <k_queue> <rate_bps_IN> <distance> <bandwidth_STA>",
+            "Usage: {} <mean_length> <k_queue> <rate_bps_IN> <distance> <bandwidth_STA> <is_UL> <N_BG> <distance_STA0>",
             args[0]
         );
         println!("your input args: {:#?}", args);
