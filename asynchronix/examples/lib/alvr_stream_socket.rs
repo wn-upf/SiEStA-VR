@@ -2028,8 +2028,6 @@ impl ReceiverDataStats {
     }
 }
 
-
-
 pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Calculate the payload size based on bitrate
     let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;
@@ -2074,26 +2072,45 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     let first_pass_log = "/tmp/ffmpeg_first_pass.log";
     let mut first_pass = Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
-            "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-c:v", "hevc_nvenc",
-            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset", "medium", // Higher quality preset
-            "-rc", "vbr_hq", // Variable Bitrate High Quality mode
-            "-cq", "19", // Constant Quality level (lower is higher quality)
-            "-b_ref_mode", "2", // Enable B-frame reference mode
-            "-bf", "3", // Number of B-frames (0-3)
-            "-temporal-aq", "1", // Temporal Adaptive Quantization
-            "-spatial-aq", "1", // Spatial Adaptive Quantization
-            "-aq-strength", "8", // Adaptive Quantization strength
-            "-frames:v", "1",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-c:v",
+            "hevc_nvenc",
+            "-b:v",
+            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-preset",
+            "medium", // Higher quality preset
+            "-rc",
+            "vbr_hq", // Variable Bitrate High Quality mode
+            "-cq",
+            "19", // Constant Quality level (lower is higher quality)
+            "-b_ref_mode",
+            "2", // Enable B-frame reference mode
+            "-bf",
+            "3", // Number of B-frames (0-3)
+            "-temporal-aq",
+            "1", // Temporal Adaptive Quantization
+            "-spatial-aq",
+            "1", // Spatial Adaptive Quantization
+            "-aq-strength",
+            "8", // Adaptive Quantization strength
+            "-frames:v",
+            "1",
             "-an",
-            "-pass", "1",
-            "-passlogfile", first_pass_log,
-            "-f", "null", 
+            "-pass",
+            "1",
+            "-passlogfile",
+            first_pass_log,
+            "-f",
+            "null",
             "/dev/null",
         ])
         .stdin(Stdio::piped())
@@ -2112,28 +2129,49 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
     // Second pass: Actual encoding with analysis from first pass
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
-            "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-c:v", "hevc_nvenc",
-            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset", "medium", // Higher quality preset
-            "-rc", "vbr_hq", // Variable Bitrate High Quality mode
-            "-cq", "19", // Constant Quality level (lower is higher quality)
-            "-b_ref_mode", "2", // Enable B-frame reference mode
-            "-bf", "3", // Number of B-frames (0-3)
-            "-temporal-aq", "1", // Temporal Adaptive Quantization
-            "-spatial-aq", "1", // Spatial Adaptive Quantization
-            "-aq-strength", "8", // Adaptive Quantization strength
-            "-frames:v", "1",
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-c:v",
+            "hevc_nvenc",
+            "-b:v",
+            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-preset",
+            "medium", // Higher quality preset
+            "-rc",
+            "vbr_hq", // Variable Bitrate High Quality mode
+            "-cq",
+            "19", // Constant Quality level (lower is higher quality)
+            "-b_ref_mode",
+            "2", // Enable B-frame reference mode
+            "-bf",
+            "3", // Number of B-frames (0-3)
+            "-temporal-aq",
+            "1", // Temporal Adaptive Quantization
+            "-spatial-aq",
+            "1", // Spatial Adaptive Quantization
+            "-aq-strength",
+            "8", // Adaptive Quantization strength
+            "-frames:v",
+            "1",
             "-an",
-            "-pass", "2",
-            "-passlogfile", first_pass_log,
-            "-f", "mp4", // Output as mp4 container
-            "-bsf:v", "hevc_mp4toannexb", // Crucial: Add this filter
-            "-movflags", "+frag_keyframe+empty_moov",
+            "-pass",
+            "2",
+            "-passlogfile",
+            first_pass_log,
+            "-f",
+            "mp4", // Output as mp4 container
+            "-bsf:v",
+            "hevc_mp4toannexb", // Crucial: Add this filter
+            "-movflags",
+            "+frag_keyframe+empty_moov",
             "-",
         ])
         .stdin(Stdio::piped())
@@ -2164,29 +2202,23 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
 
 // pub fn generate_all_bitrates_all_frames(list_bitrates: Vec<f32>, fps: f64) {
 
-
-//     let MAX_DURATION_MOVIE = 30.0; 
+//     let MAX_DURATION_MOVIE = 30.0;
 
 //     for bitrate in list_bitrates{
 
-//         let num_frames = MAX_DURATION_MOVIE * fps; 
+//         let num_frames = MAX_DURATION_MOVIE * fps;
 //         for frame in 0..num_frames as usize {
-            
-
 
 //         }
-//         println!("Encoding movie with bitrate: {}", bitrate); 
+//         println!("Encoding movie with bitrate: {}", bitrate);
 
 //         let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
 
 //         let output_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates/f{}_{}.mp4",  ,bitrate);
 
-
 //     }
 
 // }
-
-
 
 pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
     let input_path: &str =
@@ -2225,26 +2257,45 @@ pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fp
 
         let process = Command::new("ffmpeg")
             .args([
-                "-hwaccel", "cuda",
-                "-ss", &formatted_timestamp,
-                "-i", &input_path,
-                "-pix_fmt", "yuv420p",
-                "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-c:v", "hevc_nvenc",
-                "-preset", "fast", // Prioritize speed over compression
-                "-rc", "vbr_hq",
+                "-hwaccel",
+                "cuda",
+                "-ss",
+                &formatted_timestamp,
+                "-i",
+                &input_path,
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-c:v",
+                "hevc_nvenc",
+                "-preset",
+                "fast", // Prioritize speed over compression
+                "-rc",
+                "vbr_hq",
                 // "-cq", "19",
-                "-b_ref_mode", "2",
-                "-bf", "3",
-                "-temporal-aq", "1",
-                "-spatial-aq", "1",
-                "-aq-strength", "8",
-                "-frames:v", "1",
-                "-b:v", &bitrate_command,
-                "-an", "-f",
-                "mp4", "-bsf:v",
-                "hevc_mp4toannexb", "-movflags",
-                "+frag_keyframe+empty_moov", "-",
+                "-b_ref_mode",
+                "2",
+                "-bf",
+                "3",
+                "-temporal-aq",
+                "1",
+                "-spatial-aq",
+                "1",
+                "-aq-strength",
+                "8",
+                "-frames:v",
+                "1",
+                "-b:v",
+                &bitrate_command,
+                "-an",
+                "-f",
+                "mp4",
+                "-bsf:v",
+                "hevc_mp4toannexb",
+                "-movflags",
+                "+frag_keyframe+empty_moov",
+                "-",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

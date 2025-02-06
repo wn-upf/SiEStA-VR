@@ -3,29 +3,28 @@ use ffmpeg_sidecar::{
     command::FfmpegCommand,
     event::{FfmpegEvent, LogLevel},
 };
+use rayon::prelude::*;
+use std::fs::File;
+use std::io::BufWriter;
 use std::{
+    error::Error,
+    fs,
     io::{Read, Write},
     process::Command,
     thread,
-    fs,
-    error::Error,    
 };
-use rayon::prelude::*;
-use std::fs::File;
-use std::io::{BufWriter};
 // use sdl2::pixels::Color;
 // use sdl2::render::Canvas;
 // use sdl2::video::Window;
 // use sdl2::Sdl;
 use minifb::Scale;
 use minifb::{Key, Window, WindowOptions};
+use std::fs::create_dir_all;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use std::fs::{create_dir_all};
-use std::path::Path;
 
 use std::collections::HashMap;
-
 
 pub const OFFSET_VIDEO_TIMESTAMP: f64 = 40.0;
 
@@ -43,7 +42,8 @@ pub fn generate_multi_bitrate_frames(
     bitrate_ladder: &[f32], // Array of bitrates in Mbps
     output_dir: &str,
 ) -> Result<Vec<String>, Box<dyn Error>> {
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+    let input_path =
+        "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
     let base_output_dir = Path::new(output_dir);
     create_dir_all(base_output_dir)?;
 
@@ -58,16 +58,14 @@ pub fn generate_multi_bitrate_frames(
     let encoded_files: Vec<_> = bitrate_ladder
         .par_iter()
         .filter_map(|&current_bitrate_mbps| {
-            let output_filename: String; 
-            unsafe{
+            let output_filename: String;
+            unsafe {
                 output_filename = format!(
                     "frame_{}_{:.1}mbps.mp4",
-                    FRAME_INDEX_multibitrate, 
-                    current_bitrate_mbps,
-                    
-                );    
+                    FRAME_INDEX_multibitrate, current_bitrate_mbps,
+                );
             }
-            
+
             let output_path = base_output_dir.join(&output_filename);
 
             let bitrate_command = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
@@ -78,21 +76,36 @@ pub fn generate_multi_bitrate_frames(
 
             let process = Command::new("ffmpeg")
                 .args([
-                    "-hwaccel", "cuda",
-                    "-ss", &formatted_timestamp,
-                    "-i", input_path,
-                    "-pix_fmt", "yuv420p",
-                    "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                    "-c:v", "hevc_nvenc",
-                    "-preset", "fast",
-                    "-rc", "vbr_hq",
-                    "-b_ref_mode", "2",
-                    "-bf", "3",
-                    "-temporal-aq", "1",
-                    "-spatial-aq", "1",
-                    "-aq-strength", "8",
-                    "-frames:v", "1",
-                    "-b:v", &bitrate_command,
+                    "-hwaccel",
+                    "cuda",
+                    "-ss",
+                    &formatted_timestamp,
+                    "-i",
+                    input_path,
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-vf",
+                    &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                    "-c:v",
+                    "hevc_nvenc",
+                    "-preset",
+                    "fast",
+                    "-rc",
+                    "vbr_hq",
+                    "-b_ref_mode",
+                    "2",
+                    "-bf",
+                    "3",
+                    "-temporal-aq",
+                    "1",
+                    "-spatial-aq",
+                    "1",
+                    "-aq-strength",
+                    "8",
+                    "-frames:v",
+                    "1",
+                    "-b:v",
+                    &bitrate_command,
                     "-an",
                     "-y", // Overwrite output files
                     output_path.to_str().unwrap(),
@@ -112,10 +125,7 @@ pub fn generate_multi_bitrate_frames(
                         }
                     }
                     Ok(output) => {
-                        eprintln!(
-                            "FFmpeg error: {}",
-                            String::from_utf8_lossy(&output.stderr)
-                        );
+                        eprintln!("FFmpeg error: {}", String::from_utf8_lossy(&output.stderr));
                         None
                     }
                     Err(e) => {
@@ -141,24 +151,28 @@ pub fn encode_frame_sequence(
     output_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bitrate_ladder = vec![0.5, 1.0, 2.0, 4.0, 8.0]; // Bitrates in Mbps
-    
+
     for frame_idx in 0..frame_count {
         let timestamp = start_timestamp + (frame_idx as f64 / fps);
 
         match generate_multi_bitrate_frames(timestamp, fps, &bitrate_ladder, output_dir) {
             Ok(files) => {
-                println!("Successfully encoded frame at {} with {} variations:", timestamp, files.len());
+                println!(
+                    "Successfully encoded frame at {} with {} variations:",
+                    timestamp,
+                    files.len()
+                );
                 for file in files {
                     println!("  - {}", file);
                 }
-            },
+            }
             Err(e) => eprintln!("Error encoding frame at {}: {}", timestamp, e),
         }
-        unsafe{
-            FRAME_INDEX_multibitrate += 1;     
+        unsafe {
+            FRAME_INDEX_multibitrate += 1;
         }
     }
-    
+
     Ok(())
 }
 fn main() {
@@ -180,7 +194,7 @@ fn main() {
     // Limit the update rate to ~30 FPS (adjust as needed)
     // window.limit_update_rate(Some(Duration::from_millis(33)));
 
-    println!("pregenerating video"); 
+    println!("pregenerating video");
 
     let bitrates = vec![1.0, 2.0, 4.0, 8.0]; // Bitrates in Mbps
     let fps = 30.0;
@@ -188,7 +202,6 @@ fn main() {
     let start_timestamp = 2.0;
     let frame_count = 100;
     let base_output_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates";
-
 
     match encode_frame_sequence(start_timestamp, frame_count, fps, base_output_dir) {
         Ok(_) => println!("Successfully encoded all frames"),
@@ -201,15 +214,14 @@ fn main() {
     // }
 
     // Main loop
-    let mut decoded_index = 0; 
+    let mut decoded_index = 0;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         timestamp += 1.0 / 30.0; // For 30 FPS
         println!("TIMESTAMP: {}", timestamp);
         if timestamp >= 2.0 && timestamp < 3.0 {
-            current_bitrate_mbps = 0.01; 
-        }
-        else if timestamp >= 3.0 && timestamp < 3.5{
-            current_bitrate_mbps = 2.0; 
+            current_bitrate_mbps = 0.01;
+        } else if timestamp >= 3.0 && timestamp < 3.5 {
+            current_bitrate_mbps = 2.0;
         }
 
         // Process a new frame
@@ -242,7 +254,8 @@ pub fn generate_all_bitrates_all_frames(
     fps: f64,
 ) -> Result<(), std::io::Error> {
     let max_duration_movie = 30.0;
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+    let input_path =
+        "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
     let base_output_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates";
     let frame_size = WIDTH_ENCODER * HEIGHT_ENCODER * 3 / 2; // Assuming YUV420p
 
@@ -258,16 +271,23 @@ pub fn generate_all_bitrates_all_frames(
 
         let mut ffmpeg = Command::new("ffmpeg")
             .args([
-                "-hwaccel", "cuda",
-                "-i", input_path,
-                "-t", &max_duration_movie.to_string(),
-                "-pix_fmt", "yuv420p",
+                "-hwaccel",
+                "cuda",
+                "-i",
+                input_path,
+                "-t",
+                &max_duration_movie.to_string(),
+                "-pix_fmt",
+                "yuv420p",
                 "-vf",
                 &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-c:v", "hevc_nvenc",
-                "-b:v", &bitrate_command,
+                "-c:v",
+                "hevc_nvenc",
+                "-b:v",
+                &bitrate_command,
                 "-an",
-                "-f", "rawvideo",
+                "-f",
+                "rawvideo",
                 "-",
             ])
             .stdout(Stdio::piped())
@@ -277,7 +297,6 @@ pub fn generate_all_bitrates_all_frames(
         let mut buffer = vec![0u8; frame_size];
         let mut frame_index = 0;
 
-  
         loop {
             match stdout.read_exact(&mut buffer) {
                 Ok(()) => {
@@ -299,7 +318,6 @@ pub fn generate_all_bitrates_all_frames(
             }
         }
 
-
         let status = ffmpeg.wait()?;
         if !status.success() {
             return Err(std::io::Error::new(
@@ -313,7 +331,6 @@ pub fn generate_all_bitrates_all_frames(
 
     Ok(())
 }
-
 
 pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<u8> {
     let input_path =
@@ -334,19 +351,28 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<
     // println!("STRI: {}", stri);
     let mut ffmpeg = match FfmpegCommand::new()
         .args([
-            "-hwaccel", "cuda",
-            "-ss", &formatted_timestamp,
-            "-i", input_path,
-            "-pix_fmt", "yuv420p",
-            "-vf", &format!(
+            "-hwaccel",
+            "cuda",
+            "-ss",
+            &formatted_timestamp,
+            "-i",
+            input_path,
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            &format!(
                 "scale={}:{},format=yuv420p",
                 WIDTH_ENCODER_, HEIGHT_DECODER_
             ),
-            "-c:v", "hevc_nvenc",
-            "-b:v", &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-frames:v", "1",
-            "-f", "rawvideo",
-            "-an", 
+            "-c:v",
+            "hevc_nvenc",
+            "-b:v",
+            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-an",
             "-",
         ])
         .spawn()
@@ -379,15 +405,24 @@ fn decode_hevc_to_rgb24(encoded_data: Vec<u8>) -> Vec<u32> {
         .args([
             // "-loglevel",
             // "debug",
-            "-hwaccel", "cuda",
-            "-c:v","hevc_cuvid",
-            "-f", "rawvideo", // Explicitly specify input format
-            "-pix_fmt", "yuv420p", // Match input pixel format
-            "-s", &format!("{}x{}", WIDTH_ENCODER_, HEIGHT_DECODER_), // Specify input dimensions
-            "-i", "pipe:0",
-            "-f", "rawvideo", // Specify output format explicitly
-            "-pix_fmt", "rgb24", // Force RGB output
-            "-vf", &format!("scale={}:{}", WIDTH_ENCODER_, HEIGHT_DECODER_),
+            "-hwaccel",
+            "cuda",
+            "-c:v",
+            "hevc_cuvid",
+            "-f",
+            "rawvideo", // Explicitly specify input format
+            "-pix_fmt",
+            "yuv420p", // Match input pixel format
+            "-s",
+            &format!("{}x{}", WIDTH_ENCODER_, HEIGHT_DECODER_), // Specify input dimensions
+            "-i",
+            "pipe:0",
+            "-f",
+            "rawvideo", // Specify output format explicitly
+            "-pix_fmt",
+            "rgb24", // Force RGB output
+            "-vf",
+            &format!("scale={}:{}", WIDTH_ENCODER_, HEIGHT_DECODER_),
             "-", // Output to stdout
         ])
         .stdin(Stdio::piped())
