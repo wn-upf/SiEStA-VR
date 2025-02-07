@@ -610,19 +610,19 @@ impl perStaStats {
 
         let formatted_timestamp = format_timestamp!(now);
 
-        // debug_print!(
-        //     DebugColor::Purple,
-        //     "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-        //     format_elapsed!(now),
-        //     formatted_timestamp,
-        //     id_packet,
-        //     queue_size,
-        //     Ts,
-        //     Tq,
-        //     length_packet,
-        //     sta_src_id,
-        //     sta_dest_id
-        // );
+        debug_print!(
+            DebugColor::Purple,
+            "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            format_elapsed!(now),
+            formatted_timestamp,
+            id_packet,
+            queue_size,
+            Ts,
+            Tq,
+            length_packet,
+            sta_src_id,
+            sta_dest_id
+        );
 
         self.csv_data.v_timestamp.push(formatted_timestamp);
         self.csv_data.v_packet_id.push(id_packet);

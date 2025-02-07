@@ -17,15 +17,15 @@ handle_interrupt() {
 trap handle_interrupt SIGINT
 
 
-start_bandwidth=50E6
+start_bandwidth=10E6
 end_bandwidth=65E6
 step_bandwidth=2.5E6
 
 
 distance=20.0
 
-is_ul=0
-n_bg=2
+is_ul=1
+n_bg=5
 
 cargo build --release --example mm1k_sim
 for bandwidth_STA in $(seq $start_bandwidth $step_bandwidth $end_bandwidth); do

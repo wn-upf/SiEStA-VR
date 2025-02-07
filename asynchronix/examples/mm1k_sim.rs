@@ -659,37 +659,88 @@ fn downlink_uplink_scenario_flexible(
     let mut mbox_stas: Vec<Mailbox<STA_extended>> = Vec::with_capacity(num_STAs);
     let mut sta_addresses = Vec::with_capacity(num_STAs);
 
-    for (i, coords) in vec_coords.iter().enumerate() {
-        // Determine if this STA should be used based on uplink/downlink
-        // let is_valid_uplink = is_uplink && i < num_STAs / 2;
-        // let is_valid_downlink = is_downlink && i >= num_STAs / 2;
-        let is_valid_uplink = is_uplink;
-        let is_valid_downlink = is_downlink;
-        println!(
-            "STA {} is valid uplink: {}, is valid downlink: {}",
-            i, is_valid_uplink, is_valid_downlink
+    // for (i, coords) in vec_coords.iter().enumerate() {
+    //     // Determine if this STA should be used based on uplink/downlink
+    //     // let is_valid_uplink = is_uplink && i < num_STAs / 2;
+    //     // let is_valid_downlink = is_downlink && i >= num_STAs / 2;
+    //     let is_valid_uplink = is_uplink;
+    //     let is_valid_downlink = is_downlink;
+    //     println!(
+    //         "STA {} is valid uplink: {}, is valid downlink: {}",
+    //         i, is_valid_uplink, is_valid_downlink
+    //     );
+
+    //     if is_valid_uplink || is_valid_downlink {
+    //         let sta = STA_extended::new(
+    //             rate_bps_in,
+    //             mean_length,
+    //             i as i32,
+    //             2,
+    //             *coords,
+    //             true,
+    //             effective_rates[i],
+    //             t0,
+    //             true,
+    //             BG_rate,
+    //         );
+
+    //         let mbox_sta = Mailbox::new();
+    //         sta_addresses.push(mbox_sta.address());
+    //         mbox_stas.push(mbox_sta);
+    //         sta_bg_models.push(sta);
+    //     }
+    // }
+    const DOWNLINK_SRC: i32 = 5;
+
+for (i, coords) in vec_coords.iter().enumerate() {
+    // Decide which configuration to use.
+    // If both uplink and downlink are active, split the STAs in half:
+    //   • First half: uplink (source = i, dest = AP, e.g. 2)
+    //   • Second half: downlink (source = fixed value, dest = corresponding uplink STA)
+    //
+    // If only one direction is active, then use all STAs for that direction.
+    let (sta_id, sta_dest) = if is_uplink && is_downlink {
+        if i < num_STAs / 2 {
+            // Uplink configuration
+            (i as i32, 2)
+        } else {
+            // Downlink configuration: use fixed AP source and let destination be the corresponding uplink STA.
+            (DOWNLINK_SRC, (i - num_STAs / 2) as i32)
+        }
+    } else if is_uplink {
+        (i as i32, 2)
+    } else if is_downlink {
+        (DOWNLINK_SRC, i as i32)
+    } else {
+        // (should not happen)
+        (i as i32, 2)
+    };
+
+    // (Optionally update your id_src_coords vector to match the same logic, if you need it later.)
+    id_src_coords.push(sta_id as usize);
+    map_coords.insert(sta_id as usize, *coords);
+
+    // Create the STA only if either uplink or downlink is requested.
+    if is_uplink || is_downlink {
+        let sta = STA_extended::new(
+            rate_bps_in,
+            mean_length,
+            sta_id,
+            sta_dest,
+            *coords,
+            true,
+            effective_rates[i],
+            t0,
+            true,
+            BG_rate,
         );
 
-        if is_valid_uplink || is_valid_downlink {
-            let sta = STA_extended::new(
-                rate_bps_in,
-                mean_length,
-                i as i32,
-                2,
-                *coords,
-                true,
-                effective_rates[i],
-                t0,
-                true,
-                BG_rate,
-            );
-
-            let mbox_sta = Mailbox::new();
-            sta_addresses.push(mbox_sta.address());
-            mbox_stas.push(mbox_sta);
-            sta_bg_models.push(sta);
-        }
+        let mbox_sta = Mailbox::new();
+        sta_addresses.push(mbox_sta.address());
+        mbox_stas.push(mbox_sta);
+        sta_bg_models.push(sta);
     }
+}
 
     // Prepare queue
     let vec_ids_stas: Vec<i32> = sta_bg_models.iter().map(|sta| sta.sta_id).collect();
@@ -1450,13 +1501,18 @@ fn main() {
     let mut is_ul_arg = false;
 
     if is_uplink == 0 {
+        println!("DOWNLINK SCENARIO"); 
         is_downlink = true;
         is_ul_arg = false;
     } else {
-        println!("UPlink scenario");
+        println!("UPLINK SCENARIO");
         is_downlink = false;
         is_ul_arg = true;
     }
+    // println!("IS UL: {}, IS DL: {}", is_ul_arg, is_downlink);
+    // //sleep for 3 secs
+    // std::thread::sleep(Duration::from_secs(3));
+
     if N_BG == 1 {
         downlink_uplink_scenario_1BG(
             N_BG,
@@ -1489,7 +1545,7 @@ fn main() {
             k_queue,
             rate_bps_in,
             distance,
-            is_uplink == 1,
+            is_ul_arg,
             is_downlink,
             BG_rate,
             distance_sta0,

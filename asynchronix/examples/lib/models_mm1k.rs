@@ -530,24 +530,25 @@ impl QueueModule {
         // AMPDU_sent.print();
         self.packet_being_served = false;
 
-        match AMPDU_sent.sta_dest_id {
-            0 => {
-                self.output_port_sta1.send(AMPDU_sent).await;
-            }
-            1 => {
-                self.output_port_sta1.send(AMPDU_sent).await;
-            }
-            2 => {
-                self.output_port_sta1.send(AMPDU_sent).await;
-            }
-            12 => {
-                self.output_port_sta1.send(AMPDU_sent).await;
-            }
+        // match AMPDU_sent.sta_dest_id {
+        //     0 => {
+        //         self.output_port_sta1.send(AMPDU_sent).await;
+        //     }
+        //     1 => {
+        //         self.output_port_sta1.send(AMPDU_sent).await;
+        //     }
+        //     2 => {
+        //         self.output_port_sta1.send(AMPDU_sent).await;
+        //     }
+        //     12 => {
+        //         self.output_port_sta1.send(AMPDU_sent).await;
+        //     }
 
-            _ => {
-                println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE");
-            }
-        }
+        //     _ => {
+        //         println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE");
+        //     }
+        // }    
+        self.output_port_sta1.send(AMPDU_sent).await;
 
         if self.queue.len() > 0 {
             self.deque_schedule_service((), context).await;
