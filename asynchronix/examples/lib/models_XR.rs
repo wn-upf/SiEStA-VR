@@ -177,8 +177,8 @@ impl BitrateManager {
         //     self.last_target_bitrate_mbps = 0.01;
         // }
         if 10.0 <= dur && dur < 11.0 {
-            self.last_target_bitrate_mbps = 0.001;
-        } else if 15.0 <= dur && dur < 25.0 {
+            self.last_target_bitrate_mbps = 2.0;
+        } else if 12.0 <= dur && dur < 25.0 {
             self.last_target_bitrate_mbps = 0.05;
         } else if 25.0 <= dur && dur < 30.0 {
             self.last_target_bitrate_mbps = 10.0;
@@ -1178,7 +1178,6 @@ impl XRClient {
                         );
                     
                     if USE_FFMPEG == true {
-                        println!("USING FFMPEG DECODER!!!!!!!!!!!\n!!");
                         let frame = XRClient::decode_hevc_to_rgb(
                             video_frame.clone(),
                             self.decoded_frame_index,
@@ -1212,7 +1211,7 @@ impl XRClient {
                             }
                         });
                     } else { // do nothing, no real video to decode
-                        println!("ERROR DECODING????"); 
+                        // println!("ERROR DECODING????"); 
                     }
                 }
 
@@ -1531,7 +1530,7 @@ impl STA_extended {
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let mut packet_batch = Vec::new(); // Create a batch to hold packets
         let now = context.scheduler.time();
-        println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
+        // println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
         if ampdu_packet.sta_dest_id == self.sta_id {
             // make sure we ignore packets not corresponding to STA
             for packet in ampdu_packet.mpdu_packets {

@@ -1116,6 +1116,11 @@ impl QueueModule {
         //         println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE");
         //     }
         // }    
+        // if AMPDU_sent.is_uplink....
+
+
+
+
         self.output_port_sta1.send(AMPDU_sent).await;
 
         if self.queue.len() > 0 {

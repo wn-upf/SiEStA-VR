@@ -52,13 +52,13 @@ pub mod alvr_control_socket;
 
 pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
-pub const USE_FFMPEG: bool = true;
+pub const USE_FFMPEG: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // let msg = format!($fmt, $($arg)*);
-        // println!("{}", $color.to_background_fn()(msg));
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_background_fn()(msg));
     };
 }
 
@@ -725,19 +725,19 @@ impl perStaStats {
 
         let formatted_timestamp = format_timestamp!(now);
 
-        debug_print!(
-            DebugColor::Purple,
-            "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-            format_elapsed!(now),
-            formatted_timestamp,
-            id_packet,
-            queue_size,
-            Ts,
-            Tq,
-            length_packet,
-            sta_src_id,
-            sta_dest_id
-        );
+        // debug_print!(
+        //     DebugColor::Purple,
+        //     "{} [DBG STATS STA] Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+        //     format_elapsed!(now),
+        //     formatted_timestamp,
+        //     id_packet,
+        //     queue_size,
+        //     Ts,
+        //     Tq,
+        //     length_packet,
+        //     sta_src_id,
+        //     sta_dest_id
+        // );
 
         self.csv_data.v_timestamp.push(formatted_timestamp);
         self.csv_data.v_packet_id.push(id_packet);

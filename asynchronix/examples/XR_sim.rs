@@ -260,7 +260,7 @@ fn main() {
         .connect(QueueModule::input_UL, &mbox_queue);
 
     queue
-        .output_port_sta2
+        .output_port_sta1
         .connect(STA_extended::input_wireless, &mbox_sta_client_xr);
 
     queue
