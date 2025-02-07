@@ -52,7 +52,7 @@ pub mod alvr_control_socket;
 
 pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
-pub const USE_FFMPEG: bool = false;
+pub const USE_FFMPEG: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -958,7 +958,7 @@ impl MpduPacket {
             // expected_T_s: Duration::ZERO,
             sta_src_id: 0,
             sta_dest_id: 0,
-            sta_src_coords: Coords::new(),
+            sta_src_coords: Coords::with_coords(0.0, 0.0, 0.0),
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
@@ -1072,6 +1072,13 @@ impl Coords {
             x: 0.0,
             y: 0.0,
             z: 0.0,
+        }
+    }
+    pub fn with_coords(x: f64, y: f64, z: f64) -> Self {
+        Self {
+            x,
+            y,
+            z,
         }
     }
 }

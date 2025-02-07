@@ -701,7 +701,7 @@ for (i, coords) in vec_coords.iter().enumerate() {
     let (sta_id, sta_dest) = if is_uplink && is_downlink {
         if i < num_STAs / 2 {
             // Uplink configuration
-            (i as i32, 2)
+            (i as i32, 10)
         } else {
             // Downlink configuration: use fixed AP source and let destination be the corresponding uplink STA.
             (DOWNLINK_SRC, (i - num_STAs / 2) as i32)

@@ -903,7 +903,7 @@ impl QueueModule {
         let cloned_dbg = packet_arg.clone();
 
         // print!("[IN QUEUEMODULE] Q_length:{}", self.queue.len());
-        packet_arg.print(DebugColor::Indigo);
+        // packet_arg.print(DebugColor::Indigo);
 
         // if self.network_emulator.should_transmit(&packet_arg, now) {
         match self

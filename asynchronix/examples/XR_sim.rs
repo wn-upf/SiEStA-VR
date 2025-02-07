@@ -47,7 +47,7 @@ use crate::lib::models_XR::{STA_extended, SinkVideo_XR, XRClient, XRServer};
 // use crate::lib::{AmpduPacket, MpduPacket, exponential, Coords, CumulativeStats, CsvType};
 // use crate::{debug_print, format_elapsed, format_timestamp};
 
-fn main() {
+fn main_old() {
     env::set_var("RUST_BACKTRACE", "1"); // for debug backtrace!
                                          // std::env::set_var("RUST_BACKTRACE", "full");
                                          // READ COMMAND-LINE ARGUMENTS
@@ -62,6 +62,7 @@ fn main() {
 
         return;
     }
+    
     let stoptime: f64 = args[1].parse().expect("Invalid T_END");
     let mean_length: f64 = args[2].parse().expect("Invalid mean_length");
     let k_queue: usize = args[3].parse().expect("Invalid k_queue");
@@ -390,4 +391,228 @@ fn main() {
         "Inputs--> rate: {}, l_mean :{}, effective_rate: {}, k: {}",
         aggregated_rate_in, mean_length, effective_rate, k_queue
     );
+}
+
+struct VRPair {
+    xr_server: XRServer,
+    xr_client: XRClient,
+    sta_server: STA_extended,
+    sta_client: STA_extended,
+    mbox_xr_server: Mailbox<XRServer>,
+    mbox_xr_client: Mailbox<XRClient>,
+    mbox_sta_server: Mailbox<STA_extended>,
+    mbox_sta_client: Mailbox<STA_extended>,
+}
+
+impl VRPair {
+    fn new(
+        pair_index: usize,
+        t0: MonotonicTime,
+        mean_length: f64,
+        initial_bitrate: f64,
+        distance: f64,
+        name_folder: &str,
+    ) -> Self {
+        let server_id = 100 + pair_index as i32;
+        let client_id = 200 + pair_index as i32;
+        let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
+        let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
+
+        let server_coords = Coords::with_coords(1.0, 0.0, 0.0);
+        let client_coords = Coords::with_coords(distance, 0.0, 0.0);
+
+        let server_tx = frametransmission_delay(
+            initial_bitrate * 1e6,
+            MAX_AMPDU_SIZE,
+            Coords::new(),
+            server_coords,
+            P_TX,
+        );
+        let client_tx = frametransmission_delay(
+            initial_bitrate * 1e6,
+            MAX_AMPDU_SIZE,
+            Coords::new(),
+            client_coords,
+            P_TX,
+        );
+
+        let mut xr_server = XRServer::new(
+            server_ip,
+            client_ip,
+            t0,
+            INITIAL_FRAMERATE_FPS,
+            initial_bitrate as f32,
+            name_folder,
+        );
+        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS);
+
+        let mut sta_server = STA_extended::new(
+            initial_bitrate * 1e6,
+            mean_length,
+            server_id,
+            client_id,
+            server_coords,
+            true,
+            mean_length / server_tx.service_delay,
+            t0,
+            false,
+            0.0,
+        );
+        let mut sta_client = STA_extended::new(
+            initial_bitrate * 1e6,
+            mean_length,
+            client_id,
+            server_id,
+            client_coords,
+            true,
+            mean_length / client_tx.service_delay,
+            t0,
+            false,
+            0.0,
+        );
+
+        let mbox_xr_server = Mailbox::new();
+        let mbox_xr_client = Mailbox::new();
+        let mbox_sta_server = Mailbox::new();
+        let mbox_sta_client = Mailbox::new();
+
+        xr_server.outport_videoapp_network.connect(
+            STA_extended::input_XR_app,
+            &mbox_sta_server,
+        );
+        sta_server.to_app_socket.connect(
+            XRServer::in_from_network,
+            &mbox_xr_server,
+        );
+        xr_client.output_app_network.connect(
+            STA_extended::input_XR_app,
+            &mbox_sta_client,
+        );
+        sta_client.to_app_socket.connect(
+            XRClient::in_from_network,
+            &mbox_xr_client,
+        );
+
+        VRPair {
+            xr_server,
+            xr_client,
+            sta_server,
+            sta_client,
+            mbox_xr_server,
+            mbox_xr_client,
+            mbox_sta_server,
+            mbox_sta_client,
+        }
+    }
+}
+
+fn main() {
+    env::set_var("RUST_BACKTRACE", "1");
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 10 {
+        eprintln!("Usage: {} <mean_length> <k_queue> <rate_bps> <rate_queue_bps> <distance> <bitrate> <PL_prob>", args[0]);
+        return;
+    }
+
+    // Parse arguments
+    let stoptime: f64 = args[1].parse().unwrap();
+    let mean_length: f64 = args[2].parse().unwrap();
+    let k_queue: usize = args[3].parse().unwrap();
+    let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
+    let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
+    let distance: f64 = args[6].parse().unwrap();
+    let initial_bitrate: f64 = args[7].parse().unwrap();
+    let pl_prob: f64 = args[8].parse().unwrap();
+    let n_xr: usize = args[9].parse().unwrap();
+
+
+    // Create output directory
+    let name_folder = format!(
+        "sim_T{:.0}_Plen{:.0}_K{}_D{:.0}_Br{:.0}_PL{:.6}",
+        stoptime, mean_length, k_queue, distance, initial_bitrate, pl_prob
+    );
+    let output_path = format!("Results/{}", name_folder);
+    fs::create_dir_all(&output_path).expect("Failed to create directory");
+
+    let t0 = MonotonicTime::EPOCH;
+    let mut all_sta_ids = Vec::new();
+    let mut vr_pairs = Vec::new();
+    let mut xr_client_addresses = Vec::new();
+    let mut xr_server_addresses = Vec::new();
+
+    // Create XR pairs
+    for i in 0..n_xr {
+        let vr = VRPair::new(i, t0, mean_length, initial_bitrate, distance, &name_folder);
+        all_sta_ids.push(100 + i as i32);
+        all_sta_ids.push(200 + i as i32);
+        xr_client_addresses.push(vr.mbox_xr_client.address());
+        xr_server_addresses.push(vr.mbox_xr_server.address());
+        vr_pairs.push(vr);
+    }
+
+    // Create and configure queue
+    let mut queue = QueueModule::new(
+        all_sta_ids.len(),
+        k_queue.saturating_sub(1),
+        pl_prob,
+        all_sta_ids.clone(),
+    );
+    let mbox_queue = Mailbox::new();
+    let queue_address = mbox_queue.address();
+    let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
+    let queue_stats = queue.get_queue_stats_handle();
+    let sta_stats = queue.get_stas_stats_handle();
+
+    // Connect all STAs to queue
+    for vr in vr_pairs.iter_mut() {
+        vr.sta_server.output_network_port.connect(QueueModule::input, &mbox_queue);
+        vr.sta_client.output_network_port.connect(QueueModule::input_UL, &mbox_queue);
+        queue.output_port_sta1.connect(STA_extended::input_wireless, &vr.mbox_sta_server);
+        queue.output_port_sta1.connect(STA_extended::input_wireless, &vr.mbox_sta_client);
+    }
+
+    // Build simulation
+    let mut sim_builder = SimInit::new()
+        .add_model(queue, mbox_queue, "Queue")
+        .add_model(SinkVideo_XR::new(), Mailbox::new(), "Video Sink");
+
+    for (i, vr) in vr_pairs.into_iter().enumerate() {
+        sim_builder = sim_builder
+            .add_model(vr.xr_server, vr.mbox_xr_server, format!("XR Server {}", i))
+            .add_model(vr.xr_client, vr.mbox_xr_client, format!("XR Client {}", i))
+            .add_model(vr.sta_server, vr.mbox_sta_server, format!("STA Server {}", i))
+            .add_model(vr.sta_client, vr.mbox_sta_client, format!("STA Client {}", i));
+    }
+
+    let mut simu = sim_builder.init(t0);
+    let scheduler = simu.scheduler();
+
+    // Schedule events
+    for addr in &xr_client_addresses {
+        scheduler.schedule_event(Duration::from_nanos(1), XRClient::configure_streams, (), addr).unwrap();
+        scheduler.schedule_event(Duration::from_secs(10), XRClient::vsync, (), addr).unwrap();
+    }
+
+    for (i, addr) in xr_server_addresses.iter().enumerate() {
+        let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
+        scheduler.schedule_event(Duration::from_secs(10), XRServer::connection_pipeline, dest_ip, addr).unwrap();
+    }
+
+    scheduler.schedule_event(Duration::from_secs(10), QueueModule::self_scheduled_emu_queue_tx, (), &queue_address).unwrap();
+
+    // Run simulation
+    simu.step_by(Duration::from_secs_f64(stoptime));
+
+    // Save results
+
+
+    if let Ok(data) = csv_data.lock() {
+        data.write_to_csv(&name_folder, &output_path).unwrap();
+    }; 
+    if let Ok(stats) = sta_stats.lock() {
+        write_all_sta_csvs(&stats, &name_folder, &output_path).unwrap();
+    }; 
+    if let Ok(stats) = queue_stats.lock() {
+        stats.print_nicely();
+    }; 
 }

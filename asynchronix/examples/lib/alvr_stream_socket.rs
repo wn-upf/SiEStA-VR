@@ -2222,9 +2222,9 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
 
 // }
 
+
 pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
-    let input_path: &str =
-        "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
 
     // Create a unique key for this specific encoding configuration
     let config_key = format!(
@@ -2232,103 +2232,232 @@ pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fp
         input_path, current_bitrate_mbps, timestamp, WIDTH_ENCODER, HEIGHT_ENCODER,
     );
 
-    let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
+    // How many times to retry before giving up
+    let max_retries = 3;
+    let mut attempt = 0;
 
-    // Check if a process for this configuration already exists
-    let ffmpeg = if let Some(process) = pool.get_mut(&config_key) {
-        process
-    } else {
-        let timestamp_ = timestamp + OFFSET_VIDEO;
-        // If no existing process, create a new one
-        let hours = (timestamp_ / 3600.0) as u32;
-        let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
-        let seconds = timestamp_ % 60.0;
-        let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
-        print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
+    loop {
+        {
+            // Lock the pool and either get an existing process or create a new one.
+            let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
+            if !pool.contains_key(&config_key) {
+                let timestamp_ = timestamp + OFFSET_VIDEO;
+                let hours = (timestamp_ / 3600.0) as u32;
+                let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
+                let seconds = timestamp_ % 60.0;
+                let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
+                print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
 
-        // let current_bitrate_mbps = current_bitrate_mbps / INITIAL_FRAMERATE_FPS; // fps adjusted
-        let bitrate_command: String = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
+                let bitrate_command = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
+
+                print_pretty!(
+                    DebugColor::DarkBlue,
+                    "[DBG bitrate] frame: {}, per second: {}; command {}",
+                    current_bitrate_mbps,
+                    current_bitrate_mbps * INITIAL_FRAMERATE_FPS,
+                    bitrate_command
+                );
+
+                let process = Command::new("ffmpeg")
+                    .args([
+                        "-hwaccel",
+                        "cuda",
+                        "-ss",
+                        &formatted_timestamp,
+                        "-i",
+                        input_path,
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-vf",
+                        &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                        "-c:v",
+                        "hevc_nvenc",
+                        "-preset",
+                        "fast",
+                        "-rc",
+                        "vbr_hq",
+                        "-b_ref_mode",
+                        "2",
+                        "-bf",
+                        "3",
+                        "-temporal-aq",
+                        "1",
+                        "-spatial-aq",
+                        "1",
+                        "-aq-strength",
+                        "8",
+                        "-frames:v",
+                        "1",
+                        "-b:v",
+                        &bitrate_command,
+                        "-an",
+                        "-f",
+                        "mp4",
+                        "-bsf:v",
+                        "hevc_mp4toannexb",
+                        "-movflags",
+                        "+frag_keyframe+empty_moov",
+                        "-",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("Failed to spawn FFmpeg encoder");
+
+                pool.insert(config_key.clone(), process);
+            }
+        } // End of pool lock
+
+        // Read the encoded buffer.
+        let mut buf = Vec::new();
+        {
+            // Lock again to get a mutable reference to the process.
+            let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
+            let ffmpeg = pool.get_mut(&config_key).expect("Process not found in pool");
+            ffmpeg
+                .stdout
+                .as_mut()
+                .unwrap()
+                .read_to_end(&mut buf)
+                .expect("Failed to read encoded buffer");
+        }
 
         print_pretty!(
-            DebugColor::DarkBlue,
-            "[DBG bitrate] frame: {}, per second: {}; command {}",
-            current_bitrate_mbps,
-            current_bitrate_mbps * INITIAL_FRAMERATE_FPS,
-            bitrate_command
+            DebugColor::Salmon,
+            "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
+            buf.len(),
+            buf.len() / 1024,
+            &buf[..std::cmp::min(50, buf.len())]
         );
 
-        let process = Command::new("ffmpeg")
-            .args([
-                "-hwaccel",
-                "cuda",
-                "-ss",
-                &formatted_timestamp,
-                "-i",
-                &input_path,
-                "-pix_fmt",
-                "yuv420p",
-                "-vf",
-                &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-c:v",
-                "hevc_nvenc",
-                "-preset",
-                "fast", // Prioritize speed over compression
-                "-rc",
-                "vbr_hq",
-                // "-cq", "19",
-                "-b_ref_mode",
-                "2",
-                "-bf",
-                "3",
-                "-temporal-aq",
-                "1",
-                "-spatial-aq",
-                "1",
-                "-aq-strength",
-                "8",
-                "-frames:v",
-                "1",
-                "-b:v",
-                &bitrate_command,
-                "-an",
-                "-f",
-                "mp4",
-                "-bsf:v",
-                "hevc_mp4toannexb",
-                "-movflags",
-                "+frag_keyframe+empty_moov",
-                "-",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("Failed to spawn FFmpeg encoder");
-
-        pool.insert(config_key.clone(), process);
-        pool.get_mut(&config_key).unwrap()
-    };
-
-    // Read the encoded buffer
-    let mut buf = Vec::new();
-
-    ffmpeg
-        .stdout
-        .as_mut()
-        .unwrap()
-        .read_to_end(&mut buf)
-        .expect("Failed to read encoded buffer");
-
-    print_pretty!(
-        DebugColor::Salmon,
-        "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
-        buf.len(),
-        buf.len() / 1024,
-        &buf[..50]
-    );
-
-    buf
+        if !buf.is_empty() {
+            return buf;
+        } else {
+            attempt += 1;
+            if attempt >= max_retries {
+                panic!("Failed to generate a non-empty encoded frame after {} attempts", max_retries);
+            }
+            // Remove the problematic process so that a new one is spawned next time.
+            let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
+            pool.remove(&config_key);
+            print_pretty!(
+                DebugColor::Red,
+                "Encoded frame is empty, retrying (attempt {}/{})",
+                attempt,
+                max_retries
+            );
+        }
+    }
 }
+
+// pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
+//     let input_path: &str =
+//         "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+
+//     // Create a unique key for this specific encoding configuration
+//     let config_key = format!(
+//         "{}_{}_{}_{}_{}",
+//         input_path, current_bitrate_mbps, timestamp, WIDTH_ENCODER, HEIGHT_ENCODER,
+//     );
+
+//     let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
+
+//     // Check if a process for this configuration already exists
+//     let ffmpeg = if let Some(process) = pool.get_mut(&config_key) {
+//         process
+//     } else {
+//         let timestamp_ = timestamp + OFFSET_VIDEO;
+//         // If no existing process, create a new one
+//         let hours = (timestamp_ / 3600.0) as u32;
+//         let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
+//         let seconds = timestamp_ % 60.0;
+//         let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
+//         print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
+
+//         // let current_bitrate_mbps = current_bitrate_mbps / INITIAL_FRAMERATE_FPS; // fps adjusted
+//         let bitrate_command: String = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
+
+//         print_pretty!(
+//             DebugColor::DarkBlue,
+//             "[DBG bitrate] frame: {}, per second: {}; command {}",
+//             current_bitrate_mbps,
+//             current_bitrate_mbps * INITIAL_FRAMERATE_FPS,
+//             bitrate_command
+//         );
+
+//         let process = Command::new("ffmpeg")
+//             .args([
+//                 "-hwaccel",
+//                 "cuda",
+//                 "-ss",
+//                 &formatted_timestamp,
+//                 "-i",
+//                 &input_path,
+//                 "-pix_fmt",
+//                 "yuv420p",
+//                 "-vf",
+//                 &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+//                 "-c:v",
+//                 "hevc_nvenc",
+//                 "-preset",
+//                 "fast", // Prioritize speed over compression
+//                 "-rc",
+//                 "vbr_hq",
+//                 // "-cq", "19",
+//                 "-b_ref_mode",
+//                 "2",
+//                 "-bf",
+//                 "3",
+//                 "-temporal-aq",
+//                 "1",
+//                 "-spatial-aq",
+//                 "1",
+//                 "-aq-strength",
+//                 "8",
+//                 "-frames:v",
+//                 "1",
+//                 "-b:v",
+//                 &bitrate_command,
+//                 "-an",
+//                 "-f",
+//                 "mp4",
+//                 "-bsf:v",
+//                 "hevc_mp4toannexb",
+//                 "-movflags",
+//                 "+frag_keyframe+empty_moov",
+//                 "-",
+//             ])
+//             .stdin(Stdio::piped())
+//             .stdout(Stdio::piped())
+//             .stderr(Stdio::piped())
+//             .spawn()
+//             .expect("Failed to spawn FFmpeg encoder");
+
+//         pool.insert(config_key.clone(), process);
+//         pool.get_mut(&config_key).unwrap()
+//     };
+
+//     // Read the encoded buffer
+//     let mut buf = Vec::new();
+
+//     ffmpeg
+//         .stdout
+//         .as_mut()
+//         .unwrap()
+//         .read_to_end(&mut buf)
+//         .expect("Failed to read encoded buffer");
+
+//     print_pretty!(
+//         DebugColor::Salmon,
+//         "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
+//         buf.len(),
+//         buf.len() / 1024,
+//         &buf[..50]
+//     );
+
+//     buf
+// }
 
 pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Initialize the random number generator

@@ -289,11 +289,11 @@ impl StatisticsManager {
             self.interval_avg_plot_throughput = self.history_throughput_weighted.get_average();
         }
 
-        debug_bgprint!(
-            DebugColor::Magenta,
-            "[DBG STATS XR] reporting frame {}",
-            network_stats.frame_index
-        );
+        // debug_bgprint!(
+        //     DebugColor::Magenta,
+        //     "[DBG STATS XR] reporting frame {}",
+        //     network_stats.frame_index
+        // );
 
         self.last_stats = GraphNetworkStatistics_csv {
             timestamp: now

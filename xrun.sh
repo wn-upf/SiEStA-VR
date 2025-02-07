@@ -13,6 +13,10 @@ initial_bitrate_mbps=10
 
 VMAF_ANALYSIS=0
 
+N_BGs=(0 1 2)
+IS_UL_BG=(0 1)
+N_XR=(1 2 3 4 5)
+
 # Define folder name based on the same logic in Rust
 name_folder=$(printf "sim_T%.0f_Plen%.0f_K%d_Rq%.0f_D%.0f_Br%.0f_PL%.06f" \
     "$simTime" "$mean_length" "$k_queue" "$rate_bps_queue" "$distance" "$initial_bitrate_mbps" "$PL")
@@ -28,7 +32,13 @@ mkdir -p "Results/$name_folder"
 # rm out_log.ans
 # cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL
 
-script -q -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL" out_log.ans
+N_BG_one_time=2
+N_XR_one_time=3
+IS_UL=0
+
+script -q -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $N_XR_one_time" out_log.ans
+# $N_XR_one_time $IS_UL" out_log.ans
+
 
 
 
