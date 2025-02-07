@@ -1,21 +1,23 @@
+use crate::debug_bgprint;
 use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::alvr_packets::NetworkStatisticsPacket;
 use crate::lib::SlidingWindowAverage;
 
+use crate::lib::{
+    EventType, GraphNetworkStatistics, GraphNetworkStatistics_csv, NominalBitrateStats,
+    SlidingWindowTimely, SlidingWindowWeighted,
+};
+use crate::DebugColor;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
-
-use crate::lib::{
-    GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted,
-};
 // use ::{warn, SlidingWindowAverage};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
-// use serde::{Deserialize, Serialize};
-use tai_time::TaiTime;
+use tai_time::{TaiClock, TaiTime};
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -101,7 +103,7 @@ pub struct StatisticsManager {
     is_first_stats: bool,
 
     folder: String,
-    last_stats: GraphNetworkStatisticsCsv,
+    last_stats: GraphNetworkStatistics_csv,
 }
 
 #[allow(unused)]
@@ -190,7 +192,7 @@ impl StatisticsManager {
             is_first_stats: true,
 
             folder: folder.to_string(),
-            last_stats: GraphNetworkStatisticsCsv::default(),
+            last_stats: GraphNetworkStatistics_csv::default(),
         }
     }
     // This statistics are reported for every succesfully received frame
@@ -287,8 +289,18 @@ impl StatisticsManager {
             self.interval_avg_plot_throughput = self.history_throughput_weighted.get_average();
         }
 
-        self.last_stats = GraphNetworkStatisticsCsv {
-            frame_index: network_stats.frame_index as u32,
+        debug_bgprint!(
+            DebugColor::Magenta,
+            "[DBG STATS XR] reporting frame {}",
+            network_stats.frame_index
+        );
+
+        self.last_stats = GraphNetworkStatistics_csv {
+            timestamp: now
+                .checked_duration_since(TaiTime::EPOCH)
+                .unwrap()
+                .as_secs_f64(),
+            frame_index: network_stats.frame_index as usize,
 
             frame_size_bytes: network_stats.bytes_in_frame as usize,
 
@@ -329,6 +341,8 @@ impl StatisticsManager {
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
         };
 
+        debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);
+
         // Call method to save data to CSV
         if self.save_network_stats_to_csv().is_err() {
             println!("ERROR HERE CSV!!");
@@ -347,13 +361,14 @@ impl StatisticsManager {
         if file.metadata()?.len() == 0 {
             writeln!(
                 file,
-                "frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput"
+                "timestamp,frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput"
             )?;
         }
 
         // Prepare the data line to write to the CSV
         let data_line = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            self.last_stats.timestamp,                      // frame_index
             self.last_stats.frame_index,                    // frame_index
             self.last_stats.frame_size_bytes,               // frame_size_bytes
             self.last_stats.server_fps,                     // server_fps

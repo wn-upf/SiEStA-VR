@@ -1,23 +1,42 @@
-#[allow(unused)]
 use crate::lib::alvr_control_socket::{
-    framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
+    framed_recv, framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
 };
-use crate::lib::alvr_stream_socket::StreamReceiver;
+use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
+use std::{
+    fs::write,
+    io,
+    process::{ChildStdin, ChildStdout, Stdio},
+};
 
+use std::cell::RefCell;
+use std::error::Error;
+use std::fs;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread_local;
+use tempfile::{Builder, NamedTempFile};
+
+use futures::io::{AsyncReadExt, AsyncWriteExt};
+use minifb::Key;
+
+use minifb::{Window, WindowOptions};
+use std::{fs::File, thread, write};
+
+use crate::debug_bgprint;
 use crate::debug_print;
 use crate::format_elapsed;
-use crate::lib::HeaderALVRStream;
-
-// use std::intrinsics::size_of;
-use serde::Serialize;
-
-// use core::net;
-use std::mem;
+use crate::lib::{HeaderALVRStream, USE_FFMPEG};
+use crate::print_pretty;
+use core::net;
+use ffmpeg_sidecar::command::FfmpegCommand;
+use serde::{de::DeserializeOwned, Serialize};
+use std::fmt::Debug;
 use std::net::IpAddr;
+use std::{mem, vec};
 // use std::process::Output;
-use std::sync::{Arc, Mutex};
 use std::thread::yield_now;
 use std::time::{Duration, Instant};
 
@@ -27,6 +46,7 @@ use once_cell::sync::Lazy;
 
 // mod mm1k_sim;
 // use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink};
+use std::sync::mpsc::{channel, Sender};
 
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
@@ -53,7 +73,13 @@ pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 pub const DECODER_BUFFERING_FRAMES: usize = 3;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
 
+
+
+
 static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
+use dashmap::DashMap;
+use minifb::Scale;
+
 
 use std::cmp::{self, max};
 use std::collections::VecDeque;
@@ -74,6 +100,20 @@ use crate::lib::alvr_statistics::StatisticsManager;
 use super::alvr_packets::DeadlineShardlossStatPacket;
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
+use super::SlidingWindowTimely;
+// use async_process::Child;
+use lazy_static::lazy_static;
+
+use crate::lib::alvr_control_socket::{ControlPacketType};
+
+use tokio::task;
+
+
+
+pub const WIDTH_ENCODER: usize = 1920;
+pub const HEIGHT_ENCODER: usize = 1080;
+
+static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -83,6 +123,10 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<f32>(); // tx relative timestamp
 
 type InstantMap = Arc<RwLock<HashMap<u32, TaiTime<0>>>>;
+// Static ffmpeg resources
+static FFMPEG_COMMAND: OnceLock<Arc<Mutex<FfmpegCommand>>> = OnceLock::new();
+static FFMPEG_CHILD: OnceLock<Arc<Mutex<Option<(ChildStdin, BufReader<ChildStdout>)>>>> =
+    OnceLock::new();
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -120,6 +164,41 @@ impl BitrateManager {
 
         self.frame_interarrival_average
             .submit_sample(frame_interarrival_s);
+    }
+
+    pub fn report_timestamp_change_bitrate(&mut self, now: TaiTime<0>) {
+        let dur = now.duration_since(TaiTime::EPOCH).as_secs_f64();
+        // TODO: ACTUAL IMPLEMENTATION OF ABR, now just:
+
+        // if dur < 5.0{
+        //     self.last_target_bitrate_mbps = 10.0;
+        // }
+        // else if 5.0 <= dur && dur < 10.0 {
+        //     self.last_target_bitrate_mbps = 0.01;
+        // }
+        if 10.0 <= dur && dur < 11.0 {
+            self.last_target_bitrate_mbps = 0.001;
+        } else if 15.0 <= dur && dur < 25.0 {
+            self.last_target_bitrate_mbps = 0.05;
+        } else if 25.0 <= dur && dur < 30.0 {
+            self.last_target_bitrate_mbps = 10.0;
+        } else if 35.0 <= dur && dur < 45.0 {
+            self.last_target_bitrate_mbps = 0.2;
+        } else if 45.0 <= dur && dur < 55.0 {
+            self.last_target_bitrate_mbps = 10.0;
+        } else if 55.0 <= dur && dur < 65.0 {
+            self.last_target_bitrate_mbps = 0.5;
+        } else if 65.0 <= dur && dur < 75.0 {
+            self.last_target_bitrate_mbps = 10.0;
+        } else if 75.0 <= dur && dur < 85.0 {
+            self.last_target_bitrate_mbps = 1.0;
+        }
+        print_pretty!(
+            DebugColor::DarkBlue,
+            "t = {}, [DBG bitrate set] {} Mbps",
+            dur,
+            self.last_target_bitrate_mbps
+        );
     }
 }
 
@@ -185,7 +264,7 @@ pub struct XRServer {
     // pub sockets: SimRuntimeSockets,
     pub frames_sent_counter: usize,
 
-    pub map_rtt: InstantMap,
+    pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>,
     pub STATISTICS_MANAGER: StatisticsManager,
 }
 #[allow(unused)]
@@ -224,7 +303,7 @@ impl XRServer {
             // sockets,
             frames_sent_counter: 0,
 
-            map_rtt: Arc::new(RwLock::new(HashMap::new())),
+            map_rtt: Arc::new(DashMap::new()),
             STATISTICS_MANAGER: StatisticsManager::new(
                 MAX_HISTORY_SIZE,
                 Duration::from_secs_f32(1.0 / frame_rate),
@@ -237,26 +316,45 @@ impl XRServer {
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>) {
         if let Some(mut protorecv) = self.control_socket_receiver.clone() {
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap();
-            let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
+            let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
 
             match packet {
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-                    println!(
-                        "{:.9}- Server receving stats\n{:?}",
-                        now.duration_since(self.t_0).as_secs_f64(),
-                        network_stats
-                    );
-                    let map_rtt_lock = map_clone.read().unwrap();
-                    let mut hashmap = map_rtt_lock.clone();
+                    // debug_bgprint!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
+
+                    // let mut map_rtt_lock = map_clone.write().unwrap();
                     let frame_id = network_stats.frame_index as u32;
                     let rtt: Duration;
-                    if let Some(send_instant) = hashmap.remove(&frame_id) {
+                    // if let send_instant = map_clone.get(&frame_id).unwrap()
+                    if let send_instant = map_clone.remove(&frame_id).unwrap().1 {
                         rtt = now.duration_since(send_instant);
+                        // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
-                        println!("ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!");
+                        println!(
+                            "frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",
+                            network_stats.frame_index
+                        );
                         rtt = Duration::ZERO;
                     }
-                    println!("RTT = {:.9}", rtt.as_secs_f64());
+
+                    // // Before removing an entry, check whether its lifetime has exceeded the expected range.
+                    // if let Some(send_instant) = map_rtt_lock.remove(&frame_id) {// Process RTT normally
+                    //         rtt = now.duration_since(send_instant);
+                    // } else {
+                    //     println!("Frame {} missing in map_rtt, possible packet loss or eviction!", frame_id);
+                    //     rtt = Duration::ZERO;
+                    // }
+                    // if let Some(send_instant) = hashmap.remove(&frame_id) {
+                    //     rtt = now.duration_since(send_instant);
+                    //     println!("rtt = {:.9}", rtt.as_secs_f64());
+                    // }
+                    // else {
+                    //     println!("frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",  network_stats.frame_index);
+                    //     rtt = Duration::ZERO;
+                    // }
+
+                    debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
+
                     let (peak_network_throughput_bps, frame_interarrival_s) = self
                         .STATISTICS_MANAGER
                         .report_network_statistics(network_stats, rtt, now);
@@ -404,6 +502,7 @@ impl XRServer {
                                     shard_index,
                                     tx_r_instant
                                 );
+                        
 
                                 let mut packet = MpduPacket::new();
 
@@ -424,6 +523,8 @@ impl XRServer {
                                         packet.header_alvr
                                     );
                                 }
+
+                   
                                 self.outport_videoapp_network.send(packet).await;
                             } else {
                                 println!(
@@ -476,8 +577,9 @@ impl XRServer {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time();
-            let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
+            // let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
 
+            let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
             self.frames_sent_counter += 1;
@@ -486,28 +588,33 @@ impl XRServer {
                 let is_idr = false;
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
 
+                self.bitrate_manager.report_timestamp_change_bitrate(now);
+
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
-                        .get_buffer_emu(&header, current_bitrate_mbps)
+                        .get_buffer_emu(&header, current_bitrate_mbps, now)
                         .unwrap();
 
-                let cloned_socket_map = send_socket.get_frame_tracker_map();
-
-                match map_clone.write() {
-                    Ok(mut guard) => {
-                        *guard = cloned_socket_map;
-                    }
-                    Err(_) => {
-                        println!("Failed to acquire write lock in RTT hashmap");
-                    }
-                } // println!(
-                  //     "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
-                  //     current_bitrate_mbps,
-                  //     buffer_emu.inner.len(),
-                  //     buffer_emu.length
-                  // );
+                // Use DashMap's thread-safe `insert` API instead of write locks
+                let frame_tracker_map = send_socket.get_frame_tracker_map();
+                frame_tracker_map.into_iter().for_each(|(key, value)| {
+                    map_clone.insert(key, value);
+                });
+                // match map_clone.write() {
+                //     Ok(mut guard) => {
+                //         *guard = send_socket.get_frame_tracker_map();
+                //     }
+                //     Err(_) => {
+                //         println!("Failed to acquire write lock in RTT hashmap");
+                //     }
+                // }                // println!(
+                //     "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
+                //     current_bitrate_mbps,
+                //     buffer_emu.inner.len(),
+                //     buffer_emu.length
+                // );
 
                 let payload = buffer_emu.inner.clone();
                 buffer_emu
@@ -519,16 +626,11 @@ impl XRServer {
 
                 let send_result = send_socket.send(buffer_emu, now);
 
+                // Update the DashMap again with any new frame tracker data
                 let cloned_socket_map = send_socket.get_frame_tracker_map();
-
-                match map_clone.write() {
-                    Ok(mut guard) => {
-                        *guard = cloned_socket_map;
-                    }
-                    Err(_) => {
-                        println!("Failed to acquire write lock in RTT hashmap");
-                    }
-                }
+                cloned_socket_map.into_iter().for_each(|(key, value)| {
+                    map_clone.insert(key, value);
+                });
 
                 let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 
@@ -537,7 +639,7 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-                let normal = Normal::new(0.0, 5.0).unwrap(); // Mean = 0, Std dev = 5
+                let normal = Normal::new(0.0, 2.0).unwrap(); // Mean = 0, Std dev = 5
                 let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
 
                 let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps + epsilon));
@@ -609,11 +711,12 @@ impl XRServer {
 
 impl Model for XRServer {}
 
-pub struct DroppingVecDeque<T> {
+struct DroppingVecDeque<T> {
     deque: VecDeque<T>,
     capacity: usize,
     dropped_frame_counter: usize,
     ok_dequed_frame_counter: usize,
+    enqued_frame_counter: usize,
 }
 
 impl<T> DroppingVecDeque<T> {
@@ -623,10 +726,20 @@ impl<T> DroppingVecDeque<T> {
             capacity,
             dropped_frame_counter: 0,
             ok_dequed_frame_counter: 0,
+            enqued_frame_counter: 0,
         }
     }
     fn push(&mut self, item: T) {
         // If we are at capacity, pop the oldest frame from the front
+        self.enqued_frame_counter += 1;
+        debug_print!(
+            DebugColor::Gold,
+            "[VecDecoder] Pushing frame {}, decoder_length: {}, max: {},",
+            self.enqued_frame_counter,
+            self.deque.len(),
+            self.capacity,
+        );
+
         if self.deque.len() == self.capacity {
             self.deque.pop_front();
             self.dropped_frame_counter += 1;
@@ -659,6 +772,7 @@ pub struct XRClient {
     pub out_video_decoded: Output<Vec<u8>>,
 
     pub framerate: f32,
+    pub last_decoded_frame_instant: TaiTime<0>,
 
     pub output_app_network: Output<MpduPacket>,
 
@@ -669,6 +783,9 @@ pub struct XRClient {
     pub server_ip: IpAddr,
 
     pub streamsocket_clone: Option<StreamSocket>,
+
+    pub decoded_frame_index: usize,
+    // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
 impl XRClient {
@@ -681,9 +798,8 @@ impl XRClient {
             input_app_haptics: None,
 
             out_video_decoded: Output::default(),
-
             framerate: fps,
-
+            last_decoded_frame_instant: TaiTime::EPOCH,
             output_app_network: Output::default(),
             // output_tracking: Output::default(),
             coordinates: Coords::new(),
@@ -691,6 +807,8 @@ impl XRClient {
             frames_dropped_counter: 0,
             server_ip,
             streamsocket_clone: None,
+            decoded_frame_index: 0,
+            // visualize_decoder_window: None,
         }
     }
 
@@ -705,6 +823,8 @@ impl XRClient {
         let serialized_size = bincode::serialized_size(&packet)? as usize;
         let packet_size = serialized_size + FRAMED_PREFIX_CONTROL_LENGTH;
 
+        // println!("Framed send!");
+
         if buffer.len() < packet_size {
             buffer.resize(packet_size, 0);
         }
@@ -718,6 +838,7 @@ impl XRClient {
         let mut packetz = MpduPacket::new();
         packetz.data_inner = buffer[0..packet_size].to_vec();
         packetz.header_alvr.stream_id = CONTROL_STREAM;
+        packetz.header_alvr.next_packet_index = 2;
 
         context
             .scheduler
@@ -744,10 +865,12 @@ impl XRClient {
         let pack = packet.clone();
         match packet {
             ClientControlPacket::NetworkStatistics(inner) => {
+                // println!("sending stats packet!");
                 let result = Self::framed_send(self, &pack, context).await;
                 // println!("result of output control: {:?}", result);
             }
             ClientControlPacket::DeadlineShardLossStat(inner) => {
+                println!("Shardloss packet sent");
                 let result = Self::framed_send(self, &pack, context).await;
             }
             _ => eprintln!("Uncovered match case!!"),
@@ -762,6 +885,7 @@ impl XRClient {
         frames.truncate(MAX_DEADLINE_IN_STATS);
         shards_lost.truncate(MAX_DEADLINE_IN_STATS);
 
+        println!("REPORT FRAME LOSt");
         let net = DeadlineShardlossStatPacket {
             frame_indexes: frames,
             shards_lost: shards_lost,
@@ -782,6 +906,8 @@ impl XRClient {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             if self.is_streaming {
+
+                // println!("RECEIVING VIDEO!!"); 
                 if let Some(mut receiver) = self.input_app_video.clone() {
                     let (frames_lost, shards_lost): (Vec<u32>, Vec<usize>);
 
@@ -789,7 +915,15 @@ impl XRClient {
                         let mut counter = 0;
                         (frames_lost, shards_lost) =
                             StreamSocket::flush_shards_lost_deadline(&mut ssocket);
-                        XRClient::report_frame_lost(frames_lost, shards_lost, context);
+
+                        if !frames_lost.is_empty() {
+                            println!(
+                                "FRAMES LOST {:?}, SHARDS LOST {:?}",
+                                &frames_lost[..],
+                                &shards_lost[..]
+                            );
+                            XRClient::report_frame_lost(frames_lost, shards_lost, context);
+                        }
                     }
 
                     let data: ReceiverData<VideoPacketHeader> =
@@ -826,10 +960,16 @@ impl XRClient {
                         highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video frame received during the interval between consecutive frames
                         highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video shard received during the interval between consecutive frames
                         lost_shards_deadline: packets_lost_deadline,
+                        // tx_instant: data.get_tx_instant(),
                     };
                     // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
+                    debug_print!(
+                        DebugColor::Gold,
+                        "[DBG Client RX frame] Frame {:2.0} received, sending stats packet in UL",
+                        data.get_frame_index()
+                    );
 
                     context
                         .scheduler
@@ -841,12 +981,20 @@ impl XRClient {
                         .unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
-                    let Ok((_header, nal)) = data.get() else {
+                    let Ok((nal)) = data.get() else {
                         println!("UNABLE TO GET HEADER NAL? ");
                         return;
                     };
+                    let sized_vec = nal[..20.min(nal.len())].to_vec();
+
+                    debug_print!(
+                        DebugColor::Gold,
+                        "[DEBUG DECODE] NAL first 20 bytes: {:?}",
+                        sized_vec
+                    );
 
                     self.decoder_queue.push(nal.to_vec());
+
                     ()
                 }
                 // if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
@@ -854,71 +1002,146 @@ impl XRClient {
                 //     }
                 // }
             }
-            //// TODO IN THE FUTURE? :)
-            // periodically request an IDR frame using the settings' client_idr_refresh_interval_ms
-            // if settings.connection.idr_periodic_bool {
-            //     if Instant::now()
-            //         .saturating_duration_since(last_instant_IDR_client)
-            //         .as_secs_f32()
-            //         >= interval_IDR_seconds_f32
-            //     {
-            //         if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //             sender.send(&ClientControlPacket::RequestIdr).ok();
-            //         }
-            //         last_instant_IDR_client = Instant::now();
-            //     }
-            // }
-
-            // if header.is_idr {
-            //     stream_corrupted = false;
-            // } else if data.had_packet_loss() {
-            //     stream_corrupted = true;
-            //     if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //         sender.send(&ClientControlPacket::RequestIdr).ok();
-            //     }
-            //     warn!(
-            //         "Network skipped {} video packets",
-            //         data.get_frames_skipped()
-            //     );
-            // }
-            // if !stream_corrupted || !settings.connection.avoid_video_glitching {
-            //     if !decoder::push_nal(header.timestamp, nal) {
-            //         stream_corrupted = true;
-            //         if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //             sender.send(&ClientControlPacket::RequestIdr).ok();
-            //         }
-            //         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            //             stats.report_video_packet_dropped(data.get_frame_index());
-            //         }
-            //         warn!(
-            //             "Dropped video packet {}. Reason: Decoder saturation",
-            //             data.get_frame_index()
-            //         );
-            //         frames_dropped += 1;
-            //     } else {
-            //         // frame is decoded correctly
-            //         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            //             stats.report_video_packet_data(
-            //                 header.timestamp,
-            //                 data.get_frame_index(),
-            //                 frames_dropped,
-            //             );
-            //         }
-            //         frames_dropped = 0;
-            //     }
-            // } else {
-            //     if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-            //         sender.send(&ClientControlPacket::RequestIdr).ok();
-            //     }
-            //     if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            //         stats.report_video_packet_dropped(data.get_frame_index());
-            //     }
-            //     warn!(
-            //         "Dropped video packet {}. Reason: Waiting for IDR frame",
-            //         data.get_frame_index()
-            //     );
-            //     frames_dropped += 1;
         }
+    }
+
+    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
+        if rgb_data.len() != width * height * 3 {
+            eprintln!(
+                "Unexpected RGB data length. Expected {}, got {}",
+                width * height * 3,
+                rgb_data.len()
+            );
+            return None;
+        }
+
+        let rgb = rgb_data
+            .chunks_exact(3)
+            .map(|chunk| {
+                let r = chunk[0] as u32;
+                let g = chunk[1] as u32;
+                let b = chunk[2] as u32;
+                (r << 16) | (g << 8) | b
+            })
+            .collect();
+
+        Some(rgb)
+    }
+
+    // Function to convert YUV420p to RGB
+    pub fn yuv420_to_rgb(yuv: &[u8], width: usize, height: usize) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(width * height * 3);
+
+        let y_size = width * height;
+        let uv_size = (width / 2) * (height / 2);
+
+        let y_plane = &yuv[0..y_size];
+        let u_plane = &yuv[y_size..y_size + uv_size];
+        let v_plane = &yuv[y_size + uv_size..];
+
+        for i in 0..height {
+            for j in 0..width {
+                let y_index = i * width + j;
+                let u_index = ((i / 2) * (width / 2)) + (j / 2);
+                let v_index = ((i / 2) * (width / 2)) + (j / 2);
+
+                let y = y_plane[y_index] as f32;
+                let u = u_plane[u_index] as f32 - 128.0;
+                let v = v_plane[v_index] as f32 - 128.0;
+
+                // RGB conversion formula
+                let r = (y + 1.402 * v).max(0.0).min(255.0) as u8;
+                let g = (y - 0.344136 * u - 0.714136 * v).max(0.0).min(255.0) as u8;
+                let b = (y + 1.772 * u).max(0.0).min(255.0) as u8;
+
+                rgb.push(r);
+                rgb.push(g);
+                rgb.push(b);
+            }
+        }
+
+        rgb
+    }
+
+    pub fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>, frame_index: usize) -> Vec<u32> {
+        // Save the encoded buffer to a file (for debugging or reuse purposes)
+        let input_file = format!("simu_decode_samples/encoded_frame{:03}.hevc", frame_index);
+        if let Err(e) = fs::write(input_file, &encoded_buffer) {
+            eprintln!("Failed to write encoded frame to file: {}", e);
+            return Vec::new();
+        }
+
+        // Launch FFmpeg process
+        let mut ffmpeg = match Command::new("ffmpeg")
+            .args(&[
+                "-hwaccel",
+                "cuda", // Use hardware acceleration if available
+                "-c:v",
+                "hevc", // Specify HEVC codec
+                "-i",
+                "pipe:0", // Read input from stdin
+                "-pix_fmt",
+                "rgb24", // Convert to RGB pixel format
+                "-f",
+                "rawvideo", // Raw video output format
+                "-vf",
+                &format!("scale={}:{}", WIDTH_ENCODER, HEIGHT_ENCODER), // Resize output
+                "-",                                                    // Write output to stdout
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()) // Suppress FFmpeg logs
+            .spawn()
+        {
+            Ok(process) => process,
+            Err(e) => {
+                eprintln!("Failed to start FFmpeg: {}", e);
+                return Vec::new();
+            }
+        };
+
+        // Write encoded buffer to FFmpeg's stdin
+        if let Some(mut stdin) = ffmpeg.stdin.take() {
+            if let Err(e) = stdin.write_all(&encoded_buffer) {
+                eprintln!("Failed to write to FFmpeg stdin: {}", e);
+                return Vec::new();
+            }
+        } else {
+            eprintln!("Failed to open FFmpeg stdin");
+            return Vec::new();
+        }
+
+        // Read FFmpeg's output from stdout
+        let mut buf: Vec<u8> = Vec::new();
+        if let Some(mut stdout) = ffmpeg.stdout.take() {
+            if let Err(e) = stdout.read_to_end(&mut buf) {
+                eprintln!("Failed to read FFmpeg stdout: {}", e);
+                return Vec::new();
+            }
+        } else {
+            eprintln!("Failed to open FFmpeg stdout");
+            return Vec::new();
+        }
+
+        // Handle the output buffer
+        if buf.is_empty() {
+            eprintln!("Warning: Decoded frame is empty");
+            return Vec::new();
+        }
+
+        println!("Decoded frame data length: {} kb ", buf.len() / 1000);
+        // let output_file = format!("simu_decode_samples/decoded_frame_{:04}.rgb", frame_index);
+        // if let Err(e) = fs::write(&output_file, &buf) {
+        //     eprintln!("Failed to write decoded frame to file: {}", e);
+        // } else {
+        //     println!("Frame saved to {}", output_file);
+        // }
+
+        // Convert raw RGB bytes to a Vec<u32> for rendering
+        XRClient::convert_rgb_to_u32(&buf, WIDTH_ENCODER, HEIGHT_ENCODER).unwrap_or_else(|| {
+            eprintln!("Failed to convert RGB data to u32 buffer");
+            Vec::new()
+        })
     }
 
     pub fn vsync<'a>(
@@ -927,23 +1150,96 @@ impl XRClient {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            let mut T_vsync = Duration::from_secs_f32(1.0 / self.framerate);
+            // println!("VSYNC RUNNINGGGGGGGGGGGGGGGGGGGGGGG ************+");
+            let now = context.scheduler.time();
 
-            // TODO:
-            if let Some(video_frame) = self.decoder_queue.pop() {
-                println!(
-                    "{} decoded frame OK! ok: {} | dropped: {} , data: {:?}",
-                    format_elapsed!(context.scheduler.time()),
-                    self.decoder_queue.ok_dequed_frame_counter,
-                    self.decoder_queue.dropped_frame_counter,
-                    &video_frame[0..10]
-                );
-                self.out_video_decoded.send(video_frame).await;
-            } else {
+            let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
+
+            // Thread-local static for window management
+            thread_local! {
+                static DISPLAY_WINDOW: RefCell<Option<Window>> = RefCell::new(None);
             }
-            println!("Decoder queue size: {}", self.decoder_queue.len());
+
+            if let Some(video_frame) = self.decoder_queue.pop() {
+                let subsample = video_frame[0..10].to_vec();
+
+                if let Some(interarrival) =
+                    now.checked_duration_since(self.last_decoded_frame_instant)
+                {
+                    let miin: usize = usize::min(video_frame.len(), 50);
+                    print_pretty!(
+                        DebugColor::Violet,
+                        "[DBG VSYNC] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
+                        self.decoder_queue.len(),
+                        interarrival.as_secs_f32(),
+                        self.decoder_queue.ok_dequed_frame_counter,
+                        self.decoder_queue.dropped_frame_counter,
+                        &video_frame[0..miin]
+                        );
+                    
+                    if USE_FFMPEG == true {
+                        println!("USING FFMPEG DECODER!!!!!!!!!!!\n!!");
+                        let frame = XRClient::decode_hevc_to_rgb(
+                            video_frame.clone(),
+                            self.decoded_frame_index,
+                        );
+                        self.decoded_frame_index += 1;
+                        let scale_factor = 0.7;
+                        let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+                        let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+                        // Initialize or update the window
+                        DISPLAY_WINDOW.with(|window_cell| {
+                            let mut window_opt = window_cell.borrow_mut();
+
+                            // Create window if it doesn't exist
+                            if window_opt.is_none() {
+                                *window_opt = Some(
+                                    Window::new(
+                                        "Decoded HEVC Frame",
+                                        scaled_width,
+                                        scaled_height,
+                                        WindowOptions::default(),
+                                    )
+                                    .expect("Failed to create window"),
+                                );
+                            }
+
+                            // Update the window with the new frame
+                            if let Some(window) = window_opt.as_mut() {
+                                window
+                                    .update_with_buffer(&frame, WIDTH_ENCODER, HEIGHT_ENCODER)
+                                    .expect("Failed to update window buffer");
+                            }
+                        });
+                    } else { // do nothing, no real video to decode
+                        println!("ERROR DECODING????"); 
+                    }
+                }
+
+                self.last_decoded_frame_instant = now;
+                self.out_video_decoded.send(subsample).await;
+            }
+            else{
+                println!("SOMETHING GOING OOON |  queue len: {}, T_VSYNC: {:.3} ms", self.decoder_queue.len(), T_vsync.as_secs_f32() * 1000.0); 
+            }
+
+            // Adjust wait time based on queue length
             if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-                T_vsync = T_vsync * 2; // duplicate wait so queue can fill
+                T_vsync = T_vsync.mul_f64(2.0);
+                debug_bgprint!(DebugColor::Violet,
+                    "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", 
+                    T_vsync.as_secs_f32(),
+                    self.decoder_queue.len(),
+                    TARGET_FRAMES_DECODER_QUEUE
+                );
+            } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
+                T_vsync = T_vsync.mul_f64(0.5);
+                debug_bgprint!(DebugColor::Violet,
+                    "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", 
+                    T_vsync.as_secs_f32(),
+                    self.decoder_queue.len(),
+                    TARGET_FRAMES_DECODER_QUEUE
+                );
             }
 
             context
@@ -1068,22 +1364,41 @@ impl XRClient {
 
 impl Model for XRClient {}
 
-#[allow(unused)]
-pub struct SinkVideoXr {
+pub struct SinkVideo_XR {
     pub counter_decoded: usize,
+    pub last_update: TaiTime<0>,
+    pub window_timed_fps: SlidingWindowTimely<f64>,
 }
-impl SinkVideoXr {
+impl SinkVideo_XR {
     pub fn new() -> Self {
         Self {
             counter_decoded: (0),
+            last_update: TaiTime::EPOCH,
+            window_timed_fps: SlidingWindowTimely::new(1.0 / 60.0, 16., 1.0),
         }
     }
-    pub async fn in_video(&mut self, inpuut: Vec<u8>) {
-        println!("Reproducing vid {:?}", inpuut);
+    pub async fn in_video(&mut self, input: Vec<u8>, context: &Context<Self>) {
+        // Select only the first N bytes
+        let now = context.scheduler.time();
+        let n = 10;
+        let first_n_bytes = &input[..n.min(input.len())];
+
+        if let Some(user_interarrival) = now.checked_duration_since(self.last_update) {
+            self.window_timed_fps.submit_sample(
+                user_interarrival.as_secs_f64(),
+                user_interarrival.as_secs_f32(),
+            );
+            let avg_samples = self.window_timed_fps.get_interval_buffer_mean();
+            let length_samples = self.window_timed_fps.get_length();
+
+            debug_bgprint!(DebugColor::Cyan, "[USER HMD] Reproducing video! {:?}. video_interarrival: {}, avg_fps: {}, ({:2.0} samples)", first_n_bytes, user_interarrival.as_secs_f32(), 1.0 / avg_samples,length_samples );
+        }
+        self.last_update = now;
+        return;
     }
 }
-impl Model for SinkVideoXr {}
-#[allow(unused)]
+impl Model for SinkVideo_XR {}
+
 pub trait XRDevice {
     fn some_shared_method(&self);
 }
@@ -1191,7 +1506,9 @@ impl STA_extended {
     pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         // do everything else to the packet:
 
-        packet.length_packet = packet.header_alvr.packet_length as usize;
+        packet.length_packet = (packet.header_alvr.packet_length + 100) as usize;
+        // println!("Length packet XR {}", packet.length_packet);
+
         packet.packet_id = self.num_packets_sent;
 
         packet.sta_src_id = self.sta_id;
@@ -1214,27 +1531,18 @@ impl STA_extended {
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let mut packet_batch = Vec::new(); // Create a batch to hold packets
         let now = context.scheduler.time();
-
+        println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
         if ampdu_packet.sta_dest_id == self.sta_id {
             // make sure we ignore packets not corresponding to STA
             for packet in ampdu_packet.mpdu_packets {
                 // iterate through whole AMPDU
 
-                debug_print!(
-                    DebugColor::Red,
-                    "{} [DBG STA{} IN]  ---Packet {} arrived from STA{} into STA{}",
-                    format_elapsed!(now),
-                    self.sta_id,
-                    packet.packet_id,
-                    packet.sta_src_id,
-                    packet.sta_dest_id,
-                );
                 // if packet.data_inner.len() >= 100 {
-                debug_print!(
-                    DebugColor::DarkRed,
-                    "{}[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                    format_elapsed!(now.duration_since(self.t_0)),
-                );
+                // debug_print!(
+                //     DebugColor::DarkRed,
+                //     "[DBG NET_IN -> APP_OUT] : XR Packet received: ",
+                //     // format_elapsed!(now.duration_since(self.t_0)),
+                // );
 
                 self.received_packet_counter += 1;
                 packet_batch.push(packet);

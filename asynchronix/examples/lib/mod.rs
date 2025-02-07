@@ -6,16 +6,18 @@ use std::f64;
 use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
-// use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
 use colored::Colorize;
+use once_cell::sync::Lazy;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-// use once_cell::sync::Lazy;
+use std::collections::HashMap;
+
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -33,7 +35,6 @@ pub const P_TX: f64 = 20.0;
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
 
 // Define a constant to control debugging
-// pub const DEBUG_PRINT_ENABLED:bool = false; // Change to false to disable
 
 pub mod alvr_packets;
 pub mod alvr_statistics;
@@ -47,7 +48,27 @@ pub mod alvr_control_socket;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-pub static DEBUG_PRINT_ENABLED: bool = false;
+// pub static DEBUG_PRINT_ENABLED: bool = false;
+
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+
+pub const USE_FFMPEG: bool = true;
+
+#[macro_export]
+macro_rules! debug_bgprint {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // let msg = format!($fmt, $($arg)*);
+        // println!("{}", $color.to_background_fn()(msg));
+    };
+}
+
+#[macro_export]
+macro_rules! print_pretty {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_background_fn()(msg));
+    };
+}
 
 #[macro_export]
 macro_rules! debug_print {
@@ -84,13 +105,38 @@ pub enum DebugColor {
     Blue,
     Yellow,
     Magenta,
-    DarkGreen,
-    DarkRed,
     Cyan,
     White,
     Black,
     Orange,
     Purple,
+    DarkGreen,
+    DarkRed,
+    DarkBlue,
+    LightGray,
+    DarkGray,
+    LightPink,
+    Teal,
+    Gold,
+    Violet,
+    Lime,
+    DarkOrange,
+    Peach,
+    Coral,
+    Mint,
+    Navy,
+    Lavender,
+    Salmon,
+    Chocolate,
+    Indigo,
+    Turquoise,
+    Maroon,
+    LightBlue,
+    ForestGreen,
+    Azure,
+    Rose,
+    Crimson,
+    Amber,
 }
 #[allow(unused)]
 impl DebugColor {
@@ -101,13 +147,79 @@ impl DebugColor {
             DebugColor::Blue => |s| s.blue(),
             DebugColor::Yellow => |s| s.yellow(),
             DebugColor::Magenta => |s| s.magenta(),
-            DebugColor::DarkGreen => |s| s.truecolor(0, 100, 0),
-            DebugColor::DarkRed => |s| s.truecolor(139, 0, 0),
             DebugColor::Cyan => |s| s.cyan(),
             DebugColor::White => |s| s.white(),
             DebugColor::Black => |s| s.black(),
             DebugColor::Orange => |s| s.truecolor(255, 165, 0),
             DebugColor::Purple => |s| s.truecolor(128, 0, 128),
+            DebugColor::DarkGreen => |s| s.truecolor(0, 100, 0),
+            DebugColor::DarkRed => |s| s.truecolor(139, 0, 0),
+            DebugColor::DarkBlue => |s| s.truecolor(0, 0, 139),
+            DebugColor::LightGray => |s| s.truecolor(211, 211, 211),
+            DebugColor::DarkGray => |s| s.truecolor(169, 169, 169),
+            DebugColor::LightPink => |s| s.truecolor(255, 182, 193),
+            DebugColor::Teal => |s| s.truecolor(0, 128, 128),
+            DebugColor::Gold => |s| s.truecolor(255, 215, 0),
+            DebugColor::Violet => |s| s.truecolor(238, 130, 238),
+            DebugColor::Lime => |s| s.truecolor(50, 205, 50),
+            DebugColor::DarkOrange => |s| s.truecolor(255, 140, 0),
+            DebugColor::Peach => |s| s.truecolor(255, 218, 185),
+            DebugColor::Coral => |s| s.truecolor(255, 127, 80),
+            DebugColor::Mint => |s| s.truecolor(189, 252, 201),
+            DebugColor::Navy => |s| s.truecolor(0, 0, 128),
+            DebugColor::Lavender => |s| s.truecolor(230, 230, 250),
+            DebugColor::Salmon => |s| s.truecolor(250, 128, 114),
+            DebugColor::Chocolate => |s| s.truecolor(210, 105, 30),
+            DebugColor::Indigo => |s| s.truecolor(75, 0, 130),
+            DebugColor::Turquoise => |s| s.truecolor(64, 224, 208),
+            DebugColor::Maroon => |s| s.truecolor(128, 0, 0),
+            DebugColor::LightBlue => |s| s.truecolor(173, 216, 230),
+            DebugColor::ForestGreen => |s| s.truecolor(34, 139, 34),
+            DebugColor::Azure => |s| s.truecolor(240, 255, 255),
+            DebugColor::Rose => |s| s.truecolor(255, 228, 225),
+            DebugColor::Crimson => |s| s.truecolor(220, 20, 60),
+            DebugColor::Amber => |s| s.truecolor(255, 191, 0),
+        }
+    }
+    pub fn to_background_fn(&self) -> fn(String) -> colored::ColoredString {
+        match self {
+            DebugColor::Red => |s| s.on_red(),
+            DebugColor::Green => |s| s.on_green(),
+            DebugColor::Blue => |s| s.on_blue(),
+            DebugColor::Yellow => |s| s.on_yellow(),
+            DebugColor::Magenta => |s| s.on_magenta(),
+            DebugColor::Cyan => |s| s.on_cyan(),
+            DebugColor::White => |s| s.on_white(),
+            DebugColor::Black => |s| s.on_black(),
+            DebugColor::Orange => |s| s.on_truecolor(255, 165, 0),
+            DebugColor::Purple => |s| s.on_truecolor(128, 0, 128),
+            DebugColor::DarkGreen => |s| s.on_truecolor(0, 100, 0),
+            DebugColor::DarkRed => |s| s.on_truecolor(139, 0, 0),
+            DebugColor::DarkBlue => |s| s.on_truecolor(0, 0, 139),
+            DebugColor::LightGray => |s| s.on_truecolor(211, 211, 211),
+            DebugColor::DarkGray => |s| s.on_truecolor(169, 169, 169),
+            DebugColor::LightPink => |s| s.on_truecolor(255, 182, 193),
+            DebugColor::Teal => |s| s.on_truecolor(0, 128, 128),
+            DebugColor::Gold => |s| s.on_truecolor(255, 215, 0),
+            DebugColor::Violet => |s| s.on_truecolor(238, 130, 238),
+            DebugColor::Lime => |s| s.on_truecolor(50, 205, 50),
+            DebugColor::DarkOrange => |s| s.on_truecolor(255, 140, 0),
+            DebugColor::Peach => |s| s.on_truecolor(255, 218, 185),
+            DebugColor::Coral => |s| s.on_truecolor(255, 127, 80),
+            DebugColor::Mint => |s| s.on_truecolor(189, 252, 201),
+            DebugColor::Navy => |s| s.on_truecolor(0, 0, 128),
+            DebugColor::Lavender => |s| s.on_truecolor(230, 230, 250),
+            DebugColor::Salmon => |s| s.on_truecolor(250, 128, 114),
+            DebugColor::Chocolate => |s| s.on_truecolor(210, 105, 30),
+            DebugColor::Indigo => |s| s.on_truecolor(75, 0, 130),
+            DebugColor::Turquoise => |s| s.on_truecolor(64, 224, 208),
+            DebugColor::Maroon => |s| s.on_truecolor(128, 0, 0),
+            DebugColor::LightBlue => |s| s.on_truecolor(173, 216, 230),
+            DebugColor::ForestGreen => |s| s.on_truecolor(34, 139, 34),
+            DebugColor::Azure => |s| s.on_truecolor(240, 255, 255),
+            DebugColor::Rose => |s| s.on_truecolor(255, 228, 225),
+            DebugColor::Crimson => |s| s.on_truecolor(220, 20, 60),
+            DebugColor::Amber => |s| s.on_truecolor(255, 191, 0),
         }
     }
 }
@@ -220,6 +332,9 @@ impl<T> SlidingWindowTimely<T> {
 
     pub fn get_interval_buffer_mean(&self) -> f32 {
         self.get_interval_buffer_sum() / self.interval_buffer.len() as f32
+    }
+    pub fn get_length(&self) -> usize {
+        self.interval_buffer.len()
     }
 }
 #[allow(unused)]
@@ -361,7 +476,7 @@ impl CsvData {
     }
 
     pub fn write_to_csv(&self, folder: &str, dir_path: &str) -> std::io::Result<()> {
-        let path = format!("{dir_path}/QUEUE_stats.csv");
+        let path = format!("Results/{dir_path}/{folder}/QUEUE_stats.csv");
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -515,7 +630,7 @@ impl CumulativeStats {
     pub fn get_coefficient_variation(&self) -> f64 {
         let mean = self.get_average();
         if mean == 0.0 {
-            println!("ZEROOOOOOOOOOOOOOOo");
+            println!("CV IS ZERO??");
             0.0
         } else {
             self.get_std_dev() / mean
@@ -790,7 +905,22 @@ pub struct HeaderALVRStream {
     pub tx_instant: f32,
 }
 
-#[allow(unused)]
+// Implementing Display for HeaderALVRStream
+impl fmt::Display for HeaderALVRStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.next_packet_index == 0 {
+            write!(f, "")
+        } else {
+            write!(
+                f,
+                "(ALVR F: {}, S: {}/{})",
+                self.next_packet_index,
+                self.shard_index,
+                self.shards_count - 1
+            )
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct MpduPacket {
     pub packet_id: usize,
@@ -808,6 +938,9 @@ pub struct MpduPacket {
 
     pub data_inner: Vec<u8>,
     pub header_alvr: HeaderALVRStream,
+
+    pub has_consumed_emu_tokens: bool,
+    pub emulated_added_delay_deadline: Option<TaiTime<0>>,
     // pub is_alvr_control_packet: bool,
 }
 
@@ -829,12 +962,14 @@ impl MpduPacket {
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
+            has_consumed_emu_tokens: false,
+            emulated_added_delay_deadline: None,
             // is_alvr_control_packet: false,
         }
     }
 
-    pub fn print(&self) {
-        println!("Packet ID:{} | L: {}", self.packet_id, self.length_packet);
+    pub fn print(&self, color: DebugColor) {
+        debug_bgprint!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
     }
 }
 #[derive(Debug, Clone)]
@@ -869,14 +1004,23 @@ impl AmpduPacket {
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
+        let mut i = 0;
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms \x1b[0m",
+                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms", 
+                // |  ALVR: S{}/{} , F: {}  \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64() * 1000.0,
                 packet.T_s.as_secs_f64() * 1000.0,
-                // packet.expected_T_s.as_secs_f64(),
+                // packet.header_alvr.shard_index,
+                // packet.header_alvr.shards_count - 1,
+                // packet.header_alvr.next_packet_index,
             );
+            // i +=1;
+            // if i >10 {
+            //     println!( "\x1b[33m\t...");
+            //     break;
+            // }
         }
     }
 
@@ -1176,8 +1320,9 @@ pub struct GraphNetworkStatistics {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct GraphNetworkStatisticsCsv {
-    pub frame_index: u32,
+pub struct GraphNetworkStatistics_csv {
+    pub timestamp: f64,
+    pub frame_index: usize,
 
     pub frame_size_bytes: usize,
 
