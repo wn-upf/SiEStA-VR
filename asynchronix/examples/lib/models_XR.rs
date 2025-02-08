@@ -176,22 +176,22 @@ impl BitrateManager {
         // else if 5.0 <= dur && dur < 10.0 {
         //     self.last_target_bitrate_mbps = 0.01;
         // }
-        if 10.0 <= dur && dur < 11.0 {
-            self.last_target_bitrate_mbps = 5.0;
-        } else if 12.0 <= dur && dur < 25.0 {
-            self.last_target_bitrate_mbps = 0.08;
-        } else if 25.0 <= dur && dur < 30.0 {
-            self.last_target_bitrate_mbps = 10.0;
-        } else if 35.0 <= dur && dur < 45.0 {
-            self.last_target_bitrate_mbps = 0.2;
-        } else if 45.0 <= dur && dur < 55.0 {
-            self.last_target_bitrate_mbps = 10.0;
-        } else if 55.0 <= dur && dur < 65.0 {
-            self.last_target_bitrate_mbps = 0.5;
-        } else if 65.0 <= dur && dur < 75.0 {
-            self.last_target_bitrate_mbps = 10.0;
-        } else if 75.0 <= dur && dur < 85.0 {
-            self.last_target_bitrate_mbps = 1.0;
+        if 10.0 <= dur && dur < 1000.0 {
+            self.last_target_bitrate_mbps = 10.0; // just CBR for now
+        // } else if 12.0 <= dur && dur < 25.0 {
+        //     self.last_target_bitrate_mbps = 0.9;
+        // } else if 25.0 <= dur && dur < 30.0 {
+        //     self.last_target_bitrate_mbps = 10.0;
+        // } else if 35.0 <= dur && dur < 45.0 {
+        //     self.last_target_bitrate_mbps = 0.2;
+        // } else if 45.0 <= dur && dur < 55.0 {
+        //     self.last_target_bitrate_mbps = 10.0;
+        // } else if 55.0 <= dur && dur < 65.0 {
+        //     self.last_target_bitrate_mbps = 0.5;
+        // } else if 65.0 <= dur && dur < 75.0 {
+        //     self.last_target_bitrate_mbps = 10.0;
+        // } else if 75.0 <= dur && dur < 85.0 {
+        //     self.last_target_bitrate_mbps = 1.0;
         }
         print_pretty!(
             DebugColor::DarkBlue,
@@ -596,7 +596,7 @@ impl XRServer {
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
-                        .get_buffer_emu(&header, current_bitrate_mbps, now)
+                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self)
                         .unwrap();
 
                 // Use DashMap's thread-safe `insert` API instead of write locks
@@ -1272,8 +1272,9 @@ impl XRClient {
                     let miin: usize = usize::min(video_frame.len(), 50);
                     print_pretty!(
                         DebugColor::Violet,
-                        "[DBG VSYNC {}] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
+                        "[DBG VSYNC {}] Frame decoded OK! Size frame: {} ,Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
                         self.server_ip, 
+                        video_frame.len(),
                         self.decoder_queue.len(),
                         interarrival.as_secs_f32(),
                         self.decoder_queue.ok_dequed_frame_counter,
@@ -1287,7 +1288,7 @@ impl XRClient {
                             self.decoded_frame_index,
                         );
                         self.decoded_frame_index += 1;
-                        let scale_factor = 0.7;
+                        let scale_factor = 0.4;
                         let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
                         let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
     

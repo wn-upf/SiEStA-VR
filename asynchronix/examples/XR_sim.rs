@@ -506,7 +506,7 @@ impl VRPair {
     }
 }
 
-fn main() {
+fn main_works() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
     if args.len() != 10 {
@@ -615,4 +615,168 @@ fn main() {
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
     }; 
+}
+fn main() {
+    env::set_var("RUST_BACKTRACE", "1");
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 11 {
+        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> <distance> <bitrate> <pl_prob> <n_xr> <n_bg>", args[0]);
+        return;
+    }
+
+    // Parse arguments
+    let stoptime: f64 = args[1].parse().unwrap();
+    let mean_length: f64 = args[2].parse().unwrap();
+    let k_queue: usize = args[3].parse().unwrap();
+    let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
+    let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
+    let distance: f64 = args[6].parse().unwrap();
+    let initial_bitrate: f64 = args[7].parse().unwrap();
+    let pl_prob: f64 = args[8].parse().unwrap();
+    let n_xr: usize = args[9].parse().unwrap();
+    let n_bg: usize = args[10].parse().unwrap();  // New parameter for background STAs
+
+    // Create output directory
+    let name_folder = format!(
+        "sim_T{:.0}_Plen{:.0}_K{}_D{:.0}_Br{:.0}_PL{:.6}_BG{}",
+        stoptime, mean_length, k_queue, distance, initial_bitrate, pl_prob, n_bg
+    );
+    let output_path = format!("Results/{}", name_folder);
+    fs::create_dir_all(&output_path).expect("Failed to create directory");
+
+    let t0 = MonotonicTime::EPOCH;
+    let mut all_sta_ids = Vec::new();
+    let mut vr_pairs = Vec::new();
+    let mut xr_client_addresses = Vec::new();
+    let mut xr_server_addresses = Vec::new();
+    let mut bg_sta_models = Vec::new();
+    let mut bg_sta_mailboxes = Vec::new();
+    let mut bg_sta_addresses = Vec::new();
+
+    // Create XR pairs
+    for i in 0..n_xr {
+        let vr = VRPair::new(i, t0, mean_length, initial_bitrate, distance, &name_folder);
+        all_sta_ids.push(100 + i as i32);
+        all_sta_ids.push(200 + i as i32);
+        xr_client_addresses.push(vr.mbox_xr_client.address());
+        xr_server_addresses.push(vr.mbox_xr_server.address());
+        vr_pairs.push(vr);
+    }
+
+    // Create background STAs
+    for i in 0..n_bg {
+        let sta_id = 300 + i as i32;
+        let coords = Coords {
+            x: distance,
+            y: 0.0,
+            z: 0.0,
+        };
+        
+        let bg_sta = STA_extended::new(
+            rate_bps_in,
+            mean_length,
+            sta_id,
+            2,  // Default destination (AP)
+            coords,
+            true,
+            rate_bps_in,  // Using input rate as effective rate for simplicity
+            t0,
+            true,
+            rate_bps_in,  // Background traffic rate
+        );
+
+        let mbox_bg_sta = Mailbox::new();
+        bg_sta_addresses.push(mbox_bg_sta.address());
+        bg_sta_mailboxes.push(mbox_bg_sta);
+        bg_sta_models.push(bg_sta);
+        all_sta_ids.push(sta_id);
+    }
+
+    // Create and configure queue
+    let mut queue = QueueModule::new(
+        all_sta_ids.len(),
+        k_queue.saturating_sub(1),
+        pl_prob,
+        all_sta_ids.clone(),
+    );
+    let mbox_queue = Mailbox::new();
+    let queue_address = mbox_queue.address();
+    let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
+    let queue_stats = queue.get_queue_stats_handle();
+    let sta_stats = queue.get_stas_stats_handle();
+
+    // Connect all STAs to queue
+    for vr in vr_pairs.iter_mut() {
+        vr.sta_server.output_network_port.connect(QueueModule::input, &mbox_queue);
+        vr.sta_client.output_network_port.connect(QueueModule::input_UL, &mbox_queue);
+        queue.output_port_sta1.connect(STA_extended::input_wireless, &vr.mbox_sta_server);
+        queue.output_port_sta1.connect(STA_extended::input_wireless, &vr.mbox_sta_client);
+    }
+
+    // Connect background STAs to queue
+    for bg_sta in bg_sta_models.iter_mut() {
+        bg_sta.output_network_port.connect(QueueModule::input, &mbox_queue);
+    }
+
+    // Build simulation
+    let mut sim_builder = SimInit::new()
+        .add_model(queue, mbox_queue, "Queue")
+        .add_model(SinkVideo_XR::new(), Mailbox::new(), "Video Sink");
+
+    // Add XR pairs to simulation
+    for (i, vr) in vr_pairs.into_iter().enumerate() {
+        sim_builder = sim_builder
+            .add_model(vr.xr_server, vr.mbox_xr_server, format!("XR Server {}", i))
+            .add_model(vr.xr_client, vr.mbox_xr_client, format!("XR Client {}", i))
+            .add_model(vr.sta_server, vr.mbox_sta_server, format!("STA Server {}", i))
+            .add_model(vr.sta_client, vr.mbox_sta_client, format!("STA Client {}", i));
+    }
+
+    // Add background STAs to simulation
+    for (i, (bg_sta, mbox)) in bg_sta_models.into_iter().zip(bg_sta_mailboxes).enumerate() {
+        sim_builder = sim_builder.add_model(bg_sta, mbox, format!("BG STA {}", i));
+    }
+
+    let mut simu = sim_builder.init(t0);
+    let scheduler = simu.scheduler();
+
+    // Schedule XR events
+    for addr in &xr_client_addresses {
+        let epsilon = Duration::from_secs_f64(exponential(0.5));
+        scheduler.schedule_event(Duration::from_nanos(1) + epsilon, XRClient::configure_streams, (), addr).unwrap();
+        scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRClient::vsync, (), addr).unwrap();
+    }
+
+    for (i, addr) in xr_server_addresses.iter().enumerate() {
+        let epsilon = Duration::from_secs_f64(exponential(1.5));
+        let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
+        scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRServer::connection_pipeline, dest_ip, addr).unwrap();
+    }
+
+    // Schedule background STA events
+    for address in &bg_sta_addresses {
+        let epsilon = Duration::from_secs_f64(exponential(0.1));
+        scheduler.schedule_event(
+            epsilon,
+            STA_extended::send_packet_BG,
+            (),
+            address,
+        ).unwrap();
+    }
+
+    scheduler.schedule_event(Duration::from_secs(10), QueueModule::self_scheduled_emu_queue_tx, (), &queue_address).unwrap();
+
+    // Run simulation
+    simu.step_by(Duration::from_secs_f64(stoptime));
+
+    // Save results
+    if let Ok(data) = csv_data.lock() {
+        data.write_to_csv(&name_folder, &output_path).unwrap();
+    };
+    if let Ok(stats) = sta_stats.lock() {
+        write_all_sta_csvs(&stats, &name_folder, &output_path).unwrap();
+    };
+    if let Ok(stats) = queue_stats.lock() {
+        stats.print_nicely();
+    };
 }
