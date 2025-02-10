@@ -104,7 +104,7 @@ lazy_static! {
 
 
 
-pub const INITIAL_FRAMERATE_FPS: f32 = 60.0; 
+pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
 pub const OFFSET_VIDEO_TIMESTAMP: f64 = 40.0;
 
 
@@ -887,22 +887,6 @@ fn main() {
         else{
             current_bitrate_mbps = 0.7;
         }
-
-
-        // let raw_yuv = match yuv_loader.next_frame().unwrap() {
-        //     Some(frame) => frame,
-        //     None => {
-        //         println!("End of YUV file, looping...");
-        //         yuv_loader.reset().unwrap();
-        //         yuv_loader.next_frame().unwrap().unwrap()
-        //     }
-        // };
-
-        // // if raw_yuv.len() != YUV420_FRAME_SIZE {
-        // //     eprintln!("Invalid frame size: {} (expected {})", raw_yuv.len(), YUV420_FRAME_SIZE);
-        // //     continue;
-        // }
-
 
         // Process a new frame
         // let frame_result = generate_sample_ffmpeg_opti_alvr(current_bitrate_mbps, timestamp, fps, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))); 

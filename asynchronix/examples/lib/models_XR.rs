@@ -309,6 +309,7 @@ impl XRServer {
                 Duration::from_secs_f32(1.0 / frame_rate),
                 0.0,
                 name_folder,
+                ip_self, 
             ),
         }
     }
@@ -518,12 +519,12 @@ impl XRServer {
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
 
                                 if packet.header_alvr.shard_index == 0 {
-                                    println!(
-                                        "{:.9}-Server {} sending {:#?}",
-                                        now.duration_since(self.t_0).as_secs_f64(),
-                                        self.ip_self, 
-                                        packet.header_alvr
-                                    );
+                                    // println!(
+                                    //     "{:.9}-Server {} sending {:#?}",
+                                    //     now.duration_since(self.t_0).as_secs_f64(),
+                                    //     self.ip_self, 
+                                    //     packet.header_alvr
+                                    // );
                                 }
 
                    

@@ -10,6 +10,7 @@ use crate::lib::{
 use crate::DebugColor;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::path::Path;
 // use ::{warn, SlidingWindowAverage};
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,9 @@ pub struct StatisticsManager {
 
     folder: String,
     last_stats: GraphNetworkStatistics_csv,
+
+    id_XR: IpAddr, 
+
 }
 
 #[allow(unused)]
@@ -113,6 +117,7 @@ impl StatisticsManager {
         nominal_server_frame_interval: Duration,
         steamvr_pipeline_frames: f32,
         folder: &str,
+        ip_self: IpAddr, 
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(),
@@ -193,6 +198,9 @@ impl StatisticsManager {
 
             folder: folder.to_string(),
             last_stats: GraphNetworkStatistics_csv::default(),
+
+            id_XR: ip_self, 
+
         }
     }
     // This statistics are reported for every succesfully received frame
@@ -351,7 +359,7 @@ impl StatisticsManager {
     }
     // Add a method to save stats to CSV
     pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
-        let file_path = format!("Results/{}/XR_stats.csv", self.folder);
+        let file_path = format!("Results/{}/XR_stats_{:?}.csv", self.folder, self.id_XR);
         let path = Path::new(&file_path);
 
         // Open the CSV file in append mode or create it if it doesn't exist

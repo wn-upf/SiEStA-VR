@@ -50,15 +50,15 @@ pub mod alvr_control_socket;
 // }
 // pub static DEBUG_PRINT_ENABLED: bool = false;
 
-pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        let msg = format!($fmt, $($arg)*);
-        println!("{}", $color.to_background_fn()(msg));
+        // let msg = format!($fmt, $($arg)*);
+        // println!("{}", $color.to_background_fn()(msg));
     };
 }
 
@@ -476,7 +476,7 @@ impl CsvData {
     }
 
     pub fn write_to_csv(&self, folder: &str, dir_path: &str) -> std::io::Result<()> {
-        let path = format!("Results/{dir_path}/{folder}/QUEUE_stats.csv");
+        let path = format!("{dir_path}/QUEUE_stats.csv");
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -1226,7 +1226,7 @@ pub fn write_all_sta_csvs(
         if let Ok(stats) = sta_stats.data.lock() {
             // Create a filename with the station ID
 
-            let filename: String = format!("{results_folder}STA{}.csv", stats.sta_id);
+            let filename: String = format!("{results_folder}/STA{}.csv", stats.sta_id);
             println!("FILENAME222: {filename}");
             // Open file with write permissions
             let file = OpenOptions::new()
