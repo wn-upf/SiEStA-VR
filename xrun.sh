@@ -2,7 +2,7 @@
 simTime=75.0
 k_queue=10000
 mean_length=12000.0
-rate_bps_src=3E6; 
+rate_bps_src=20E6; 
 # rate_bps_src=6.5E8 ## loads the queue
 rate_bps_queue=6E5 ## does nothing theoretically 
 
@@ -36,7 +36,7 @@ N_BG_one_time=2
 N_XR_one_time=3
 IS_UL=0
 
-script -q -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $N_XR_one_time" out_log.ans
+script -q -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $N_XR_one_time $N_BG_one_time " out_log.ans
 # $N_XR_one_time $IS_UL" out_log.ans
 
 

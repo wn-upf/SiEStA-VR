@@ -2064,6 +2064,7 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     buffer_inner
 }
 
+#[rustfmt::skip]
 pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
     let hours = (timestamp / 3600.0) as u32;
@@ -2093,31 +2094,19 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f6
             "hevc_nvenc",
             "-b:v",
             &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset",
-            "medium", // Higher quality preset
-            "-rc",
-            "vbr_hq", // Variable Bitrate High Quality mode
-            "-cq",
-            "19", // Constant Quality level (lower is higher quality)
-            "-b_ref_mode",
-            "2", // Enable B-frame reference mode
-            "-bf",
-            "3", // Number of B-frames (0-3)
-            "-temporal-aq",
-            "1", // Temporal Adaptive Quantization
-            "-spatial-aq",
-            "1", // Spatial Adaptive Quantization
-            "-aq-strength",
-            "8", // Adaptive Quantization strength
-            "-frames:v",
-            "1",
-            "-an",
-            "-pass",
-            "1",
-            "-passlogfile",
-            first_pass_log,
-            "-f",
-            "null",
+            "-preset", "medium", // Higher quality preset
+            "-rc", "vbr_hq", // Variable Bitrate High Quality mode
+            "-cq", "19", // Constant Quality level (lower is higher quality)
+            "-b_ref_mode", "2", // Enable B-frame reference mode
+            "-bf", "3", // Number of B-frames (0-3)
+            "-temporal-aq", "1", // Temporal Adaptive Quantization
+            "-spatial-aq", "1", // Spatial Adaptive Quantization
+            "-aq-strength", "8", // Adaptive Quantization strength
+            "-frames:v", "1",
+            "-an",              // no audio 
+            "-pass", "1", 
+            "-passlogfile", first_pass_log,
+            "-f", "null",
             "/dev/null",
         ])
         .stdin(Stdio::piped())
@@ -2239,158 +2228,8 @@ lazy_static! {
 }
 
 
-// const START_CODE_3: &[u8] = &[0x00, 0x00, 0x01];
-// const START_CODE_4: &[u8] = &[0x00, 0x00, 0x00, 0x01];
 
-// struct FfmpegStreamer {
-//     child: tokio::process::Child,
-//     buffer: Vec<u8>,
-//     reader: tokio::io::BufReader<tokio::process::ChildStdout>,
-// }
-// lazy_static!{
-//     static ref FFMPEG_ENCODE_POOL_NEW: Mutex<HashMap<String, FfmpegStreamer>> = Mutex::new(HashMap::new());
-
-// }
-
-// pub fn generate_sample_ffmpeg_opti2(
-//     current_bitrate_mbps: f32,
-//     timestamp: f64,
-//     fps: f64,
-//     ip: IpAddr,
-// ) -> Vec<u8> {
-//     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_sunflower_2160p_60fps_stereo_abl.mp4";
-//     let ip_str = ip.to_string();
-//     let config_key = format!(
-//         "{}_{}_{}_{}_{}",
-//         input_path, current_bitrate_mbps, ip_str, WIDTH_ENCODER, HEIGHT_ENCODER,
-//     );
-
-//     let offset_video = {
-//         let mut hasher = DefaultHasher::new();
-//         ip.hash(&mut hasher);
-//         (hasher.finish() % 500) as f64
-//     };
-
-//     let max_retries = 3;
-//     let mut attempt = 0;
-
-//     loop {
-//         let mut pool = FFMPEG_ENCODE_POOL_NEW.lock().unwrap();
-//         let streamer = pool.entry(config_key.clone()).or_insert_with(|| {
-//             let timestamp_ = timestamp + offset_video;
-//             let hours = (timestamp_ / 3600.0) as u32;
-//             let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
-//             let seconds = timestamp_ % 60.0;
-//             let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
-            
-//             let bitrate_command = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
-
-//             let mut child = Command::new("ffmpeg")
-//                 .args([
-//                     "-hwaccel", "cuda",
-//                     "-ss", &formatted_timestamp,
-//                     "-i", input_path,
-//                     "-pix_fmt", "yuv420p",
-//                     "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-//                     "-c:v", "hevc_nvenc",
-//                     "-preset", "fast",
-//                     "-rc", "cbr",
-//                     "-b_ref_mode", "2",
-//                     "-bf", "3",
-//                     "-temporal-aq", "1",
-//                     "-spatial-aq", "1",
-//                     "-aq-strength", "8",
-//                     "-b:v", &bitrate_command,
-//                     "-an",
-//                     "-f", "hevc",
-//                     "-bsf:v", "hevc_mp4toannexb",
-//                     "-"
-//                 ])
-//                 .stdin(Stdio::piped())
-//                 .stdout(Stdio::piped())
-//                 .stderr(Stdio::piped())
-//                 .spawn()
-//                 .expect("Failed to spawn FFmpeg encoder");
-
-//             let stdout = child.stdout.take().unwrap();
-//             // Set non-blocking mode
-//             let fd = stdout.as_raw_fd();
-//             fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).expect("Non-blocking set failed");
-//             let reader = tokio::io::BufReader::new(stdout);
-            
-//             FfmpegStreamer {
-//                 child,
-//                 buffer: Vec::with_capacity(2 * 1024 * 1024),
-//                 reader,
-//             }
-//         });
-
-//         // Non-blocking read
-//         let mut chunk = vec![0u8; 1024 * 1024];
-//         let bytes_read = match streamer.reader.read(&mut chunk).await {
-//             Ok(n) => n,
-//             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0, // No data available
-//             Err(_) => {
-//                 pool.remove(&config_key);
-//                 continue;
-//             }
-//         };
-        
-//         if bytes_read > 0 {
-//             streamer.buffer.extend_from_slice(&chunk[..bytes_read]);
-//         }
-
-//         // Try to find frame boundaries
-//         let frame = find_frame(&mut streamer.buffer);
-        
-//         if let Some(frame) = frame {
-//             return frame;
-//         } else if attempt >= max_retries {
-//             panic!("Failed to get frame after {} attempts", max_retries);
-//         } else {
-//             attempt += 1;
-//         }
-//     }
-// }
-
-// fn find_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-//     let mut start = 0;
-//     // Find the start of the frame
-//     while start <= buffer.len().saturating_sub(4) {
-//         if buffer[start..].starts_with(START_CODE_4) {
-//             start += 4;
-//             break;
-//         } else if buffer[start..].starts_with(START_CODE_3) {
-//             start += 3;
-//             break;
-//         }
-//         start += 1;
-//     }
-
-//     if start == 0 {
-//         // No start code found
-//         return None;
-//     }
-
-//     // Find the end of the frame (next start code)
-//     let mut end = start;
-//     while end <= buffer.len().saturating_sub(3) {
-//         if buffer[end..].starts_with(START_CODE_3) || buffer[end..].starts_with(START_CODE_4) {
-//             let frame = buffer[..end].to_vec();
-//             buffer.drain(..end);
-//             return Some(frame);
-//         }
-//         end += 1;
-//     }
-
-//     // No end found, keep the start code in buffer
-//     if start > 0 {
-//         buffer.drain(..start.saturating_sub(4)); // Adjust based on start code length
-//     }
-//     None
-// }
-
-
+#[rustfmt::skip]
 pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64, ip: IpAddr) -> Vec<u8> {
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_sunflower_2160p_60fps_stereo_abl.mp4";
     // given this sample video, choosing 100
@@ -2438,44 +2277,26 @@ pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fp
                
                 let process = Command::new("ffmpeg")
                 .args([
-                        "-hwaccel",
-                        "cuda",
-                        "-ss",
-                        &formatted_timestamp,
-                        "-i",
-                        input_path,
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-vf",
-                        &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                        "-c:v",
-                        "hevc_nvenc",
-                        "-preset",
-                        "fast",
-                        "-rc",
-                        "cbr",
-                        "-b_ref_mode",
-                        "2",
-                        "-bf",
-                        "3",
-                        "-temporal-aq",
-                        "1",
-                        "-spatial-aq",
-                        "1",
-                        "-aq-strength",
-                        "8",
-                        "-frames:v",
-                        "1",
-                        "-b:v",
-                        &bitrate_command,
-                        "-an",
-                        "-f",
-                        "mp4",
-                        "-bsf:v",
-                        "hevc_mp4toannexb",
-                        "-movflags",
-                        "+frag_keyframe+empty_moov",
-                        "-",
+                        "-hwaccel", "cuda",
+                        "-ss", &formatted_timestamp,
+                        "-i", input_path,
+                        "-pix_fmt", "yuv420p",
+                        "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
+                        "-c:v", "hevc_nvenc",
+                        "-preset", "fast",
+                        "-rc", "cbr",
+                        "-b_ref_mode", "2",
+                        "-bf", "3",
+                        "-temporal-aq", "1",
+                        "-spatial-aq", "1",
+                        "-aq-strength", "8",
+                        "-frames:v", "1",
+                        "-b:v", &bitrate_command,
+                        "-an", // no audio
+                        "-f", "mp4", 
+                        "-bsf:v", "hevc_mp4toannexb", // to follow GoP 
+                        "-movflags", "+frag_keyframe+empty_moov", // don't remember why
+                        "-", // out through stdout
                     ])
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())

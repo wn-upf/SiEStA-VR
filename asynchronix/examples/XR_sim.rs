@@ -742,8 +742,9 @@ fn main() {
 
     // Schedule XR events
     for addr in &xr_client_addresses {
-        let epsilon = Duration::from_secs_f64(exponential(0.5));
-        scheduler.schedule_event(Duration::from_nanos(1) + epsilon, XRClient::configure_streams, (), addr).unwrap();
+        // let epsilon = Duration::from_secs_f64(exponential(0.5));
+        let epsilon = Duration::from_secs_f64(0.01); 
+        scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRClient::configure_streams, (), addr).unwrap();
         scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRClient::vsync, (), addr).unwrap();
     }
 
