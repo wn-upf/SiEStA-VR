@@ -870,9 +870,9 @@ fn main() {
     let base_output_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates";
 
 
-    let mut yuv_loader = YuvFrameLoader::new("raw_frames.yuv").unwrap();
+    // let mut yuv_loader = YuvFrameLoader::new("raw_frames.yuv").unwrap();
 
-    println!("Loaded YUV file with {} frames", yuv_loader.total_frames);
+    // println!("Loaded YUV file with {} frames", yuv_loader.total_frames);
 
     // Main loop
     let mut decoded_index = 0;
@@ -889,14 +889,14 @@ fn main() {
         }
 
 
-        let raw_yuv = match yuv_loader.next_frame().unwrap() {
-            Some(frame) => frame,
-            None => {
-                println!("End of YUV file, looping...");
-                yuv_loader.reset().unwrap();
-                yuv_loader.next_frame().unwrap().unwrap()
-            }
-        };
+        // let raw_yuv = match yuv_loader.next_frame().unwrap() {
+        //     Some(frame) => frame,
+        //     None => {
+        //         println!("End of YUV file, looping...");
+        //         yuv_loader.reset().unwrap();
+        //         yuv_loader.next_frame().unwrap().unwrap()
+        //     }
+        // };
 
         // // if raw_yuv.len() != YUV420_FRAME_SIZE {
         // //     eprintln!("Invalid frame size: {} (expected {})", raw_yuv.len(), YUV420_FRAME_SIZE);
@@ -905,8 +905,8 @@ fn main() {
 
 
         // Process a new frame
-        let frame_result = generate_sample_ffmpeg_opti_alvr(current_bitrate_mbps, timestamp, fps, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))); 
-        
+        // let frame_result = generate_sample_ffmpeg_opti_alvr(current_bitrate_mbps, timestamp, fps, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))); 
+        let frame_result: std::result::Result<Vec<u8>, std::io::Error> = Ok(generate_sample_ffmpeg(current_bitrate_mbps, timestamp) ); 
 
         match frame_result {
             Ok(frame) => {
