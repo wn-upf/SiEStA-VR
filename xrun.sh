@@ -1,4 +1,4 @@
-NUMBER_OF_JOBS=10
+NUMBER_OF_JOBS=3
 SERIAL_EXECUTION=1
 
 
@@ -13,14 +13,25 @@ rate_bps_queue=6E5 ## does nothing theoretically
 distance=2.0
 PL=0.00
 
-initial_bitrate_mbps=100
 
 VMAF_ANALYSIS=0
 
 N_BGs=(0)
 IS_UL_BG=(0)
 # N_XR=(1 2 3 4 5)
-N_XR=(1)
+N_XR=(1 2 3 4 5 6 7 8 9 10)
+initial_bitrate_mbps=10
+
+
+# Define the function to execute on Ctrl+C
+handle_interrupt() {
+    echo "Simulation interrupted."
+    exit 1;
+}
+
+# Set up the trap for SIGINT (Ctrl+C)
+trap handle_interrupt SIGINT
+
 
 temp_file=$(mktemp)
 
@@ -41,14 +52,17 @@ for nbg in "${N_BGs[@]}"; do
                 echo ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $nxr $nbg $is_ul >> "$temp_file"
             
             else                                    ## Serial execution
-                cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $nxr $nbg $is_ul
+                script -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $nxr $nbg $is_ul" "out_log.ans"
+                sleep 1
+                rm out_log.ans
+            
             fi
             # cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $initial_bitrate_mbps $PL $nxr $nbg
         done 
     done
 done 
-
-parallel -j "$NUMBER_OF_JOBS" < "$temp_file"
+shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS"
+# parallel -j "$NUMBER_OF_JOBS" < "$temp_file"
 rm "$temp_file"
 
 

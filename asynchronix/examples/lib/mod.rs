@@ -7,7 +7,8 @@ use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
-use crate::lib::alvr_stream_socket::{DeviceMotion, Pose};
+use crate::lib::alvr_packets::Pose;
+use crate::lib::alvr_packets::DeviceMotion; 
 use colored::Colorize;
 use once_cell::sync::Lazy;
 use rand::Rng;
@@ -50,15 +51,15 @@ pub mod alvr_control_socket;
 // }
 // pub static DEBUG_PRINT_ENABLED: bool = false;
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 pub const USE_FFMPEG: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // let msg = format!($fmt, $($arg)*);
-        // println!("{}", $color.to_background_fn()(msg));
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", $color.to_background_fn()(msg));
     };
 }
 

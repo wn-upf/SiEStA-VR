@@ -358,8 +358,17 @@ impl StatisticsManager {
         return (peak_network_throughput_bps, frame_interarrival);
     }
     // Add a method to save stats to CSV
+    
     pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
-        let file_path = format!("Results/{}/XR_stats_{:?}.csv", self.folder, self.id_XR);
+        fn get_4_octet(ip: IpAddr) -> Option<u8> {
+            match ip {
+                IpAddr::V4(ipv4) => Some(ipv4.octets()[2]),
+                IpAddr::V6(_) => None, // Return None for IPv6
+            }
+        }
+        let num = get_4_octet(self.id_XR).unwrap();
+        let file_path = format!("Results/{}/XR_stats_{:?}.csv", self.folder, num);
+        
         let path = Path::new(&file_path);
 
         // Open the CSV file in append mode or create it if it doesn't exist

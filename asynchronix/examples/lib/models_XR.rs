@@ -4,11 +4,15 @@ use crate::lib::alvr_control_socket::{
 use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
 use std::{
     fs::write,
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
+use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
 
 use std::cell::RefCell;
 use std::error::Error;
@@ -43,6 +47,7 @@ use std::time::{Duration, Instant};
 use std::time::SystemTime;
 
 use once_cell::sync::Lazy;
+use glam::{Vec3, Quat};
 
 // mod mm1k_sim;
 // use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink};
@@ -74,7 +79,7 @@ pub const DECODER_BUFFERING_FRAMES: usize = 3;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
 
 
-
+pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
 
 static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 use dashmap::DashMap;
@@ -177,7 +182,8 @@ impl BitrateManager {
         //     self.last_target_bitrate_mbps = 0.01;
         // }
         if 10.0 <= dur && dur < 1000.0 {
-            self.last_target_bitrate_mbps = 10.0; // just CBR for now
+            // self.last_target_bitrate_mbps = 10.0; // just CBR for now
+        }
         // } else if 12.0 <= dur && dur < 25.0 {
         //     self.last_target_bitrate_mbps = 0.9;
         // } else if 25.0 <= dur && dur < 30.0 {
@@ -192,7 +198,7 @@ impl BitrateManager {
         //     self.last_target_bitrate_mbps = 10.0;
         // } else if 75.0 <= dur && dur < 85.0 {
         //     self.last_target_bitrate_mbps = 1.0;
-        }
+        
         print_pretty!(
             DebugColor::DarkBlue,
             "t = {}, [DBG bitrate set] {} Mbps",
@@ -399,7 +405,7 @@ impl XRServer {
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
 
-                        println!("TODO THE REST!!");
+                        println!("TODO: THE REST of tracking server!!");
                     }
                 }
                 STATISTICS => {
@@ -492,19 +498,9 @@ impl XRServer {
                                     _ => "?? IDK",
                                 };
                                 elapsed = now.duration_since(self.t_0);
-
-                                // debug_print!(
-                                //     DebugColor::DarkGreen,
-                                //     "\t|Packet length: {}| Stream ID: {}| Next packet index: {}| Shards count: {} | Shard index: {:2.0} | Transmit-receive instant: {} |",
-
-                                //     packet_length,
-                                //     str_id,
-                                //     next_packet_index,
-                                //     shards_count,
-                                //     shard_index,
-                                //     tx_r_instant
-                                // );
-                        
+                                
+                                
+                                
 
                                 let mut packet = MpduPacket::new();
 
@@ -526,9 +522,9 @@ impl XRServer {
                                     //     packet.header_alvr
                                     // );
                                 }
-
-                   
-                                self.outport_videoapp_network.send(packet).await;
+                                if stream_id == VIDEO{
+                                    self.outport_videoapp_network.send(packet).await;
+                                }
                             } else {
                                 println!(
                                     "{}",
@@ -644,7 +640,7 @@ impl XRServer {
 
                 let normal = Normal::new(0.0, 2.0).unwrap(); // Mean = 0, Std dev = 5
                 let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
-
+                
                 let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps + epsilon));
 
                 context
@@ -746,7 +742,7 @@ impl<T> DroppingVecDeque<T> {
         if self.deque.len() == self.capacity {
             self.deque.pop_front();
             self.dropped_frame_counter += 1;
-            println!("DROPPED A FRAME IN DECODER!!");
+            // println!("DROPPED A FRAME IN DECODER!!");
         }
         // Push the new item to the back
         self.deque.push_back(item);
@@ -766,11 +762,13 @@ impl<T> DroppingVecDeque<T> {
 pub struct XRClient {
     pub decoder_queue: DroppingVecDeque<Vec<u8>>,
 
-    pub outport_streams: Output<Vec<u8>>,
+    pub outport_tracking_network: Output<MpduPacket>,
 
     pub input_app_video: Option<StreamReceiver<VideoPacketHeader>>,
     pub input_app_audio: Option<StreamReceiver<()>>,
     pub input_app_haptics: Option<StreamReceiver<Haptics>>,
+
+    pub output_app_tracking_sender: Option<StreamSender<Tracking>>,  
 
     pub out_video_decoded: Output<Vec<u8>>,
 
@@ -788,18 +786,23 @@ pub struct XRClient {
     pub streamsocket_clone: Option<StreamSocket>,
 
     pub decoded_frame_index: usize,
+    pub t_0: TaiTime<0>, 
+
+
+    pub last_tracking_time: TaiTime<0>, 
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
 impl XRClient {
-    pub fn new(server_ip: IpAddr, fps: f32) -> Self {
+    pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>) -> Self {
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
-            outport_streams: Output::default(),
+            outport_tracking_network: Output::default(),
             input_app_video: None,
             input_app_audio: None,
             input_app_haptics: None,
 
+            output_app_tracking_sender: None, 
             out_video_decoded: Output::default(),
             framerate: fps,
             last_decoded_frame_instant: TaiTime::EPOCH,
@@ -811,9 +814,264 @@ impl XRClient {
             server_ip,
             streamsocket_clone: None,
             decoded_frame_index: 0,
+            t_0: now, 
+            last_tracking_time: now, 
             // visualize_decoder_window: None,
         }
     }
+    pub async fn configure_streams(&mut self, packet_size: usize ,context: &Context<Self> ) {
+        // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
+        let stream_port: u16 = 9944;
+        let stream_protocol: SocketProtocol = SocketProtocol::Channel;
+        let dscp: Option<DscpTos> = None;
+        let server_send_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
+        let client_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
+        let client_send_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
+        let server_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
+        // let packet_size: i32 = 1400;
+
+        if let Ok(mut stream_socket) = StreamSocketBuilder::accept_from_server_mod(
+            self.server_ip,
+            stream_port,
+            packet_size as _,
+        ) {
+            println!("Connection established!");
+            self.is_streaming = true;
+
+            self.input_app_video = Some(
+                stream_socket.subscribe_to_stream::<VideoPacketHeader>(VIDEO, MAX_UNREAD_PACKETS),
+            );
+            self.input_app_audio =
+                Some(stream_socket.subscribe_to_stream(AUDIO, MAX_UNREAD_PACKETS));
+            self.input_app_haptics =
+                Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
+            self.streamsocket_clone = Some(stream_socket.clone());
+
+            self.output_app_tracking_sender = Some(stream_socket.request_stream(TRACKING, self.t_0));
+            
+            XRClient::generate_tracking_data(self, (), context).await;
+
+            // {
+            //     // retrieve video packets in RX buffer
+            //     if let Some(rx_socket) = self.input_app_video.clone(){
+
+            //             let  buffer_tx: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+            //             let  buffer_rx = buffer_tx.clone();
+
+            //             let arc_receiver = rx_socket.network_app_interface.clone();
+
+            //             XRClient::read_network_interface_to_app(self, (), context, buffer_rx, arc_receiver);
+
+            //             let mut buffer_app: Vec<u8> = vec![0;MAX_PACKET_SIZE_RECV];
+            //             let data_app = rx_socket.inner.lock().unwrap().recv(&mut buffer_app);
+
+            //             println!("DATA OF APP: {:?}", &buffer_app[0..100]);
+            //     }
+            // }
+        }
+    }
+
+    pub fn generate_tracking_data<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        
+        const HEAD_ID : u64 = 555; 
+
+        async move {
+            let now = context.scheduler.time(); 
+
+            let mut position_offset = Vec3::ZERO; 
+
+            // let mut loop_deadline = now; 
+            let mut random_position_deadlne = now; 
+
+            // if let Some(tracking_send_socket) = self.output_app_tracking_sender.clone() {
+            if self.is_streaming{
+
+                let mut rng = StdRng::from_entropy(); 
+
+                let yaw: f32 = rng.gen_range((-PI as f32)..(PI as f32));
+                let pitch: f32 = rng.gen_range((-PI as f32)..(PI as f32));
+
+                let orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch); 
+                let position_offset  = (Vec3::new(rand::random(), rand::random(), rand::random())
+                - Vec3::ONE / 0.5)
+                * 1.0;
+                let position = Vec3::new(0.0, 1.82, 0.0) + position_offset;
+
+                let track = Tracking {
+                        target_timestamp: TARGET_TIMESTAMP_TRACKING, 
+                        device_motions: vec![(
+                            HEAD_ID,
+                            DeviceMotion {
+                                pose: Pose {
+                                    orientation,
+                                    position,
+                                },
+                                linear_velocity: Vec3::ZERO,
+                                angular_velocity: Vec3::ZERO,
+                            },
+                        )],
+                        ..Default::default()
+                    }; 
+
+                if let Some(mut sender) = self.output_app_tracking_sender.clone() {
+            
+                    let arc_inner_app_receiver = sender.app_network_interface.clone(); 
+                    
+                    let send_result = sender.send_header_tracking(&track, now);
+                    let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+        
+                    XRClient::read_app_send_network_interface(self, (), now, buffer, arc_inner_app_receiver).await; // FUNCTION TO HANDLE NETWORK PACKETS!
+                }    
+                
+                // println!("CLIENT FRAMERATE = {}", self.framerate); 
+                let loop_deadline = Duration::from_secs_f32(1.0/self.framerate / 3.0); 
+
+                context.scheduler.schedule_event(loop_deadline, Self::generate_tracking_data, ()).unwrap();
+            }       
+        } 
+    }
+
+    pub async fn send_tracking(&mut self, tracking: Tracking, now:TaiTime<0> ) {
+        if let Some(mut sender) = self.output_app_tracking_sender.clone() {
+            
+            let arc_inner_app_receiver = sender.app_network_interface.clone(); 
+            
+            let send_result = sender.send_header_tracking(&tracking, now);
+            let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+
+            XRClient::read_app_send_network_interface(self, (), now, buffer, arc_inner_app_receiver).await; // FUNCTION TO HANDLE NETWORK PACKETS!
+        
+        
+        }    
+    }
+    fn read_app_send_network_interface<'a>(
+        &'a mut self,
+        _: (),
+        now: TaiTime<0>,
+        mut buffer: Vec<u8>,
+        // mut receiver: std::sync::MutexGuard<'_, Box<dyn SocketReader>>,
+        receiver: Arc<Mutex<Box<dyn SocketReader>>>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let mut stop = false;
+
+            let mut elapsed = now.duration_since(self.t_0);
+
+            // debug_print!(
+            //     DebugColor::DarkGreen,
+            //     "{}[DBG XR_SERVER {}] Sending to network the following packets:",
+            //     self.ip_self, 
+            //     elapsed.as_secs_f64(),
+            // );
+            while !stop {
+                let bytes_received = {
+                    let mut guard = receiver.lock().unwrap();
+                    guard.recv(&mut buffer)
+                };
+
+                match bytes_received {
+                    Ok(bytes_received) => {
+                        if bytes_received == 0 {
+                            // If no data is received, stop the loop
+                            // println!(
+                            //     "{}",
+                            //     DebugColor::DarkGreen.to_color_fn()(String::from(
+                            //         "No new data received, stopping."
+                            //     ))
+                            // );
+                            stop = true;
+                            break;
+                        } else {
+                            // TODO: CHECK WITH WIRESHARK ENCAPSULATION OF PACKET
+                            // println!("{}", DebugColor::DarkGreen.to_color_fn()(String::from("Parsed from connection output:")));
+                            if let Ok((
+                                packet_length,
+                                stream_id,
+                                next_packet_index,
+                                shards_count,
+                                shard_index,
+                                tx_r_instant,
+                            )) = parse_shard_data(&buffer[..100])
+                            {
+                                let str_id = match stream_id {
+                                    0 => "Tracking",
+                                    1 => "Haptics",
+                                    2 => "Audio",
+                                    3 => "Video",
+                                    4 => "Statistics",
+                                    _ => "?? IDK",
+                                };
+                                elapsed = now.duration_since(self.t_0);
+                                
+
+                                let elapsed_tracking = now.duration_since(self.last_tracking_time).as_secs_f32(); 
+                                
+                                if stream_id == TRACKING{
+                                    debug_print!(
+                                        DebugColor::ForestGreen,
+                                        "{} UL TRACKING -> Δt_tracking:{:.4} |length: {}| Stream ID: {}|",
+                                        format_elapsed!(now), 
+                                        elapsed_tracking, 
+                                        packet_length,
+                                        str_id,
+                                    );
+                                }
+                                self.last_tracking_time = now; 
+
+                                let mut packet = MpduPacket::new();
+
+                                packet.header_alvr = HeaderALVRStream {
+                                    packet_length,
+                                    stream_id,
+                                    next_packet_index,
+                                    shards_count,
+                                    shard_index,
+                                    tx_instant: tx_r_instant,
+                                };
+                                packet.data_inner = buffer[..packet_length as usize].to_vec();
+
+                                if packet.header_alvr.shard_index == 0 {
+                                    // println!(
+                                    //     "{:.9}-Server {} sending {:#?}",
+                                    //     now.duration_since(self.t_0).as_secs_f64(),
+                                    //     self.ip_self, 
+                                    //     packet.header_alvr
+                                    // );
+                                }
+                                if stream_id ==TRACKING{
+                                    self.outport_tracking_network.send(packet).await;
+                                }
+
+                            } else {
+                                println!(
+                                    "{}",
+                                    DebugColor::DarkGreen.to_color_fn()(String::from(
+                                        "Failed to parse shard data, stopping."
+                                    ))
+                                );
+                                stop = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        println!(
+                            "{}",
+                            DebugColor::DarkGreen.to_color_fn()(String::from(
+                                "Error receiving data, stopping"
+                            ))
+                        );
+                        stop = true;
+                    }
+                }
+            }
+        }
+    }
+
 
     pub async fn framed_send<S: Serialize>(
         &mut self,
@@ -1148,110 +1406,6 @@ impl XRClient {
         })
     }
 
-    // pub fn vsync<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-    //     async move {
-    //         // println!("VSYNC RUNNINGGGGGGGGGGGGGGGGGGGGGGG ************+");
-    //         let now = context.scheduler.time();
-
-    //         let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-
-    //         // Thread-local static for window management
-    //         thread_local! {
-    //             static DISPLAY_WINDOW: RefCell<Option<Window>> = RefCell::new(None);
-    //         }
-
-    //         if let Some(video_frame) = self.decoder_queue.pop() {
-    //             let subsample = video_frame[0..10].to_vec();
-
-    //             if let Some(interarrival) =
-    //                 now.checked_duration_since(self.last_decoded_frame_instant)
-    //             {
-    //                 let miin: usize = usize::min(video_frame.len(), 50);
-    //                 print_pretty!(
-    //                     DebugColor::Violet,
-    //                     "[DBG VSYNC {}] Frame decoded OK! Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
-    //                     self.server_ip, 
-    //                     self.decoder_queue.len(),
-    //                     interarrival.as_secs_f32(),
-    //                     self.decoder_queue.ok_dequed_frame_counter,
-    //                     self.decoder_queue.dropped_frame_counter,
-    //                     &video_frame[0..miin]
-    //                     );
-                    
-    //                 if USE_FFMPEG == true {
-    //                     let frame = XRClient::decode_hevc_to_rgb(
-    //                         video_frame.clone(),
-    //                         self.decoded_frame_index,
-    //                     );
-    //                     self.decoded_frame_index += 1;
-    //                     let scale_factor = 0.7;
-    //                     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
-    //                     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
-    //                     // Initialize or update the window
-    //                     DISPLAY_WINDOW.with(|window_cell| {
-    //                         let mut window_opt = window_cell.borrow_mut();
-
-    //                         // Create window if it doesn't exist
-    //                         if window_opt.is_none() {
-    //                             *window_opt = Some(
-    //                                 Window::new(
-    //                                     "Decoded HEVC Frame",
-    //                                     scaled_width,
-    //                                     scaled_height,
-    //                                     WindowOptions::default(),
-    //                                 )
-    //                                 .expect("Failed to create window"),
-    //                             );
-    //                         }
-
-    //                         // Update the window with the new frame
-    //                         if let Some(window) = window_opt.as_mut() {
-    //                             window
-    //                                 .update_with_buffer(&frame, WIDTH_ENCODER, HEIGHT_ENCODER)
-    //                                 .expect("Failed to update window buffer");
-    //                         }
-    //                     });
-    //                 } else { // do nothing, no real video to decode
-    //                     // println!("ERROR DECODING????"); 
-    //                 }
-    //             }
-
-    //             self.last_decoded_frame_instant = now;
-    //             self.out_video_decoded.send(subsample).await;
-    //         }
-    //         else{
-    //             println!(" Decoder queue is empty! |  queue len: {}, T_VSYNC: {:.3} ms", self.decoder_queue.len(), T_vsync.as_secs_f32() * 1000.0); 
-    //         }
-
-    //         // Adjust wait time based on queue length
-    //         if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-    //             T_vsync = T_vsync.mul_f64(2.0);
-    //             debug_bgprint!(DebugColor::Violet,
-    //                 "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})", 
-    //                 T_vsync.as_secs_f32(),
-    //                 self.decoder_queue.len(),
-    //                 TARGET_FRAMES_DECODER_QUEUE
-    //             );
-    //         } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
-    //             T_vsync = T_vsync.mul_f64(0.5);
-    //             debug_bgprint!(DebugColor::Violet,
-    //                 "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})", 
-    //                 T_vsync.as_secs_f32(),
-    //                 self.decoder_queue.len(),
-    //                 TARGET_FRAMES_DECODER_QUEUE
-    //             );
-    //         }
-
-    //         context
-    //             .scheduler
-    //             .schedule_event(T_vsync, Self::vsync, ())
-    //             .unwrap();
-    //     }
-    // }
     pub fn vsync<'a>(
         &'a mut self,
         _: (),
@@ -1361,54 +1515,7 @@ impl XRClient {
         }
     }
 
-    pub async fn configure_streams(&mut self) {
-        // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
-        let stream_port: u16 = 9944;
-        let stream_protocol: SocketProtocol = SocketProtocol::Channel;
-        let dscp: Option<DscpTos> = None;
-        let server_send_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
-        let client_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
-        let client_send_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
-        let server_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
-        let packet_size: i32 = 1400;
-
-        if let Ok(mut stream_socket) = StreamSocketBuilder::accept_from_server_mod(
-            self.server_ip,
-            stream_port,
-            packet_size as _,
-        ) {
-            println!("Connection established!");
-            self.is_streaming = true;
-
-            self.input_app_video = Some(
-                stream_socket.subscribe_to_stream::<VideoPacketHeader>(VIDEO, MAX_UNREAD_PACKETS),
-            );
-            self.input_app_audio =
-                Some(stream_socket.subscribe_to_stream(AUDIO, MAX_UNREAD_PACKETS));
-            self.input_app_haptics =
-                Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
-            self.streamsocket_clone = Some(stream_socket.clone());
-
-            // {
-            //     // retrieve video packets in RX buffer
-            //     if let Some(rx_socket) = self.input_app_video.clone(){
-
-            //             let  buffer_tx: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
-            //             let  buffer_rx = buffer_tx.clone();
-
-            //             let arc_receiver = rx_socket.network_app_interface.clone();
-
-            //             XRClient::read_network_interface_to_app(self, (), context, buffer_rx, arc_receiver);
-
-            //             let mut buffer_app: Vec<u8> = vec![0;MAX_PACKET_SIZE_RECV];
-            //             let data_app = rx_socket.inner.lock().unwrap().recv(&mut buffer_app);
-
-            //             println!("DATA OF APP: {:?}", &buffer_app[0..100]);
-            //     }
-            // }
-        }
-    }
-
+    
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
         let packet_vec = frame.vec;
         let now = frame.timestamp;

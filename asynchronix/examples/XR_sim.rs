@@ -10,6 +10,7 @@ use asynchronix::model::Context;
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
+use ffmpeg_next::packet::packet;
 use std::collections::HashMap;
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
@@ -94,7 +95,7 @@ impl VRPair {
             initial_bitrate as f32,
             name_folder,
         );
-        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS);
+        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0);
 
         let mut sta_server = STA_extended::new(
             initial_bitrate * 1e6,
@@ -130,6 +131,12 @@ impl VRPair {
             STA_extended::input_XR_app,
             &mbox_sta_server,
         );
+
+        xr_client.outport_tracking_network.connect(
+            STA_extended::input_XR_app, 
+            &mbox_sta_client, 
+        ); 
+
         sta_server.to_app_socket.connect(
             XRServer::in_from_network,
             &mbox_xr_server,
@@ -285,16 +292,19 @@ fn main() {
     let mut simu = sim_builder.init(t0);
     let scheduler = simu.scheduler();
 
+    let packet_size = 1400; 
+
+
     // Schedule XR events
     for addr in &xr_client_addresses {
         // let epsilon = Duration::from_secs_f64(exponential(0.5));
         let epsilon = Duration::from_secs_f64(0.01); 
-        scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRClient::configure_streams, (), addr).unwrap();
+        scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRClient::configure_streams, packet_size, addr).unwrap(); // Why pass packet_size? -> compiler complains if no other arg is found when context is needed:) 
         scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRClient::vsync, (), addr).unwrap();
     }
 
     for (i, addr) in xr_server_addresses.iter().enumerate() {
-        let epsilon = Duration::from_secs_f64(exponential(1.5));
+        let epsilon = Duration::from_secs_f64(exponential(0.3));
         let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
         scheduler.schedule_event(Duration::from_secs(10) + epsilon, XRServer::connection_pipeline, dest_ip, addr).unwrap();
     }

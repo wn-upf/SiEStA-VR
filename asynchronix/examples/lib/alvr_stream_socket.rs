@@ -59,11 +59,14 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::result::Result::Ok;
 use tai_time::TaiTime;
 
+use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
+
+
 // use super::alvr_packets::NetworkStatisticsPacket;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
-pub const INITIAL_FRAMERATE_FPS: f32 = 60.0;
+pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -456,19 +459,19 @@ impl VideoPacketHeader {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
-pub struct Pose {
-    pub orientation: Quat, // NB: default Quat is identity
-    pub position: Vec3,
-}
+// #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
+// pub struct Pose {
+//     pub orientation: Quat, // NB: default Quat is identity
+//     pub position: Vec3,
+// }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
-pub struct DeviceMotion {
-    pub pose: Pose,
-    pub linear_velocity: Vec3,
-    pub angular_velocity: Vec3,
-}
-
+// #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
+// pub struct DeviceMotion {
+//     pub pose: Pose,
+//     pub linear_velocity: Vec3,
+//     pub angular_velocity: Vec3,
+// }
+// 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct FaceData {
     pub eye_gazes: [Option<Pose>; 2],
@@ -1862,13 +1865,6 @@ impl<H: Serialize> StreamSender<H> {
 
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
-        // print_pretty!(
-        //     DebugColor::Navy,
-        //     "[BEFORE] Get_buffer_emu frame size: {} bytes ({} KB)\nData = {:?}",
-        //     buffer.len(),
-        //     buffer.len() / 1024,
-        //     &buffer[..200]
-        // );
 
         if buffer.len() < hidden_offset {
             buffer.resize(hidden_offset, 0);
@@ -1879,13 +1875,6 @@ impl<H: Serialize> StreamSender<H> {
 
         self.next_packet_index += 1;
 
-        // print_pretty!(
-        //     DebugColor::Navy,
-        //     "\t[AFTEEER ]Get_buffer_emu frame size: {} bytes ({} KB)\nData = {:?}",
-        //     buffer.len(),
-        //     buffer.len() / 1024,
-        //     &buffer[..200]
-        // );
 
         Ok(Buffer {
             inner: buffer,
@@ -1895,11 +1884,34 @@ impl<H: Serialize> StreamSender<H> {
         })
     }
 
-    pub fn send_header(&mut self, header: &H, now: TaiTime<0>) -> Result<()> {
-        let ip_random = IpAddr::V4(Ipv4Addr::new(199, 0, 0, 99));
-        let buffer = self.get_buffer_emu(header, 20.0 as f32, now, ip_random  )?;
 
-        println!("WATCHOUT, using 20 as default!!");
+    pub fn get_buffer_tracking(&mut self, header: &H, now: TaiTime<0>) -> Result<Buffer<H>> {
+        let mut buffer = vec![0; 1000];
+        let header_size = bincode::serialized_size(header)? as usize;
+        let hidden_offset = SHARD_PREFIX_SIZE + header_size;
+
+        if buffer.len() < hidden_offset {
+            buffer.resize(hidden_offset, 0);
+        }
+
+        bincode::serialize_into(&mut buffer[SHARD_PREFIX_SIZE..hidden_offset], header)?;
+
+        Ok(Buffer {
+            inner: buffer,
+            hidden_offset,
+            length: 0,
+            _phantom: PhantomData,
+        })
+    }
+    // pub fn send_header(&mut self, header: &H, now: TaiTime<0>) -> Result<()> {
+    //     let ip_random = IpAddr::V4(Ipv4Addr::new(199, 0, 0, 99));
+    //     let buffer = self.get_buffer_emu(header, 20.0 as f32, now, ip_random  )?;
+
+    //     println!("WATCHOUT, using 20 as default!!");
+    //     self.send(buffer, now)
+    // }
+    pub fn send_header_tracking(&mut self, header: &H, now: TaiTime<0>) -> Result<()>{
+        let buffer = self.get_buffer_tracking(header, now).unwrap();
         self.send(buffer, now)
     }
 }
