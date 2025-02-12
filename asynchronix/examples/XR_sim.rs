@@ -250,12 +250,15 @@ fn main() {
         k_queue.saturating_sub(1),
         pl_prob,
         all_sta_ids.clone(),
+        name_folder, 
+        
     );
     let mbox_queue = Mailbox::new();
     let queue_address = mbox_queue.address();
-    let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
+
+    // let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
     let queue_stats = queue.get_queue_stats_handle();
-    let sta_stats = queue.get_stas_stats_handle();
+    // let sta_stats = queue.get_stas_stats_handle();
 
     // Connect all STAs to queue
     for vr in vr_pairs.iter_mut() {
@@ -326,15 +329,15 @@ fn main() {
     simu.step_by(Duration::from_secs_f64(stoptime));
 
     // Save results
-    if let Ok(data) = csv_data.lock() {
-        if let Ok(data2) = data.write_to_csv(&name_folder, &output_path){
-            println!("CSV data saved correctly!!");
-        }
-        else{
-            println!("ERROOOOOOOOR SAVING CSV DATA!! ! ! ! \n\n"); 
-        }
+    // if let Ok(data) = csv_data.lock() {
+    //     if let Ok(data2) = data.write_to_csv(&name_folder, &output_path){
+    //         println!("CSV data saved correctly!!");
+    //     }
+    //     else{
+    //         println!("ERROOOOOOOOR SAVING CSV DATA!! ! ! ! \n\n"); 
+    //     }
 
-    };
+    // };
     // if let Ok(stats) = sta_stats.lock() {
     //     write_all_sta_csvs(&stats, &name_folder, &output_path).unwrap();
     // };

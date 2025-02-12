@@ -2,18 +2,17 @@ use crate::lib::alvr_control_socket::{
     framed_recv, framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
 };
 use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
-use rand::Rng;
 use rand_distr::{Distribution, Normal};
+use rand::distributions::Uniform;
+use rand::{thread_rng, Rng};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-
 use std::{
     fs::write,
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
 use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
-
 use std::cell::RefCell;
 use std::error::Error;
 use std::fs;
@@ -21,7 +20,6 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread_local;
-use tempfile::{Builder, NamedTempFile};
 
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use minifb::Key;
@@ -40,17 +38,12 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 use std::net::IpAddr;
 use std::{mem, vec};
-// use std::process::Output;
 use std::thread::yield_now;
 use std::time::{Duration, Instant};
-
 use std::time::SystemTime;
-
 use once_cell::sync::Lazy;
 use glam::{Vec3, Quat};
 
-// mod mm1k_sim;
-// use crate::mm1k_sim::{QueueModule, QueueStats, Sink, DataSink};
 use std::sync::mpsc::{channel, Sender};
 
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
@@ -58,62 +51,35 @@ use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
     SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
 };
-
 use crate::lib::alvr_control_socket::ProtoControlSocket;
 use tai_time::TaiTime;
-
-use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
-};
+use crate::lib::alvr_stream_socket::{ AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO};
 use crate::lib::DEBUG_PRINT_ENABLED;
-
-pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
-
-pub const CAPACITY_RX_BUFFER: usize = 2000;
-pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
-pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
-
-pub const DECODER_BUFFERING_FRAMES: usize = 3;
-pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
-
-
-pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
-
-static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 use dashmap::DashMap;
 use minifb::Scale;
-
 
 use std::cmp::{self, max};
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::future::Future;
-
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
-
 use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::lib::{exponential, AmpduPacket, Coords, DebugColor, MpduPacket, SlidingWindowAverage};
-
 use crate::lib::alvr_statistics::StatisticsManager;
 // use crate::lib::INITIAL_BITRATE_MBPS_SIM;
-
 use super::alvr_packets::DeadlineShardlossStatPacket;
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
-use super::SlidingWindowTimely;
+use super::{SlidingWindowTimely, _INITIAL_BITRATE_MBPS_SIM};
 // use async_process::Child;
 use lazy_static::lazy_static;
-
 use crate::lib::alvr_control_socket::{ControlPacketType};
-
 use tokio::task;
 
-
+use serde::Deserialize;
 
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
@@ -133,12 +99,79 @@ static FFMPEG_COMMAND: OnceLock<Arc<Mutex<FfmpegCommand>>> = OnceLock::new();
 static FFMPEG_CHILD: OnceLock<Arc<Mutex<Option<(ChildStdin, BufReader<ChildStdout>)>>>> =
     OnceLock::new();
 
+pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
+
+pub const CAPACITY_RX_BUFFER: usize = 2000;
+pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
+
+pub const DECODER_BUFFERING_FRAMES: usize = 3;
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
+
+
+pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
+
+// static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
+
+#[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
+pub struct HeuristicStats {
+        pub frame_interval_s: f32,
+        pub server_fps: f32,
+        pub steps_bps: f32,
+    
+        pub network_heur_fps: f32,
+        pub rtt_avg_heur_s: f32,
+        pub random_prob: f32,
+    
+        pub threshold_fps: f32,
+        pub threshold_rtt_s: f32,
+        pub threshold_u: f32,
+    
+        pub requested_bitrate_bps: f32,
+    }
+#[derive(Clone)]
+pub struct EncoderLatencyLimiter{
+    pub max_saturation_multiplier: f32, 
+}
+#[derive(Clone)]
+pub struct DecoderLatencyLimiter{
+    pub max_decoder_latency_ms: u64, 
+    pub latency_overstep_frames: usize,
+    pub latency_overstep_multiplier: f32,
+}
+#[derive(Clone)]
+pub enum BitrateMode {
+    ConstantMbps(u64),
+    // Adaptive {
+    //     saturation_multiplier: f32,
+    //     max_bitrate_mbps: u64,
+    //     min_bitrate_mbps: u64,
+    //     max_network_latency_ms: u64,
+    //     encoder_latency_limiter: EncoderLatencyLimiter,
+    //     decoder_latency_limiter: DecoderLatencyLimiter, 
+    // },
+    NestVr {
+        update_interval_nestvr_s: f32,
+        max_bitrate_mbps: f32,
+        min_bitrate_mbps: f32,
+        initial_bitrate_mbps: f32,
+        step_size_mbps: f32,
+        capacity_scaling_factor: f32,
+        rtt_explor_prob: f32,
+        nfr_thresh: f32,
+        rtt_thresh_scaling_factor: f32,
+    }
+}
+
 #[allow(unused)]
 #[derive(Clone)]
 pub struct BitrateManager {
     last_frame_instant: Instant,
     last_update_instant: Instant,
 
+    pub bitrate_mode: BitrateMode, 
     frame_index: usize,
 
     frame_interval_average: SlidingWindowAverage<Duration>,
@@ -153,6 +186,9 @@ pub struct BitrateManager {
     rtt_average: SlidingWindowAverage<Duration>,
     peak_throughput_average: SlidingWindowAverage<f32>,
     frame_interarrival_average: SlidingWindowAverage<f32>,
+
+    last_target_bitrate_bps : f32, 
+    
 }
 
 impl BitrateManager {
@@ -170,6 +206,131 @@ impl BitrateManager {
         self.frame_interarrival_average
             .submit_sample(frame_interarrival_s);
     }
+
+    pub fn one_pass_abr(&mut self, ) -> f32 {
+        let bitrate_bps = match self.bitrate_mode{
+            BitrateMode::ConstantMbps(bitrate_mbps) => bitrate_mbps as f32 * 1e6,
+
+            BitrateMode::NestVr {
+                max_bitrate_mbps,
+                min_bitrate_mbps,
+                initial_bitrate_mbps,
+                step_size_mbps,
+                capacity_scaling_factor,
+                rtt_explor_prob,
+                nfr_thresh,
+                rtt_thresh_scaling_factor,
+                ..
+            } => {
+                fn floor_to_nearest_mult_from_initial(value: f32, step: f32, initial: f32) -> f32 {
+                    initial + ((value - initial) / step).floor() * step
+                }
+
+                fn minmax_bitrate(
+                    bitrate_bps: f32,
+                    max_bitrate_mbps: f32,
+                    min_bitrate_mbps: f32,
+                ) -> f32 {
+                    let mut bitrate = bitrate_bps;
+                    bitrate = f32::min(bitrate, max_bitrate_mbps * 1e6);
+                    bitrate = f32::max(bitrate, min_bitrate_mbps * 1e6);
+
+                    bitrate
+                }
+
+                // Sample from uniform distribution
+                let mut rng = rand::thread_rng();
+                let uniform_dist = Uniform::new(0.0, 1.0);
+                let random_prob = rng.sample(uniform_dist);
+
+                let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
+
+                let frame_interval_s = self.frame_interval_average.get_average().as_secs_f32();
+                let rtt_avg_heur_s = self.rtt_average.get_average().as_secs_f32();
+
+                let server_fps = if frame_interval_s != 0.0 {
+                    1.0 / frame_interval_s
+                } else {
+                    0.0
+                };
+                let heur_fps = if self.frame_interarrival_average.get_average() != 0.0 {
+                    1.0 / self.frame_interarrival_average.get_average()
+                } else {
+                    0.0
+                };
+
+                let estimated_capacity_bps = self.peak_throughput_average.get_average();
+                let steps_bps = step_size_mbps * 1E6;
+
+                let threshold_fps = nfr_thresh * server_fps;
+                let threshold_rtt = frame_interval_s * rtt_thresh_scaling_factor;
+                let threshold_u = rtt_explor_prob;
+
+                if heur_fps >= threshold_fps {
+                    if rtt_avg_heur_s > threshold_rtt {
+                        if random_prob >= threshold_u {
+                            bitrate_bps -= steps_bps; // decrease bitrate by 1 step
+                        }
+                    } else {
+                        if random_prob <= threshold_u {
+                            bitrate_bps += steps_bps; // increase bitrate by 1 step
+                        }
+                    }
+                } else {
+                    bitrate_bps -= steps_bps; // decrease bitrate by 1 step
+                }
+
+                // Ensure bitrate is within allowed range
+                bitrate_bps = minmax_bitrate(bitrate_bps, max_bitrate_mbps, min_bitrate_mbps);
+
+                // Ensure bitrate is below the estimated network capacity
+                let capacity_upper_limit = capacity_scaling_factor * estimated_capacity_bps;
+                bitrate_bps = floor_to_nearest_mult_from_initial(
+                    f32::min(bitrate_bps, capacity_upper_limit),
+                    steps_bps,
+                    initial_bitrate_mbps * 1E6,
+                );
+
+                let heur_stats = HeuristicStats {
+                    frame_interval_s: frame_interval_s,
+                    server_fps: server_fps, // fps_tx
+                    steps_bps: steps_bps,
+
+                    network_heur_fps: heur_fps, // fps_rx
+                    rtt_avg_heur_s: rtt_avg_heur_s,
+                    random_prob: random_prob,
+
+                    threshold_fps: threshold_fps,
+                    threshold_rtt_s: threshold_rtt,
+                    threshold_u: threshold_u,
+
+                    requested_bitrate_bps: bitrate_bps,
+                };
+
+                debug_bgprint!(DebugColor::Purple , " ------NeSt-VR STATS-------: {:#?}", heur_stats); 
+
+                // alvr_events::send_event(EventType::HeuristicStats(heur_stats));
+
+                // if let Switch::Enabled(max) = max_bitrate_mbps {
+                //     let maxi = *max as f32 * 1e6;
+                //     stats.manual_max_bps = Some(maxi);
+                // }
+                // if let Switch::Enabled(min) = min_bitrate_mbps {
+                //     let mini = *min as f32 * 1e6;
+                //     stats.manual_min_bps = Some(mini);
+                // }
+
+                self.last_target_bitrate_bps = bitrate_bps; 
+                bitrate_bps
+            }
+
+        }; 
+        debug_bgprint!(DebugColor::Purple , " Bitrate chosen -> {:.3} mbps", bitrate_bps / 1e6); 
+        bitrate_bps
+    }
+
+
+
 
     pub fn report_timestamp_change_bitrate(&mut self, now: TaiTime<0>) {
         let dur = now.duration_since(TaiTime::EPOCH).as_secs_f64();
@@ -242,6 +403,9 @@ impl BitrateManager {
                 1. / initial_framerate,
                 max_history_size,
             ),
+
+            bitrate_mode: BitrateMode::ConstantMbps(_INITIAL_BITRATE_MBPS_SIM as u64),   // ONLY CBR FOR NOW!!!
+            last_target_bitrate_bps: 0.0, 
         }
     }
 }
@@ -338,7 +502,7 @@ impl XRServer {
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
                         println!(
-                            "frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",
+                            "frame {} RTT ZEROO!!!!!",
                             network_stats.frame_index
                         );
                         rtt = Duration::ZERO;
@@ -587,9 +751,10 @@ impl XRServer {
                 let is_idr = false;
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
 
-                self.bitrate_manager.report_timestamp_change_bitrate(now);
-
+                self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
+                // 
+                // let current_bitrate_mbps: f32 = self.bitrate_manager.one_pass_abr(); // for ABR bitrates
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
@@ -601,20 +766,7 @@ impl XRServer {
                 frame_tracker_map.into_iter().for_each(|(key, value)| {
                     map_clone.insert(key, value);
                 });
-                // match map_clone.write() {
-                //     Ok(mut guard) => {
-                //         *guard = send_socket.get_frame_tracker_map();
-                //     }
-                //     Err(_) => {
-                //         println!("Failed to acquire write lock in RTT hashmap");
-                //     }
-                // }                // println!(
-                //     "DBG-> Bitrate: {} Mbps,  Buffer length: {}  buffer.LENGTH: {:?}",
-                //     current_bitrate_mbps,
-                //     buffer_emu.inner.len(),
-                //     buffer_emu.length
-                // );
-
+                
                 let payload = buffer_emu.inner.clone();
                 buffer_emu
                     .get_range_mut(0, payload.len())

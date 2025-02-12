@@ -822,7 +822,7 @@ impl QueueModule {
         self.array_stas_stats.clone()
     }
 
-    pub fn new(num_stas: usize, queue_size: usize, PL_prob: f64, vec_ids: Vec<i32>) -> Self {
+    pub fn new(num_stas: usize, queue_size: usize, PL_prob: f64, vec_ids: Vec<i32>, folder_dir: String) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
 
@@ -876,7 +876,7 @@ impl QueueModule {
             service_rate: 0.0,
             t0_time: Instant::now(),
 
-            csv_metrics: CsvType::new(),
+            csv_metrics: CsvType::new(&folder_dir),
 
             coords_queue: Coords::new(),
             p_tx: 20.0,

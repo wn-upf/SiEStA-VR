@@ -19,6 +19,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
+use std::io::{self, Write};
+use std::path::Path;
+
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -447,10 +450,7 @@ pub fn exponential(mean: f64) -> f64 {
     -mean * u.ln()
 }
 
-#[derive(Clone)]
-pub struct CsvType {
-    csv_data: Arc<Mutex<CsvData>>,
-}
+
 
 // Separate struct to hold the data that will be shared
 #[derive(Clone)]
@@ -481,48 +481,54 @@ impl CsvData {
     }
 
     pub fn write_to_csv(&self, folder: &str, dir_path: &str) -> std::io::Result<()> {
-        let path = format!("{dir_path}/QUEUE_stats.csv");
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)?;
+        // let path = format!("{dir_path}/QUEUE_stats.csv");
+        // let file = OpenOptions::new()
+        //     .write(true)
+        //     .create(true)
+        //     .truncate(true)
+        //     .open(path)?;
 
-        let mut writer = Writer::from_writer(file);
+        // let mut writer = Writer::from_writer(file);
 
-        // Write header
-        writer.write_record(&[
-            "timestamp",
-            "packet_ID",
-            "queue_size",
-            "L_packet",
-            "T_s",
-            "T_q",
-            "id_src",
-            "id_dest",
-        ])?;
+        // // Write header
+        // writer.write_record(&[
+        //     "timestamp",
+        //     "packet_ID",
+        //     "queue_size",
+        //     "L_packet",
+        //     "T_s",
+        //     "T_q",
+        //     "id_src",
+        //     "id_dest",
+        // ])?;
 
-        // Write all stored data at once
-        for i in 0..self.v_timestamp.len() {
-            writer.write_record(&[
-                &self.v_timestamp[i],
-                &self.v_packet_id[i].to_string(),
-                &self.v_queue_size[i].to_string(),
-                &self.v_packet_l[i].to_string(),
-                &self.v_queue_ts[i].to_string(),
-                &self.v_queue_tq[i].to_string(),
-                &self.v_id_src[i].to_string(),
-                &self.v_id_dest[i].to_string(),
-            ])?;
-        }
+        // // Write all stored data at once
+        // for i in 0..self.v_timestamp.len() {
+        //     writer.write_record(&[
+        //         &self.v_timestamp[i],
+        //         &self.v_packet_id[i].to_string(),
+        //         &self.v_queue_size[i].to_string(),
+        //         &self.v_packet_l[i].to_string(),
+        //         &self.v_queue_ts[i].to_string(),
+        //         &self.v_queue_tq[i].to_string(),
+        //         &self.v_id_src[i].to_string(),
+        //         &self.v_id_dest[i].to_string(),
+        //     ])?;
+        // }
 
-        writer.flush()?;
+        // writer.flush()?;
+        // Ok(())
+        println!("DEPRECATED FUNCTIONNNNNNN TODO: DELETE ALL REFERENCES!"); 
         Ok(())
     }
 }
-
+#[derive(Clone)]
+pub struct CsvType {
+    csv_data: Arc<Mutex<CsvData>>,
+    folder: String, 
+}
 impl CsvType {
-    pub fn new() -> Self {
+    pub fn new(folder_name: &str) -> Self {
         Self {
             // v_timestamp: Vec::new(),
             // v_packet_id: Vec::new(),
@@ -531,6 +537,7 @@ impl CsvType {
             // v_queue_tq: Vec::new(),
             // v_packet_l: Vec::new(),
             csv_data: Arc::new(Mutex::new(CsvData::new())),
+            folder: folder_name.to_string(), 
         }
     }
 
@@ -573,8 +580,67 @@ impl CsvType {
             data.v_id_src.push(id_src);
             data.v_id_dest.push(id_dest);
         }
+
+         // Dump all the current data to CSV each time this is called.
+         if let Err(e) = self.save_network_stats_to_csv() {
+            eprintln!("Error writing CSV: {}", e);
+        }
     }
+
+    /// Dumps the entire content of the in-memory vectors to the CSV file.
+    /// After a successful write, the vectors are cleared.
+    pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
+        // Construct the file path
+        let file_path = format!("Results/{}/QUEUE_stats.csv", self.folder);
+        let path = Path::new(&file_path);
+
+        // Open the file in append mode; create it if necessary.
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+
+        // If the file is empty, write a header.
+        if file.metadata()?.len() == 0 {
+            writeln!(
+                file,
+                "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest"
+            )?;
+        }
+
+        // Lock the shared data and drain its contents.
+        let mut data = self.csv_data.lock().unwrap();
+
+        // Assuming all vectors have the same length.
+        for i in 0..data.v_timestamp.len() {
+            // Format one CSV record from the current index.
+            let record = format!(
+                "{},{},{},{},{},{},{},{}",
+                data.v_timestamp[i],
+                data.v_packet_id[i],
+                data.v_queue_size[i],
+                data.v_packet_l[i],
+                data.v_queue_ts[i],
+                data.v_queue_tq[i],
+                data.v_id_src[i],
+                data.v_id_dest[i]
+            );
+            writeln!(file, "{}", record)?;
+        }
+        file.flush()?;
+
+        // Clear the vectors so the same data is not written again.
+        data.v_timestamp.clear();
+        data.v_packet_id.clear();
+        data.v_queue_size.clear();
+        data.v_queue_ts.clear();
+        data.v_queue_tq.clear();
+        data.v_packet_l.clear();
+        data.v_id_src.clear();
+        data.v_id_dest.clear();
+
+        Ok(())
+    }
+
 }
+
 
 #[allow(unused)]
 #[derive(Clone)]
