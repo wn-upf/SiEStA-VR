@@ -1149,18 +1149,18 @@ impl QueueModule {
                         if let Some(stats) = array_STAs_stats.get(&stats_update.sta_src_id) {
                             // println!("OK PER STA");
 
-                            if let Ok(mut stats_data) = stats.data.lock() {
-                                stats_data.update_stats_per_sta(
-                                    stats_update.now,
-                                    stats_update.packet_id as usize,
-                                    stats_update.queue_length_when_out,
-                                    stats_update.T_s,
-                                    stats_update.T_q,
-                                    stats_update.length_packet,
-                                    stats_update.sta_src_id,
-                                    stats_update.sta_dest_id,
-                                );
-                            }
+                            // if let Ok(mut stats_data) = stats.data.lock() {
+                            //     stats_data.update_stats_per_sta(
+                            //         stats_update.now,
+                            //         stats_update.packet_id as usize,
+                            //         stats_update.queue_length_when_out,
+                            //         stats_update.T_s,
+                            //         stats_update.T_q,
+                            //         stats_update.length_packet,
+                            //         stats_update.sta_src_id,
+                            //         stats_update.sta_dest_id,
+                            //     );
+                            // }
                         } else {
                             println!(
                                 "ERROR: No stats found for station {}. Total stations: {}",

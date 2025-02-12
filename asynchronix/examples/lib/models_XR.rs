@@ -405,7 +405,7 @@ impl XRServer {
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
 
-                        println!("TODO: THE REST of tracking server!!");
+                        // println!("TODO: THE REST of tracking server!!");
                     }
                 }
                 STATISTICS => {

@@ -335,9 +335,9 @@ fn main() {
         }
 
     };
-    if let Ok(stats) = sta_stats.lock() {
-        write_all_sta_csvs(&stats, &name_folder, &output_path).unwrap();
-    };
+    // if let Ok(stats) = sta_stats.lock() {
+    //     write_all_sta_csvs(&stats, &name_folder, &output_path).unwrap();
+    // };
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
     };
