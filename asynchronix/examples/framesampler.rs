@@ -5,11 +5,13 @@ use ffmpeg_sidecar::command::{FfmpegCommand};
 use minifb::{Key, Scale, Window, WindowOptions};
 use rand::Rng;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
-
-
+use std::time::Duration;
+use std::time::Instant;
 // Define the expected (encoder) dimensions.
-pub const WIDTH_ENCODER: usize = 3840;
-pub const HEIGHT_ENCODER: usize = 4320;
+pub const WIDTH_ENCODER: usize = 1920;
+pub const HEIGHT_ENCODER: usize = 1080;
+
+pub const INITIAL_BITRATE : String = "2M"; 
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
@@ -54,16 +56,19 @@ pub struct HevcEncoder {
 impl HevcEncoder {
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str) -> Result<Self> {
         let mut child = FfmpegCommand::new()
-            // .args(&["-re"]) // Read input at real-time speed
+            .hwaccel("cuvid")
+            .args(&["-re"]) // Read input at real-time speed
             .args(&["-stream_loop", "-1"]) // Loop input indefinitely
             .input(input)
             .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
-            .args(&["-c:v", "hevc"])
-            .args(&["-preset", "ultrafast"])
+            .args(&["-c:v", "hevc_nvenc"])
+            .args(&["-preset", "fast"])
             .args(&["-rc", "cbr"])
             .args(&["-b:v", bitrate, "-maxrate", bitrate])
+            // .args(&["-r", "60"]) // Specify the output frame rate (60 FPS)
             .args(&["-rc-lookahead", "0"])
-            .args(&["-g", "90"])
+            .args(&["-g", "60"])
+            // .args(&["-threads", "5"])
             .args(&["-movflags", "+frag_keyframe+empty_moov"])
             .args(&["-flush_packets", "1"])
             .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -141,6 +146,7 @@ impl HevcDecoder {
     pub fn new(framerate: u32, width: u32, height: u32) -> Result<Self> {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
+            .hwaccel("auto")
             .args(&["-f", "mp4", "-i", "-"])
             // .args(&["-c:v", "hevc"])
             .args(&["-vf", &format!("fps={}", framerate)])
@@ -233,13 +239,14 @@ fn main() -> Result<()> {
     println!("HIHI!!!"); 
 
 
-    let mut encoder = HevcEncoder::new(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "3M")?;
+
+    let mut encoder = HevcEncoder::new(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &INITIAL_BITRATE)?;
     let decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)?;
     println!("SET UP ENCODE DECODE"); 
-    let drop_probability = 0.01;
+    let drop_probability = 0.000;
     let mut rng = rand::thread_rng();
 
-    let scale_factor = 0.3;
+    let scale_factor = 0.8;
     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
 
@@ -253,28 +260,40 @@ fn main() -> Result<()> {
     // Target 60 FPS (16.67ms per frame)
     let frame_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
     let mut next_frame_time = std::time::Instant::now();
+    let mut t = Instant::now(); 
+    let mut number_fps: usize = 0; // var to keep track somehow of fps
+
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // Process encoder packets
-        print!("RUN!"); 
+        // print!("RUN!"); 
         while let Ok(Some(packet)) = encoder.try_next_packet() {
-            if rng.gen::<f64>() >= drop_probability {
+            // if rng.gen::<f64>() >= drop_probability {
+                // std::thread::sleep(Duration::from_millis(100)); // Adjust this value based on desired speed
                 decoder.packet_tx.send(packet)?;
-            }
+            // }
         }
-
         // Process decoder frames
+        if Instant::now().duration_since(t) >= Duration::from_secs(2){
+            t = Instant::now();
+            println!("FPS COUNTER AVG 2secs: {}", number_fps / 2); 
+            number_fps = 0; 
+        }
+        // println!("{}", number_fps); 
         if let Ok(Some(frame)) = decoder.try_next_frame() {
             let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
             let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
             window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
+            number_fps += 1; 
+
         }
 
-        // Maintain frame rate
-        let now = std::time::Instant::now();
-        if now < next_frame_time {
-            std::thread::sleep(next_frame_time - now);
-        }
+
+        // // Maintain frame rate
+        // let now = std::time::Instant::now();
+        // if now < next_frame_time {
+        //     std::thread::sleep(next_frame_time - now);
+        // }
         next_frame_time += frame_duration;
     }
 
