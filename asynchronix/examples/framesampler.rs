@@ -35,8 +35,8 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
     }
 
     if !pixels.is_empty() {
-        println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}", 
-            pixels[0], pixels[1], pixels[2], pixels[3], pixels[4]);
+        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}", 
+        //     pixels[0], pixels[1], pixels[2], pixels[3], pixels[4]);
     }
     pixels
 }
