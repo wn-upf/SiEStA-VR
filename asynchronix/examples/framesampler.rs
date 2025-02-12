@@ -3,12 +3,18 @@ use std::io::{BufReader, Read, Write};
 use std::process::{ChildStdin, ChildStdout};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use minifb::{Key, Scale, Window, WindowOptions};
+use rand::Rng;
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use std::time::Duration;
-use sdl2::libc;
-
+use std::time::Instant;
+// Define the expected (encoder) dimensions.
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
+pub const INITIAL_BITRATE : &str= "2M"; 
+
+/// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
+/// where each pixel is represented as 0xRRGGBB.
 fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> {
     let expected_len = width * height * 3;
     if rgb_data.len() != expected_len {
@@ -35,13 +41,8 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
     pixels
 }
 
-fn scale_pixels(
-    buffer: &[u32],
-    orig_width: usize,
-    orig_height: usize,
-    new_width: usize,
-    new_height: usize,
-) -> Vec<u32> {
+
+fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width: usize, new_height: usize) -> Vec<u32> {
     let mut scaled = vec![0u32; new_width * new_height];
     let x_ratio = (orig_width << 16) / new_width;
     let y_ratio = (orig_height << 16) / new_height;
@@ -57,232 +58,252 @@ fn scale_pixels(
 }
 
 pub struct HevcEncoder {
-    reader: BufReader<ChildStdout>,
+    packet_rx: Receiver<Vec<u8>>,
     _child: ffmpeg_sidecar::child::FfmpegChild,
-    stderr: std::process::ChildStderr,
+    _stderr_handle: std::thread::JoinHandle<()>,
 }
-
 impl HevcEncoder {
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str) -> Result<Self> {
-        if !std::path::Path::new(input).exists() {
-            return Err(anyhow::anyhow!("Input file does not exist: {}", input));
-        }
-
-        let mut ffmpeg_cmd_builder = FfmpegCommand::new(); 
-        let mut ffmpeg_cmd = ffmpeg_cmd_builder
-            .args(&["-stream_loop", "-1"])
-            .args(&["-loglevel", "warning"])
+        let mut child = FfmpegCommand::new()
+            .hwaccel("cuvid")
+            .args(&["-re"]) // Read input at real-time speed
+            .args(&["-stream_loop", "-1"]) // Loop input indefinitely
             .input(input)
-            .args(&["-vf", &format!("scale={}:{}", width, height)])
-            .args(&["-c:v", "libx265"])
-            .args(&["-preset", "ultrafast"])
-            .args(&["-tune", "zerolatency"])
-            .args(&["-x265-params", "log-level=error:keyint=30:min-keyint=30:scenecut=0"])
-            .args(&["-pix_fmt", "yuv420p"])
-            .args(&["-b:v", bitrate])
-            .args(&["-maxrate", bitrate])
-            .args(&["-minrate", bitrate])
-            .args(&["-bufsize", "1M"])  // Reduced buffer size for lower latency
+            .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
+            .args(&["-c:v", "hevc_nvenc"])
+            .args(&["-preset", "fast"])
             .args(&["-rc", "cbr"])
+            .args(&["-b:v", bitrate, "-maxrate", bitrate])
+            // .args(&["-r", "60"]) // Specify the output frame rate (60 FPS)
+            .args(&["-rc-lookahead", "0"])
+            .args(&["-g", "60"])
+            // .args(&["-threads", "5"])
+            .args(&["-movflags", "+frag_keyframe+empty_moov"])
+            .args(&["-flush_packets", "1"])
+            .args(&["-bsf:v", "hevc_mp4toannexb"])
             .args(&["-an"])
-            .args(&["-f", "mpegts", "pipe:1"]);
+            .args(&["-f", "mp4", "-"])
+            .spawn()?;
 
-        println!("Encoder command: {:?}", ffmpeg_cmd);
-        let mut child = ffmpeg_cmd.spawn()?;
-        
-        let stdout = child.take_stdout().ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
-        let stderr = child.take_stderr().ok_or_else(|| anyhow::anyhow!("Failed to capture stderr"))?;
+        let stdout = child.take_stdout().unwrap();
+        let stderr = child.take_stderr().unwrap();
 
-        Ok(HevcEncoder {
-            reader: BufReader::new(stdout),
+        let (packet_tx, packet_rx) = unbounded();
+
+        // Start stdout reader thread
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        packet_tx.send(buf[..n].to_vec()).unwrap();
+                    }
+                    Err(e) => {
+                        eprintln!("Encoder read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Start stderr monitor thread
+        let stderr_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match reader.read_to_string(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => eprint!("{}", buf),
+                    Err(e) => {
+                        eprintln!("Encoder stderr read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            packet_rx,
             _child: child,
-            stderr,
+            _stderr_handle: stderr_handle,
         })
     }
 
-    pub fn next_packet(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut buf = vec![0u8; 131072];  // Increased buffer size for TS packets
-        match self.reader.read(&mut buf) {
-            Ok(0) => Ok(None),
-            Ok(n) => {
-                buf.truncate(n);
-                println!("Read encoded packet of size: {} bytes", n);
-                Ok(Some(buf))
-            }
-            Err(e) => Err(e.into())
+    pub fn try_next_packet(&self) -> Result<Option<Vec<u8>>> {
+        match self.packet_rx.try_recv() {
+            Ok(packet) => Ok(Some(packet)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
         }
-    }
-
-    pub fn check_errors(&mut self) -> Result<()> {
-        let mut buf = [0u8; 4096];
-        if let Ok(n) = self.stderr.read(&mut buf) {
-            if n > 0 {
-                let stderr_output = String::from_utf8_lossy(&buf[..n]);
-                if !stderr_output.contains("ffmpeg version") {
-                    eprintln!("Encoder stderr: {}", stderr_output);
-                }
-            }
-        }
-        Ok(())
     }
 }
 
 pub struct HevcDecoder {
-    reader: BufReader<ChildStdout>,
-    writer: ChildStdin,
-    frame_size: usize,
+    frame_rx: Receiver<Vec<u8>>,
+    // packet_tx: Sender<Vec<u8>>,
+    packet_tx: Sender<Vec<u8>>,  // Changed from [u8] to Vec<u8>
+    _stdin_handle: std::thread::JoinHandle<()>,
+    _stderr_handle: std::thread::JoinHandle<()>,
     width: u32,
     height: u32,
-    stderr: std::process::ChildStderr,
 }
 
 impl HevcDecoder {
     pub fn new(framerate: u32, width: u32, height: u32) -> Result<Self> {
-        let frame_size: usize = (width as usize) * (height as usize) * 3;
-        let mut ffmpeg_cmd_builder = FfmpegCommand::new(); 
-          let frame_size = (width as usize) * (height as usize) * 3;
-        
-        let ffmpeg_cmd = ffmpeg_cmd_builder
-            .args(&["-hwaccel", "cuda"])
-            .args(&["-c:v", "hevc_cuvid"])
-            .args(&["-i", "pipe:0"])
-            .args(&["-fps_mode", "cfr"])
-            .args(&["-fflags", "+nobuffer"])
-            .args(&["-flags", "low_delay"])
-            .args(&["-strict", "experimental"])
-            .args(&["-vf", &format!(
-                "hwdownload,format=nv12,fps={},scale_cuda={}:{}:format=yuv420p,hwdownload,format=rgb24",
-                framerate, width, height
-            )])
-            .args(&["-f", "rawvideo"])
+        let frame_size = (width as usize) * (height as usize) * 3;
+        let mut child = FfmpegCommand::new()
+            .hwaccel("auto")
+            .args(&["-f", "mp4", "-i", "-"])
+            // .args(&["-c:v", "hevc"])
+            .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
-            .args(&["pipe:1"]);
+            .args(&["-f", "rawvideo", "-"])
+            .spawn()?;
 
-        println!("Decoder command: {:?}", ffmpeg_cmd);
-        let mut child = ffmpeg_cmd.spawn()?;
-        
-        let stdout = child.take_stdout().ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
-        let stdin = child.take_stdin().ok_or_else(|| anyhow::anyhow!("Failed to capture stdin"))?;
-        let stderr = child.take_stderr().ok_or_else(|| anyhow::anyhow!("Failed to capture stderr"))?;
+        let stdout = child.take_stdout().unwrap();
+        let stdin = child.take_stdin().unwrap();
+        let stderr = child.take_stderr().unwrap();
 
-        Ok(HevcDecoder {
-            reader: BufReader::new(stdout),
-            writer: stdin,
-            frame_size,
+    // Changed: Explicitly specify Vec<u8> type for the channel
+    let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
+    let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);  // Added type parameter
+        // Start stdout reader thread
+        std::thread::spawn({
+            let frame_size = frame_size;
+            move || {
+                let mut reader = BufReader::new(stdout);
+                let mut buffer = Vec::with_capacity(frame_size * 2);
+                let mut chunk = vec![0u8; 4096];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buffer.extend_from_slice(&chunk[..n]);
+                            while buffer.len() >= frame_size {
+                                let frame = buffer.drain(..frame_size).collect();
+                                frame_tx.send(frame).unwrap();
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Decoder read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let stdin_handle = std::thread::spawn(move || {
+            let mut writer = stdin;
+            for packet in packet_rx {
+                if let Err(e) = writer.write_all(&packet) {  // packet is Vec<u8> here
+                    eprintln!("Decoder write error: {}", e);
+                    break;
+                }
+            }
+        });
+
+        // Start stderr monitor thread
+        let stderr_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match reader.read_to_string(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => eprint!("{}", buf),
+                    Err(e) => {
+                        eprintln!("Decoder stderr read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            frame_rx,
+            packet_tx,
+            _stdin_handle: stdin_handle,
+            _stderr_handle: stderr_handle,
             width,
             height,
-            stderr,
         })
     }
 
-    pub fn feed_packet(&mut self, packet: &[u8]) -> Result<()> {
-        self.writer.write_all(packet)?;
-        self.writer.flush()?;
-        Ok(())
-    }
-
-    pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut frame = vec![0u8; self.frame_size];
-        
-        use std::os::unix::io::AsRawFd;
-        let fd = self.reader.get_ref().as_raw_fd();
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    pub fn try_next_frame(&self) -> Result<Option<Vec<u8>>> {
+        match self.frame_rx.try_recv() {
+            Ok(frame) => Ok(Some(frame)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Decoder frame channel disconnected")),
         }
-
-        match self.reader.read_exact(&mut frame) {
-            Ok(()) => Ok(Some(frame)),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn check_errors(&mut self) -> Result<()> {
-        let mut buf = [0u8; 4096];
-        if let Ok(n) = self.stderr.read(&mut buf) {
-            if n > 0 {
-                eprintln!("Decoder stderr: {}", String::from_utf8_lossy(&buf[..n]));
-            }
-        }
-        Ok(())
     }
 }
 
 fn main() -> Result<()> {
     ffmpeg_sidecar::download::auto_download()?;
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
+    println!("HIHI!!!"); 
 
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_sunflower_2160p_60fps_stereo_abl.mp4";
-    let width = 1920;
-    let height = 1080;
-    
-    let mut encoder = HevcEncoder::new(input_path, width, height, "2M")?;
-    let mut decoder = HevcDecoder::new(60, width, height)?;
 
-    let scale_factor = 0.4;
-    let scaled_width = (width as f64 * scale_factor) as usize;
-    let scaled_height = (height as f64 * scale_factor) as usize;
+
+    let mut encoder = HevcEncoder::new(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &INITIAL_BITRATE)?;
+    let decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)?;
+    println!("SET UP ENCODE DECODE"); 
+    let drop_probability = 0.000;
+    let mut rng = rand::thread_rng();
+
+    let scale_factor = 0.8;
+    let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+    let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
 
     let mut window = Window::new(
         "Video Stream",
         scaled_width,
         scaled_height,
-        WindowOptions {
-            scale: Scale::X1,
-            ..WindowOptions::default()
-        },
+        WindowOptions::default(),
     )?;
+    println!("WINDOW OPEN"); 
+    // Target 60 FPS (16.67ms per frame)
+    let frame_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
+    let mut next_frame_time = std::time::Instant::now();
+    let mut t = Instant::now(); 
+    let mut number_fps: usize = 0; // var to keep track somehow of fps
 
-    let mut frames_processed = 0;
-    let start_time = std::time::Instant::now();
-    let mut last_frame_time = start_time;
+
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // Process encoder packets
-        if let Some(packet) = encoder.next_packet()? {
-            println!("Sending packet size: {}", packet.len());
-            if let Err(e) = decoder.feed_packet(&packet) {
-                eprintln!("Packet feed error: {}", e);
-            }
+        // print!("RUN!"); 
+        while let Ok(Some(packet)) = encoder.try_next_packet() {
+            // if rng.gen::<f64>() >= drop_probability {
+                // std::thread::sleep(Duration::from_millis(100)); // Adjust this value based on desired speed
+                decoder.packet_tx.send(packet)?;
+            // }
+        }
+        // Process decoder frames
+        if Instant::now().duration_since(t) >= Duration::from_secs(2){
+            t = Instant::now();
+            println!("FPS COUNTER AVG 2secs: {}", number_fps / 2); 
+            number_fps = 0; 
+        }
+        // println!("{}", number_fps); 
+        if let Ok(Some(frame)) = decoder.try_next_frame() {
+            let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+            let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+            window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
+            number_fps += 1; 
+
         }
 
-        // Process decoder frames with timeout
-        let start_read = std::time::Instant::now();
-        while start_read.elapsed() < Duration::from_millis(33) {
-            match decoder.next_frame() {
-                Ok(Some(frame_bytes)) => {
-                    println!("Received frame: {} bytes", frame_bytes.len());
-                    
-                    // Validate frame size
-                    if frame_bytes.len() != (width * height * 3) as usize {
-                        eprintln!("Invalid frame size: {} (expected {})", 
-                            frame_bytes.len(), width * height * 3);
-                        continue;
-                    }
 
-                    // Convert and display
-                    let pixels = convert_rgb_to_u32(&frame_bytes, width as usize, height as usize);
-                    if !pixels.is_empty() {
-                        let scaled_pixels = scale_pixels(
-                            &pixels,
-                            width as usize,
-                            height as usize,
-                            scaled_width,
-                            scaled_height
-                        );
-                        
-                        window.update_with_buffer(&scaled_pixels, scaled_width, scaled_height)?;
-                        frames_processed += 1;
-                    }
-                }
-                Ok(None) => break, // No more frames available
-                Err(e) => eprintln!("Frame read error: {}", e),
-            }
-        }
-
-        encoder.check_errors()?;
-        decoder.check_errors()?;
-        std::thread::sleep(Duration::from_millis(1));
+        // // Maintain frame rate
+        // let now = std::time::Instant::now();
+        // if now < next_frame_time {
+        //     std::thread::sleep(next_frame_time - now);
+        // }
+        next_frame_time += frame_duration;
     }
 
     Ok(())
