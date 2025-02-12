@@ -11,7 +11,7 @@ use std::time::Instant;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const INITIAL_BITRATE : String = "2M"; 
+pub const INITIAL_BITRATE : &str= "2M"; 
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
