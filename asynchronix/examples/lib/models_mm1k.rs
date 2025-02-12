@@ -41,7 +41,7 @@ macro_rules! debug_schedule {
         }
     }
 }
-pub const DEBUG_SCHEDULING: bool = false;
+pub const DEBUG_SCHEDULING: bool = true;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_POLICY: bool = false;
@@ -1286,71 +1286,85 @@ impl QueueModule {
             let mut selected_sta = None;
 
             if LYAPUNOV_POLICY == true {
-                let mut min_priority = f64::MAX;
-                debug_schedule!(
-                    "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
-                    format_elapsed!(now)
-                );
-
-                for (key, info) in sta_packets.iter() {
-                    // iterate through all STAs present in queue
-
-                    // FIRST APPROACH: works well, but can be improved by only considering right hand term if queue size is greater than AMPDU size
-                    // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms;
-                    // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
-
-                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i
-                    let rhs = info.expected_queue_delivery_ms; // max-weight scheduling (Q_i * rate_i)
-                    let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
-                        // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
-                        lhs - rhs
-                    } else {
-                        1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet
-                    };
-
+                    let mut min_priority = f64::MAX;
                     debug_schedule!(
-                        "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | ",
-                        key.0,
-                        info.packet_count,
-                        key.0,
-                        priority,
-                        lhs,
-                        rhs
+                        "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
+                        format_elapsed!(now)
                     );
 
-                    if priority < min_priority {
-                        min_priority = priority;
-                        selected_sta = Some(*key);
+                    for (key, info) in sta_packets.iter() {
+
+                        // iterate through all STAs present in queue
+
+                        // FIRST APPROACH: works well, but can be improved by only considering right hand term if queue size is greater than AMPDU size
+                        // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms;
+                        // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
+
+                        let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i
+                        let rhs = info.expected_queue_delivery_ms; // max-weight scheduling (Q_i * rate_i)
+                        let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
+                            // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
+                            lhs - rhs
+                        } else {
+                            1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet, TODO: Try proportional instead ->  K_penalty_ampdu * ( lhs - rhs)
+                        };
+
+                        let is_ul = if key.0 > key.1 {1} // if sta_src >> sta_dest, then it should be UL traffic
+                            else{0}; 
+
+                        debug_schedule!(
+                            "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | is_ul = {} (src: {} dest: {}) ",
+                            key.0,
+                            info.packet_count,
+                            key.0,
+                            priority,
+                            lhs,
+                            rhs,
+                            is_ul,
+                            key.0,
+                            key.1, 
+
+                        );
+
+                        if priority < min_priority {
+                            min_priority = priority;
+                            selected_sta = Some(*key);
+                        }
                     }
-                }
-            } else if SOFTMAX_POLICY == true {
-                // let key_softmax: (i32, i32);
-                debug_schedule!("SOFTMAX POLICY",);
-                let mut softmax_values: Vec<f64> = Vec::new();
-                let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
-                for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                    softmax_values.push(packets.expected_queue_delivery_ms); // multiplied to be in microseconds, as the softmax function is sensitive to scale we ensure values at least are > 1
-                    softmax_keys.push((*sta_src, *sta_dest));
-                }
-                // println!("Expected queue delivery values: {:?} in microseconds", softmax_values);
+                } else if SOFTMAX_POLICY == true {
+                    // let key_softmax: (i32, i32);
+                    debug_schedule!("SOFTMAX POLICY",);
+                    let mut softmax_values: Vec<f64> = Vec::new();
+                    let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
+                    for ((sta_src, sta_dest), packets) in sta_packets.iter() {
+                        let is_ul = if sta_src > sta_dest {1} // if sta_src >> sta_dest, then it should be UL traffic
+                        else{0}; 
 
-                pub const SOFTMAX_TEMP: f64 = 1000.0;
+                        debug_schedule!("IS_UL = {} | ( src: {}, dest: {} )",
+                                        is_ul, sta_src, sta_dest); 
 
-                let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
+                        softmax_values.push(packets.expected_queue_delivery_ms); // since softmax function is sensitive to scale, we ensure values at least are > 1
+                        softmax_keys.push((*sta_src, *sta_dest));
+                    }
+                    // println!("Expected queue delivery values: {:?} in microseconds", softmax_values);
 
-                let mut rng = rand::thread_rng();
+                    pub const SOFTMAX_TEMP: f64 = 1000.0;
 
-                // println!("RNG = {}, Softmax probabilities: {:?}", rng.gen::<f64>(), softmax_probs);
+                    let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
 
-                let selected_index = softmax_probs
-                    .iter()
-                    .position(|&p| (1.0 - p) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
-                    .unwrap_or(softmax_probs.len() - 1);
-                let selected_key = softmax_keys[selected_index];
-                // key_softmax = selected_key.clone();
+                    let mut rng = rand::thread_rng();
 
-                selected_sta = Some(selected_key);
-            } else { // NORMAL POLICY: FIFO
+                    // println!("RNG = {}, Softmax probabilities: {:?}", rng.gen::<f64>(), softmax_probs);
+
+                    let selected_index = softmax_probs
+                        .iter()
+                        .position(|&p| (1.0 - p) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
+                        .unwrap_or(softmax_probs.len() - 1);
+                    let selected_key = softmax_keys[selected_index];
+                    // key_softmax = selected_key.clone();
+
+                    selected_sta = Some(selected_key);
+                } else { // NORMAL POLICY: FIFO
             }
 
             let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
@@ -1399,7 +1413,6 @@ impl QueueModule {
 
                 let mut last_service_duration = Duration::default();
                 let mut packet_index = 0;
-                let mut resultz = ResultsFrameTXDelay::new();
 
                 let mut resultz = ResultsFrameTXDelay::new();
 
