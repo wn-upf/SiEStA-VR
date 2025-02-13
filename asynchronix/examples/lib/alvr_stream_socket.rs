@@ -10,13 +10,21 @@ use nix::fcntl;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
-use tokio::io::{AsyncReadExt, BufReader};
+// use tokio::io::{AsyncReadExt, BufReader};
+use std::io::{BufReader};
 use crate::DebugColor;
 use lazy_static::lazy_static;
 use std::thread;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::process::ChildStdout;
+use ffmpeg_sidecar::command::FfmpegCommand;
+
+lazy_static! {
+    // Global static encoder instance
+    static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
+}
+
 
 
 
@@ -79,41 +87,154 @@ pub const CONTROL_STREAM: u16 = 5;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
-#[derive(Clone)]
-pub struct EncodingTask {
-    pub current_bitrate_mbps: f32,
-    pub timestamp: f64,
-    pub fps: f64,
-    pub config_key: String,
-    pub result_tx: mpsc::Sender<Vec<u8>>,
-}
-static mut COUNTER_FIBONACCI: usize = 0;
 
-pub fn spawn_encoding_pool(
-    pool_size: usize,
-) -> (
-    mpsc::Sender<EncodingTask>,
-    Arc<Mutex<mpsc::Receiver<EncodingTask>>>,
-) {
-    let (tx, rx) = mpsc::channel::<EncodingTask>();
-    let rx = Arc::new(Mutex::new(rx)); // Wrap the receiver in Arc<Mutex> for shared access
-
-    for _ in 0..pool_size {
-        let receiver = Arc::clone(&rx); // Clone the Arc, not the Receiver
-
-        // Create a new worker thread that processes the tasks
-        thread::spawn(move || loop {
-            let task = receiver
-                .lock()
-                .unwrap()
-                .recv()
-                .expect("Failed to receive task");
-            process_task(task);
-        });
+/// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
+/// where each pixel is represented as 0xRRGGBB.
+fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> {
+    let expected_len = width * height * 3;
+    if rgb_data.len() != expected_len {
+        eprintln!(
+            "Unexpected RGB data length. Expected {}, got {}",
+            expected_len,
+            rgb_data.len()
+        );
+        return Vec::new();
+    }
+    
+    let mut pixels = Vec::with_capacity(width * height);
+    for chunk in rgb_data.chunks_exact(3) {
+        let pixel = ((chunk[0] as u32) << 16) | 
+                   ((chunk[1] as u32) << 8) | 
+                   (chunk[2] as u32);
+        pixels.push(pixel);
     }
 
-    (tx, rx) // Return both the sender and the shared receiver
+    if !pixels.is_empty() {
+        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}", 
+        //     pixels[0], pixels[1], pixels[2], pixels[3], pixels[4]);
+    }
+    pixels
 }
+
+
+fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width: usize, new_height: usize) -> Vec<u32> {
+    let mut scaled = vec![0u32; new_width * new_height];
+    let x_ratio = (orig_width << 16) / new_width;
+    let y_ratio = (orig_height << 16) / new_height;
+
+    for y in 0..new_height {
+        let y2 = ((y * y_ratio) >> 16) * orig_width;
+        for x in 0..new_width {
+            let x2 = (x * x_ratio) >> 16;
+            scaled[y * new_width + x] = buffer[y2 + x2];
+        }
+    }
+    scaled
+}
+
+pub struct HevcEncoder {
+    packet_rx: Receiver<Vec<u8>>,
+    _child: ffmpeg_sidecar::child::FfmpegChild,
+    _stderr_handle: std::thread::JoinHandle<()>,
+}
+impl HevcEncoder {
+    /// Initialize the global encoder instance
+    pub async fn init(input: &str, width: u32, height: u32, bitrate: f32) -> Result<()> {
+        let encoder = Self::new(input, width, height, bitrate).unwrap();
+        let mut guard = HEVC_ENCODER.lock().unwrap();
+        *guard = Some(encoder);
+        Ok(())
+    }
+
+    /// Get a reference to the global encoder instance
+    pub fn get() -> Result<&'static Mutex<Option<HevcEncoder>>> {
+        Ok(&HEVC_ENCODER)
+    }
+
+    pub fn new(input: &str, width: u32, height: u32, bitrate_arg: f32) -> Result<Self> {
+        
+        let bitrate = format!("{:.0}K", bitrate_arg * 1000.0);
+        
+        let mut child = FfmpegCommand::new()
+            .hwaccel("auto")
+            .args(&["-re"]) // Read input at real-time speed
+            .args(&["-stream_loop", "-1"]) // Loop input indefinitely
+            .input(input)
+            .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
+            .args(&["-c:v", "hevc_nvenc"])
+            .args(&["-preset", "fast"])
+            .args(&["-rc", "cbr"])
+            .args(&["-b:v", &bitrate, "-maxrate", &bitrate])
+            // .args(&["-r", "60"]) // Specify the output frame rate (60 FPS)
+            .args(&["-rc-lookahead", "0"])
+            .args(&["-g", "60"])
+            // .args(&["-threads", "5"])
+            .args(&["-movflags", "+frag_keyframe+empty_moov"])
+            .args(&["-flush_packets", "1"])
+            .args(&["-bsf:v", "hevc_mp4toannexb"])
+            .args(&["-an"])
+            .args(&["-f", "mp4", "-"])
+            .spawn()?;
+
+        let stdout = child.take_stdout().unwrap();
+        let stderr = child.take_stderr().unwrap();
+
+        let (packet_tx, packet_rx) = unbounded();
+
+        // Start stdout reader thread
+        // std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = [0u8; 131072];
+            for i in 0..100 {
+            // loop{
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Err(e) = packet_tx.send(buf[..n].to_vec()) {
+                            eprintln!("Failed to send packet: {:?}", e);
+                            break;
+                        }                    }
+                    Err(e) => {
+                        eprintln!("Encoder read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        // });
+
+        // Start stderr monitor thread
+        let stderr_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match reader.read_to_string(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => eprint!("{}", buf),
+                    Err(e) => {
+                        eprintln!("Encoder stderr read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            packet_rx,
+            _child: child,
+            _stderr_handle: stderr_handle,
+        })
+    }
+
+    pub fn try_next_packet(&self) -> Result<Option<Vec<u8>>> {
+        match self.packet_rx.try_recv() {
+            Ok(packet) => Ok(Some(packet)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
+        }
+    }
+}
+
 
 // fn process_task(task: EncodingTask) {
 //     let EncodingTask { current_bitrate_mbps, timestamp, fps, config_key, result_tx } = task;
@@ -165,87 +286,6 @@ pub fn spawn_encoding_pool(
 //     result_tx.send(buf).expect("Failed to send data through channel");
 // }
 
-fn process_task(task: EncodingTask) {
-    // Process the task (same as before)
-    let EncodingTask {
-        current_bitrate_mbps,
-        timestamp,
-        fps,
-        config_key,
-        result_tx,
-    } = task;
-
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
-    let hours = (timestamp / 3600.0) as u32;
-    let minutes = ((timestamp % 3600.0) / 60.0) as u32;
-    let seconds = timestamp % 60.0;
-    let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds - 10.0);
-
-    let current_bitrate_mbps = current_bitrate_mbps / 90.0; // Adjusting bitrate
-
-    // Spawn FFmpeg process
-    let mut process = std::process::Command::new("ffmpeg")
-        .args([
-            "-hwaccel",
-            "cuda",
-            "-ss",
-            &formatted_timestamp,
-            "-i",
-            input_path,
-            "-pix_fmt",
-            "yuv420p",
-            "-vf",
-            &format!("scale={}:{},format=yuv420p", 1280, 720),
-            "-c:v",
-            "hevc_nvenc",
-            "-b:v",
-            &format!("{:.0}K", current_bitrate_mbps * 1000.0),
-            "-preset",
-            "medium",
-            "-rc",
-            "vbr_hq",
-            "-cq",
-            "19",
-            "-b_ref_mode",
-            "2",
-            "-bf",
-            "3",
-            "-temporal-aq",
-            "1",
-            "-spatial-aq",
-            "1",
-            "-aq-strength",
-            "8",
-            "-frames:v",
-            "1",
-            "-an",
-            "-f",
-            "mp4",
-            "-bsf:v",
-            "hevc_mp4toannexb",
-            "-movflags",
-            "+frag_keyframe+empty_moov",
-            "-",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn FFmpeg encoder");
-
-    let mut buf = Vec::new();
-    process
-        .stdout
-        .as_mut()
-        .unwrap()
-        .read_to_end(&mut buf)
-        .expect("Failed to read encoded buffer");
-
-    // Send result through the channel
-    result_tx
-        .send(buf)
-        .expect("Failed to send data through channel");
-}
 
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
@@ -459,19 +499,7 @@ impl VideoPacketHeader {
     }
 }
 
-// #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
-// pub struct Pose {
-//     pub orientation: Quat, // NB: default Quat is identity
-//     pub position: Vec3,
-// }
-
-// #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
-// pub struct DeviceMotion {
-//     pub pose: Pose,
-//     pub linear_velocity: Vec3,
-//     pub angular_velocity: Vec3,
-// }
-// 
+ 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct FaceData {
     pub eye_gazes: [Option<Pose>; 2],
@@ -914,6 +942,7 @@ impl StreamSocket {
             shards_count: 0,
             ref_time: t0,
             frame_tracker: FrameTracker::new(),
+            encoder_hevc: None, 
         }
     }
 
@@ -1750,6 +1779,8 @@ pub struct StreamSender<H> {
     shards_count: usize,
     ref_time: TaiTime<0>,
     frame_tracker: FrameTracker,
+    encoder_hevc: Option<bool> , 
+
 }
 
 pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &'static str> {
@@ -1843,14 +1874,26 @@ impl<H> StreamSender<H> {
 }
 #[allow(unused)]
 impl<H: Serialize> StreamSender<H> {
-    pub fn get_buffer_emu(
+    pub async fn get_buffer_emu(
         &mut self,
         header: &H,
         current_bitrate_mbps: f32,
         now: TaiTime<0>,
         ip: IpAddr,
     ) -> Result<Buffer<H>> {
+        
         let mut buffer: Vec<u8>;
+
+        if self.encoder_hevc.is_none() {
+            let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+            self.encoder_hevc = Some(true) ;  
+        
+            HevcEncoder::init(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, current_bitrate_mbps).await.unwrap();
+        
+        }
+
+
+        
 
         if USE_FFMPEG == true {
             buffer = generate_sample_ffmpeg_opti(

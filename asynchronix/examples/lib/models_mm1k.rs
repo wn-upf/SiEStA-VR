@@ -41,7 +41,7 @@ macro_rules! debug_schedule {
         }
     }
 }
-pub const DEBUG_SCHEDULING: bool = true;
+pub const DEBUG_SCHEDULING: bool = false;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_POLICY: bool = false;
