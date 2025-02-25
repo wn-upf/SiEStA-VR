@@ -12,6 +12,8 @@ use std::{
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
+use tokio::sync::Mutex as tokMutex; 
+
 use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
 use std::cell::RefCell;
 use std::error::Error;
@@ -126,8 +128,7 @@ lazy_static! {
 
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
-    // packet_tx: Sender<Vec<u8>>,
-    packet_tx: Sender<Vec<u8>>,  // Changed from [u8] to Vec<u8>
+    packet_tx: Sender<Vec<u8>>,
     _stdin_handle: std::thread::JoinHandle<()>,
     _stderr_handle: std::thread::JoinHandle<()>,
     width: u32,
@@ -135,25 +136,12 @@ pub struct HevcDecoder {
 }
 
 impl HevcDecoder {
-
-    pub fn init(framerate: f32){
-        let decoder: HevcDecoder = HevcDecoder::new(framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32);
-        let mut guard: std::sync::MutexGuard<'_, Option<HevcDecoder>> = HEVC_DECODER.lock().unwrap();
-        *guard = Some(decoder);
-    }
-
-    /// Get a reference to the global encoder instance
-    pub fn get() -> &'static Mutex<Option<HevcDecoder>> {
-        &HEVC_DECODER
-    }
-
-
     pub fn new(framerate: u32, width: u32, height: u32) -> Self {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
-            .hwaccel("auto")
-            .args(&["-f", "mp4", "-i", "-"])
-            // .args(&["-c:v", "hevc"])
+            .hwaccel("cuda")
+            .args(&["-f", "mpegts", "-i", "-"]) // Changed input format to mpegts to match encoder output
+            // .args(&["-c:v", "hevc"]) // No need to specify codec again, it should be auto-detected
             .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
             .args(&["-f", "rawvideo", "-"])
@@ -164,15 +152,15 @@ impl HevcDecoder {
         let stderr = child.take_stderr().unwrap();
 
     // Changed: Explicitly specify Vec<u8> type for the channel
-    let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
-    let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);  // Added type parameter
+        let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
+        let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);  // Added type parameter
         // Start stdout reader thread
         std::thread::spawn({
             let frame_size = frame_size;
             move || {
                 let mut reader = BufReader::new(stdout);
                 let mut buffer = Vec::with_capacity(frame_size * 2);
-                let mut chunk = vec![0u8; 131072];
+                let mut chunk = vec![0u8; 4096];
                 loop {
                     match reader.read(&mut chunk) {
                         Ok(0) => break,
@@ -229,18 +217,23 @@ impl HevcDecoder {
         }
     }
 
-    pub fn try_next_frame(&self, encoded_buffer: Vec<u8> ) -> Option<Vec<u8>> {
-        let res = self.packet_tx.send(encoded_buffer).unwrap();
-
+    pub fn try_next_frame(&self) -> Option<Vec<u8>> {
+        // println!("TRY READ FRAME"); // ADDED LOGGING
         match self.frame_rx.try_recv() {
-            Ok(frame) => Some(frame),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {println!("Warning! Decoder frame channel disconnected");
-                                                None} ,
+            Ok(frame) => {
+                // println!("Frame received!"); // ADDED LOGGING
+                Some(frame)
+            },
+            Err(TryRecvError::Empty) => {
+                println!("No frame available yet."); // ADDED LOGGING
+                None
+            },
+            Err(TryRecvError::Disconnected) => {println!("WARNING! Decoder frame channel disconnected");
+                                                 None
+                                                } ,
         }
     }
 }
-
 
 
 
@@ -1080,7 +1073,8 @@ pub struct XRClient {
 
     pub last_tracking_time: TaiTime<0>, 
 
-    pub has_decoder: Option<bool>, 
+    // pub has_decoder: Option<bool>, 
+    pub decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>, 
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
@@ -1107,7 +1101,7 @@ impl XRClient {
             decoded_frame_index: 0,
             t_0: now, 
             last_tracking_time: now, 
-            has_decoder: None, 
+            decoder_arc: None, 
             // visualize_decoder_window: None,
         }
     }
@@ -1142,10 +1136,10 @@ impl XRClient {
             self.output_app_tracking_sender = Some(stream_socket.request_stream(TRACKING, self.t_0));
             
 
-            if self.has_decoder.is_none(){
-                self.has_decoder = Some(true); 
+            if self.decoder_arc.is_none(){
+                // self.has_decoder = Some(true); 
                 println!("INITIALIZING DECODER: FPS: {:.1}", self.framerate); 
-                HevcDecoder::init(self.framerate); 
+                self.decoder_arc = Some(Arc::new(tokMutex::new( HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32))   ) ); 
             }
 
             XRClient::generate_tracking_data(self, (), context).await;
@@ -1624,27 +1618,27 @@ impl XRClient {
         rgb
     }
 
-    pub async fn decode_hevc_to_rgb(encoded_buffer: Vec<u8>, frame_index: usize) -> Vec<u32> {
+    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> Vec<u32> {
         // Save the encoded buffer to a file (for debugging or reuse purposes)
-      
-
-        let decoder_guard = HevcDecoder::get().lock().unwrap(); 
-        // Read FFmpeg's output from stdout
         let mut buf: Vec<u8> = Vec::new();
-        // Handle the output buffer
- 
-        if let Some(decoder) = &*decoder_guard{
 
-            if let Some(frame) = decoder.try_next_frame(encoded_buffer) {
+        if let Some(decoder_arc)  = &self.decoder_arc{
+
+            let mut decoder_guard = decoder_arc.lock().await; 
+            let decoder = &mut *decoder_guard; 
+
+            decoder.packet_tx.send(encoded_buffer).unwrap();
+
+            if let Some(frame) = decoder.try_next_frame() {
                 println!("DECODING FRRRRRRRRAME"); 
                 buf = frame.clone(); 
             }
-        }
 
-        if buf.is_empty(){
-            println!("WARNING!! EMPTY DECODER BUFFER?? ")
-        }
+            if buf.is_empty(){
+                println!("WARNING!! EMPTY DECODER BUFFER?? ")
+            }
 
+        }
 
         // Convert raw RGB bytes to a Vec<u32> for rendering
         XRClient::convert_rgb_to_u32(&buf, WIDTH_ENCODER, HEIGHT_ENCODER).unwrap_or_else(|| {
@@ -1685,7 +1679,7 @@ impl XRClient {
                     );
                     
                     if USE_FFMPEG == true {
-                        let frame = XRClient::decode_hevc_to_rgb(
+                        let frame = self.decode_hevc_to_rgb(
                             video_frame.clone(),
                             self.decoded_frame_index,
                         ).await;

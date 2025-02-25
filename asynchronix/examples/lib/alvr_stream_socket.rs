@@ -19,11 +19,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::process::ChildStdout;
 use ffmpeg_sidecar::command::FfmpegCommand;
+use tokio::io::{AsyncReadExt, BufReader as tokBufReader, AsyncBufReadExt}; // Import AsyncBufReadExt
+use std::io::{BufRead};
+use std::path::PathBuf;
+use std::fs;
+use tokio::sync::Mutex as tokMutex; 
 
-lazy_static! {
-    // Global static encoder instance
-    static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
-}
+// lazy_static! {
+//     // Global static encoder instance
+//     static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
+// }
 
 
 
@@ -34,6 +39,12 @@ use crate::{debug_bgprint, format_elapsed};
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 350.0;
+
+
+pub const CHUNK_SIZE_FRAMES: usize = 300; 
+pub const IDR_FRAME_SIZE_GOP: usize = 90; 
+
+
 use rand::Rng;
 use std::cell::RefCell;
 use std::fmt::{self, Debug};
@@ -132,110 +143,292 @@ fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width
     scaled
 }
 
+
 pub struct HevcEncoder {
-    packet_rx: Receiver<Vec<u8>>,
-    _child: ffmpeg_sidecar::child::FfmpegChild,
-    _stderr_handle: std::thread::JoinHandle<()>,
+    input: String,
+    width: u32,
+    height: u32,
+    bitrate: String,
+    chunk_size_frames: usize,
+    // Buffer to hold chunks; each chunk is a vector of bytes read from ffmpeg
+    current_chunk: VecDeque<Vec<u8>>,
+    // Track the start time (in seconds) for the next chunk
+    timestamp_tracker: f32,
+
+
+    idr_frame_size: usize, 
+    fps: usize, 
+    time_scale_chunks: f32, 
+
+    // frame_buffer: VecDeque<Vec<u8>>, // Buffer to hold *individual frames*
 }
+
 impl HevcEncoder {
-    /// Initialize the global encoder instance
-    pub async fn init(input: &str, width: u32, height: u32, bitrate: f32) -> Result<()> {
-        let encoder = Self::new(input, width, height, bitrate).unwrap();
-        let mut guard = HEVC_ENCODER.lock().unwrap();
-        *guard = Some(encoder);
-        Ok(())
+    /// Create a new encoder. Instead of launching a persistent ffmpeg process,
+    /// we simply store the configuration and initialize the buffer and timestamp.
+    pub fn new(
+        input: &str,
+        width: u32,
+        height: u32,
+        bitrate: &str,
+        chunk_size_frames: usize,
+        idr_frame_size: usize, 
+        fps: usize, 
+    ) -> Result<Self> {
+        Ok(Self {
+            input: input.to_owned(),
+            width,
+            height,
+            bitrate: bitrate.to_owned(),
+            chunk_size_frames,
+            current_chunk: VecDeque::new(),
+            timestamp_tracker: 0.0,
+            idr_frame_size,
+            fps: fps,
+            time_scale_chunks: chunk_size_frames as f32/ fps as f32, 
+        })
     }
 
-    /// Get a reference to the global encoder instance
-    pub fn get() -> Result<&'static Mutex<Option<HevcEncoder>>> {
-        Ok(&HEVC_ENCODER)
-    }
+    async fn spawn_chunk(&mut self) -> Result<()> {
+        // Format the start time (in seconds). For more precision you could use decimals.
+        let start_time = format!("{}", self.timestamp_tracker);
+        let time_scale_chunks = format!("{:.3}", self.time_scale_chunks); 
 
-    pub fn new(input: &str, width: u32, height: u32, bitrate_arg: f32) -> Result<Self> {
-        
-        let bitrate = format!("{:.0}K", bitrate_arg * 1000.0);
+        // println!("Spawning chunk at timestamp: {}", start_time); // ADDED LOGGING
+        // println!("Generating with bitrate: {}", self.bitrate); 
         
         let mut child = FfmpegCommand::new()
-            .hwaccel("auto")
-            .args(&["-re"]) // Read input at real-time speed
-            .args(&["-stream_loop", "-1"]) // Loop input indefinitely
-            .input(input)
-            .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
+            .hwaccel("cuda")
+            // Seek to the current timestamp and run for 1 second
+            .args(&["-ss", &start_time])
+            .args(&["-t", &time_scale_chunks])
+            .input(&self.input)
+            .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", self.width, self.height)])
             .args(&["-c:v", "hevc_nvenc"])
             .args(&["-preset", "fast"])
             .args(&["-rc", "cbr"])
-            .args(&["-b:v", &bitrate, "-maxrate", &bitrate])
-            // .args(&["-r", "60"]) // Specify the output frame rate (60 FPS)
+            .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
             .args(&["-rc-lookahead", "0"])
-            .args(&["-g", "60"])
-            // .args(&["-threads", "5"])
+            .args(&["-g", &format!("{:.0}", self.idr_frame_size)])
             .args(&["-movflags", "+frag_keyframe+empty_moov"])
             .args(&["-flush_packets", "1"])
             .args(&["-bsf:v", "hevc_mp4toannexb"])
             .args(&["-an"])
-            .args(&["-f", "mp4", "-"])
+            // Choose a container format that works well for streaming (e.g., mpegts)
+            .args(&["-f", "mpegts", "-"])
             .spawn()?;
 
-        let stdout = child.take_stdout().unwrap();
-        let stderr = child.take_stderr().unwrap();
+        let mut stdout = child
+            .take_stdout()
+            .expect("Failed to capture ffmpeg stdout in spawn_chunk");
 
-        let (packet_tx, packet_rx) = unbounded();
-
-        // Start stdout reader thread
-        // std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = [0u8; 131072];
-            for i in 0..100 {
-            // loop{
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Err(e) = packet_tx.send(buf[..n].to_vec()) {
-                            eprintln!("Failed to send packet: {:?}", e);
-                            break;
-                        }                    }
-                    Err(e) => {
-                        eprintln!("Encoder read error: {}", e);
-                        break;
-                    }
-                }
-            }
-        // });
-
-        // Start stderr monitor thread
-        let stderr_handle = std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match reader.read_to_string(&mut buf) {
-                    Ok(0) => break,
-                    Ok(_) => eprint!("{}", buf),
-                    Err(e) => {
-                        eprintln!("Encoder stderr read error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            packet_rx,
-            _child: child,
-            _stderr_handle: stderr_handle,
-        })
-    }
-
-    pub fn try_next_packet(&self) -> Result<Option<Vec<u8>>> {
-        match self.packet_rx.try_recv() {
-            Ok(packet) => Ok(Some(packet)),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
+        let mut chunk_data = Vec::new();
+        let mut buf = [0u8; 4096*32];
+        
+        println!("Reading stdout from ffmpeg..."); // ADDED LOGGING
+        while let Ok(n) = stdout.read(&mut buf) {
+            if n == 0 { break; }
+            chunk_data.extend_from_slice(&buf[..n]);
         }
+        // println!("Finished reading stdout, waiting for child process..."); // ADDED LOGGING
+        child.wait()?;
+
+        // Append the chunk data (which is now a complete 1-second segment) to our buffer.
+        self.current_chunk.push_back(chunk_data); 
+        // Update timestamp_tracker so the next spawn will process the subsequent second.
+        self.timestamp_tracker += self.time_scale_chunks;
+
+        println!("Timestamp cursor updated to: {} |fps: {} |chunk_size = {}, time_chunks:{} ", self.timestamp_tracker, self.fps, self.current_chunk.len(), self.time_scale_chunks); // ADDED LOGGING
+        Ok(())
     }
+    async fn spawn_chunk_files(&mut self) -> Result<()> {
+        // Format the start time (in seconds)
+        let start_time = format!("{}", self.timestamp_tracker);
+        println!("Spawning chunk at timestamp: {}", start_time);
+    
+        // Define the output file pattern (files will be written into simu_decode_samples/)
+        let output_pattern = "simu_decode_samples/frame_%04d.hevc";
+    
+        let mut child = FfmpegCommand::new()
+            .hwaccel("cuda")
+            // Seek to the current timestamp and process for a fixed duration (self.time_scale_chunks)
+            .args(&["-ss", &start_time])
+            .args(&["-t", &format!("{:.3}", self.time_scale_chunks)])
+            .input(&self.input)
+            .args(&[
+                "-vf",
+                &format!(
+                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                    self.width, self.height
+                ),
+            ])
+            .args(&["-c:v", "hevc_nvenc"])
+            .args(&["-preset", "fast"])
+            .args(&["-rc", "cbr"])
+            .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+            .args(&["-rc-lookahead", "0"])
+            // Use your specified GOP structure (self.idr_frame_size), so not forcing every frame to be an IDR
+            .args(&["-g", &format!("{:.0}", self.idr_frame_size)])
+            .args(&["-movflags", "+frag_keyframe+empty_moov"])
+            .args(&["-flush_packets", "1"])
+            .args(&["-bsf:v", "hevc_mp4toannexb"])
+            .args(&["-an"])
+            // Use the segment muxer to split the output by frame.
+            // -segment_frames 1 tells ffmpeg to start a new file after every encoded frame.
+            .args(&[
+                "-f", "segment",
+                "-segment_frames", "1",
+                output_pattern,
+            ])
+            .spawn()?;
+    
+        child.wait()?;
+    
+        // Update the timestamp_tracker for the next chunk.
+        self.timestamp_tracker += self.time_scale_chunks;
+        println!("Timestamp updated to: {}", self.timestamp_tracker);
+        Ok(())
+    }
+
+
+    pub fn load_frames_from_folder(folder: &str) -> Result<VecDeque<Vec<u8>>> {
+        let mut frames = VecDeque::new();
+    
+        // Read directory entries and filter by files with ".hevc" extension.
+        let mut entries: Vec<PathBuf> = fs::read_dir(folder)?
+            .filter_map(|entry| {
+                entry.ok().and_then(|e| {
+                    let path = e.path();
+                    // Check for .hevc extension (case-insensitive)
+                    if path.extension().and_then(|s| s.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("hevc"))
+                        .unwrap_or(false)
+                    {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+    
+        // Sort entries lexicographically so the filenames are in order.
+        entries.sort();
+    
+        // Read each file into a Vec<u8> and push into the deque.
+        for path in entries {
+            let data = fs::read(&path)?;
+            frames.push_back(data);
+        }
+
+        
+
+        // for entry in fs::read_dir(folder)? { // clear the folder after 
+        //     let entry = entry?;
+        //     let path = entry.path();
+
+        //     if path.is_dir() {
+        //         fs::remove_dir_all(&path)?; // Recursively remove directories
+        //     } else {
+        //         fs::remove_file(&path)?; // Remove files
+        //     }
+        // }    
+
+
+        Ok(frames)
+    }
+
+
+    /// Returns the next chunk of packets.
+    /// If the internal buffer has fewer than `chunk_size_frames` packets, spawn a new ffmpeg process to add one.
+    pub async fn try_next_chunk(&mut self) -> Result<Option<VecDeque<Vec<u8>>>> {
+        if self.current_chunk.len() < self.chunk_size_frames {
+            println!("Current chunk size is {}, less than {}, spawning new chunk.", self.current_chunk.len(), self.chunk_size_frames); // ADDED LOGGING
+            self.spawn_chunk().await.unwrap();
+        } else {
+            println!("Current chunk size is sufficient, taking chunk."); // ADDED LOGGING
+        }
+        // Take the entire current chunk and return it.
+        let chunk = std::mem::take(&mut self.current_chunk);
+        Ok(Some(chunk))
+    }
+
+    pub async fn try_next_chunk_files(&mut self) -> Result<Option<VecDeque<Vec<u8>>>> {
+        
+        self.spawn_chunk_files().await.unwrap(); 
+
+        let chunk = HevcEncoder::load_frames_from_folder("simu_decode_samples/").unwrap(); 
+
+        // Take the entire current chunk and return it.
+        // let chunk = std::mem::take(&mut self.current_chunk);
+        Ok(Some(chunk))
+    }
+    
 }
 
 
+    pub fn split_into_frames(chunk_data: &[u8]) -> VecDeque<Vec<u8>> {
+        // Define the AUD NAL unit start code: 0x00 00 00 01 35
+        const AUD_START_CODE: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x35];
+        let mut frames = VecDeque::new();
+
+        let mut start_idx = 0;
+        let mut next_idx;
+
+        while let Some(pos) = chunk_data[start_idx..].windows(AUD_START_CODE.len()).position(|window| window == AUD_START_CODE) {
+            next_idx = start_idx + pos;
+
+            // If we already have a starting position, extract the frame
+            if start_idx > 0 {
+                let frame = chunk_data[start_idx..next_idx].to_vec();
+                frames.push_back(frame);
+            }
+
+            // Update the start index to the position of the next AUD start code
+            start_idx = next_idx;
+        }
+
+        // Add the last frame (if any data remains after the last AUD)
+        if start_idx < chunk_data.len() {
+            let frame = chunk_data[start_idx..].to_vec();
+            frames.push_back(frame);
+        }
+
+        frames
+    }
+
+    /// Helper function that scans the input data for Annex‑B start code prefixes and
+    /// returns a vector of slices (each slice is one complete NAL unit).
+    pub fn extract_nal_units(data: &[u8]) -> Vec<&[u8]> {
+        let mut nal_units = Vec::new();
+        let mut last_start = None;
+        let mut i = 0;
+        while i < data.len() {
+            // Check first for a 4‑byte start code.
+            if i + 3 < data.len() && &data[i..i + 4] == [0, 0, 0, 1] {
+                if let Some(start) = last_start {
+                    nal_units.push(&data[start..i]);
+                }
+                last_start = Some(i);
+                i += 4;
+                continue;
+            }
+            // Then check for a 3‑byte start code.
+            if i + 2 < data.len() && &data[i..i + 3] == [0, 0, 1] {
+                if let Some(start) = last_start {
+                    nal_units.push(&data[start..i]);
+                }
+                last_start = Some(i);
+                i += 3;
+                continue;
+            }
+            i += 1;
+        }
+        if let Some(start) = last_start {
+            nal_units.push(&data[start..]);
+        }
+        nal_units
+    }
 // fn process_task(task: EncodingTask) {
 //     let EncodingTask { current_bitrate_mbps, timestamp, fps, config_key, result_tx } = task;
 
@@ -943,6 +1136,7 @@ impl StreamSocket {
             ref_time: t0,
             frame_tracker: FrameTracker::new(),
             encoder_hevc: None, 
+            chunk_frames: VecDeque::new(), 
         }
     }
 
@@ -1764,24 +1958,6 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     }
 }
 
-#[derive(Clone)]
-pub struct StreamSender<H> {
-    inner: Arc<Mutex<Box<dyn SocketWriter>>>,
-    pub app_network_interface: Arc<Mutex<Box<dyn SocketReader>>>,
-
-    stream_id: u16,
-    max_packet_size: usize,
-
-    pub next_packet_index: u32,
-    used_buffers: Vec<Vec<u8>>,
-    _phantom: PhantomData<H>,
-
-    shards_count: usize,
-    ref_time: TaiTime<0>,
-    frame_tracker: FrameTracker,
-    encoder_hevc: Option<bool> , 
-
-}
 
 pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &'static str> {
     if data.len() < 22 {
@@ -1804,6 +1980,28 @@ pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &
         tx_r_instant,
     ))
 }
+
+
+#[derive(Clone)]
+pub struct StreamSender<H> {
+    inner: Arc<Mutex<Box<dyn SocketWriter>>>,
+    pub app_network_interface: Arc<Mutex<Box<dyn SocketReader>>>,
+
+    stream_id: u16,
+    max_packet_size: usize,
+
+    pub next_packet_index: u32,
+    used_buffers: Vec<Vec<u8>>,
+    _phantom: PhantomData<H>,
+
+    shards_count: usize,
+    ref_time: TaiTime<0>,
+    frame_tracker: FrameTracker,
+    encoder_hevc: Option<Arc<tokMutex<HevcEncoder>>>,
+    chunk_frames: VecDeque<Vec<u8>>,
+
+}
+
 #[allow(unused)]
 impl<H> StreamSender<H> {
     pub fn get_shards_count(&self) -> usize {
@@ -1881,27 +2079,76 @@ impl<H: Serialize> StreamSender<H> {
         now: TaiTime<0>,
         ip: IpAddr,
     ) -> Result<Buffer<H>> {
-        
         let mut buffer: Vec<u8>;
-
-        if self.encoder_hevc.is_none() {
-            let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
-            self.encoder_hevc = Some(true) ;  
-        
-            HevcEncoder::init(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, current_bitrate_mbps).await.unwrap();
-        
-        }
-
-
-        
-
+        let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
         if USE_FFMPEG == true {
-            buffer = generate_sample_ffmpeg_opti(
-                current_bitrate_mbps,
-                now.duration_since(TaiTime::EPOCH).as_secs_f64(),
-                INITIAL_FRAMERATE_FPS as f64,
-                ip, 
-            );
+            if self.encoder_hevc.is_none(){
+
+                let bitrate_str = format!("{:.1}K", current_bitrate_mbps * 1000.0 ); 
+                let encoder = HevcEncoder::new(
+                    input_path,
+                    WIDTH_ENCODER as u32,
+                    HEIGHT_ENCODER as u32,
+                    &bitrate_str,
+                    CHUNK_SIZE_FRAMES,
+                    IDR_FRAME_SIZE_GOP,
+                    INITIAL_FRAMERATE_FPS as usize
+                )?;
+                self.encoder_hevc = Some(Arc::new(tokMutex::new(encoder))); 
+   
+            }
+
+            if let Some(encoder_arc) = &self.encoder_hevc {
+                println!("chunk frames bfr : {}", self.chunk_frames.len()); 
+                if let Some(frame_chunk) = self.chunk_frames.pop_front() {
+
+                    buffer = frame_chunk; 
+                    println!("CHUUUNK...Got {} frames left! , buffer len: {}" , self.chunk_frames.len(), buffer.len()); 
+                }
+                else { // we generate a new chunk
+
+                    let bitrate_str = format!("{:.1}K", current_bitrate_mbps * 1000.0 );
+
+                    // --- Scope to get bitrate string outside lock ---
+                    {
+                        // Lock the encoder only when we need to generate new chunks and check/update bitrate
+                        let mut encoder_guard = encoder_arc.lock().await;
+                        let encoder = &mut *encoder_guard;
+
+                        if encoder.bitrate != bitrate_str {
+                            println!("Bitrate changed! TODO: bitrate set !")
+                            // encoder.update_bitrate(&bitrate_str)?; // If you had such method
+                        }
+                    } // encoder_guard goes out of scope
+                    let mut encoder_guard_for_chunk_call = encoder_arc.lock().await;
+
+                    if let Ok(Some(chunk)) = encoder_guard_for_chunk_call.try_next_chunk_files().await.as_mut() { // Await future outside lock
+                        // let chuck = chunk.pop_front().unwrap();     
+                        
+                        println!("Size of chuuuunk: {}", chunk.len()); 
+                        self.chunk_frames  = chunk.clone(); // IMPORTANT!! SEPARATE INTO SINGLE FRAMES
+                                                  
+                        if let Some(buf) = self.chunk_frames.pop_front()
+                        {   
+                            buffer = buf; 
+                            println!("******************************Got new chunk, popping one frame! frame len : {} , chunk_len = {}", buffer.len(), self.chunk_frames.len()); 
+                            // println!("DATA: \n {:?}",buffer); 
+                        }
+                        else{
+                            buffer = Vec::new();
+                            println!("Error generating new chunksssss");
+
+                        }
+
+                    } else {
+                        buffer = Vec::new();
+                        println!("Error generating new chunks");
+                }
+             }
+            } else {
+                buffer = Vec::new();
+                println!("Encoder not initialized");
+            }
         } else {
             buffer = generate_fibonacci_video_payload(current_bitrate_mbps); //
         }

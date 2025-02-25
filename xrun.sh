@@ -1,5 +1,5 @@
 NUMBER_OF_JOBS=7
-SERIAL_EXECUTION=0
+SERIAL_EXECUTION=1
 
 
 
@@ -19,7 +19,7 @@ VMAF_ANALYSIS=0
 N_BGs=(0)
 IS_UL_BG=(0)
 # N_XR=(1 2 3 4 5)
-N_XR=(1 2 3 4 5 6 7 8 9 10)
+N_XR=(1 )
 initial_bitrate_mbps=100
 
 
