@@ -140,7 +140,7 @@ impl HevcDecoder {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
-            .args(&["-f", "mpegts", "-i", "-"]) // Changed input format to mpegts to match encoder output
+            .args(&["-f", "hevc", "-i", "-"]) // Changed input format to mpegts to match encoder output
             // .args(&["-c:v", "hevc"]) // No need to specify codec again, it should be auto-detected
             .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
@@ -225,7 +225,7 @@ impl HevcDecoder {
                 Some(frame)
             },
             Err(TryRecvError::Empty) => {
-                println!("No frame available yet."); // ADDED LOGGING
+                println!("DECODER: No frame available yet."); // ADDED LOGGING
                 None
             },
             Err(TryRecvError::Disconnected) => {println!("WARNING! Decoder frame channel disconnected");

@@ -10,15 +10,15 @@ use std::time::Instant;
 use std::collections::VecDeque;
 
 // Define the expected (encoder) dimensions.
-pub const WIDTH_ENCODER: usize = 1920;
-pub const HEIGHT_ENCODER: usize = 1080;
+pub const WIDTH_ENCODER: usize = 3840;
+pub const HEIGHT_ENCODER: usize = 2160;
 
-pub const INITIAL_BITRATE : &str= "10M"; 
-pub const WINDOW_SCALE_FACTOR: f64 = 1.0; 
+pub const INITIAL_BITRATE : &str= "2M"; 
+pub const WINDOW_SCALE_FACTOR: f64 = 0.5; 
 
-pub const IDR_FRAME_SIZE_GOP: usize = 600;
+pub const IDR_FRAME_SIZE_GOP: usize = 30000;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.001; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.06; 
 
 
 
@@ -146,19 +146,6 @@ impl HevcParser {
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
 fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> {
@@ -283,42 +270,89 @@ impl HevcEncoder {
         })
     }
 
+    // pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
+    //     match self.packet_rx.try_recv() {
+    //         Ok(packet) => {
+    //             // Add packet data to the parser
+    //             self.parser.add_data(&packet);
+                
+    //             // Extract frames from the parser and buffer them
+    //             let frames = self.parser.get_frames();
+    //             for frame in frames {
+    //                 // Check if this frame is a keyframe
+    //                 let is_keyframe = Self::is_keyframe(&frame);
+    //                 if is_keyframe {
+    //                     self.last_keyframe = Some(frame.clone());
+    //                 }
+                    
+    //                 self.frame_buffer.push_back(frame);
+    //             }
+                
+    //             Ok(Some(packet))
+    //         },
+    //         Err(TryRecvError::Empty) => Ok(None),
+    //         Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
+    //     }
+    // }
+
+    // pub fn process_incoming_packets(&mut self) -> Result<()> {
+    //     while let Ok(Some(_)) = self.try_next_packet() {
+    //         // Just process the packets to fill our frame buffer
+    //     }
+    //     Ok(())
+    // }
     pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
+        // println!("HevcEncoder::try_next_packet - trying to receive packet"); // ADDED LOG
         match self.packet_rx.try_recv() {
             Ok(packet) => {
+                // println!("HevcEncoder::try_next_packet - received packet of size: {}", packet.len()); // ADDED LOG
                 // Add packet data to the parser
                 self.parser.add_data(&packet);
-                
+
                 // Extract frames from the parser and buffer them
                 let frames = self.parser.get_frames();
+                // println!("HevcEncoder::try_next_packet - extracted {} frames from packet", frames.len()); // ADDED LOG
                 for frame in frames {
                     // Check if this frame is a keyframe
                     let is_keyframe = Self::is_keyframe(&frame);
                     if is_keyframe {
                         self.last_keyframe = Some(frame.clone());
                     }
-                    
+
                     self.frame_buffer.push_back(frame);
                 }
-                
+
                 Ok(Some(packet))
             },
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
+            Err(TryRecvError::Empty) => {
+                // println!("HevcEncoder::try_next_packet - channel empty"); // ADDED LOG
+                Ok(None)
+            },
+            Err(TryRecvError::Disconnected) => {
+                eprintln!("HevcEncoder::try_next_packet - channel disconnected"); // Existing error log
+                Err(anyhow::anyhow!("Encoder channel disconnected"))
+            }
         }
     }
+
+    pub fn process_incoming_packets(&mut self) -> Result<()> {
+        // println!("HevcEncoder::process_incoming_packets - start processing"); // ADDED LOG
+        let mut packets_processed = 0;
+        while let Ok(Some(_)) = self.try_next_packet() {
+            packets_processed += 1; // Count processed packets
+            // Just process the packets to fill our frame buffer
+        }
+        // println!("HevcEncoder::process_incoming_packets - processed {} packets", packets_processed); // ADDED LOG
+        Ok(())
+    }
+    
     
     // Get the next frame from the buffer
     pub fn next_frame(&mut self) -> Option<Vec<u8>> {
         self.frame_buffer.pop_front()
     }
 
-    pub fn process_incoming_packets(&mut self) -> Result<()> {
-        while let Ok(Some(_)) = self.try_next_packet() {
-            // Just process the packets to fill our frame buffer
-        }
-        Ok(())
-    }
+
     
     // Check if a frame contains a keyframe
     fn is_keyframe(frame: &[u8]) -> bool {
@@ -351,6 +385,33 @@ impl HevcEncoder {
     pub fn frames_available(&self) -> usize {
         self.frame_buffer.len()
     }
+
+    /// Asynchronously waits until the encoder has been initialized (i.e. there is at least one frame available).
+    pub async fn wait_for_initialization(&mut self) -> Result<()> {
+        // Poll until at least one frame is in the buffer.
+        while self.frames_available() == 0 {
+            // Process any incoming packets.
+            self.process_incoming_packets()?;
+            // Sleep briefly to yield to other async tasks.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    /// Asynchronously retrieves the next frame from the encoder.
+    /// This function is async-friendly and yields the next available frame.
+    pub async fn get_buffer_emu(&mut self) -> Option<Vec<u8>> {
+        loop {
+            if let Some(frame) = self.next_frame() {
+                return Some(frame);
+            }
+            if let Err(e) = self.process_incoming_packets() {
+                eprintln!("Error processing incoming packets: {}", e);
+            }
+            // Yield briefly to allow other async tasks to run.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 }
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
@@ -368,7 +429,7 @@ impl HevcDecoder {
     pub fn new(framerate: u32, width: u32, height: u32) -> Result<Self> {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
-            .hwaccel("auto")
+            .hwaccel("cuda")
             // Change: Use raw HEVC format for input
             .args(&["-f", "hevc", "-i", "-"])
             .args(&["-vf", &format!("fps={}", framerate)])
@@ -500,6 +561,7 @@ impl HevcDecoder {
     pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
         self.decoded_frames.pop_front()
     }
+
 }
 
 fn main() -> Result<()> {
@@ -592,15 +654,7 @@ fn main() -> Result<()> {
                 } else {
                     println!("Simulated frame loss!");
                     frames_dropped += 1;
-                    
-                    // If we've dropped multiple frames in a row, send a keyframe
-                    if frames_dropped > 3 && encoder.get_latest_keyframe().is_some() {
-                        // println!("Sending recovery keyframe after packet loss");
-                        // if let Err(e) = decoder.process_packet(encoder.get_latest_keyframe().unwrap()) {
-                        //     eprintln!("Error sending recovery keyframe: {}", e);
-                        // }
-                        frames_dropped = 0;
-                    }
+
                 }
                 
                 // Schedule next transmission
