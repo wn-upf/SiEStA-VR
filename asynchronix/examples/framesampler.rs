@@ -7,11 +7,155 @@ use rand::Rng;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 use std::time::Instant;
+use std::collections::VecDeque;
+
 // Define the expected (encoder) dimensions.
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const INITIAL_BITRATE : &str= "2M"; 
+pub const INITIAL_BITRATE : &str= "10M"; 
+pub const WINDOW_SCALE_FACTOR: f64 = 1.0; 
+
+pub const IDR_FRAME_SIZE_GOP: usize = 60;
+
+
+
+/// Represents a single HEVC NAL unit
+pub struct NalUnit {
+    pub nal_type: u8,
+    pub data: Vec<u8>,
+    pub is_keyframe: bool,
+}
+
+/// A parser for HEVC bitstreams to extract individual frames
+pub struct HevcParser {
+    buffer: Vec<u8>,
+}
+
+impl HevcParser {
+    pub fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    /// Add more encoded data to the parser buffer
+    pub fn add_data(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    /// Find the next NAL unit start code in the buffer
+    fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
+        for i in start_pos..self.buffer.len() - 3 {
+            // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
+            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
+               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
+                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Extract the next complete NAL unit from the buffer
+    pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
+        // Find the first start code
+        let start_pos = self.find_next_start_code(0)?;
+        
+        // Determine start code length (3 or 4 bytes)
+        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
+            4
+        } else {
+            3
+        };
+        
+        // Find the next start code
+        let next_start = self.find_next_start_code(start_pos + start_code_len);
+        
+        let (nal_end, has_next) = match next_start {
+            Some(pos) => (pos, true),
+            None => (self.buffer.len(), false)
+        };
+        
+        // If we don't have a complete NAL unit yet, wait for more data
+        if !has_next {
+            return None;
+        }
+        
+        // Extract NAL header and determine NAL type
+        let nal_header_pos = start_pos + start_code_len;
+        if nal_header_pos >= self.buffer.len() {
+            return None;
+        }
+        
+        let nal_header = self.buffer[nal_header_pos];
+        let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+        
+        // Extract the complete NAL unit data (including header)
+        let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
+        
+        // Remove the processed NAL unit from the buffer
+        self.buffer.drain(0..nal_end);
+        
+        // Determine if this is a keyframe (I-frame)
+        // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+        let is_keyframe = (16..=21).contains(&nal_type);
+        
+        Some(NalUnit {
+            nal_type,
+            data: nal_data,
+            is_keyframe,
+        })
+    }
+
+    /// Get all complete frames currently in the buffer
+    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        let mut current_frame = Vec::new();
+        let mut saw_vcl = false;
+        
+        while let Some(nal) = self.next_nal_unit() {
+            // VCL NAL units (0-31) contain the actual picture data
+            let is_vcl = nal.nal_type <= 31;
+            
+            // If we see a VCL NAL and already saw one before, it's a new frame
+            if is_vcl && saw_vcl {
+                if !current_frame.is_empty() {
+                    frames.push(current_frame);
+                    current_frame = Vec::new();
+                }
+                saw_vcl = false;
+            }
+            
+            if is_vcl {
+                saw_vcl = true;
+            }
+            
+            // Add start code and NAL data to current frame
+            current_frame.extend_from_slice(&[0, 0, 0, 1]);
+            current_frame.extend_from_slice(&nal.data);
+        }
+        
+        // Add the last frame if it's not empty
+        if !current_frame.is_empty() {
+            frames.push(current_frame);
+        }
+        
+        frames
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
@@ -61,6 +205,9 @@ pub struct HevcEncoder {
     packet_rx: Receiver<Vec<u8>>,
     _child: ffmpeg_sidecar::child::FfmpegChild,
     _stderr_handle: std::thread::JoinHandle<()>,
+    parser: HevcParser,
+    frame_buffer: VecDeque<Vec<u8>>,  // Buffer for encoded frames
+    last_keyframe: Option<Vec<u8>>,    // Store the most recent keyframe
 }
 impl HevcEncoder {
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str) -> Result<Self> {
@@ -74,15 +221,14 @@ impl HevcEncoder {
             .args(&["-preset", "fast"])
             .args(&["-rc", "cbr"])
             .args(&["-b:v", bitrate, "-maxrate", bitrate])
-            // .args(&["-r", "60"]) // Specify the output frame rate (60 FPS)
             .args(&["-rc-lookahead", "0"])
-            .args(&["-g", "60"])
-            // .args(&["-threads", "5"])
+            .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP) ])
             .args(&["-movflags", "+frag_keyframe+empty_moov"])
             .args(&["-flush_packets", "1"])
             .args(&["-bsf:v", "hevc_mp4toannexb"])
             .args(&["-an"])
-            .args(&["-f", "mp4", "-"])
+            // .args(&["-f", "mp4", "-"])
+            .args(&["-f", "hevc", "-"]) // Raw HEVC format
             .spawn()?;
 
         let stdout = child.take_stdout().unwrap();
@@ -129,26 +275,91 @@ impl HevcEncoder {
             packet_rx,
             _child: child,
             _stderr_handle: stderr_handle,
+            parser: HevcParser::new(),
+            frame_buffer: VecDeque::new(),
+            last_keyframe: None,
         })
     }
 
-    pub fn try_next_packet(&self) -> Result<Option<Vec<u8>>> {
+    pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
         match self.packet_rx.try_recv() {
-            Ok(packet) => Ok(Some(packet)),
+            Ok(packet) => {
+                // Add packet data to the parser
+                self.parser.add_data(&packet);
+                
+                // Extract frames from the parser and buffer them
+                let frames = self.parser.get_frames();
+                for frame in frames {
+                    // Check if this frame is a keyframe
+                    let is_keyframe = Self::is_keyframe(&frame);
+                    if is_keyframe {
+                        self.last_keyframe = Some(frame.clone());
+                    }
+                    
+                    self.frame_buffer.push_back(frame);
+                }
+                
+                Ok(Some(packet))
+            },
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
         }
     }
-}
+    
+    // Get the next frame from the buffer
+    pub fn next_frame(&mut self) -> Option<Vec<u8>> {
+        self.frame_buffer.pop_front()
+    }
 
+    pub fn process_incoming_packets(&mut self) -> Result<()> {
+        while let Ok(Some(_)) = self.try_next_packet() {
+            // Just process the packets to fill our frame buffer
+        }
+        Ok(())
+    }
+    
+    // Check if a frame contains a keyframe
+    fn is_keyframe(frame: &[u8]) -> bool {
+        // Check for start code
+        for i in 0..frame.len().saturating_sub(5) {
+            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
+               (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
+                let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
+                let nal_header_pos = i + start_code_len;
+                
+                if nal_header_pos < frame.len() {
+                    let nal_header = frame[nal_header_pos];
+                    let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+                    
+                    // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+                    if (16..=21).contains(&nal_type) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    // Get the latest keyframe (useful for recovery after packet loss)
+    pub fn get_latest_keyframe(&self) -> Option<Vec<u8>> {
+        self.last_keyframe.clone()
+    }
+    
+    // Number of frames waiting in the buffer
+    pub fn frames_available(&self) -> usize {
+        self.frame_buffer.len()
+    }
+}
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
-    // packet_tx: Sender<Vec<u8>>,
-    packet_tx: Sender<Vec<u8>>,  // Changed from [u8] to Vec<u8>
+    packet_tx: Sender<Vec<u8>>,
     _stdin_handle: std::thread::JoinHandle<()>,
     _stderr_handle: std::thread::JoinHandle<()>,
     width: u32,
     height: u32,
+    parser: HevcParser,
+    frame_buffer: VecDeque<Vec<u8>>,  // Buffer for parsed HEVC frames
+    decoded_frames: VecDeque<Vec<u8>>, // Buffer for decoded RGB frames
 }
 
 impl HevcDecoder {
@@ -156,8 +367,8 @@ impl HevcDecoder {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
             .hwaccel("auto")
-            .args(&["-f", "mp4", "-i", "-"])
-            // .args(&["-c:v", "hevc"])
+            // Change: Use raw HEVC format for input
+            .args(&["-f", "hevc", "-i", "-"])
             .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
             .args(&["-f", "rawvideo", "-"])
@@ -167,9 +378,9 @@ impl HevcDecoder {
         let stdin = child.take_stdin().unwrap();
         let stderr = child.take_stderr().unwrap();
 
-    // Changed: Explicitly specify Vec<u8> type for the channel
-    let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
-    let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);  // Added type parameter
+        let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
+        let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
+        
         // Start stdout reader thread
         std::thread::spawn({
             let frame_size = frame_size;
@@ -199,8 +410,14 @@ impl HevcDecoder {
         let stdin_handle = std::thread::spawn(move || {
             let mut writer = stdin;
             for packet in packet_rx {
-                if let Err(e) = writer.write_all(&packet) {  // packet is Vec<u8> here
+                if let Err(e) = writer.write_all(&packet) {
                     eprintln!("Decoder write error: {}", e);
+                    break;
+                }
+                
+                // It's important to flush after each frame to ensure real-time processing
+                if let Err(e) = writer.flush() {
+                    eprintln!("Decoder flush error: {}", e);
                     break;
                 }
             }
@@ -230,32 +447,74 @@ impl HevcDecoder {
             _stderr_handle: stderr_handle,
             width,
             height,
+            parser: HevcParser::new(),
+            frame_buffer: VecDeque::new(),
+            decoded_frames: VecDeque::new(),
         })
     }
 
-    pub fn try_next_frame(&self) -> Result<Option<Vec<u8>>> {
+    // Process incoming encoded packets
+    pub fn process_packet(&mut self, packet: Vec<u8>) -> Result<()> {
+        // Add packet data to the parser
+        self.parser.add_data(&packet);
+        
+        // Extract frames from the parser and buffer them
+        let frames = self.parser.get_frames();
+        for frame in frames {
+            self.frame_buffer.push_back(frame);
+        }
+        
+        // Forward the packet to ffmpeg for decoding
+        self.packet_tx.send(packet)?;
+        
+        Ok(())
+    }
+
+    // Your existing method to get raw frames from ffmpeg
+    fn try_next_decoded_frame(&self) -> Result<Option<Vec<u8>>> {
         match self.frame_rx.try_recv() {
             Ok(frame) => Ok(Some(frame)),
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Decoder frame channel disconnected")),
         }
     }
+    
+    // Process any available decoded frames from ffmpeg
+    pub fn process_decoded_frames(&mut self) -> Result<()> {
+        // Drain any available decoded frames into our buffer
+        while let Ok(Some(frame)) = self.try_next_decoded_frame() {
+            self.decoded_frames.push_back(frame);
+        }
+        
+        Ok(())
+    }
+
+    // Get the next available encoded frame
+    pub fn next_encoded_frame(&mut self) -> Option<Vec<u8>> {
+        self.frame_buffer.pop_front()
+    }
+
+    // Get the next available decoded RGB frame
+    pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
+        self.decoded_frames.pop_front()
+    }
 }
 
 fn main() -> Result<()> {
     ffmpeg_sidecar::download::auto_download()?;
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
-    println!("HIHI!!!"); 
-
-
+    println!("Starting video codec simulation..."); 
 
     let mut encoder = HevcEncoder::new(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &INITIAL_BITRATE)?;
-    let decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)?;
-    println!("SET UP ENCODE DECODE"); 
-    let drop_probability = 0.000;
+    let mut decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)?;
+    println!("Encoder and decoder initialized"); 
+    
+    // Packet loss simulation parameters
+    let mut drop_probability = 0.000; // Set to 0 initially
     let mut rng = rand::thread_rng();
 
-    let scale_factor = 0.8;
+    // Window setup
+    let scale_factor = WINDOW_SCALE_FACTOR;
     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
 
@@ -265,46 +524,143 @@ fn main() -> Result<()> {
         scaled_height,
         WindowOptions::default(),
     )?;
-    println!("WINDOW OPEN"); 
-    // Target 60 FPS (16.67ms per frame)
+    println!("Window opened"); 
+    
+    // FPS control
     let frame_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
     let mut next_frame_time = std::time::Instant::now();
-    let mut t = Instant::now(); 
-    let mut number_fps: usize = 0; // var to keep track somehow of fps
-
+    let mut fps_timer = Instant::now(); 
+    let mut frames_displayed: usize = 0;
+    let mut frames_dropped: usize = 0;
+    
+    // Frame transmission simulation - we'll use this to control transmission rate
+    let transmission_interval = Duration::from_millis(16); // ~60fps
+    let mut next_transmission_time = Instant::now();
+    
+    // Pipeline recovery
+    let mut consecutive_failures = 0;
+    let max_failures = 5; // Max consecutive failures before recovery
+    let mut last_frame_time = Instant::now();
+    let frame_timeout = Duration::from_millis(500); // If no frames for 500ms, try recovery
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        // Process encoder packets
-        // print!("RUN!"); 
-        while let Ok(Some(packet)) = encoder.try_next_packet() {
-            // if rng.gen::<f64>() >= drop_probability {
-                // std::thread::sleep(Duration::from_millis(100)); // Adjust this value based on desired speed
-                decoder.packet_tx.send(packet)?;
-            // }
+        // Check if we need to attempt recovery
+        if Instant::now().duration_since(last_frame_time) > frame_timeout {
+            println!("Pipeline stalled, attempting recovery...");
+            
+            // Send a keyframe if available to reset decoder state
+            if let Some(keyframe) = encoder.get_latest_keyframe() {
+                println!("Sending recovery keyframe");
+                if let Err(e) = decoder.process_packet(keyframe) {
+                    eprintln!("Error sending recovery keyframe: {}", e);
+                }
+            }
+            
+            last_frame_time = Instant::now();
         }
-        // Process decoder frames
-        if Instant::now().duration_since(t) >= Duration::from_secs(2){
-            t = Instant::now();
-            println!("FPS COUNTER AVG 2secs: {}", number_fps / 2); 
-            number_fps = 0; 
+        
+        // 1. Process incoming encoded data to fill encoder's frame buffer
+        if let Err(e) = encoder.process_incoming_packets() {
+            eprintln!("Error processing encoder packets: {}", e);
+            consecutive_failures += 1;
+            
+            if consecutive_failures > max_failures {
+                eprintln!("Too many failures, attempting recovery");
+                // Could restart encoder/decoder here if needed
+                consecutive_failures = 0;
+            }
+            
+            continue; // Skip to next iteration
         }
-        // println!("{}", number_fps); 
-        if let Ok(Some(frame)) = decoder.try_next_frame() {
-            let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-            let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-            window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
-            number_fps += 1; 
-
+        
+        // Reset failure counter if successful
+        consecutive_failures = 0;
+        
+        // 2. Simulate frame-by-frame transmission at a controlled rate
+        let now = Instant::now();
+        if now >= next_transmission_time && encoder.frames_available() > 0 {
+            // Time to transmit a new frame
+            if let Some(frame) = encoder.next_frame() {
+                // Simulate packet loss
+                if rng.gen::<f64>() >= drop_probability {
+                    // Send the frame to decoder
+                    if let Err(e) = decoder.process_packet(frame) {
+                        eprintln!("Error sending frame to decoder: {}", e);
+                    }
+                } else {
+                    println!("Simulated packet loss!");
+                    frames_dropped += 1;
+                    
+                    // If we've dropped multiple frames in a row, send a keyframe
+                    if frames_dropped > 3 && encoder.get_latest_keyframe().is_some() {
+                        println!("Sending recovery keyframe after packet loss");
+                        if let Err(e) = decoder.process_packet(encoder.get_latest_keyframe().unwrap()) {
+                            eprintln!("Error sending recovery keyframe: {}", e);
+                        }
+                        frames_dropped = 0;
+                    }
+                }
+                
+                // Schedule next transmission
+                next_transmission_time += transmission_interval;
+            }
+        }
+        
+        // 3. Process any decoded frames
+        if let Err(e) = decoder.process_decoded_frames() {
+            eprintln!("Error processing decoded frames: {}", e);
         }
 
-
-        // // Maintain frame rate
-        // let now = std::time::Instant::now();
-        // if now < next_frame_time {
-        //     std::thread::sleep(next_frame_time - now);
-        // }
-        next_frame_time += frame_duration;
+        // 4. Display frames at controlled framerate
+        let display_time = std::time::Instant::now();
+        if display_time >= next_frame_time {
+            if let Some(frame) = decoder.next_decoded_frame() {
+                // Update the last successful frame time
+                last_frame_time = Instant::now();
+                
+                // Convert and display the frame
+                let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                
+                if let Err(e) = window.update_with_buffer(&scaled, scaled_width, scaled_height) {
+                    eprintln!("Error updating window buffer: {}", e);
+                } else {
+                    frames_displayed += 1;
+                }
+                
+                // Schedule next frame display time
+                next_frame_time += frame_duration;
+            }
+        } else {
+            // Sleep to save CPU if it's not time for next frame
+            std::thread::sleep(std::cmp::min(
+                next_frame_time.saturating_duration_since(display_time),
+                Duration::from_millis(1)
+            ));
+        }
+        
+        // FPS counter
+        if Instant::now().duration_since(fps_timer) >= Duration::from_secs(2) {
+            println!("FPS: {}", frames_displayed / 2); 
+            frames_displayed = 0;
+            fps_timer = Instant::now();
+        }
+        
+        // Process window events
+        window.update();
+        
+        // Toggle packet loss with spacebar
+        if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
+            if drop_probability == 0.0 {
+                drop_probability = 0.05;
+                println!("Packet loss simulation enabled (5%)");
+            } else {
+                drop_probability = 0.0;
+                println!("Packet loss simulation disabled");
+            }
+        }
     }
-
+    
+    println!("Exiting gracefully...");
     Ok(())
 }
