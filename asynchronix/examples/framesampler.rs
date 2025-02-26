@@ -16,7 +16,9 @@ pub const HEIGHT_ENCODER: usize = 1080;
 pub const INITIAL_BITRATE : &str= "10M"; 
 pub const WINDOW_SCALE_FACTOR: f64 = 1.0; 
 
-pub const IDR_FRAME_SIZE_GOP: usize = 60;
+pub const IDR_FRAME_SIZE_GOP: usize = 600;
+
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.001; 
 
 
 
@@ -510,7 +512,7 @@ fn main() -> Result<()> {
     println!("Encoder and decoder initialized"); 
     
     // Packet loss simulation parameters
-    let mut drop_probability = 0.000; // Set to 0 initially
+    let mut drop_probability = PACKET_LOSS_PROBABILITY; 
     let mut rng = rand::thread_rng();
 
     // Window setup
@@ -588,15 +590,15 @@ fn main() -> Result<()> {
                         eprintln!("Error sending frame to decoder: {}", e);
                     }
                 } else {
-                    println!("Simulated packet loss!");
+                    println!("Simulated frame loss!");
                     frames_dropped += 1;
                     
                     // If we've dropped multiple frames in a row, send a keyframe
                     if frames_dropped > 3 && encoder.get_latest_keyframe().is_some() {
-                        println!("Sending recovery keyframe after packet loss");
-                        if let Err(e) = decoder.process_packet(encoder.get_latest_keyframe().unwrap()) {
-                            eprintln!("Error sending recovery keyframe: {}", e);
-                        }
+                        // println!("Sending recovery keyframe after packet loss");
+                        // if let Err(e) = decoder.process_packet(encoder.get_latest_keyframe().unwrap()) {
+                        //     eprintln!("Error sending recovery keyframe: {}", e);
+                        // }
                         frames_dropped = 0;
                     }
                 }
@@ -649,16 +651,16 @@ fn main() -> Result<()> {
         // Process window events
         window.update();
         
-        // Toggle packet loss with spacebar
-        if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
-            if drop_probability == 0.0 {
-                drop_probability = 0.05;
-                println!("Packet loss simulation enabled (5%)");
-            } else {
-                drop_probability = 0.0;
-                println!("Packet loss simulation disabled");
-            }
-        }
+        // // Toggle packet loss with spacebar
+        // if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
+        //     if drop_probability == 0.0 {
+        //         drop_probability = 0.05;
+        //         println!("Packet loss simulation enabled (5%)");
+        //     } else {
+        //         drop_probability = 0.0;
+        //         println!("Packet loss simulation disabled");
+        //     }
+        // }
     }
     
     println!("Exiting gracefully...");
