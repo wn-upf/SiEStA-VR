@@ -8,18 +8,131 @@ use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 use std::time::Instant;
 use std::collections::VecDeque;
-
+use async_std::task;
 // Define the expected (encoder) dimensions.
-pub const WIDTH_ENCODER: usize = 3840;
-pub const HEIGHT_ENCODER: usize = 2160;
+// pub const WIDTH_ENCODER: usize = 3840;
+// pub const HEIGHT_ENCODER: usize = 2160;
+pub const WIDTH_ENCODER: usize = 1920;
+pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const INITIAL_BITRATE : &str= "2M"; 
-pub const WINDOW_SCALE_FACTOR: f64 = 0.5; 
+pub const WINDOW_SCALE_FACTOR: f64 = 0.9; 
 
 pub const IDR_FRAME_SIZE_GOP: usize = 300;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.01; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.00; 
 
+pub const CHUNK_SIZE_ENCODER_S: f64 = 10.0; 
+
+// New encoder type that chunks the video into fixed-duration segments.
+/// Each chunk is produced by invoking ffmpeg with "-ss" (start time)
+/// and "-t" (duration) options. Parsed complete frames are sent over an async channel.
+pub struct ChunkedHevcEncoder {
+    input: String,
+    width: u32,
+    height: u32,
+    bitrate: String,
+    chunk_duration: f64,   // Duration of each chunk in seconds.
+    current_offset: f64,   // Current start timestamp.
+    frame_tx: Sender<Vec<u8>>,
+    frame_rx: Receiver<Vec<u8>>,
+}
+
+impl ChunkedHevcEncoder {
+    /// Create a new ChunkedHevcEncoder.
+    pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64) -> Self {
+        // We use a bounded channel to store parsed frames.
+        let (frame_tx, frame_rx) = bounded(100);
+        Self {
+            input: input.to_string(),
+            width,
+            height,
+            bitrate: bitrate.to_string(),
+            chunk_duration,
+            current_offset: 0.0,
+            frame_tx,
+            frame_rx,
+        }
+    }
+
+    /// Continuously spawn ffmpeg processes to produce video chunks.
+    /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
+    /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
+    /// Each complete frame is sent via the async channel.
+    pub async fn start_chunking(&mut self) -> Result<()> {
+        loop {
+            // Build an ffmpeg command for the current chunk:
+            // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
+            let mut command = FfmpegCommand::new();
+            command
+                .hwaccel("cuda")
+                .args(&["-ss", &self.current_offset.to_string()])
+                .args(&["-t", &self.chunk_duration.to_string()])
+                .args(&["-re"]) // read at realtime speed
+                .input(&self.input)
+                .args(&[
+                    "-vf",
+                    &format!(
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                        self.width, self.height
+                    ),
+                ])
+                .args(&["-c:v", "hevc_nvenc"])
+                .args(&["-preset", "fast"])
+                .args(&["-rc", "cbr"])
+                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-rc-lookahead", "0"])
+                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])  // using your GOP size constant
+                .args(&["-movflags", "+frag_keyframe+empty_moov"])
+                .args(&["-flush_packets", "1"])
+                .args(&["-bsf:v", "hevc_mp4toannexb"])
+                .args(&["-an"])
+                .args(&["-f", "hevc", "-"]); // output raw HEVC
+
+            // Spawn the ffmpeg process for this chunk.
+            let mut child = command.spawn()?;
+            let stdout = child.take_stdout().unwrap();
+            let mut reader = BufReader::new(stdout);
+
+            let mut parser = HevcParser::new();
+            let mut buf = [0u8; 4096];
+
+            // Read data from the process until it ends.
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break, // end of chunk
+                    Ok(n) => {
+                        parser.add_data(&buf[..n]);
+                        // Extract complete frames and send them on the channel.
+                        let frames = parser.get_frames();
+                        for frame in frames {
+                            if let Err(e) = self.frame_tx.send(frame) {
+                                eprintln!("Error sending frame: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading ffmpeg chunk: {}", e);
+                        break;
+                    }
+                }
+            }
+            let _ = child.wait();
+
+            // Update offset for the next chunk.
+            self.current_offset += self.chunk_duration;
+            // (Optional: Reset current_offset to zero if you want to loop over the input.)
+
+            // Optionally yield control to allow other async tasks to run.
+            task::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Async getter that awaits and returns the next available frame.
+    pub async fn next_frame(&self) -> Option<Vec<u8>> {
+        self.frame_rx.recv().ok()
+    }
+}
 
 
 /// Represents a single HEVC NAL unit
@@ -201,7 +314,7 @@ pub struct HevcEncoder {
 impl HevcEncoder {
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str) -> Result<Self> {
         let mut child = FfmpegCommand::new()
-            .hwaccel("cuvid")
+            .hwaccel("cuda")
             .args(&["-re"]) // Read input at real-time speed
             .args(&["-stream_loop", "-1"]) // Loop input indefinitely
             .input(input)
@@ -270,6 +383,26 @@ impl HevcEncoder {
         })
     }
 
+    pub async fn wait_for_initialization(&mut self) -> Result<()> {
+        // Poll until at least one frame is in the buffer.
+        while self.frames_available() == 0 {
+            self.process_incoming_packets()?;
+            task::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
+
+    pub async fn get_buffer_emu(&mut self) -> Option<Vec<u8>> {
+        loop {
+            if let Some(frame) = self.next_frame() {
+                return Some(frame);
+            }
+            if let Err(e) = self.process_incoming_packets() {
+                eprintln!("Error processing incoming packets: {}", e);
+            }
+            task::sleep(Duration::from_millis(1)).await;
+        }
+    }
     // pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
     //     match self.packet_rx.try_recv() {
     //         Ok(packet) => {
@@ -386,32 +519,6 @@ impl HevcEncoder {
         self.frame_buffer.len()
     }
 
-    /// Asynchronously waits until the encoder has been initialized (i.e. there is at least one frame available).
-    pub async fn wait_for_initialization(&mut self) -> Result<()> {
-        // Poll until at least one frame is in the buffer.
-        while self.frames_available() == 0 {
-            // Process any incoming packets.
-            self.process_incoming_packets()?;
-            // Sleep briefly to yield to other async tasks.
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        Ok(())
-    }
-
-    /// Asynchronously retrieves the next frame from the encoder.
-    /// This function is async-friendly and yields the next available frame.
-    pub async fn get_buffer_emu(&mut self) -> Option<Vec<u8>> {
-        loop {
-            if let Some(frame) = self.next_frame() {
-                return Some(frame);
-            }
-            if let Err(e) = self.process_incoming_packets() {
-                eprintln!("Error processing incoming packets: {}", e);
-            }
-            // Yield briefly to allow other async tasks to run.
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
 }
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
@@ -564,159 +671,132 @@ impl HevcDecoder {
 
 }
 
-fn main() -> Result<()> {
-    ffmpeg_sidecar::download::auto_download()?;
+#[async_std::main]
+async fn main() -> Result<()> {
+    // ffmpeg_sidecar::download::auto_download()?;
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
-    println!("Starting video codec simulation..."); 
+    println!("Starting video codec simulation...");
 
-    let mut encoder = HevcEncoder::new(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &INITIAL_BITRATE)?;
+    // Create the chunked encoder.
+    let mut chunked_encoder = ChunkedHevcEncoder::new(
+        input_path,
+        WIDTH_ENCODER as u32,
+        HEIGHT_ENCODER as u32,
+        INITIAL_BITRATE,
+        CHUNK_SIZE_ENCODER_S,  // Chunk duration in seconds
+    );
+    // Clone the async receiver so we can poll for frames in the main loop.
+    let frame_rx = chunked_encoder.frame_rx.clone();
+
+    // Spawn the chunking task in the background.
+    async_std::task::spawn(async move {
+        if let Err(e) = chunked_encoder.start_chunking().await {
+            eprintln!("Chunking task error: {}", e);
+        }
+    });
+
+    // Create the decoder as before.
     let mut decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)?;
-    println!("Encoder and decoder initialized"); 
-    
-    // Packet loss simulation parameters
-    let mut drop_probability = PACKET_LOSS_PROBABILITY; 
-    let mut rng = rand::thread_rng();
+    println!("Encoder and decoder initialized");
 
-    // Window setup
+    // Window setup.
     let scale_factor = WINDOW_SCALE_FACTOR;
     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
-
     let mut window = Window::new(
         "Video Stream",
         scaled_width,
         scaled_height,
         WindowOptions::default(),
     )?;
-    println!("Window opened"); 
-    
-    // FPS control
-    let frame_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
-    let mut next_frame_time = std::time::Instant::now();
-    let mut fps_timer = Instant::now(); 
+    println!("Window opened");
+
+    // FPS control.
+    let frame_duration = Duration::from_secs_f64(1.0 / 60.0);
+    let mut next_frame_time = Instant::now();
+    let mut fps_timer = Instant::now();
     let mut frames_displayed: usize = 0;
     let mut frames_dropped: usize = 0;
-    
-    // Frame transmission simulation - we'll use this to control transmission rate
+
+    // Transmission simulation.
     let transmission_interval = Duration::from_millis(16); // ~60fps
     let mut next_transmission_time = Instant::now();
-    
-    // Pipeline recovery
-    let mut consecutive_failures = 0;
-    let max_failures = 5; // Max consecutive failures before recovery
+
+    // Pipeline recovery.
     let mut last_frame_time = Instant::now();
-    let frame_timeout = Duration::from_millis(500); // If no frames for 500ms, try recovery
+    let frame_timeout = Duration::from_millis(2000);
+    let mut drop_probability = PACKET_LOSS_PROBABILITY;
+    let mut rng = rand::thread_rng();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        // Check if we need to attempt recovery
+        // 1. Pipeline recovery: if no frame received in a while, try to recover using a keyframe.
         if Instant::now().duration_since(last_frame_time) > frame_timeout {
             println!("Pipeline stalled, attempting recovery...");
-            
-            // Send a keyframe if available to reset decoder state
-            if let Some(keyframe) = encoder.get_latest_keyframe() {
+            // Await a frame (which should ideally be a keyframe) for recovery.
+            if let Ok(keyframe) = frame_rx.recv() {
                 println!("Sending recovery keyframe");
                 if let Err(e) = decoder.process_packet(keyframe) {
                     eprintln!("Error sending recovery keyframe: {}", e);
                 }
+            } else {
+                println!("No keyframe available for recovery");
             }
-            
             last_frame_time = Instant::now();
         }
-        
-        // 1. Process incoming encoded data to fill encoder's frame buffer
-        if let Err(e) = encoder.process_incoming_packets() {
-            eprintln!("Error processing encoder packets: {}", e);
-            consecutive_failures += 1;
-            
-            if consecutive_failures > max_failures {
-                eprintln!("Too many failures, attempting recovery");
-                // Could restart encoder/decoder here if needed
-                consecutive_failures = 0;
-            }
-            
-            continue; // Skip to next iteration
-        }
-        
-        // Reset failure counter if successful
-        consecutive_failures = 0;
-        
-        // 2. Simulate frame-by-frame transmission at a controlled rate
+
+        // 2. Frame transmission simulation: non-blocking try_recv from our async channel.
         let now = Instant::now();
-        if now >= next_transmission_time && encoder.frames_available() > 0 {
-            // Time to transmit a new frame
-            if let Some(frame) = encoder.next_frame() {
-                // Simulate packet loss
+        if now >= next_transmission_time {
+            if let Ok(frame) = frame_rx.try_recv() {
+                // Simulate packet loss.
                 if rng.gen::<f64>() >= drop_probability {
-                    // Send the frame to decoder
                     if let Err(e) = decoder.process_packet(frame) {
                         eprintln!("Error sending frame to decoder: {}", e);
                     }
                 } else {
                     println!("Simulated frame loss!");
                     frames_dropped += 1;
-
                 }
-                
-                // Schedule next transmission
                 next_transmission_time += transmission_interval;
             }
         }
-        
-        // 3. Process any decoded frames
+
+        // 3. Process any decoded frames.
         if let Err(e) = decoder.process_decoded_frames() {
             eprintln!("Error processing decoded frames: {}", e);
         }
 
-        // 4. Display frames at controlled framerate
-        let display_time = std::time::Instant::now();
+        // 4. Display frames.
+        let display_time = Instant::now();
         if display_time >= next_frame_time {
             if let Some(frame) = decoder.next_decoded_frame() {
-                // Update the last successful frame time
+                // Update the last successful frame time.
                 last_frame_time = Instant::now();
-                
-                // Convert and display the frame
+                // Convert and display the frame.
                 let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
                 let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-                
                 if let Err(e) = window.update_with_buffer(&scaled, scaled_width, scaled_height) {
                     eprintln!("Error updating window buffer: {}", e);
                 } else {
                     frames_displayed += 1;
                 }
-                
-                // Schedule next frame display time
                 next_frame_time += frame_duration;
             }
         } else {
-            // Sleep to save CPU if it's not time for next frame
-            std::thread::sleep(std::cmp::min(
-                next_frame_time.saturating_duration_since(display_time),
-                Duration::from_millis(1)
-            ));
+            // Yield to other tasks.
+            async_std::task::sleep(Duration::from_millis(1)).await;
         }
-        
-        // FPS counter
+
+        // FPS counter.
         if Instant::now().duration_since(fps_timer) >= Duration::from_secs(2) {
-            println!("FPS: {}", frames_displayed / 2); 
+            println!("FPS: {}", frames_displayed / 2);
             frames_displayed = 0;
             fps_timer = Instant::now();
         }
-        
-        // Process window events
+
         window.update();
-        
-        // // Toggle packet loss with spacebar
-        // if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
-        //     if drop_probability == 0.0 {
-        //         drop_probability = 0.05;
-        //         println!("Packet loss simulation enabled (5%)");
-        //     } else {
-        //         drop_probability = 0.0;
-        //         println!("Packet loss simulation disabled");
-        //     }
-        // }
     }
-    
+
     println!("Exiting gracefully...");
     Ok(())
 }
