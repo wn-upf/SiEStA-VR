@@ -16,9 +16,9 @@ pub const HEIGHT_ENCODER: usize = 2160;
 pub const INITIAL_BITRATE : &str= "2M"; 
 pub const WINDOW_SCALE_FACTOR: f64 = 0.5; 
 
-pub const IDR_FRAME_SIZE_GOP: usize = 30000;
+pub const IDR_FRAME_SIZE_GOP: usize = 300;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.06; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.01; 
 
 
 
