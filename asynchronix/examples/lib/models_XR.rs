@@ -1560,27 +1560,37 @@ impl XRClient {
         }
     }
 
-    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
-        if rgb_data.len() != width * height * 3 {
-            eprintln!(
-                "Unexpected RGB data length. Expected {}, got {}",
-                width * height * 3,
-                rgb_data.len()
-            );
+    pub fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
+        let expected_size = width * height * 3; // RGB data is 3 bytes per pixel
+        
+        if rgb_data.len() != expected_size {
+            println!("RGB data size mismatch: expected {}, got {}", expected_size, rgb_data.len());
             return None;
         }
-
-        let rgb = rgb_data
-            .chunks_exact(3)
-            .map(|chunk| {
-                let r = chunk[0] as u32;
-                let g = chunk[1] as u32;
-                let b = chunk[2] as u32;
-                (r << 16) | (g << 8) | b
-            })
-            .collect();
-
-        Some(rgb)
+        
+        let mut u32_buffer = Vec::with_capacity(width * height);
+        
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) * 3;
+                
+                // Bounds check to prevent panic
+                if idx + 2 >= rgb_data.len() {
+                    println!("Error: Out of bounds at ({}, {}), idx={}", x, y, idx);
+                    return None;
+                }
+                
+                // Create ARGB (little endian: 0xAA_RR_GG_BB)
+                let r = rgb_data[idx] as u32;
+                let g = rgb_data[idx + 1] as u32;
+                let b = rgb_data[idx + 2] as u32;
+                let pixel = 0xFF000000 | (r << 16) | (g << 8) | b;
+                
+                u32_buffer.push(pixel);
+            }
+        }
+        
+        Some(u32_buffer)
     }
 
     // Function to convert YUV420p to RGB
@@ -1618,33 +1628,71 @@ impl XRClient {
         rgb
     }
 
+  
     pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> Vec<u32> {
-        // Save the encoded buffer to a file (for debugging or reuse purposes)
-        let mut buf: Vec<u8> = Vec::new();
-
-        if let Some(decoder_arc)  = &self.decoder_arc{
-
-            let mut decoder_guard = decoder_arc.lock().await; 
-            let decoder = &mut *decoder_guard; 
-
-            decoder.packet_tx.send(encoded_buffer).unwrap();
-
-            if let Some(frame) = decoder.try_next_frame() {
-                println!("DECODING FRRRRRRRRAME"); 
-                buf = frame.clone(); 
-            }
-
-            if buf.is_empty(){
-                println!("WARNING!! EMPTY DECODER BUFFER?? ")
-            }
-
+        // Make a copy of the buffer for debugging if needed
+        let encoded_length = encoded_buffer.len();
+        println!("Decoding HEVC frame of size: {} bytes", encoded_length);
+        
+        if encoded_buffer.is_empty() {
+            println!("WARNING: Empty encoded buffer received!");
+            return Vec::new();
         }
-
-        // Convert raw RGB bytes to a Vec<u32> for rendering
-        XRClient::convert_rgb_to_u32(&buf, WIDTH_ENCODER, HEIGHT_ENCODER).unwrap_or_else(|| {
-            eprintln!("Failed to convert RGB data to u32 buffer");
-            Vec::new()
-        })
+        
+        // For debugging, print first few bytes of the buffer
+        let preview_size = std::cmp::min(20, encoded_buffer.len());
+        println!("[DEBUG DECODE] NAL first {} bytes: {:?}", preview_size, &encoded_buffer[0..preview_size]);
+        
+        let mut rgb_data = Vec::new();
+        
+        if let Some(decoder_arc) = &self.decoder_arc {
+            let mut decoder_guard = decoder_arc.lock().await;
+            let decoder = &mut *decoder_guard;
+            
+            // Send the data to the decoder
+            if let Err(e) = decoder.packet_tx.send(encoded_buffer) {
+                println!("Failed to send packet to decoder: {}", e);
+                return Vec::new();
+            }
+            
+            // Give the decoder some time to process
+            let start_time = std::time::Instant::now();
+            let timeout = std::time::Duration::from_millis(100);
+            
+            while start_time.elapsed() < timeout {
+                if let Some(frame) = decoder.try_next_frame() {
+                    println!("[Decoder] Successfully decoded frame of size: {} bytes", frame.len());
+                    rgb_data = frame;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            
+            if rgb_data.is_empty() {
+                println!("WARNING: Decoder produced empty frame after timeout");
+            }
+        } else {
+            println!("ERROR: Decoder not initialized");
+        }
+        
+        // Verify expected buffer size before conversion
+        let expected_size = WIDTH_ENCODER * HEIGHT_ENCODER * 3; // RGB is 3 bytes per pixel
+        if rgb_data.len() != expected_size {
+            println!("Unexpected RGB data length. Expected {}, got {}", expected_size, rgb_data.len());
+            return Vec::new();
+        }
+        
+        // Convert RGB to u32 with better error handling
+        match XRClient::convert_rgb_to_u32(&rgb_data, WIDTH_ENCODER, HEIGHT_ENCODER) {
+            Some(buffer) => {
+                println!("Successfully converted RGB to u32 buffer of size: {}", buffer.len());
+                buffer
+            },
+            None => {
+                eprintln!("Failed to convert RGB data to u32 buffer");
+                Vec::new()
+            }
+        }
     }
 
     pub fn vsync<'a>(

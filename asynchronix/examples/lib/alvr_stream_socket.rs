@@ -1,5 +1,5 @@
 use asynchronix::model::Context;
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use crossbeam::channel::{unbounded, bounded,  Receiver, RecvTimeoutError, Sender, TryRecvError};
 // use futures_util::stream::empty;
 use std::io::{Read, Write};
 #[allow(unused_imports)]
@@ -146,6 +146,124 @@ fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width
 }
 
 
+pub struct ChunkedHevcEncoder {
+    input: String,
+    width: u32,
+    height: u32,
+    bitrate: String,
+    chunk_duration: f64,   // Duration of each chunk in seconds.
+    current_offset: f64,   // Current start timestamp.
+    frame_tx: Sender<Vec<u8>>,
+    frame_rx: Receiver<Vec<u8>>,
+}
+
+impl ChunkedHevcEncoder {
+    /// Create a new ChunkedHevcEncoder.
+    pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64) -> Self {
+        // We use a bounded channel to store parsed frames.
+        println!("Initializing chunkedhevcencoder"); 
+        let (frame_tx, frame_rx) = bounded(100);
+        Self {
+            input: input.to_string(),
+            width,
+            height,
+            bitrate: bitrate.to_string(),
+            chunk_duration,
+            current_offset: 0.0,
+            frame_tx,
+            frame_rx,
+        }
+    }
+
+    /// Continuously spawn ffmpeg processes to produce video chunks.
+    /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
+    /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
+    /// Each complete frame is sent via the async channel.
+    pub async fn start_chunking(&mut self)  {
+        println!("CHUNKING!"); 
+        // Build an ffmpeg command for the current chunk:
+        // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
+        let mut command = FfmpegCommand::new();
+        command
+            .hwaccel("cuda")
+            .args(&["-ss", &self.current_offset.to_string()])
+            .args(&["-t", &self.chunk_duration.to_string()])
+            .args(&["-re"]) // read at realtime speed
+            .input(&self.input)
+            .args(&[
+                "-vf",
+                &format!(
+                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                    self.width, self.height
+                ),
+            ])
+            .args(&["-c:v", "hevc_nvenc"])
+            .args(&["-preset", "fast"])
+            .args(&["-rc", "cbr"])
+            .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+            .args(&["-rc-lookahead", "0"])
+            .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])  // using your GOP size constant
+            .args(&["-movflags", "+frag_keyframe+empty_moov"])
+            .args(&["-flush_packets", "1"])
+            .args(&["-bsf:v", "hevc_mp4toannexb"])
+            .args(&["-an"])
+            .args(&["-f", "hevc", "-"]); // output raw HEVC
+
+        // Spawn the ffmpeg process for this chunk.
+        let mut child = command.spawn().unwrap();
+        let stdout = child.take_stdout().unwrap();
+        let mut reader = BufReader::new(stdout);
+
+        let mut parser = HevcParser::new();
+        let mut buf = [0u8; 4096];
+        println!("SPAWN CHUNK"); 
+        
+        let loop_limit = 1000;
+        let mut i = 0;  
+        // Read data from the process until it ends.
+        loop {
+            println!("loop {}", i);
+            i += 1; 
+            if i > loop_limit {
+                i = 0; 
+                println!("BREAK"); 
+                break; 
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break, // end of chunk
+                Ok(n) => {
+                    parser.add_data(&buf[..n]);
+                    // Extract complete frames and send them on the channel.
+                    let frames = parser.get_frames();
+                    for frame in frames {
+                        if let Err(e) = self.frame_tx.send(frame) {
+                            eprintln!("Error sending frame: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading ffmpeg chunk: {}", e);
+                    break;
+                }
+            }
+        }
+        // let _ = child.wait();
+
+        // Update offset for the next chunk.
+        self.current_offset += self.chunk_duration;
+        // (Optional: Reset current_offset to zero if you want to loop over the input.)
+
+        // Optionally yield control to allow other async tasks to run.
+        thread::sleep(Duration::from_millis(10));
+    
+    }
+
+    /// Async getter that awaits and returns the next available frame.
+    pub async fn next_frame(&self) -> Option<Vec<u8>> {
+        self.frame_rx.recv().ok()
+    }
+}
+
 
 /// Represents a single HEVC NAL unit
 pub struct NalUnit {
@@ -269,363 +387,225 @@ impl HevcParser {
         frames
     }
 }
-/// extract the next complete encoded frame.
 
-pub struct HevcEncoder {
-    input_path: String,
-    width: u32,
-    height: u32,
-    current_bitrate: String,
-    frame_buffer: VecDeque<Vec<u8>>,  // Buffer for encoded frames
-    last_keyframe: Option<Vec<u8>>,   // Store the most recent keyframe
-    parser: HevcParser,
-    
-    // Current encoding process state
-    current_child: Option<ffmpeg_sidecar::child::FfmpegChild>,
-    current_packet_rx: Option<Receiver<Vec<u8>>>,
-    current_stderr_handle: Option<std::thread::JoinHandle<()>>,
-    
-    // Position tracking
-    current_position: f64,  // Current position in seconds
-    next_chunk_position: f64, // Position to start the next chunk
-    chunk_duration: f64,    // Duration of each chunk in seconds
-    buffer_target_size: usize, // Target number of frames to keep in buffer
-    buffer_min_threshold: usize, // Minimum threshold before starting next chunk
-    
-    // Performance tracking
-    last_chunk_start_time: Option<TaiTime<0>>,
-    encoding_in_progress: bool,
-    stats: EncoderStats,
-}
 
-struct EncoderStats {
-    chunks_encoded: usize,
-    frames_produced: usize,
-    buffer_underruns: usize,
-    encoding_time: Duration,
-    bitrate_changes: usize,
-}
+// pub struct HevcEncoder {
+//     packet_rx: Receiver<Vec<u8>>,
+//     _child: ffmpeg_sidecar::child::FfmpegChild,
+//     _stderr_handle: std::thread::JoinHandle<()>,
+//     parser: HevcParser,
+//     frame_buffer: VecDeque<Vec<u8>>,  // Buffer for encoded frames
+//     last_keyframe: Option<Vec<u8>>,    // Store the most recent keyframe
+// }
+// impl HevcEncoder {
+//     pub fn new(input: &str, width: u32, height: u32, bitrate: &str) -> Result<Self> {
+//         let mut child = FfmpegCommand::new()
+//             .hwaccel("cuda")
+//             .args(&["-re"]) // Read input at real-time speed
+//             .args(&["-stream_loop", "-1"]) // Loop input indefinitely
+//             .input(input)
+//             .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
+//             .args(&["-c:v", "hevc_nvenc"])
+//             .args(&["-preset", "fast"])
+//             .args(&["-rc", "cbr"])
+//             .args(&["-b:v", bitrate, "-maxrate", bitrate])
+//             .args(&["-rc-lookahead", "0"])
+//             .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP) ])
+//             .args(&["-movflags", "+frag_keyframe+empty_moov"])
+//             .args(&["-flush_packets", "1"])
+//             .args(&["-bsf:v", "hevc_mp4toannexb"])
+//             .args(&["-an"])
+//             // .args(&["-f", "mp4", "-"])
+//             .args(&["-f", "hevc", "-"]) // Raw HEVC format
+//             .spawn()?;
 
-impl HevcEncoder {
-    /// Creates a new HevcEncoder without starting the encoding process
-    pub fn new(input_path: &str, width: u32, height: u32, initial_bitrate: &str, 
-               chunk_duration: f64, buffer_target_size: usize) -> Result<Self> {
-        // Calculate an appropriate threshold for starting the next chunk
-        // Start encoding the next chunk when buffer has less than 25% of target
-        let buffer_min_threshold = buffer_target_size / 4;
-        
-        Ok(Self {
-            input_path: input_path.to_string(),
-            width,
-            height,
-            current_bitrate: initial_bitrate.to_string(),
-            frame_buffer: VecDeque::new(),
-            last_keyframe: None,
-            parser: HevcParser::new(),
-            current_child: None,
-            current_packet_rx: None,
-            current_stderr_handle: None,
-            current_position: 0.0,
-            next_chunk_position: 0.0,
-            chunk_duration,
-            buffer_target_size,
-            buffer_min_threshold,
-            last_chunk_start_time: None,
-            encoding_in_progress: false,
-            stats: EncoderStats {
-                chunks_encoded: 0,
-                frames_produced: 0,
-                buffer_underruns: 0,
-                encoding_time: Duration::from_secs(0),
-                bitrate_changes: 0,
-            },
-        })
-    }
-    
-    /// Starts encoding a chunk of video from the current position
-    pub fn start_chunk_encoding(&mut self, now: TaiTime<0>) -> Result<()> {
-        // First, stop any current encoding process
-        self.stop_encoding()?;
-        
-        let start_position = self.next_chunk_position;
-        println!("Starting chunk encoding at position {:.2}s with bitrate {}", 
-                 start_position, self.current_bitrate);
-        
-        // Track chunk start time for performance metrics
-        self.last_chunk_start_time = Some(now);
-        self.encoding_in_progress = true;
-        
-        // Create a new ffmpeg process for encoding the next chunk
-        let mut child = FfmpegCommand::new()
-            .hwaccel("cuda")
-            .args(&["-ss", &format!("{:.3}", start_position)]) // Start from specified position
-            .args(&["-t", &format!("{:.3}", self.chunk_duration)])    // Encode for chunk_duration seconds
-            .input(&self.input_path)
-            .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", 
-                                   self.width, self.height)])
-            .args(&["-c:v", "hevc_nvenc"])
-            .args(&["-preset", "p1"])      // Faster preset
-            .args(&["-tune", "ull"])          // Ultra low latency tuning
-            .args(&["-rc", "cbr"])
-            .args(&["-b:v", &self.current_bitrate, "-maxrate", &self.current_bitrate])
-            .args(&["-bufsize", &format!("{}", self.current_bitrate.replace("M", "000"))]) // Smaller buffer for more consistent bitrate
-            .args(&["-rc-lookahead", "0"])    // No lookahead for lower latency
-            .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])
-            .args(&["-movflags", "+frag_keyframe+empty_moov"])
-            .args(&["-flush_packets", "1"])
-            .args(&["-bsf:v", "hevc_mp4toannexb"])
-            .args(&["-an"])
-            .args(&["-f", "hevc", "-"]) // Raw HEVC format
-            .spawn()?;
+//         let stdout = child.take_stdout().unwrap();
+//         let stderr = child.take_stderr().unwrap();
 
-        let stdout = child.take_stdout().unwrap();
-        let stderr = child.take_stderr().unwrap();
+//         let (packet_tx, packet_rx) = unbounded();
 
-        let (packet_tx, packet_rx) = unbounded();
+//         // Start stdout reader thread
+//         std::thread::spawn(move || {
+//             let mut reader = BufReader::new(stdout);
+//             let mut buf = [0u8; 4096];
+//             loop {
+//                 match reader.read(&mut buf) {
+//                     Ok(0) => break,
+//                     Ok(n) => {
+//                         packet_tx.send(buf[..n].to_vec()).unwrap();
+//                     }
+//                     Err(e) => {
+//                         eprintln!("Encoder read error: {}", e);
+//                         break;
+//                     }
+//                 }
+//             }
+//         });
 
-        // Start stdout reader thread
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = [0u8; 8192]; // Larger buffer for more efficient reading
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break, // End of stream
-                    Ok(n) => {
-                        if packet_tx.send(buf[..n].to_vec()).is_err() {
-                            break; // Channel closed
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Encoder read error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+//         // Start stderr monitor thread
+//         let stderr_handle = std::thread::spawn(move || {
+//             let mut reader = BufReader::new(stderr);
+//             let mut buf = String::new();
+//             loop {
+//                 buf.clear();
+//                 match reader.read_to_string(&mut buf) {
+//                     Ok(0) => break,
+//                     Ok(_) => eprint!("{}", buf),
+//                     Err(e) => {
+//                         eprintln!("Encoder stderr read error: {}", e);
+//                         break;
+//                     }
+//                 }
+//             }
+//         });
 
-        // Start stderr monitor thread - only capture errors
-        let stderr_handle = std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match reader.read_to_string(&mut buf) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        // Only print errors, not all stderr output
-                        if buf.contains("Error") || buf.contains("error") {
-                            eprint!("{}", buf);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Encoder stderr read error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+//         Ok(Self {
+//             packet_rx,
+//             _child: child,
+//             _stderr_handle: stderr_handle,
+//             parser: HevcParser::new(),
+//             frame_buffer: VecDeque::new(),
+//             last_keyframe: None,
+//         })
+//     }
 
-        // Store the encoder state
-        self.current_child = Some(child);
-        self.current_packet_rx = Some(packet_rx);
-        self.current_stderr_handle = Some(stderr_handle);
-        
-        // Update position for tracking
-        self.next_chunk_position = start_position + self.chunk_duration;
-        self.stats.chunks_encoded += 1;
-        
-        Ok(())
-    }
-    
-    /// Stops the current encoding process
-    pub fn stop_encoding(&mut self) -> Result<()> {
-        if let Some(mut child) = self.current_child.take() {
-            // Try to terminate the process gracefully
-            if let Err(e) = child.kill() {
-                eprintln!("Error killing ffmpeg process: {}", e);
-                // Continue anyway
-            }
-            
-            // Drop the channel receiver to close it
-            self.current_packet_rx.take();
-            
-            // We won't wait for the stderr handle to complete
-            self.current_stderr_handle.take();
-            
-            // Update encoding stats if we were tracking encoding time
-            if let Some(start_time) = self.last_chunk_start_time.take() {
-                self.stats.encoding_time += start_time.duration_since(TaiTime::EPOCH);
-            }
-            
-            self.encoding_in_progress = false;
-        }
-        
-        Ok(())
-    }
-    
-    /// Changes the encoding bitrate for subsequent chunks
-    pub fn set_bitrate(&mut self, new_bitrate: &str) {
-        if self.current_bitrate != new_bitrate {
-            println!("Changing bitrate from {} to {}", self.current_bitrate, new_bitrate);
-            self.current_bitrate = new_bitrate.to_string();
-            self.stats.bitrate_changes += 1;
-            
-            // We won't restart the encoding immediately - let the current chunk finish
-            // The next chunk will use the new bitrate automatically
-        }
-    }
-    
-    /// Process available encoded packets
-    pub fn process_incoming_packets(&mut self, now: TaiTime<0>) -> Result<()> {
-        if let Some(packet_rx) = &self.current_packet_rx {
-            let mut done = false;
-            let mut packets_processed = 0;
-            
-            while !done {
-                match packet_rx.try_recv() {
-                    Ok(packet) => {
-                        // Add packet data to the parser
-                        self.parser.add_data(&packet);
-                        packets_processed += 1;
-                        
-                        // Extract frames from the parser and buffer them
-                        let frames = self.parser.get_frames();
-                        for frame in frames {
-                            // Check if this frame is a keyframe
-                            let is_keyframe = Self::is_keyframe(&frame);
-                            if is_keyframe {
-                                self.last_keyframe = Some(frame.clone());
-                            }
-                            
-                            self.frame_buffer.push_back(frame);
-                            self.stats.frames_produced += 1;
-                        }
-                    },
-                    Err(TryRecvError::Empty) => {
-                        done = true;
-                    },
-                    Err(TryRecvError::Disconnected) => {
-                        // Channel is closed, encoding chunk is done
-                        if self.encoding_in_progress {
-                            println!("Chunk encoding completed with {} packets processed", packets_processed);
-                        }
-                        
-                        // Check if we need to start the next chunk based on buffer status
-                        self.encoding_in_progress = false;
-                        
-                        // Update encoding stats
-                        if let Some(start_time) = self.last_chunk_start_time.take() {
-                            self.stats.encoding_time += start_time.duration_since(TaiTime::EPOCH);
-                        }
-                        
-                        // Clear old encoder state
-                        self.current_child.take();
-                        self.current_packet_rx.take();
-                        self.current_stderr_handle.take();
-                        
-                        return self.check_buffer_status(now);
-                    },
-                }
-            }
-        }
-        
-        // Check if we need to start a new chunk based on buffer status
-        self.check_buffer_status(now)
-    }
-    
-    /// Checks if we need to start encoding a new chunk based on buffer status
-    fn check_buffer_status(&mut self, now:  TaiTime<0>) -> Result<()> {
-        // Only start a new chunk if:
-        // 1. No active encoding is in progress
-        // 2. Buffer is below our minimum threshold 
-        if !self.encoding_in_progress && self.frame_buffer.len() < self.buffer_min_threshold {
-            println!("Buffer running low ({} frames, threshold: {}), starting new chunk", 
-                    self.frame_buffer.len(), self.buffer_min_threshold);
-            
-            if self.frame_buffer.is_empty() {
-                self.stats.buffer_underruns += 1;
-            }
-            
-            self.start_chunk_encoding(now)?;
-        }
-        
-        Ok(())
-    }
-    
-    /// Resets the encoder to start from the beginning of the video
-    pub fn reset_to_beginning(&mut self) -> Result<()> {
-        self.stop_encoding()?;
-        self.current_position = 0.0;
-        self.next_chunk_position = 0.0;
-        self.frame_buffer.clear();
-        self.last_keyframe = None;
-        
-        Ok(())
-    }
-    
-    /// Get the next frame from the buffer
-    pub fn next_frame(&mut self, now: TaiTime<0>) -> Option<Vec<u8>> {
-        let frame = self.frame_buffer.pop_front();
-        
-        // Each time we remove a frame, check if we need to refill the buffer
-        // This check ensures we maintain a continuous supply of frames
-        if let Err(e) = self.check_buffer_status(now) {
-            eprintln!("Error checking buffer status: {}", e);
-        }
-        
-        frame
-    }
-    
-    /// Get the latest keyframe (useful for recovery after packet loss)
-    pub fn get_latest_keyframe(&self) -> Option<Vec<u8>> {
-        self.last_keyframe.clone()
-    }
-    
-    /// Number of frames waiting in the buffer
-    pub fn frames_available(&self) -> usize {
-        self.frame_buffer.len()
-    }
-    
-    /// Check if a frame contains a keyframe
-    fn is_keyframe(frame: &[u8]) -> bool {
-        // Same implementation as before
-        for i in 0..frame.len().saturating_sub(5) {
-            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
-               (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
-                let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
-                let nal_header_pos = i + start_code_len;
+//     pub async fn wait_for_initialization(&mut self) -> Result<()> {
+//         // Poll until at least one frame is in the buffer.
+//         while self.frames_available() == 0 {
+//             self.process_incoming_packets()?;
+//             task::sleep(Duration::from_millis(10)).await;
+//         }
+//         Ok(())
+//     }
+
+//     pub async fn get_buffer_emu(&mut self) -> Option<Vec<u8>> {
+//         loop {
+//             if let Some(frame) = self.next_frame() {
+//                 return Some(frame);
+//             }
+//             if let Err(e) = self.process_incoming_packets() {
+//                 eprintln!("Error processing incoming packets: {}", e);
+//             }
+//             task::sleep(Duration::from_millis(1)).await;
+//         }
+//     }
+//     // pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
+//     //     match self.packet_rx.try_recv() {
+//     //         Ok(packet) => {
+//     //             // Add packet data to the parser
+//     //             self.parser.add_data(&packet);
                 
-                if nal_header_pos < frame.len() {
-                    let nal_header = frame[nal_header_pos];
-                    let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+//     //             // Extract frames from the parser and buffer them
+//     //             let frames = self.parser.get_frames();
+//     //             for frame in frames {
+//     //                 // Check if this frame is a keyframe
+//     //                 let is_keyframe = Self::is_keyframe(&frame);
+//     //                 if is_keyframe {
+//     //                     self.last_keyframe = Some(frame.clone());
+//     //                 }
                     
-                    // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-                    if (16..=21).contains(&nal_type) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
+//     //                 self.frame_buffer.push_back(frame);
+//     //             }
+                
+//     //             Ok(Some(packet))
+//     //         },
+//     //         Err(TryRecvError::Empty) => Ok(None),
+//     //         Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
+//     //     }
+//     // }
+
+//     // pub fn process_incoming_packets(&mut self) -> Result<()> {
+//     //     while let Ok(Some(_)) = self.try_next_packet() {
+//     //         // Just process the packets to fill our frame buffer
+//     //     }
+//     //     Ok(())
+//     // }
+//     pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
+//         // println!("HevcEncoder::try_next_packet - trying to receive packet"); // ADDED LOG
+//         match self.packet_rx.try_recv() {
+//             Ok(packet) => {
+//                 // println!("HevcEncoder::try_next_packet - received packet of size: {}", packet.len()); // ADDED LOG
+//                 // Add packet data to the parser
+//                 self.parser.add_data(&packet);
+
+//                 // Extract frames from the parser and buffer them
+//                 let frames = self.parser.get_frames();
+//                 // println!("HevcEncoder::try_next_packet - extracted {} frames from packet", frames.len()); // ADDED LOG
+//                 for frame in frames {
+//                     // Check if this frame is a keyframe
+//                     let is_keyframe = Self::is_keyframe(&frame);
+//                     if is_keyframe {
+//                         self.last_keyframe = Some(frame.clone());
+//                     }
+
+//                     self.frame_buffer.push_back(frame);
+//                 }
+
+//                 Ok(Some(packet))
+//             },
+//             Err(TryRecvError::Empty) => {
+//                 // println!("HevcEncoder::try_next_packet - channel empty"); // ADDED LOG
+//                 Ok(None)
+//             },
+//             Err(TryRecvError::Disconnected) => {
+//                 eprintln!("HevcEncoder::try_next_packet - channel disconnected"); // Existing error log
+//                 Err(anyhow::anyhow!("Encoder channel disconnected"))
+//             }
+//         }
+//     }
+
+//     pub fn process_incoming_packets(&mut self) -> Result<()> {
+//         // println!("HevcEncoder::process_incoming_packets - start processing"); // ADDED LOG
+//         let mut packets_processed = 0;
+//         while let Ok(Some(_)) = self.try_next_packet() {
+//             packets_processed += 1; // Count processed packets
+//             // Just process the packets to fill our frame buffer
+//         }
+//         // println!("HevcEncoder::process_incoming_packets - processed {} packets", packets_processed); // ADDED LOG
+//         Ok(())
+//     }
     
-    /// Gets the current timestamp position in the video
-    pub fn get_current_position(&self) -> f64 {
-        self.current_position
-    }
     
-    /// Prints encoder statistics
-    pub fn print_stats(&self) {
-        println!("===== Encoder Statistics =====");
-        println!("Chunks encoded: {}", self.stats.chunks_encoded);
-        println!("Frames produced: {}", self.stats.frames_produced);
-        println!("Buffer underruns: {}", self.stats.buffer_underruns);
-        println!("Bitrate changes: {}", self.stats.bitrate_changes);
-        println!("Total encoding time: {:.2}s", self.stats.encoding_time.as_secs_f64());
-        println!("Current buffer size: {}", self.frame_buffer.len());
-        println!("============================");
-    }
-}
+//     // Get the next frame from the buffer
+//     pub fn next_frame(&mut self) -> Option<Vec<u8>> {
+//         self.frame_buffer.pop_front()
+//     }
+
+
+    
+//     // Check if a frame contains a keyframe
+//     fn is_keyframe(frame: &[u8]) -> bool {
+//         // Check for start code
+//         for i in 0..frame.len().saturating_sub(5) {
+//             if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
+//                (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
+//                 let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
+//                 let nal_header_pos = i + start_code_len;
+                
+//                 if nal_header_pos < frame.len() {
+//                     let nal_header = frame[nal_header_pos];
+//                     let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+                    
+//                     // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+//                     if (16..=21).contains(&nal_type) {
+//                         return true;
+//                     }
+//                 }
+//             }
+//         }
+//         false
+//     }
+//     // Get the latest keyframe (useful for recovery after packet loss)
+//     pub fn get_latest_keyframe(&self) -> Option<Vec<u8>> {
+//         self.last_keyframe.clone()
+//     }
+    
+//     // Number of frames waiting in the buffer
+//     pub fn frames_available(&self) -> usize {
+//         self.frame_buffer.len()
+//     }
+
+// }
 
 
   
@@ -1260,7 +1240,7 @@ impl StreamSocket {
             shards_count: 0,
             ref_time: t0,
             frame_tracker: FrameTracker::new(),
-            encoder_wrapper: None, 
+            ffmpeg_encoder: None, 
             chunk_frames: VecDeque::new(), 
             is_initializing_encoder: Arc::new(AtomicBool::new(false)), 
         }
@@ -2131,8 +2111,8 @@ pub struct StreamSender<H> {
 
     // is_initializing_encoder: Arc<AtomicBool>,
 
-    encoder_wrapper: Option<Arc<tokMutex<HevcEncoder>>>,
-    
+    // encoder_wrapper: Option<Arc<tokMutex<HevcEncoder>>>,
+    ffmpeg_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
     // Keep the initialization flag:
     is_initializing_encoder: Arc<AtomicBool>,
 
@@ -2219,202 +2199,56 @@ impl<H: Serialize> StreamSender<H> {
         let mut buffer: Vec<u8> = Vec::new();
         
         if USE_FFMPEG {
-            // Initialize the encoder if it doesn't exist yet
-            if self.encoder_wrapper.is_none() {
-                // Try to set the initialization flag atomically
-                let was_initializing = self.is_initializing_encoder.compare_exchange(
-                    false, true, AtOrdering::Acquire, AtOrdering::Relaxed
-                ).is_ok();
+            if self.ffmpeg_encoder.is_none() {
+                // Create a new ChunkedHevcEncoder.
+
+                let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
+
+                let encoder = ChunkedHevcEncoder::new(
+                    input_path,
+                    WIDTH_ENCODER as u32,
+                    HEIGHT_ENCODER as u32,
+                    &bitrate_cmd,
+                    1.0, // Chunk duration in seconds
+                );
+                // Spawn the encoder's chunking task in the background.
+                // (We move ownership into the task here.)
+               // Wrap the encoder in an Arc<Mutex<_>>.
+                let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
+                // Clone the Arc for the async task.
+                let encoder_arc_clone = Arc::clone(&encoder_arc);
                 
-                // Only proceed with initialization if we successfully set the flag
-                if was_initializing {
-                    // Format bitrate string (convert from Mbps to appropriately formatted string)
-                    let bitrate_str = format!("{}M", current_bitrate_mbps);
-                    println!("Initializing HEVC encoder with bitrate: {}", bitrate_str);
-                    
-                    // Create a new HevcEncoder with optimized parameters
-                    let encoder = match HevcEncoder::new(
-                        input_path, 
-                        WIDTH_ENCODER as u32, 
-                        HEIGHT_ENCODER as u32,
-                        &bitrate_str,
-                        5.0, // 5-second chunks
-                        300  // Buffer target size
-                    ) {
-                        Ok(mut encoder) => {
-                            // Start the initial encoding process
-                            if let Err(e) = encoder.start_chunk_encoding(now) {
-                                // Reset flag and return error if start fails
-                                self.is_initializing_encoder.store(false, AtOrdering::Release);
-                                return Err(anyhow::anyhow!("Failed to start encoding: {}", e));
-                            }
-                            
-                            // *** IMPORTANT ADDITION: Wait for frames to be available ***
-                            println!("Waiting for frames to be available...");
-                            let wait_start = std::time::Instant::now();
-                            let timeout = std::time::Duration::from_secs(30); // 30-second timeout for first frames
-                            
-                            // Process packets until we have frames or timeout
-                            while encoder.frames_available() == 0 {
-                                if wait_start.elapsed() > timeout {
-                                    self.is_initializing_encoder.store(false, AtOrdering::Release);
-                                    return Err(anyhow::anyhow!("Timed out waiting for encoder to produce frames"));
-                                }
-                                
-                                if let Err(e) = encoder.process_incoming_packets(now) {
-                                    eprintln!("Error processing packets during initialization: {}", e);
-                                }
-                                
-                                // Short sleep to avoid tight loop
-                                std::thread::sleep(Duration::from_millis(50));
-                            }
-                            
-                            println!("Encoder has buffered {} frames", encoder.frames_available());
-                            encoder
-                        },
-                        Err(e) => {
-                            // Reset the flag if initialization fails
-                            self.is_initializing_encoder.store(false, AtOrdering::Release);
-                            return Err(anyhow::anyhow!("Failed to initialize encoder: {}", e));
-                        }
-                    };
-                    
-                    // Wrap encoder in Arc and Mutex for thread-safe access
-                    self.encoder_wrapper = Some(Arc::new(tokMutex::new(encoder)));
-                    
-                    // Reset the flag once initialization is complete
-                    self.is_initializing_encoder.store(false, AtOrdering::Release);
-                    
-                    println!("HEVC encoder initialization complete");
-                } else {
-                    // Wait for the other thread to complete initialization
-                    let wait_start = std::time::Instant::now();
-                    let timeout = std::time::Duration::from_secs(40); // 40-second timeout
-                    
-                    while self.is_initializing_encoder.load(AtOrdering::Relaxed) {
-                        // Check for timeout
-                        if wait_start.elapsed() > timeout {
-                            eprintln!("Timed out waiting for encoder initialization by another thread");
-                            // Instead of breaking, use fallback buffer
-                            buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
-                            
-                            // Prepare and return the buffer with header
-                            let header_size = bincode::serialized_size(header)? as usize;
-                            let hidden_offset = SHARD_PREFIX_SIZE + header_size;
-                            
-                            if buffer.len() < hidden_offset {
-                                buffer.resize(hidden_offset, 0);
-                            }
-                            
-                            let buffer_len = buffer.len();
-                            self.next_packet_index += 1;
-                            
-                            return Ok(Buffer {
-                                inner: buffer,
-                                hidden_offset,
-                                length: buffer_len,
-                                _phantom: PhantomData,
-                            });
-                        }
-                        std::thread::sleep(Duration::from_millis(100)); // Longer sleep to reduce CPU usage
-                    }
-                    
-                    // After waiting, if the encoder is still not initialized, use fallback
-                    if self.encoder_wrapper.is_none() {
-                        eprintln!("Encoder wasn't initialized by other thread, using fallback");
-                        buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
-                        
-                        // Prepare and return the buffer with header
-                        let header_size = bincode::serialized_size(header)? as usize;
-                        let hidden_offset = SHARD_PREFIX_SIZE + header_size;
-                        
-                        if buffer.len() < hidden_offset {
-                            buffer.resize(hidden_offset, 0);
-                        }
-                        
-                        let buffer_len = buffer.len();
-                        self.next_packet_index += 1;
-                        
-                        return Ok(Buffer {
-                            inner: buffer,
-                            hidden_offset,
-                            length: buffer_len,
-                            _phantom: PhantomData,
-                        });
-                    }
-                }
+                
+                
+                // async_std::task::spawn(async move {
+                let mut encoder = encoder_arc_clone.lock().await;
+                encoder.start_chunking().await; 
+                
+                
+                // Store the Arc in your field.
+                self.ffmpeg_encoder = Some(encoder_arc);
+                // Save a new encoder handle into self.
             }
             
-            // Check if bitrate needs updating
-            if let Some(encoder_arc) = &self.encoder_wrapper {
-                // Convert current bitrate to string format
-                let bitrate_str = format!("{}M", current_bitrate_mbps);
-                
-                // Lock the encoder to check/update bitrate
-                let mut encoder_guard = encoder_arc.lock().await;
-                
-                // Update bitrate if it's different from the current one
-                if encoder_guard.current_bitrate != bitrate_str {
-                    println!("Updating encoder bitrate from {} to {}", 
-                             encoder_guard.current_bitrate, bitrate_str);
-                    encoder_guard.set_bitrate(&bitrate_str);
-                }
-                
-                // Process any incoming packets to keep the buffer filled
-                if let Err(e) = encoder_guard.process_incoming_packets(now) {
-                    eprintln!("Error processing encoder packets: {}", e);
-                }
-                
-                // Try to get a frame from the buffer
-                if let Some(frame) = encoder_guard.next_frame(now) {
-                    buffer = frame;
-                    // Debug info showing frame retrieved
-                    println!("Frame retrieved, size: {} bytes, frames remaining: {}", 
-                             buffer.len(), encoder_guard.frames_available());
-                } else {
-                    // If no frames are available, try to process more packets with a more aggressive approach
-                    println!("No frames immediately available, processing more packets...");
-                    
-                    // Try multiple times to process packets and get a frame
-                    for retry in 1..=5 {
-                        if let Err(e) = encoder_guard.process_incoming_packets(now) {
-                            eprintln!("Error processing encoder packets (retry {}): {}", retry, e);
-                        }
-                        
-                        // Try to get a frame after processing
-                        if let Some(frame) = encoder_guard.next_frame(now) {
-                            buffer = frame;
-                            println!("Frame retrieved on retry {}, size: {} bytes", retry, buffer.len());
-                            break;
-                        }
-                        
-                        // Short sleep between retries
-                        std::thread::sleep(Duration::from_millis(50));
+            // Await the next available frame from the encoder.
+            if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
+                let encoder = encoder_arc.lock().await;
+                match encoder.next_frame().await {
+                    Some(frame) => {
+                        buffer = frame;
                     }
-                    
-                    // If we still don't have a frame, try keyframe or fallback
-                    if buffer.is_empty() {
-                        // Last resort: try to get a keyframe if available
-                        if let Some(keyframe) = encoder_guard.get_latest_keyframe() {
-                            println!("No regular frames available, using keyframe");
-                            buffer = keyframe;
-                        } else {
-                            // No frames available at all, use fallback instead of error
-                            eprintln!("No frames available from encoder, using fallback");
-                            // Drop the lock before generating fallback content
-                            drop(encoder_guard);
-                            buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
-                        }
+                    None => {
+                        eprintln!("No frame available from ChunkedHevcEncoder.");
+                        // Fallback to an empty payload or some default.
+                        buffer = Vec::new();
                     }
                 }
-                
-                // Make sure to drop the lock if we haven't already
-                // drop(encoder_guard);
             }
         } else {
-            // Fallback for non-FFMPEG mode
+            // Fallback for non-FFMPEG mode.
             buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
         }
+        
         
         // Ensure buffer has space for header
         let header_size = bincode::serialized_size(header)? as usize;
