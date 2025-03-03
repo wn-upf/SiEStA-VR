@@ -15,10 +15,10 @@ use async_std::task;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const INITIAL_BITRATE : &str= "1M"; 
-pub const WINDOW_SCALE_FACTOR: f64 = 0.9; 
+pub const INITIAL_BITRATE : &str= "30M"; 
+pub const WINDOW_SCALE_FACTOR: f64 = 1.0; 
 
-pub const IDR_FRAME_SIZE_GOP: usize = 60;
+pub const IDR_FRAME_SIZE_GOP: usize = 600;
 
 pub const PACKET_LOSS_PROBABILITY: f64 = 0.00; 
 

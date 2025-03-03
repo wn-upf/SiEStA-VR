@@ -82,7 +82,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
-pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
+pub const INITIAL_FRAMERATE_FPS: f32 = 60.0;
 
 
 pub const CHUNK_DURATION_F64_s: f64 = 1.0;
@@ -92,7 +92,7 @@ pub const OFFSET_VIDEO: f64 = 15.0;
 
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300; 
-pub const IDR_FRAME_SIZE_GOP: usize = 600; 
+pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;

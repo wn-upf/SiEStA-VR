@@ -104,7 +104,7 @@ lazy_static! {
 
 
 
-pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
+pub const INITIAL_FRAMERATE_FPS: f32 = 60.0; 
 pub const OFFSET_VIDEO_TIMESTAMP: f64 = 40.0;
 
 
