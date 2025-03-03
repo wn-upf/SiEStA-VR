@@ -88,6 +88,8 @@ use serde::Deserialize;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
+pub const SCALE_FACTOR_WINDOW: f64 = 0.8;
+
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
@@ -437,9 +439,7 @@ impl HevcDecoder {
         // 1. We've seen at least one keyframe
         // 2. We've processed at least 10 frames
         // 3. Priming is marked complete
-        self.priming_complete && 
-        self.keyframes_seen >= 1 && 
-        self.frames_processed >= 10
+        self.keyframes_seen >= 1
     }
 
     // New function to check if a frame contains valid HEVC data
@@ -569,14 +569,14 @@ impl HevcDecoder {
                 }
                 
                 // Try to get a decoded frame
-                match self.try_next_decoded_frame_with_timeout(200) {
+                match self.try_next_decoded_frame_with_timeout(5) {
                     Some(frame) => {
                         frames_received += 1;
                         
-                        if frames_received >= 10{
-                            println!("throttle decoded samples gotten"); 
-                            break; // throttle decoded samples gotten
-                        }
+                        // if frames_received >= 10{
+                        //     println!("throttle decoded samples gotten"); 
+                        //     break; // throttle decoded samples gotten
+                        // }
                         // Validate frame size
                         if frame.len() != self.expected_frame_size {
                             println!("⚠️ Frame size mismatch: got {} bytes, expected {}",
@@ -884,7 +884,7 @@ impl BitrateManager {
         //     self.last_target_bitrate_mbps = 0.01;
         // }
         if 10.0 <= dur && dur < 1000.0 {
-            // self.last_target_bitrate_mbps = 10.0; // just CBR for now
+            self.last_target_bitrate_mbps = 10.0; // just CBR for now
         }
         // } else if 12.0 <= dur && dur < 25.0 {
         //     self.last_target_bitrate_mbps = 0.9;
@@ -1492,6 +1492,7 @@ pub struct XRClient {
     // pub has_decoder: Option<bool>, 
     pub decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>, 
 
+    pub is_decoder_ready: bool, 
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>,  // Buffer to hold initial frames
     decoder_ready: bool,                  // Flag to track if decoder is ready
@@ -1524,7 +1525,7 @@ impl XRClient {
             t_0: now, 
             last_tracking_time: now, 
             decoder_arc: None, 
-
+            is_decoder_ready: false, 
 
                         // Add these new fields:
             initialization_buffer: Vec::new(),   // Buffer to hold initial frames
@@ -2089,22 +2090,25 @@ impl XRClient {
                      frame_display, frame_index, encoded_length);
              // Check if decoder is ready
             
-            if !decoder.is_ready() {
-                println!("Decoder not ready yet (processed: {}, keyframes: {}, frames in buffer: {})",
-                        decoder.frames_processed, decoder.keyframes_seen, decoder.decoded_frames.len());
-                return Vec::new();
-            }
+  
             // Process the frame
             decoder.process_packet(encoded_buffer);
             
             // Process any decoded frames
             decoder.process_decoded_frames();
+
+            // if self.is_decoder_ready == false {
+            //     println!("Decoder not ready yet (processed: {}, keyframes: {}, frames in buffer: {})",
+            //             decoder.frames_processed, decoder.keyframes_seen, decoder.decoded_frames.len());
+            //     return Vec::new();
+            // }
             
             // Try to get a decoded frame
             if let Some(frame) = decoder.next_decoded_frame() {
                 // Convert to RGB
                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     println!("✅ Successfully decoded and converted frame #{}", frame_index);
+                    self.is_decoder_ready = true; 
                     return pixels;
                 } else {
                     println!("ERROR: Failed to convert decoded frame to RGB");
@@ -2230,7 +2234,7 @@ impl XRClient {
 
                             if !frame.is_empty() {
                                 self.decoded_frame_index += 1;
-                                let scale_factor = 0.4;
+                                let scale_factor = SCALE_FACTOR_WINDOW;
                                 let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
                                 let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
         

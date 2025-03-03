@@ -40,11 +40,11 @@ use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
 use crate::{debug_bgprint, format_elapsed};
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 350.0;
+pub const OFFSET_VIDEO: f64 = 15.0;
 
 
-pub const CHUNK_SIZE_FRAMES: usize = 300; 
-pub const IDR_FRAME_SIZE_GOP: usize = 90; 
+// pub const CHUNK_SIZE_FRAMES: usize = 300; 
+pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
 
 use rand::Rng;
@@ -89,6 +89,10 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
+
+pub const CHUNK_DURATION_F64_s: f64 = 1.0;
+
+
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
 pub const HAPTICS: u16 = 1;
@@ -99,6 +103,9 @@ pub const STATISTICS: u16 = 4;
 pub const CONTROL_STREAM: u16 = 5;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
+
+
+
 
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
@@ -155,6 +162,8 @@ pub struct ChunkedHevcEncoder {
     current_offset: f64,   // Current start timestamp.
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
+
+    parser: HevcParser, 
 }
 
 impl ChunkedHevcEncoder {
@@ -169,9 +178,11 @@ impl ChunkedHevcEncoder {
             height,
             bitrate: bitrate.to_string(),
             chunk_duration,
-            current_offset: 0.0,
+            current_offset: OFFSET_VIDEO,
             frame_tx,
             frame_rx,
+
+            parser: HevcParser::new(), 
         }
     }
 
@@ -185,7 +196,7 @@ impl ChunkedHevcEncoder {
         // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
         let mut command = FfmpegCommand::new();
         command
-            .hwaccel("cuda")
+            // .hwaccel("cuda")
             .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-t", &self.chunk_duration.to_string()])
             .args(&["-re"]) // read at realtime speed
@@ -214,11 +225,11 @@ impl ChunkedHevcEncoder {
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
 
-        let mut parser = HevcParser::new();
+        // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
         print!("SPAWN CHUNK..."); 
         
-        let loop_limit = 1000;
+        let loop_limit = 1000000;
         let mut i = 0;  
         // Read data from the process until it ends.
         loop {
@@ -232,9 +243,9 @@ impl ChunkedHevcEncoder {
             match reader.read(&mut buf) {
                 Ok(0) => break, // end of chunk
                 Ok(n) => {
-                    parser.add_data(&buf[..n]);
+                    self.parser.add_data(&buf[..n]);
                     // Extract complete frames and send them on the channel.
-                    let frames = parser.get_frames();
+                    let frames = self.parser.get_frames();
                     for frame in frames {
                         if let Err(e) = self.frame_tx.send(frame) {
                             eprintln!("Error sending frame: {}", e);
@@ -254,13 +265,22 @@ impl ChunkedHevcEncoder {
         // (Optional: Reset current_offset to zero if you want to loop over the input.)
 
         // Optionally yield control to allow other async tasks to run.
-        thread::sleep(Duration::from_millis(10));
+        // thread::sleep(Duration::from_millis(10));
     
     }
 
     /// Async getter that awaits and returns the next available frame.
     pub async fn next_frame(&self) -> Option<Vec<u8>> {
-        self.frame_rx.recv().ok()
+        // self.frame_rx.recv().ok()
+
+        if let Ok(a) = self.frame_rx.recv_timeout(Duration::from_millis(1)){
+            return Some(a); 
+        }
+        else{
+            println!("No frame received internal encoder!");
+            None
+        }
+
     }
 }
 
@@ -1243,6 +1263,7 @@ impl StreamSocket {
             ffmpeg_encoder: None, 
             chunk_frames: VecDeque::new(), 
             is_initializing_encoder: Arc::new(AtomicBool::new(false)), 
+            time_since_last_update: t0, 
         }
     }
 
@@ -1446,7 +1467,7 @@ impl StreamSocket {
             return try_again();
         };
 
-        debug_print!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
+        print_pretty!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -1593,7 +1614,7 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            debug_print!(DebugColor::Orange, "FRAME IS COMPLETE!",);
+            print_pretty!(DebugColor::Orange, "FRAME IS COMPLETE!",);
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index);
@@ -2116,6 +2137,8 @@ pub struct StreamSender<H> {
     // Keep the initialization flag:
     is_initializing_encoder: Arc<AtomicBool>,
 
+    pub time_since_last_update: TaiTime<0>,
+
 }
 
 #[allow(unused)]
@@ -2199,59 +2222,70 @@ impl<H: Serialize> StreamSender<H> {
         let mut buffer: Vec<u8> = Vec::new();
         
         if USE_FFMPEG {
-            
             if self.ffmpeg_encoder.is_none() {
-                // Create a new ChunkedHevcEncoder.
-                
+                // Create a new ChunkedHevcEncoder
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
-
+    
                 let encoder = ChunkedHevcEncoder::new(
                     input_path,
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
                     &bitrate_cmd,
-                    1.0, // Chunk duration in seconds
+                    CHUNK_DURATION_F64_s, // Chunk duration in seconds
                 );
-                // Spawn the encoder's chunking task in the background.
-                // (We move ownership into the task here.)
-               // Wrap the encoder in an Arc<Mutex<_>>.
+                
+                // Wrap the encoder in an Arc<Mutex<_>>
                 let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
-                // Clone the Arc for the async task.
-                let encoder_arc_clone = Arc::clone(&encoder_arc);
+                
+                // Initialize the encoder BEFORE storing it
+                {
+                    let mut encoder = encoder_arc.lock().await;
+                    encoder.start_chunking().await;
+                } // Lock is dropped here
+                
+                // Store the initialized encoder
                 self.ffmpeg_encoder = Some(encoder_arc);
-
-                
-                
-                // async_std::task::spawn(async move {
-                let mut encoder = encoder_arc_clone.lock().await;
-                encoder.start_chunking().await; 
-                
-                
-                // Store the Arc in your field.
-                // Save a new encoder handle into self.
+                self.time_since_last_update = now;
             }
             
-            // Await the next available frame from the encoder.
+            // Now that the encoder is initialized and the lock released, get a frame
             if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
-                let encoder = encoder_arc.lock().await;
+                let mut encoder = encoder_arc.lock().await;
+                
+                print_pretty!(DebugColor::Red, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
+                
                 match encoder.next_frame().await {
                     Some(frame) => {
                         buffer = frame;
                     }
                     None => {
-                        eprintln!("No frame available from ChunkedHevcEncoder.");
-                        // Fallback to an empty payload or some default.
+                        eprintln!("No frame available from ChunkedHevcEncoder, generating new!.");
+                        encoder.start_chunking().await; 
+
+
                         buffer = Vec::new();
                     }
                 }
+
+                let is_late_enough = now >= TaiTime::EPOCH + Duration::from_secs_f64(12.0);
+                
+                // Check if it's time to process another chunk
+                if let Some(deadline) = self.time_since_last_update.checked_add(Duration::from_secs_f64(CHUNK_DURATION_F64_s)) {
+                    if now >= deadline && is_late_enough{
+                        print_pretty!(DebugColor::Azure, "Deadline reached, NOT processing chunk!", );
+                        self.time_since_last_update = now;
+                        // encoder.start_chunking().await;
+                    }
+                } else {
+                    eprintln!("Timestamp overflow when computing deadline!");
+                }
             }
         } else {
-            // Fallback for non-FFMPEG mode.
+            // Fallback for non-FFMPEG mode
             buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
         }
         
-        
-        // Ensure buffer has space for header
+        // Rest of your function remains the same
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
         
