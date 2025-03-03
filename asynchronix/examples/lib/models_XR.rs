@@ -13,7 +13,7 @@ use std::{
     process::{ChildStdin, ChildStdout, Stdio},
 };
 use tokio::sync::Mutex as tokMutex; 
-
+use crate::lib::HevcParser;
 use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
 use std::cell::RefCell;
 use std::error::Error;
@@ -88,7 +88,7 @@ use serde::Deserialize;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.8;
+pub const SCALE_FACTOR_WINDOW: f64 = 1.0;
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -127,163 +127,152 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 
 use crossbeam::channel::{Receiver, unbounded, bounded, Sender, TryRecvError};  
 
-
-pub fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
-    let expected_size = width * height * 3; // RGB data is 3 bytes per pixel
-    
-    if rgb_data.len() != expected_size {
-        println!("RGB data size mismatch: expected {}, got {}", expected_size, rgb_data.len());
+fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
+    if rgb_data.len() != width * height * 3 {
+        println!("ERROR: Expected rgb_data size {} but got {}", 
+                width * height * 3, rgb_data.len());
         return None;
     }
     
-    let mut u32_buffer = Vec::with_capacity(width * height);
-    
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) * 3;
-            
-            // Bounds check to prevent panic
-            if idx + 2 >= rgb_data.len() {
-                println!("Error: Out of bounds at ({}, {}), idx={}", x, y, idx);
-                return None;
-            }
-            
-            // Create ARGB (little endian: 0xAA_RR_GG_BB)
-            let r = rgb_data[idx] as u32;
-            let g = rgb_data[idx + 1] as u32;
-            let b = rgb_data[idx + 2] as u32;
-            let pixel = 0xFF000000 | (r << 16) | (g << 8) | b;
-            
-            u32_buffer.push(pixel);
-        }
+    let mut pixels = Vec::with_capacity(width * height);
+    for chunk in rgb_data.chunks_exact(3) {
+        let pixel = ((chunk[0] as u32) << 16) | 
+                   ((chunk[1] as u32) << 8) | 
+                   (chunk[2] as u32);
+        pixels.push(pixel);
     }
     
-    Some(u32_buffer)
+    Some(pixels)
 }
 
 
+// pub struct NalUnit {
+//     pub nal_type: u8,
+//     pub data: Vec<u8>,
+//     pub is_keyframe: bool,
+// // }
 
-pub struct NalUnit {
-    pub nal_type: u8,
-    pub data: Vec<u8>,
-    pub is_keyframe: bool,
-}
+// /// A parser for HEVC bitstreams to extract individual frames
+// pub struct HevcParser {
+//     buffer: Vec<u8>,
+// }
 
-/// A parser for HEVC bitstreams to extract individual frames
-pub struct HevcParser {
-    buffer: Vec<u8>,
-}
+// impl HevcParser {
+//     pub fn new() -> Self {
+//         Self { buffer: Vec::new() }
+//     }
 
-impl HevcParser {
-    pub fn new() -> Self {
-        Self { buffer: Vec::new() }
-    }
+//     /// Add more encoded data to the parser buffer
+//     pub fn add_data(&mut self, data: &[u8]) {
+//         self.buffer.extend_from_slice(data);
+//     }
 
-    /// Add more encoded data to the parser buffer
-    pub fn add_data(&mut self, data: &[u8]) {
-        self.buffer.extend_from_slice(data);
-    }
+//     /// Find the next NAL unit start code in the buffer
+//     fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
+//         for i in start_pos..self.buffer.len() - 3 {
+//             // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
+//             if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
+//                (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
+//                 self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+//                 return Some(i);
+//             }
+//         }
+//         None
+//     }
+//     pub fn clear(&mut self) {
+//         println!("Clearing parser buffer: {} bytes", self.buffer.len());
+//         self.buffer.clear();
+//     }
+//     /// Extract the next complete NAL unit from the buffer
+//     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
+//         // Find the first start code
+//         let start_pos = self.find_next_start_code(0)?;
+        
+//         // Determine start code length (3 or 4 bytes)
+//         let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
+//             4
+//         } else {
+//             3
+//         };
+        
+//         // Find the next start code
+//         let next_start = self.find_next_start_code(start_pos + start_code_len);
+        
+//         let (nal_end, has_next) = match next_start {
+//             Some(pos) => (pos, true),
+//             None => (self.buffer.len(), false)
+//         };
+        
+//         // If we don't have a complete NAL unit yet, wait for more data
+//         if !has_next {
+//             return None;
+//         }
+        
+//         // Extract NAL header and determine NAL type
+//         let nal_header_pos = start_pos + start_code_len;
+//         if nal_header_pos >= self.buffer.len() {
+//             return None;
+//         }
+        
+//         let nal_header = self.buffer[nal_header_pos];
+//         let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+        
+//         // Extract the complete NAL unit data (including header)
+//         let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
+        
+//         // Remove the processed NAL unit from the buffer
+//         self.buffer.drain(0..nal_end);
+        
+//         // Determine if this is a keyframe (I-frame)
+//         // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+//         let is_keyframe = (16..=21).contains(&nal_type);
+        
+//         Some(NalUnit {
+//             nal_type,
+//             data: nal_data,
+//             is_keyframe,
+//         })
+//     }
 
-    /// Find the next NAL unit start code in the buffer
-    fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
-        for i in start_pos..self.buffer.len() - 3 {
-            // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Extract the next complete NAL unit from the buffer
-    pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
-        // Find the first start code
-        let start_pos = self.find_next_start_code(0)?;
+//     /// Get all complete frames currently in the buffer
+//     pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
+//         let mut frames = Vec::new();
+//         let mut current_frame = Vec::new();
+//         let mut saw_vcl = false;
         
-        // Determine start code length (3 or 4 bytes)
-        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
-            4
-        } else {
-            3
-        };
-        
-        // Find the next start code
-        let next_start = self.find_next_start_code(start_pos + start_code_len);
-        
-        let (nal_end, has_next) = match next_start {
-            Some(pos) => (pos, true),
-            None => (self.buffer.len(), false)
-        };
-        
-        // If we don't have a complete NAL unit yet, wait for more data
-        if !has_next {
-            return None;
-        }
-        
-        // Extract NAL header and determine NAL type
-        let nal_header_pos = start_pos + start_code_len;
-        if nal_header_pos >= self.buffer.len() {
-            return None;
-        }
-        
-        let nal_header = self.buffer[nal_header_pos];
-        let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-        
-        // Extract the complete NAL unit data (including header)
-        let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
-        
-        // Remove the processed NAL unit from the buffer
-        self.buffer.drain(0..nal_end);
-        
-        // Determine if this is a keyframe (I-frame)
-        // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-        let is_keyframe = (16..=21).contains(&nal_type);
-        
-        Some(NalUnit {
-            nal_type,
-            data: nal_data,
-            is_keyframe,
-        })
-    }
-
-    /// Get all complete frames currently in the buffer
-    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
-        let mut frames = Vec::new();
-        let mut current_frame = Vec::new();
-        let mut saw_vcl = false;
-        
-        while let Some(nal) = self.next_nal_unit() {
-            // VCL NAL units (0-31) contain the actual picture data
-            let is_vcl = nal.nal_type <= 31;
+//         while let Some(nal) = self.next_nal_unit() {
+//             // VCL NAL units (0-31) contain the actual picture data
+//             let is_vcl = nal.nal_type <= 31;
             
-            // If we see a VCL NAL and already saw one before, it's a new frame
-            if is_vcl && saw_vcl {
-                if !current_frame.is_empty() {
-                    frames.push(current_frame);
-                    current_frame = Vec::new();
-                }
-                saw_vcl = false;
-            }
+//             // If we see a VCL NAL and already saw one before, it's a new frame
+//             if is_vcl && saw_vcl {
+//                 if !current_frame.is_empty() {
+//                     frames.push(current_frame);
+//                     current_frame = Vec::new();
+//                 }
+//                 saw_vcl = false;
+//             }
             
-            if is_vcl {
-                saw_vcl = true;
-            }
+//             if is_vcl {
+//                 saw_vcl = true;
+//             }
             
-            // Add start code and NAL data to current frame
-            current_frame.extend_from_slice(&[0, 0, 0, 1]);
-            current_frame.extend_from_slice(&nal.data);
-        }
+//             // Add start code and NAL data to current frame
+//             current_frame.extend_from_slice(&[0, 0, 0, 1]);
+//             current_frame.extend_from_slice(&nal.data);
+//         }
         
-        // Add the last frame if it's not empty
-        if !current_frame.is_empty() {
-            frames.push(current_frame);
-        }
-        
-        frames
-    }
-}
+//         // Add the last frame if it's not empty
+//         if !current_frame.is_empty() {
+//             frames.push(current_frame);
+//         }
+//         if self.buffer.len() > 100000 {
+//             println!("Auto-clearing oversized parser buffer: {} bytes", self.buffer.len());
+//             self.buffer.clear();
+//         }
+//         frames
+//     }
+// }
 
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
@@ -320,6 +309,8 @@ impl HevcDecoder {
             .args(&["-f", "hevc", "-i", "-"])
             .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
+            // .args(&["-flags", "+low_delay"])
+            // .args(&["-fflags", "+nobuffer+flush_packets"])
             .args(&["-f", "rawvideo", "-"])
             .spawn().unwrap();
 
@@ -353,8 +344,10 @@ impl HevcDecoder {
                             //     n, buffer.len(), frame_size);
                                 
                             while buffer.len() >= frame_size {
-                                let frame = buffer.drain(..frame_size).collect();
-                                println!("Sending complete decoded frame of size: {}", frame_size);
+                                let frame = buffer.drain(..frame_size).collect::<Vec<u8>>();
+                                // frame_tx.send(frame).unwrap();
+                                // println!("Sending complete decoded frame of size: {}", frame_size);
+
                                 if let Err(e) = frame_tx.send(frame) {
                                     eprintln!("Decoder frame send error: {}", e);
                                     break;
@@ -430,7 +423,7 @@ impl HevcDecoder {
             total_bytes_processed: 0.0,
             priming_complete: false,
             expected_frame_size: frame_size,
-            max_buffered_frames: 60, 
+            max_buffered_frames: 120, 
         }
     }
 
@@ -559,55 +552,57 @@ impl HevcDecoder {
         }
         None
     }
-        pub fn process_decoded_frames(&mut self) -> usize {
-            let mut frames_received = 0;
-            let max_attempts = 10;  // Reduced from 100000 to avoid excessive attempts
-            
-            for attempt in 0..max_attempts {
-                if attempt % 5 == 0 {
-                    println!("Processing decoded frames, attempt {}", attempt);
-                }
-                
-                // Try to get a decoded frame
-                match self.try_next_decoded_frame_with_timeout(5) {
-                    Some(frame) => {
-                        frames_received += 1;
-                        
-                        // if frames_received >= 10{
-                        //     println!("throttle decoded samples gotten"); 
-                        //     break; // throttle decoded samples gotten
-                        // }
-                        // Validate frame size
-                        if frame.len() != self.expected_frame_size {
-                            println!("⚠️ Frame size mismatch: got {} bytes, expected {}",
-                                    frame.len(), self.expected_frame_size);
-                            
-                            // Still add to buffer if it's reasonable in size
-                            if frame.len() > self.expected_frame_size / 2 {
-                                self.decoded_frames.push_back(frame);
-                            }
-                        } else {
+        // Better implementation of process_decoded_frames
+    pub fn process_decoded_frames(&mut self) -> usize {
+        let mut frames_received = 0;
+        let start_time = Instant::now();
+        let max_processing_time = Duration::from_millis(50);  // Prevent blocking too long
+        
+        // Process frames with a time limit
+        while start_time.elapsed() < max_processing_time {
+            match self.frame_rx.try_recv() {
+                Ok(frame) => {
+                    frames_received += 1;
+                    self.last_decoded_frame_time = Instant::now();
+                    
+                    // Check frame is the expected size
+                    if frame.len() == self.expected_frame_size {
+                        self.decoded_frames.push_back(frame);
+                    } else {
+                        println!("⚠️ Received malformed frame (size={}), expected {}", 
+                                frame.len(), self.expected_frame_size);
+                        // Only add if it's close - this helps avoid complete corruption
+                        if frame.len() >= self.expected_frame_size * 9 / 10 && 
+                        frame.len() <= self.expected_frame_size * 11 / 10 {
                             self.decoded_frames.push_back(frame);
-                            println!("Received decoded frame, now have {} in buffer", 
-                                     self.decoded_frames.len());
                         }
-                        
-                        // Continue checking for more frames
-                    },
-                    None => {
-                        // No more frames available right now
+                    }
+                    
+                    // Don't buffer too many frames - it causes delay
+                    if self.decoded_frames.len() >= self.max_buffered_frames {
                         break;
                     }
+                },
+                Err(TryRecvError::Empty) => {
+                    // No more frames available now
+                    break;
+                },
+                Err(TryRecvError::Disconnected) => {
+                    println!("🛑 Decoder output channel disconnected!");
+                    // Trigger restart at next opportunity
+                    // self.needs_restart = true;
+                    break;
                 }
             }
-            
-            if frames_received > 0 {
-                println!("✅ Added {} frames to decoded buffer, now has {} frames",
-                        frames_received, self.decoded_frames.len());
-            }
-            
-            frames_received
         }
+        
+        if frames_received > 0 {
+            println!("✅ Added {} frames to decoded buffer, now has {} frames (in {}ms)",
+                    frames_received, self.decoded_frames.len(), start_time.elapsed().as_millis());
+        }
+        
+        frames_received
+    }
     
         // Get the next available encoded frame
         pub fn next_encoded_frame(&mut self) -> Option<Vec<u8>> {
@@ -1495,7 +1490,6 @@ pub struct XRClient {
     pub is_decoder_ready: bool, 
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>,  // Buffer to hold initial frames
-    decoder_ready: bool,                  // Flag to track if decoder is ready
     min_buffered_frames: usize,           // Minimum frames to buffer before decoding
     saw_keyframe: bool,     
     // pub visualize_decoder_window: Option<Window>,
@@ -1525,11 +1519,10 @@ impl XRClient {
             t_0: now, 
             last_tracking_time: now, 
             decoder_arc: None, 
-            is_decoder_ready: false, 
 
                         // Add these new fields:
             initialization_buffer: Vec::new(),   // Buffer to hold initial frames
-            decoder_ready: false,                  // Flag to track if decoder is ready
+            is_decoder_ready: false,                  // Flag to track if decoder is ready
             min_buffered_frames: 10,           // Minimum frames to buffer before decoding
             saw_keyframe: false,     
 
@@ -1568,11 +1561,11 @@ impl XRClient {
             self.output_app_tracking_sender = Some(stream_socket.request_stream(TRACKING, self.t_0));
             
 
-            if self.decoder_arc.is_none(){
-                // self.has_decoder = Some(true); 
-                println!("INITIALIZING DECODER: FPS: {:.1}", self.framerate); 
-                self.decoder_arc = Some(Arc::new(tokMutex::new( HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32))   ) ); 
-            }
+            // if self.decoder_arc.is_none(){
+            //     // self.has_decoder = Some(true); 
+            //     println!("INITIALIZING DECODER: FPS: {:.1}", self.framerate); 
+            //     self.decoder_arc = Some(Arc::new(tokMutex::new( HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32))   ) ); 
+            // }
 
             XRClient::generate_tracking_data(self, (), context).await;
 
@@ -1991,38 +1984,22 @@ impl XRClient {
             }
         }
     }
-
-    pub fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
-        let expected_size = width * height * 3; // RGB data is 3 bytes per pixel
-        
-        if rgb_data.len() != expected_size {
-            println!("RGB data size mismatch: expected {}, got {}", expected_size, rgb_data.len());
+    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
+        if rgb_data.len() != width * height * 3 {
+            println!("ERROR: Expected rgb_data size {} but got {}", 
+                    width * height * 3, rgb_data.len());
             return None;
         }
         
-        let mut u32_buffer = Vec::with_capacity(width * height);
-        
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) * 3;
-                
-                // Bounds check to prevent panic
-                if idx + 2 >= rgb_data.len() {
-                    println!("Error: Out of bounds at ({}, {}), idx={}", x, y, idx);
-                    return None;
-                }
-                
-                // Create ARGB (little endian: 0xAA_RR_GG_BB)
-                let r = rgb_data[idx] as u32;
-                let g = rgb_data[idx + 1] as u32;
-                let b = rgb_data[idx + 2] as u32;
-                let pixel = 0xFF000000 | (r << 16) | (g << 8) | b;
-                
-                u32_buffer.push(pixel);
-            }
+        let mut pixels = Vec::with_capacity(width * height);
+        for chunk in rgb_data.chunks_exact(3) {
+            let pixel = ((chunk[0] as u32) << 16) | 
+                       ((chunk[1] as u32) << 8) | 
+                       (chunk[2] as u32);
+            pixels.push(pixel);
         }
         
-        Some(u32_buffer)
+        Some(pixels)
     }
 
     // Function to convert YUV420p to RGB
@@ -2177,7 +2154,7 @@ impl XRClient {
                 }
                 
                 // Buffering phase - collect frames without decoding
-                if !self.decoder_ready {
+                if !self.is_decoder_ready {
                     // Add frame to initialization buffer
                     self.initialization_buffer.push(video_frame.clone());
                     
@@ -2202,7 +2179,7 @@ impl XRClient {
                         }
                         
                         // Mark decoder as ready and clear buffer
-                        self.decoder_ready = true;
+                        self.is_decoder_ready = true;
                         self.initialization_buffer.clear();
                     } else {
                         println!("Buffering frame {} of {} (keyframe: {})", 
@@ -2240,7 +2217,9 @@ impl XRClient {
         
                                 // Use server_ip as the window identifier
                                 let window_title = format!("Decoded HEVC Frame - {}", self.server_ip);
-                                
+                                println!("DEBUG: Frame pixel count: {}, Window dimensions: {}x{} ({})", 
+                                  frame.len(), scaled_width, scaled_height, scaled_width * scaled_height);
+
                                 DISPLAY_WINDOWS.with(|windows_cell| {
                                     let mut windows = windows_cell.borrow_mut();
                                     

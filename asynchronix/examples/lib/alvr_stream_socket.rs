@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::fs;
 use tokio::sync::Mutex as tokMutex; 
 use std::sync::atomic::AtomicBool; 
+use crate::lib::HevcParser;
 
 use std::sync::atomic::Ordering as AtOrdering;
 // lazy_static! {
@@ -110,15 +111,11 @@ pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
-fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> {
-    let expected_len = width * height * 3;
-    if rgb_data.len() != expected_len {
-        eprintln!(
-            "Unexpected RGB data length. Expected {}, got {}",
-            expected_len,
-            rgb_data.len()
-        );
-        return Vec::new();
+fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
+    if rgb_data.len() != width * height * 3 {
+        println!("ERROR: Expected rgb_data size {} but got {}", 
+                width * height * 3, rgb_data.len());
+        return None;
     }
     
     let mut pixels = Vec::with_capacity(width * height);
@@ -128,12 +125,8 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
                    (chunk[2] as u32);
         pixels.push(pixel);
     }
-
-    if !pixels.is_empty() {
-        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}", 
-        //     pixels[0], pixels[1], pixels[2], pixels[3], pixels[4]);
-    }
-    pixels
+    
+    Some(pixels)
 }
 
 
@@ -163,6 +156,7 @@ pub struct ChunkedHevcEncoder {
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
 
+    frame_queue: VecDeque<Vec<u8>>,  // Add this new field for queuing frames
     parser: HevcParser, 
 }
 
@@ -181,9 +175,13 @@ impl ChunkedHevcEncoder {
             current_offset: OFFSET_VIDEO,
             frame_tx,
             frame_rx,
-
+            frame_queue: VecDeque::new(),  // Initialize the queue
             parser: HevcParser::new(), 
         }
+    }
+
+    pub fn clear_parser(&mut self) {
+        self.parser.buffer.clear();
     }
 
     /// Continuously spawn ffmpeg processes to produce video chunks.
@@ -192,8 +190,7 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self)  {
         println!("CHUNKING!"); 
-        // Build an ffmpeg command for the current chunk:
-        // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
+        self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         command
             // .hwaccel("cuda")
@@ -228,18 +225,17 @@ impl ChunkedHevcEncoder {
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
         print!("SPAWN CHUNK..."); 
-        
-        let loop_limit = 1000000;
+        // let loop_limit = 1000000;
         let mut i = 0;  
         // Read data from the process until it ends.
         loop {
             // println!("loop {}", i);
-            i += 1; 
-            if i > loop_limit {
-                i = 0; 
-                print!("BREAK\n"); 
-                break; 
-            }
+            // i += 1; 
+            // if i > loop_limit {
+            //     i = 0; 
+            //     print!("BREAK\n"); 
+            //     break; 
+            // }
             match reader.read(&mut buf) {
                 Ok(0) => break, // end of chunk
                 Ok(n) => {
@@ -259,33 +255,53 @@ impl ChunkedHevcEncoder {
             }
         }
         // let _ = child.wait();
+        let _ = child.wait();
 
         // Update offset for the next chunk.
         self.current_offset += self.chunk_duration;
-        // (Optional: Reset current_offset to zero if you want to loop over the input.)
+            // Add a safety check to clear parser buffer if it gets too large
+        if self.parser.buffer.len() > 1_000_000 {  // 1MB limit
+            println!("Parser buffer getting too large ({}), clearing", self.parser.buffer.len());
+            self.parser.buffer.clear();
+        }
 
-        // Optionally yield control to allow other async tasks to run.
-        // thread::sleep(Duration::from_millis(10));
-    
     }
-
-    /// Async getter that awaits and returns the next available frame.
-    pub async fn next_frame(&self) -> Option<Vec<u8>> {
-        // self.frame_rx.recv().ok()
-
-        if let Ok(a) = self.frame_rx.recv_timeout(Duration::from_millis(1)){
-            return Some(a); 
+    pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
+        // CRITICAL: Process parser buffer FIRST, always
+        let extracted_frames = self.parser.get_frames();
+        if !extracted_frames.is_empty() {
+            println!("Extracted {} frames from parser buffer, size {}", 
+                     extracted_frames.len(), self.parser.buffer.len());
+            
+            // Store all but first frame for future use
+            for frame in extracted_frames.iter().skip(1) {
+                self.frame_queue.push_back(frame.clone());
+            }
+            
+            // Return the first extracted frame immediately
+            return Some(extracted_frames[0].clone());
         }
-        else{
-            println!("No frame received internal encoder!");
-            None
+        
+        // Check queue next
+        if let Some(frame) = self.frame_queue.pop_front() {
+            return Some(frame);
         }
-
+        
+        // Only now try channel
+        if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(10)) {
+            return Some(frame);
+        }
+        
+        // Cleanup if necessary
+        if self.parser.buffer.len() > 50000 {
+            println!("Auto-clearing oversized parser buffer: {} bytes", self.parser.buffer.len());
+            self.parser.buffer.clear();
+        }
+        
+        None
     }
 }
 
-
-/// Represents a single HEVC NAL unit
 pub struct NalUnit {
     pub nal_type: u8,
     pub data: Vec<u8>,
@@ -293,340 +309,7 @@ pub struct NalUnit {
 }
 
 /// A parser for HEVC bitstreams to extract individual frames
-pub struct HevcParser {
-    buffer: Vec<u8>,
-}
-
-impl HevcParser {
-    pub fn new() -> Self {
-        Self { buffer: Vec::new() }
-    }
-
-    /// Add more encoded data to the parser buffer
-    pub fn add_data(&mut self, data: &[u8]) {
-        self.buffer.extend_from_slice(data);
-    }
-
-    /// Find the next NAL unit start code in the buffer
-    fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
-        for i in start_pos..self.buffer.len() - 3 {
-            // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Extract the next complete NAL unit from the buffer
-    pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
-        // Find the first start code
-        let start_pos = self.find_next_start_code(0)?;
-        
-        // Determine start code length (3 or 4 bytes)
-        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
-            4
-        } else {
-            3
-        };
-        
-        // Find the next start code
-        let next_start = self.find_next_start_code(start_pos + start_code_len);
-        
-        let (nal_end, has_next) = match next_start {
-            Some(pos) => (pos, true),
-            None => (self.buffer.len(), false)
-        };
-        
-        // If we don't have a complete NAL unit yet, wait for more data
-        if !has_next {
-            return None;
-        }
-        
-        // Extract NAL header and determine NAL type
-        let nal_header_pos = start_pos + start_code_len;
-        if nal_header_pos >= self.buffer.len() {
-            return None;
-        }
-        
-        let nal_header = self.buffer[nal_header_pos];
-        let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-        
-        // Extract the complete NAL unit data (including header)
-        let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
-        
-        // Remove the processed NAL unit from the buffer
-        self.buffer.drain(0..nal_end);
-        
-        // Determine if this is a keyframe (I-frame)
-        // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-        let is_keyframe = (16..=21).contains(&nal_type);
-        
-        Some(NalUnit {
-            nal_type,
-            data: nal_data,
-            is_keyframe,
-        })
-    }
-
-    /// Get all complete frames currently in the buffer
-    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
-        let mut frames = Vec::new();
-        let mut current_frame = Vec::new();
-        let mut saw_vcl = false;
-        
-        while let Some(nal) = self.next_nal_unit() {
-            // VCL NAL units (0-31) contain the actual picture data
-            let is_vcl = nal.nal_type <= 31;
-            
-            // If we see a VCL NAL and already saw one before, it's a new frame
-            if is_vcl && saw_vcl {
-                if !current_frame.is_empty() {
-                    frames.push(current_frame);
-                    current_frame = Vec::new();
-                }
-                saw_vcl = false;
-            }
-            
-            if is_vcl {
-                saw_vcl = true;
-            }
-            
-            // Add start code and NAL data to current frame
-            current_frame.extend_from_slice(&[0, 0, 0, 1]);
-            current_frame.extend_from_slice(&nal.data);
-        }
-        
-        // Add the last frame if it's not empty
-        if !current_frame.is_empty() {
-            frames.push(current_frame);
-        }
-        
-        frames
-    }
-}
-
-
-// pub struct HevcEncoder {
-//     packet_rx: Receiver<Vec<u8>>,
-//     _child: ffmpeg_sidecar::child::FfmpegChild,
-//     _stderr_handle: std::thread::JoinHandle<()>,
-//     parser: HevcParser,
-//     frame_buffer: VecDeque<Vec<u8>>,  // Buffer for encoded frames
-//     last_keyframe: Option<Vec<u8>>,    // Store the most recent keyframe
-// }
-// impl HevcEncoder {
-//     pub fn new(input: &str, width: u32, height: u32, bitrate: &str) -> Result<Self> {
-//         let mut child = FfmpegCommand::new()
-//             .hwaccel("cuda")
-//             .args(&["-re"]) // Read input at real-time speed
-//             .args(&["-stream_loop", "-1"]) // Loop input indefinitely
-//             .input(input)
-//             .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
-//             .args(&["-c:v", "hevc_nvenc"])
-//             .args(&["-preset", "fast"])
-//             .args(&["-rc", "cbr"])
-//             .args(&["-b:v", bitrate, "-maxrate", bitrate])
-//             .args(&["-rc-lookahead", "0"])
-//             .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP) ])
-//             .args(&["-movflags", "+frag_keyframe+empty_moov"])
-//             .args(&["-flush_packets", "1"])
-//             .args(&["-bsf:v", "hevc_mp4toannexb"])
-//             .args(&["-an"])
-//             // .args(&["-f", "mp4", "-"])
-//             .args(&["-f", "hevc", "-"]) // Raw HEVC format
-//             .spawn()?;
-
-//         let stdout = child.take_stdout().unwrap();
-//         let stderr = child.take_stderr().unwrap();
-
-//         let (packet_tx, packet_rx) = unbounded();
-
-//         // Start stdout reader thread
-//         std::thread::spawn(move || {
-//             let mut reader = BufReader::new(stdout);
-//             let mut buf = [0u8; 4096];
-//             loop {
-//                 match reader.read(&mut buf) {
-//                     Ok(0) => break,
-//                     Ok(n) => {
-//                         packet_tx.send(buf[..n].to_vec()).unwrap();
-//                     }
-//                     Err(e) => {
-//                         eprintln!("Encoder read error: {}", e);
-//                         break;
-//                     }
-//                 }
-//             }
-//         });
-
-//         // Start stderr monitor thread
-//         let stderr_handle = std::thread::spawn(move || {
-//             let mut reader = BufReader::new(stderr);
-//             let mut buf = String::new();
-//             loop {
-//                 buf.clear();
-//                 match reader.read_to_string(&mut buf) {
-//                     Ok(0) => break,
-//                     Ok(_) => eprint!("{}", buf),
-//                     Err(e) => {
-//                         eprintln!("Encoder stderr read error: {}", e);
-//                         break;
-//                     }
-//                 }
-//             }
-//         });
-
-//         Ok(Self {
-//             packet_rx,
-//             _child: child,
-//             _stderr_handle: stderr_handle,
-//             parser: HevcParser::new(),
-//             frame_buffer: VecDeque::new(),
-//             last_keyframe: None,
-//         })
-//     }
-
-//     pub async fn wait_for_initialization(&mut self) -> Result<()> {
-//         // Poll until at least one frame is in the buffer.
-//         while self.frames_available() == 0 {
-//             self.process_incoming_packets()?;
-//             task::sleep(Duration::from_millis(10)).await;
-//         }
-//         Ok(())
-//     }
-
-//     pub async fn get_buffer_emu(&mut self) -> Option<Vec<u8>> {
-//         loop {
-//             if let Some(frame) = self.next_frame() {
-//                 return Some(frame);
-//             }
-//             if let Err(e) = self.process_incoming_packets() {
-//                 eprintln!("Error processing incoming packets: {}", e);
-//             }
-//             task::sleep(Duration::from_millis(1)).await;
-//         }
-//     }
-//     // pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
-//     //     match self.packet_rx.try_recv() {
-//     //         Ok(packet) => {
-//     //             // Add packet data to the parser
-//     //             self.parser.add_data(&packet);
-                
-//     //             // Extract frames from the parser and buffer them
-//     //             let frames = self.parser.get_frames();
-//     //             for frame in frames {
-//     //                 // Check if this frame is a keyframe
-//     //                 let is_keyframe = Self::is_keyframe(&frame);
-//     //                 if is_keyframe {
-//     //                     self.last_keyframe = Some(frame.clone());
-//     //                 }
-                    
-//     //                 self.frame_buffer.push_back(frame);
-//     //             }
-                
-//     //             Ok(Some(packet))
-//     //         },
-//     //         Err(TryRecvError::Empty) => Ok(None),
-//     //         Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Encoder channel disconnected")),
-//     //     }
-//     // }
-
-//     // pub fn process_incoming_packets(&mut self) -> Result<()> {
-//     //     while let Ok(Some(_)) = self.try_next_packet() {
-//     //         // Just process the packets to fill our frame buffer
-//     //     }
-//     //     Ok(())
-//     // }
-//     pub fn try_next_packet(&mut self) -> Result<Option<Vec<u8>>> {
-//         // println!("HevcEncoder::try_next_packet - trying to receive packet"); // ADDED LOG
-//         match self.packet_rx.try_recv() {
-//             Ok(packet) => {
-//                 // println!("HevcEncoder::try_next_packet - received packet of size: {}", packet.len()); // ADDED LOG
-//                 // Add packet data to the parser
-//                 self.parser.add_data(&packet);
-
-//                 // Extract frames from the parser and buffer them
-//                 let frames = self.parser.get_frames();
-//                 // println!("HevcEncoder::try_next_packet - extracted {} frames from packet", frames.len()); // ADDED LOG
-//                 for frame in frames {
-//                     // Check if this frame is a keyframe
-//                     let is_keyframe = Self::is_keyframe(&frame);
-//                     if is_keyframe {
-//                         self.last_keyframe = Some(frame.clone());
-//                     }
-
-//                     self.frame_buffer.push_back(frame);
-//                 }
-
-//                 Ok(Some(packet))
-//             },
-//             Err(TryRecvError::Empty) => {
-//                 // println!("HevcEncoder::try_next_packet - channel empty"); // ADDED LOG
-//                 Ok(None)
-//             },
-//             Err(TryRecvError::Disconnected) => {
-//                 eprintln!("HevcEncoder::try_next_packet - channel disconnected"); // Existing error log
-//                 Err(anyhow::anyhow!("Encoder channel disconnected"))
-//             }
-//         }
-//     }
-
-//     pub fn process_incoming_packets(&mut self) -> Result<()> {
-//         // println!("HevcEncoder::process_incoming_packets - start processing"); // ADDED LOG
-//         let mut packets_processed = 0;
-//         while let Ok(Some(_)) = self.try_next_packet() {
-//             packets_processed += 1; // Count processed packets
-//             // Just process the packets to fill our frame buffer
-//         }
-//         // println!("HevcEncoder::process_incoming_packets - processed {} packets", packets_processed); // ADDED LOG
-//         Ok(())
-//     }
-    
-    
-//     // Get the next frame from the buffer
-//     pub fn next_frame(&mut self) -> Option<Vec<u8>> {
-//         self.frame_buffer.pop_front()
-//     }
-
-
-    
-//     // Check if a frame contains a keyframe
-//     fn is_keyframe(frame: &[u8]) -> bool {
-//         // Check for start code
-//         for i in 0..frame.len().saturating_sub(5) {
-//             if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
-//                (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
-//                 let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
-//                 let nal_header_pos = i + start_code_len;
-                
-//                 if nal_header_pos < frame.len() {
-//                     let nal_header = frame[nal_header_pos];
-//                     let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-                    
-//                     // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-//                     if (16..=21).contains(&nal_type) {
-//                         return true;
-//                     }
-//                 }
-//             }
-//         }
-//         false
-//     }
-//     // Get the latest keyframe (useful for recovery after packet loss)
-//     pub fn get_latest_keyframe(&self) -> Option<Vec<u8>> {
-//         self.last_keyframe.clone()
-//     }
-    
-//     // Number of frames waiting in the buffer
-//     pub fn frames_available(&self) -> usize {
-//         self.frame_buffer.len()
-//     }
-
-// }
-
+/// A parser for HEVC bitstreams to extract individual frames
 
   
 
@@ -1264,6 +947,8 @@ impl StreamSocket {
             chunk_frames: VecDeque::new(), 
             is_initializing_encoder: Arc::new(AtomicBool::new(false)), 
             time_since_last_update: t0, 
+            last_buffer_size: 0,
+            static_buffer_count: 0,
         }
     }
 
@@ -2139,6 +1824,9 @@ pub struct StreamSender<H> {
 
     pub time_since_last_update: TaiTime<0>,
 
+    last_buffer_size: usize,
+    static_buffer_count: u32,
+
 }
 
 #[allow(unused)]
@@ -2254,31 +1942,39 @@ impl<H: Serialize> StreamSender<H> {
                 
                 print_pretty!(DebugColor::Red, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
                 
+
+
+
+
                 match encoder.next_frame().await {
                     Some(frame) => {
                         buffer = frame;
                     }
                     None => {
-                        eprintln!("No frame available from ChunkedHevcEncoder, generating new!.");
-                        encoder.start_chunking().await; 
-
-
-                        buffer = Vec::new();
+                        print_pretty!(DebugColor::Red, "No frame available, restarting encoder", );
+                        
+                        // Clear ALL buffers before restart
+                        encoder.parser.buffer.clear();
+                        encoder.frame_queue.clear();
+                        
+                        // Restart chunking
+                        encoder.start_chunking().await;
+                        
+                        // Wait for encoder to produce frames
+                        // task::sleep(Duration::from_millis(100)).await;
+                        
+                        // Try again after waiting
+                        match encoder.next_frame().await {
+                            Some(frame) => buffer = frame,
+                            None => {
+                                print_pretty!(DebugColor::Red, "Still no frame after restart, using empty buffer", );
+                                buffer = Vec::new();
+                            }
+                        }
                     }
                 }
 
-                let is_late_enough = now >= TaiTime::EPOCH + Duration::from_secs_f64(12.0);
                 
-                // Check if it's time to process another chunk
-                if let Some(deadline) = self.time_since_last_update.checked_add(Duration::from_secs_f64(CHUNK_DURATION_F64_s)) {
-                    if now >= deadline && is_late_enough{
-                        print_pretty!(DebugColor::Azure, "Deadline reached, NOT processing chunk!", );
-                        self.time_since_last_update = now;
-                        // encoder.start_chunking().await;
-                    }
-                } else {
-                    eprintln!("Timestamp overflow when computing deadline!");
-                }
             }
         } else {
             // Fallback for non-FFMPEG mode
@@ -2330,7 +2026,36 @@ impl<H: Serialize> StreamSender<H> {
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
 }
-
+pub fn contains_keyframe(frame: &[u8]) -> bool {
+    // Check for valid frame size
+    if frame.len() < 6 {
+        return false;
+    }
+    
+    // Scan for HEVC NAL units with types 16-21 (keyframes)
+    for i in 0..frame.len().saturating_sub(5) {
+        // Look for start codes (0x000001 or 0x00000001)
+        if (frame[i] == 0 && frame[i+1] == 0 && frame[i+2] == 1) || 
+           (i+3 < frame.len() && frame[i] == 0 && frame[i+1] == 0 && frame[i+2] == 0 && frame[i+3] == 1) {
+            
+            // Determine start code length
+            let start_code_len = if frame[i+2] == 0 { 4 } else { 3 };
+            
+            // Check NAL header if there's enough data
+            let header_pos = i + start_code_len;
+            if header_pos < frame.len() {
+                let nal_header = frame[header_pos];
+                let nal_type = (nal_header >> 1) & 0x3F;  // HEVC NAL type is bits 1-6
+                
+                // HEVC keyframes are NAL types 16-21 (IRAP pictures)
+                if (16..=21).contains(&nal_type) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 impl<T> HandleTryAgain<T> for io::Result<T> {
     fn handle_try_again(self) -> ConResult<T> {
         self.map_err(|e| {

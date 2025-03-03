@@ -370,6 +370,134 @@ impl SlidingWindowTimely<f32> {
     }
 }
 
+pub struct NalUnit {
+    pub nal_type: u8,
+    pub data: Vec<u8>,
+    pub is_keyframe: bool,
+}
+pub struct HevcParser {
+    buffer: Vec<u8>,
+}
+
+impl HevcParser {
+    pub fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    /// Add more encoded data to the parser buffer
+    pub fn add_data(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    /// Find the next NAL unit start code in the buffer
+    fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
+        for i in start_pos..self.buffer.len() - 3 {
+            // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
+            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
+               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
+                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+                return Some(i);
+            }
+        }
+        None
+    }
+    pub fn clear(&mut self) {
+        println!("Clearing parser buffer: {} bytes", self.buffer.len());
+        self.buffer.clear();
+    }
+    /// Extract the next complete NAL unit from the buffer
+    pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
+        // Find the first start code
+        let start_pos = self.find_next_start_code(0)?;
+        
+        // Determine start code length (3 or 4 bytes)
+        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
+            4
+        } else {
+            3
+        };
+        
+        // Find the next start code
+        let next_start = self.find_next_start_code(start_pos + start_code_len);
+        
+        let (nal_end, has_next) = match next_start {
+            Some(pos) => (pos, true),
+            None => (self.buffer.len(), false)
+        };
+        
+        // If we don't have a complete NAL unit yet, wait for more data
+        if !has_next {
+            return None;
+        }
+        
+        // Extract NAL header and determine NAL type
+        let nal_header_pos = start_pos + start_code_len;
+        if nal_header_pos >= self.buffer.len() {
+            return None;
+        }
+        
+        let nal_header = self.buffer[nal_header_pos];
+        let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+        
+        // Extract the complete NAL unit data (including header)
+        let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
+        
+        // Remove the processed NAL unit from the buffer
+        self.buffer.drain(0..nal_end);
+        
+        // Determine if this is a keyframe (I-frame)
+        // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+        let is_keyframe = (16..=21).contains(&nal_type);
+        
+        Some(NalUnit {
+            nal_type,
+            data: nal_data,
+            is_keyframe,
+        })
+    }
+
+    /// Get all complete frames currently in the buffer
+    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        let mut current_frame = Vec::new();
+        let mut saw_vcl = false;
+        
+        while let Some(nal) = self.next_nal_unit() {
+            // VCL NAL units (0-31) contain the actual picture data
+            let is_vcl = nal.nal_type <= 31;
+            
+            // If we see a VCL NAL and already saw one before, it's a new frame
+            if is_vcl && saw_vcl {
+                if !current_frame.is_empty() {
+                    frames.push(current_frame);
+                    current_frame = Vec::new();
+                }
+                saw_vcl = false;
+            }
+            
+            if is_vcl {
+                saw_vcl = true;
+            }
+            
+            // Add start code and NAL data to current frame
+            current_frame.extend_from_slice(&[0, 0, 0, 1]);
+            current_frame.extend_from_slice(&nal.data);
+        }
+        
+        // Add the last frame if it's not empty
+        if !current_frame.is_empty() {
+            frames.push(current_frame);
+        }
+        if self.buffer.len() > 100000 {
+            println!("Auto-clearing oversized parser buffer: {} bytes", self.buffer.len());
+            self.buffer.clear();
+        }
+        frames
+    }
+}
+
+
+
 #[derive(Clone)]
 pub struct SlidingWindowAverage<T> {
     history_buffer: VecDeque<T>,
