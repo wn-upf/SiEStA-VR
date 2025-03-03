@@ -117,7 +117,7 @@ pub const CAPACITY_RX_BUFFER: usize = 2000;
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
-pub const DECODER_BUFFERING_FRAMES: usize = 3;
+pub const DECODER_BUFFERING_FRAMES: usize = 10;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
 
 
@@ -2261,26 +2261,26 @@ impl XRClient {
                 );
             }
     
-            // Rest of your vsync logic remains the same
-            if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-                T_vsync = T_vsync.mul_f64(2.0);
-                debug_bgprint!(
-                    DebugColor::Violet,
-                    "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})",
-                    T_vsync.as_secs_f32(),
-                    self.decoder_queue.len(),
-                    TARGET_FRAMES_DECODER_QUEUE
-                );
-            } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
-                T_vsync = T_vsync.mul_f64(0.5);
-                debug_bgprint!(
-                    DebugColor::Violet,
-                    "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})",
-                    T_vsync.as_secs_f32(),
-                    self.decoder_queue.len(),
-                    TARGET_FRAMES_DECODER_QUEUE
-                );
-            }
+            // // Rest of your vsync logic remains the same
+            // if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
+            //     T_vsync = T_vsync.mul_f64(2.0);
+            //     debug_bgprint!(
+            //         DebugColor::Violet,
+            //         "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})",
+            //         T_vsync.as_secs_f32(),
+            //         self.decoder_queue.len(),
+            //         TARGET_FRAMES_DECODER_QUEUE
+            //     );
+            // } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
+            //     T_vsync = T_vsync.mul_f64(0.5);
+            //     debug_bgprint!(
+            //         DebugColor::Violet,
+            //         "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})",
+            //         T_vsync.as_secs_f32(),
+            //         self.decoder_queue.len(),
+            //         TARGET_FRAMES_DECODER_QUEUE
+            //     );
+            // }
     
             context
                 .scheduler
