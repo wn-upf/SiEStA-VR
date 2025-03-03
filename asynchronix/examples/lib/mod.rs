@@ -488,10 +488,10 @@ impl HevcParser {
         if !current_frame.is_empty() {
             frames.push(current_frame);
         }
-        if self.buffer.len() > 100000 {
-            println!("Auto-clearing oversized parser buffer: {} bytes", self.buffer.len());
-            self.buffer.clear();
-        }
+        // if self.buffer.len() > 100000 {
+        //     println!("Auto-clearing oversized parser buffer: {} bytes", self.buffer.len());
+        //     self.buffer.clear();
+        // }
         frames
     }
 }

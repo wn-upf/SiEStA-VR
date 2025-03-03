@@ -39,13 +39,7 @@ use tokio::time::{sleep, Duration as Durtokio};
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
 
 use crate::{debug_bgprint, format_elapsed};
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
-pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 15.0;
 
-
-// pub const CHUNK_SIZE_FRAMES: usize = 300; 
-pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
 
 use rand::Rng;
@@ -92,7 +86,13 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 
 pub const CHUNK_DURATION_F64_s: f64 = 1.0;
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
+pub const MAX_DEADLINE_IN_STATS: usize = 10;
+pub const OFFSET_VIDEO: f64 = 15.0;
 
+
+// pub const CHUNK_SIZE_FRAMES: usize = 300; 
+pub const IDR_FRAME_SIZE_GOP: usize = 600; 
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -292,11 +292,6 @@ impl ChunkedHevcEncoder {
             return Some(frame);
         }
         
-        // Cleanup if necessary
-        if self.parser.buffer.len() > 50000 {
-            println!("Auto-clearing oversized parser buffer: {} bytes", self.parser.buffer.len());
-            self.parser.buffer.clear();
-        }
         
         None
     }
@@ -1906,7 +1901,7 @@ impl<H: Serialize> StreamSender<H> {
         now: TaiTime<0>,
         ip: IpAddr,
     ) -> Result<Buffer<H>> {
-        let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
+        let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
         let mut buffer: Vec<u8> = Vec::new();
         
         if USE_FFMPEG {
