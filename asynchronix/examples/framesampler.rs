@@ -15,14 +15,15 @@ use async_std::task;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const INITIAL_BITRATE : &str= "2M"; 
+pub const INITIAL_BITRATE : &str= "1M"; 
 pub const WINDOW_SCALE_FACTOR: f64 = 0.9; 
 
-pub const IDR_FRAME_SIZE_GOP: usize = 300;
+pub const IDR_FRAME_SIZE_GOP: usize = 60;
 
 pub const PACKET_LOSS_PROBABILITY: f64 = 0.00; 
 
 pub const CHUNK_SIZE_ENCODER_S: f64 = 10.0; 
+
 
 // New encoder type that chunks the video into fixed-duration segments.
 /// Each chunk is produced by invoking ffmpeg with "-ss" (start time)
@@ -42,6 +43,8 @@ impl ChunkedHevcEncoder {
     /// Create a new ChunkedHevcEncoder.
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64) -> Self {
         // We use a bounded channel to store parsed frames.
+        
+        println!("Initializing chunkedhevcencoder"); 
         let (frame_tx, frame_rx) = bounded(100);
         Self {
             input: input.to_string(),
@@ -61,6 +64,9 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self) -> Result<()> {
         loop {
+
+            println!("CHUNKING!"); 
+
             // Build an ffmpeg command for the current chunk:
             // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
             let mut command = FfmpegCommand::new();
@@ -80,7 +86,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
-                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate, "-minrate", &self.bitrate])
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])  // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
@@ -530,10 +536,17 @@ pub struct HevcDecoder {
     parser: HevcParser,
     frame_buffer: VecDeque<Vec<u8>>,  // Buffer for parsed HEVC frames
     decoded_frames: VecDeque<Vec<u8>>, // Buffer for decoded RGB frames
+
+    ewma_frame_size: f64,  // Store the EWMA value
+    last_update: Instant,   // Track last update time
+
+
+    epoch: Instant, 
+
 }
 
 impl HevcDecoder {
-    pub fn new(framerate: u32, width: u32, height: u32) -> Result<Self> {
+    pub fn new(framerate: u32, width: u32, height: u32, epoch: Instant, ) -> Result<Self> {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
@@ -620,12 +633,32 @@ impl HevcDecoder {
             parser: HevcParser::new(),
             frame_buffer: VecDeque::new(),
             decoded_frames: VecDeque::new(),
+            ewma_frame_size: 0.0,
+            last_update: Instant::now(),
+            epoch: epoch, 
         })
     }
 
     // Process incoming encoded packets
     pub fn process_packet(&mut self, packet: Vec<u8>) -> Result<()> {
         // Add packet data to the parser
+        
+        let frame_size = packet.len() as f64;
+        let now = Instant::now();
+        let delta_t = now.duration_since(self.last_update).as_secs_f64();
+        self.last_update = now;
+
+        // Calculate smoothing factor α
+        let alpha = 1.0 - (-delta_t / 1.0).exp();
+
+        // Update EWMA
+        self.ewma_frame_size = alpha * frame_size + (1.0 - alpha) * self.ewma_frame_size;
+
+        println!(
+            "{:.3} - Parsing w size: {}, EWMA size: {:.2}", 
+            Instant::now().duration_since(self.epoch).as_secs_f64(),
+            frame_size, self.ewma_frame_size
+        );    
         self.parser.add_data(&packet);
         
         // Extract frames from the parser and buffer them
@@ -653,6 +686,7 @@ impl HevcDecoder {
     pub fn process_decoded_frames(&mut self) -> Result<()> {
         // Drain any available decoded frames into our buffer
         while let Ok(Some(frame)) = self.try_next_decoded_frame() {
+            // println!("Frame got on decoder, size: {}", frame.len());
             self.decoded_frames.push_back(frame);
         }
         
@@ -674,6 +708,7 @@ impl HevcDecoder {
 #[async_std::main]
 async fn main() -> Result<()> {
     // ffmpeg_sidecar::download::auto_download()?;
+    let EPOCH = Instant::now(); 
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
     println!("Starting video codec simulation...");
 
@@ -696,7 +731,7 @@ async fn main() -> Result<()> {
     });
 
     // Create the decoder as before.
-    let mut decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)?;
+    let mut decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
     println!("Encoder and decoder initialized");
 
     // Window setup.
@@ -770,6 +805,9 @@ async fn main() -> Result<()> {
         let display_time = Instant::now();
         if display_time >= next_frame_time {
             if let Some(frame) = decoder.next_decoded_frame() {
+
+                // println!("Frame got on decoder, size: {}", frame.len());
+
                 // Update the last successful frame time.
                 last_frame_time = Instant::now();
                 // Convert and display the frame.

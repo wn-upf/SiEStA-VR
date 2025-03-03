@@ -349,7 +349,7 @@ impl StatisticsManager {
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
         };
 
-        debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);
+        // debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);
 
         // Call method to save data to CSV
         if self.save_network_stats_to_csv().is_err() {

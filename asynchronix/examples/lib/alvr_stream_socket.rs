@@ -216,17 +216,17 @@ impl ChunkedHevcEncoder {
 
         let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
-        println!("SPAWN CHUNK"); 
+        print!("SPAWN CHUNK..."); 
         
         let loop_limit = 1000;
         let mut i = 0;  
         // Read data from the process until it ends.
         loop {
-            println!("loop {}", i);
+            // println!("loop {}", i);
             i += 1; 
             if i > loop_limit {
                 i = 0; 
-                println!("BREAK"); 
+                print!("BREAK\n"); 
                 break; 
             }
             match reader.read(&mut buf) {
@@ -2112,7 +2112,7 @@ pub struct StreamSender<H> {
     // is_initializing_encoder: Arc<AtomicBool>,
 
     // encoder_wrapper: Option<Arc<tokMutex<HevcEncoder>>>,
-    ffmpeg_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
+    pub ffmpeg_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
     // Keep the initialization flag:
     is_initializing_encoder: Arc<AtomicBool>,
 
@@ -2199,9 +2199,10 @@ impl<H: Serialize> StreamSender<H> {
         let mut buffer: Vec<u8> = Vec::new();
         
         if USE_FFMPEG {
+            
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder.
-
+                
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
 
                 let encoder = ChunkedHevcEncoder::new(
@@ -2217,7 +2218,8 @@ impl<H: Serialize> StreamSender<H> {
                 let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
                 // Clone the Arc for the async task.
                 let encoder_arc_clone = Arc::clone(&encoder_arc);
-                
+                self.ffmpeg_encoder = Some(encoder_arc);
+
                 
                 
                 // async_std::task::spawn(async move {
@@ -2226,7 +2228,6 @@ impl<H: Serialize> StreamSender<H> {
                 
                 
                 // Store the Arc in your field.
-                self.ffmpeg_encoder = Some(encoder_arc);
                 // Save a new encoder handle into self.
             }
             
