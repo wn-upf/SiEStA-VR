@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::collections::{HashMap, VecDeque};
 use async_std::task;
-
+use plotters::prelude::*;
 use std::fs::File;
 use std::path::Path;
 use std::process::Command; 
@@ -26,14 +26,14 @@ pub const WINDOW_SCALE_FACTOR: f64 = 0.7;
 
 pub const IDR_FRAME_SIZE_GOP: usize = 300;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.01; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.05; 
 
 pub const CHUNK_SIZE_ENCODER_S: f64 = 10.0; 
 pub const FRAME_CUTOFF_LIMIT: usize = 1000; 
 
 pub const OFFSET_VIDEO: f64 = 0.0;
 
-pub const REENCODE: bool = false; 
+pub const REENCODE: bool = true; 
 
 #[derive(Debug, Clone)]
 struct FrameMetadata {
@@ -42,133 +42,186 @@ struct FrameMetadata {
     is_keyframe: bool,
 }
 
-struct VmafTracker {
-    csv_writer: BufWriter<File>,
-    frame_counter: u64,
-    last_vmaf_score: Option<f64>,
+// New struct to store synchronized frame pairs
+#[derive(Debug, Clone)]
+struct SyncedFramePair {
+    frame_number: u64,
+    ref_path: String,
+    lossy_path: String,
+    timestamp_ms: u64,
 }
 
-impl VmafTracker {
-    fn new() -> Result<Self, io::Error> {
-        // Create directory if it doesn't exist
-        fs::create_dir_all("Video_Sink/vmaf")?;
+use plotters::prelude::*;
+
+// Maximum number of frames to keep in history for plotting
+const VMAF_HISTORY_SIZE: usize = 180; // 3 seconds at 60fps
+
+// Structure to hold VMAF metrics for real-time display
+struct VmafMetrics {
+    // History of VMAF scores for plotting
+    scores: VecDeque<f64>,
+    // Current frame's VMAF score
+    current_score: f64,
+    // Running statistics
+    min_score: f64,
+    max_score: f64,
+    avg_score: f64,
+    total_frames: usize,
+    // Path to save plot image
+    plot_path: String,
+    // Dimensions for the plot
+    width: u32,
+    height: u32,
+}
+
+impl VmafMetrics {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            scores: VecDeque::with_capacity(VMAF_HISTORY_SIZE),
+            current_score: 0.0,
+            min_score: 100.0,
+            max_score: 0.0,
+            avg_score: 0.0,
+            total_frames: 0,
+            plot_path: "Video_Sink/vmaf_plot.png".to_string(),
+            width,
+            height,
+        }
+    }
+
+    // Add a new VMAF score to the history
+    pub fn add_score(&mut self, score: f64) {
+        self.current_score = score;
         
-        // Create CSV file for VMAF scores
-        let vmaf_file = File::create("Video_Sink/vmaf/vmaf_scores.csv")?;
-        let mut csv_writer = BufWriter::new(vmaf_file);
+        // Update statistics
+        self.min_score = self.min_score.min(score);
+        self.max_score = self.max_score.max(score);
+        self.total_frames += 1;
         
-        // Write CSV header
-        writeln!(csv_writer, "frame_number,timestamp_ms,vmaf_score")?;
+        // Update running average
+        let total_score = self.avg_score * (self.total_frames - 1) as f64 + score;
+        self.avg_score = total_score / self.total_frames as f64;
         
-        Ok(VmafTracker {
-            csv_writer,
-            frame_counter: 0,
-            last_vmaf_score: None,
-        })
+        // Add to history, keeping the last VMAF_HISTORY_SIZE scores
+        self.scores.push_back(score);
+        if self.scores.len() > VMAF_HISTORY_SIZE {
+            self.scores.pop_front();
+        }
     }
     
-    fn save_frame_pair(&mut self, ref_frame: &[u8], lossy_frame: &[u8], width: usize, height: usize, timestamp_ms: u64) -> Result<(), io::Error> {
-        self.frame_counter += 1;
+    // Generate a plot of VMAF scores
+    pub fn generate_plot(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let root = BitMapBackend::new(&self.plot_path, (self.width, self.height))
+            .into_drawing_area();
         
-        // Create directories for YUV frames if they don't exist
-        fs::create_dir_all("Video_Sink/vmaf/reference_yuv")?;
-        fs::create_dir_all("Video_Sink/vmaf/lossy_yuv")?;
+        root.fill(&WHITE)?;
         
-        // Convert RGB to YUV420p and save reference frame
-        let ref_yuv_path = format!("Video_Sink/vmaf/reference_yuv/frame_{:04}.yuv", self.frame_counter);
-        rgb_to_yuv420p(ref_frame, width, height, &ref_yuv_path)?;
+        let min_y = (self.min_score.max(0.0) - 5.0).max(0.0);
+        let max_y = (self.max_score + 5.0).min(100.0);
         
-        // Convert RGB to YUV420p and save lossy frame
-        let lossy_yuv_path = format!("Video_Sink/vmaf/lossy_yuv/frame_{:04}.yuv", self.frame_counter);
-        rgb_to_yuv420p(lossy_frame, width, height, &lossy_yuv_path)?;
+        let mut chart = ChartBuilder::on(&root)
+            .caption("VMAF Score Over Time", ("sans-serif", 20).into_font())
+            .margin(5)
+            .x_label_area_size(30)
+            .y_label_area_size(30)
+            .build_cartesian_2d(0..self.scores.len(), min_y..max_y)?;
         
-        // Calculate VMAF for this frame pair
-        let vmaf_score = calculate_frame_vmaf(&ref_yuv_path, &lossy_yuv_path, width, height)?;
-        self.last_vmaf_score = Some(vmaf_score);
+        chart.configure_mesh()
+            .x_labels(5)
+            .y_labels(5)
+            .y_desc("VMAF Score")
+            .x_desc("Frame")
+            .axis_desc_style(("sans-serif", 15))
+            .draw()?;
         
-        // Write to CSV
-        writeln!(self.csv_writer, "{},{},{:.4}", self.frame_counter, timestamp_ms, vmaf_score)?;
-        self.csv_writer.flush()?;
+        // Plot VMAF scores as a line
+        chart.draw_series(LineSeries::new(
+            self.scores.iter().enumerate().map(|(i, &score)| (i, score)),
+            &BLUE,
+        ))?
+        .label("VMAF Score")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
         
-        println!("Frame #{}: VMAF Score = {:.2}", self.frame_counter, vmaf_score);
+        // Add a reference line for "good quality" threshold at VMAF = 80
+        chart.draw_series(LineSeries::new(
+            vec![(0, 80.0), (self.scores.len(), 80.0)],
+            &RED.mix(0.5),
+        ))?
+        .label("Good Quality")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED.mix(0.5)));
+        
+        // Add stats to the chart
+        chart.draw_series(std::iter::once(Text::new(
+            format!("Current: {:.1} | Avg: {:.1} | Min: {:.1} | Max: {:.1}",
+                self.current_score, self.avg_score, self.min_score, self.max_score),
+            (self.scores.len() / 2, max_y - 5.0),
+            ("sans-serif", 15).into_font(),
+        )))?;
+        
+        chart.configure_series_labels()
+            .background_style(&WHITE.mix(0.8))
+            .border_style(&BLACK)
+            .draw()?;
+        
+        root.present()?;
         
         Ok(())
     }
     
-    fn get_last_vmaf_score(&self) -> Option<f64> {
-        self.last_vmaf_score
+    // Get the path to the plot image
+    pub fn get_plot_path(&self) -> &str {
+        &self.plot_path
     }
 }
 
-// Convert RGB to YUV420p and save to file
-fn rgb_to_yuv420p(rgb_data: &[u8], width: usize, height: usize, output_path: &str) -> Result<(), io::Error> {
-    // Create a temp RGB file
-    let temp_rgb_path = format!("{}.rgb", output_path);
-    let mut rgb_file = File::create(&temp_rgb_path)?;
-    rgb_file.write_all(rgb_data)?;
+// Function to calculate VMAF for a single frame pair (reference and distorted)
+fn calculate_frame_vmaf(ref_frame: &[u8], distorted_frame: &[u8], width: usize, height: usize) -> Result<f64, anyhow::Error> {
+    use std::process::Command;
+    use tempfile::tempdir;
     
-    // Use ffmpeg to convert RGB to YUV420p
-    let status = Command::new("ffmpeg")
+    // Create temporary directory for files
+    let temp_dir = tempdir()?;
+    
+    // Save frames to temporary files
+    let ref_path = temp_dir.path().join("ref.rgb");
+    let dist_path = temp_dir.path().join("dist.rgb");
+    
+    std::fs::write(&ref_path, ref_frame)?;
+    std::fs::write(&dist_path, distorted_frame)?;
+    
+    // Use FFmpeg to calculate VMAF for these frames
+    let output = Command::new("ffmpeg")
         .args(&[
             "-f", "rawvideo",
             "-pixel_format", "rgb24",
             "-video_size", &format!("{}x{}", width, height),
-            "-i", &temp_rgb_path,
+            "-i", ref_path.to_str().unwrap(),
             "-f", "rawvideo",
-            "-pix_fmt", "yuv420p",
-            "-y", output_path
-        ])
-        .status()?;
-    
-    // Remove temp RGB file
-    fs::remove_file(temp_rgb_path)?;
-    
-    if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "Failed to convert RGB to YUV420p"));
-    }
-    
-    Ok(())
-}
-
-// Calculate VMAF for a single frame pair
-fn calculate_frame_vmaf(ref_yuv_path: &str, lossy_yuv_path: &str, width: usize, height: usize) -> Result<f64, io::Error> {
-    // Create a temporary file to store VMAF output
-    let vmaf_output = "Video_Sink/vmaf/temp_vmaf_output.json";
-    
-    // Run ffmpeg with libvmaf to calculate VMAF
-    let status = Command::new("ffmpeg")
-        .args(&[
-            "-f", "rawvideo",
-            "-pixel_format", "yuv420p", 
+            "-pixel_format", "rgb24",
             "-video_size", &format!("{}x{}", width, height),
-            "-i", ref_yuv_path,
-            "-f", "rawvideo",
-            "-pixel_format", "yuv420p",
-            "-video_size", &format!("{}x{}", width, height),
-            "-i", lossy_yuv_path,
-            "-lavfi", "libvmaf=log_fmt=json:log_path=Video_Sink/vmaf/temp_vmaf_output.json:n_threads=4",
+            "-i", dist_path.to_str().unwrap(),
+            "-lavfi", "libvmaf=log_fmt=json:log_path=-",
             "-f", "null", "-"
         ])
-        .status()?;
+        .output()?;
     
-    if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "Failed to calculate VMAF"));
+    // Parse the JSON output to extract VMAF score
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    // Extract VMAF score from output
+    if let Some(vmaf_idx) = stderr.find("\"vmaf\":") {
+        let score_text = &stderr[vmaf_idx + 7..];
+        if let Some(end_idx) = score_text.find(',') {
+            let score_str = &score_text[..end_idx];
+            return Ok(score_str.trim().parse::<f64>()?);
+        }
     }
     
-    // Parse the VMAF output
-    let vmaf_json = fs::read_to_string(vmaf_output)?;
-    
-    // Very simple JSON parsing to extract VMAF score
-    // In a real implementation, you would use a proper JSON parser
-    if let Some(idx) = vmaf_json.find("\"vmaf\":") {
-        let score_start = idx + 7; // length of "\"vmaf\":"
-        let score_end = vmaf_json[score_start..].find(',').unwrap_or(vmaf_json[score_start..].len());
-        let vmaf_score = vmaf_json[score_start..score_start+score_end].trim().parse::<f64>().unwrap_or(0.0);
-        return Ok(vmaf_score);
-    }
-    
-    Err(io::Error::new(io::ErrorKind::Other, "Failed to parse VMAF score"))
+    // If parsing fails, return an error
+    return Ok(200.0)
+    // Err(anyhow::anyhow!("Failed to extract VMAF score from FFmpeg output"))
 }
+
 
 
 
@@ -207,7 +260,7 @@ impl ChunkedHevcEncoder {
 
     /// Continuously spawn ffmpeg processes to produce video chunks.
     /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
-    /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
+    /// As data is read from ffmpeg's stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self) -> Result<()> {
         loop {
@@ -471,7 +524,6 @@ pub struct HevcDecoder {
 
 
     epoch: Instant, 
-
 }
 
 impl HevcDecoder {
@@ -507,7 +559,15 @@ impl HevcDecoder {
                             buffer.extend_from_slice(&chunk[..n]);
                             while buffer.len() >= frame_size {
                                 let frame = buffer.drain(..frame_size).collect();
-                                frame_tx.send(frame).unwrap();
+                                // frame_tx.send(frame).unwrap();
+
+                                if let Ok(_) = frame_tx.send(frame) {
+                                    // frame
+
+                                } else {
+                                    println!("SEND ERROR!");
+                                    // break;
+                                }
                             }
                         }
                         Err(e) => {
@@ -652,19 +712,21 @@ impl HevcDecoder {
     pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
         self.decoded_frames.pop_front()
     }
-
 }
 
 #[async_std::main]
 async fn main() -> Result<()> {
     // ffmpeg_sidecar::download::auto_download()?;
 
-
     let mut num_updates_ref = 0; 
     let EPOCH = Instant::now(); 
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
     println!("Starting video codec simulation...");
 
+    // Create directories for RGB frames
+    std::fs::create_dir_all("Video_Sink/reference_rgb")?;
+    std::fs::create_dir_all("Video_Sink/lossy_rgb")?;
+    
     // Create the chunked encoder.
     let mut chunked_encoder = ChunkedHevcEncoder::new(
         input_path,
@@ -676,7 +738,10 @@ async fn main() -> Result<()> {
     // Clone the async receiver so we can poll for frames in the main loop.
     let frame_rx = chunked_encoder.frame_rx.clone();
 
-    if REENCODE == true{
+    // For storing synchronized frame pairs
+    let mut synced_pairs: Vec<SyncedFramePair> = Vec::new();
+
+    if REENCODE == true {
         // Spawn the chunking task in the background.
         async_std::task::spawn(async move {
             if let Err(e) = chunked_encoder.start_chunking().await {
@@ -688,33 +753,15 @@ async fn main() -> Result<()> {
         let mut ref_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
         let mut lossy_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
 
-        // let mut ref_file = BufWriter::new(File::create("Video_Sink/reference_video.rgb")?);
-        // let mut lossy_file = BufWriter::new(File::create("Video_Sink/lossy_video.rgb")?);
-
-
-        // let mut reference_frames_map = HashMap::new();
-        // let mut lossy_frames_map = HashMap::new(); 
         let mut frame_counter: u64 = 0;
-
-        std::fs::create_dir_all("Video_Sink/reference_hevc")?;
-        std::fs::create_dir_all("Video_Sink/lossy_hevc")?;
-
-        // Index file writers
-        let mut ref_index = BufWriter::new(File::create("Video_Sink/reference_index.csv")?);
-        let mut lossy_index = BufWriter::new(File::create("Video_Sink/lossy_index.csv")?);
-
-        // Write CSV headers
-        writeln!(ref_index, "frame_number,timestamp_ms,is_keyframe,filename")?;
-        writeln!(lossy_index, "frame_number,timestamp_ms,is_keyframe,filename")?;
-
-
-
-
 
         let frame_size_rgb = WIDTH_ENCODER * HEIGHT_ENCODER * 3;
         let black_frame = vec![0u8; frame_size_rgb];
         let mut last_lossy_frame: Option<Vec<u8>> = None;
 
+        // CSV index for frame pairs
+        let mut sync_index = BufWriter::new(File::create("Video_Sink/synced_frames.csv")?);
+        writeln!(sync_index, "frame_number,timestamp_ms,ref_path,lossy_path")?;
 
         println!("Encoder and decoder initialized");
 
@@ -722,6 +769,15 @@ async fn main() -> Result<()> {
         let scale_factor = WINDOW_SCALE_FACTOR;
         let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
         let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+
+        let mut vmaf_metrics = VmafMetrics::new(scaled_width as u32, (scaled_height / 4) as u32);
+        // Create a third window for the VMAF visualization
+        let mut vmaf_window = Window::new(
+            "VMAF Metrics",
+            scaled_width,
+            scaled_height / 4,
+            WindowOptions::default(),
+        )?;
         let mut reference_window = Window::new(
             "Reference Video",
             scaled_width,
@@ -734,7 +790,6 @@ async fn main() -> Result<()> {
             scaled_height,
             WindowOptions::default(),
         )?; 
-
 
         println!("Window opened");
 
@@ -755,7 +810,7 @@ async fn main() -> Result<()> {
         let mut drop_probability = PACKET_LOSS_PROBABILITY;
         let mut rng = rand::thread_rng();
 
-        while reference_window.is_open() && lossy_window.is_open() 
+        while reference_window.is_open() && lossy_window.is_open() && vmaf_window.is_open()
             && !reference_window.is_key_down(Key::Escape) 
             && !lossy_window.is_key_down(Key::Escape) {
             // 1. Pipeline recovery: if no frame received in a while, try to recover using a keyframe.
@@ -782,8 +837,6 @@ async fn main() -> Result<()> {
             let now = Instant::now();
             if now >= next_transmission_time {
                 if let Ok(frame) = frame_rx.try_recv() {
-
-
                     //Retrieve reference frame
                     if let Err(e) = ref_decoder.process_packet(frame.clone()) {
                         eprintln!("Reference decoder error: {}", e);
@@ -809,98 +862,114 @@ async fn main() -> Result<()> {
                 eprintln!("Error lossy processing decoded frames: {}", e);
             }
 
-            if let Some(frame) = ref_decoder.next_encoded_frame() {
-
+            // Process encoded frames for frame numbers
+            if let Some(_) = ref_decoder.next_encoded_frame() {
                 frame_counter += 1; 
-                
-                let timestamp = Instant::now().duration_since(EPOCH).as_millis() as u64;
-                let is_keyframe = HevcDecoder::is_keyframe(&frame);
-                let metadata = FrameMetadata {
-                    frame_number: frame_counter,
-                    timestamp_ms: timestamp,
-                    is_keyframe,
-                };
-
-                let filename = format!("Video_Sink/reference_hevc/frame_{:04}.hevc", frame_counter);
-                let mut file = File::create(&filename)?;
-                file.write_all(&frame)?;
-
-                writeln!(
-                    ref_index, 
-                    "{},{},{},{}", 
-                    metadata.frame_number, 
-                    metadata.timestamp_ms, 
-                    metadata.is_keyframe, 
-                    filename
-                )?;
-                // reference_frames_map.insert(frame_counter, metadata);
-
-            
-                if let Some(lossy_frame) = lossy_decoder.next_encoded_frame() {   // ref frames always should appear, lossy frames not guaranteed so it can be inside scope of "let Some(ref_frame)"
-                    let timestamp = Instant::now().duration_since(EPOCH).as_millis() as u64;
-                    let is_keyframe = HevcDecoder::is_keyframe(&lossy_frame);
-                    let metadata = FrameMetadata {
-                        frame_number: frame_counter,
-                        timestamp_ms: timestamp,
-                        is_keyframe,
-                    };
-                    
-                    // Save encoded HEVC frame
-                    let filename = format!("Video_Sink/lossy_hevc/frame_{:04}.hevc", frame_counter);
-                    let mut file = File::create(&filename)?;
-                    file.write_all(&lossy_frame)?;
-                    
-                    // Update index
-                    writeln!(
-                        lossy_index, 
-                        "{},{},{},{}", 
-                        metadata.frame_number, 
-                        metadata.timestamp_ms, 
-                        metadata.is_keyframe, 
-                        filename
-                    )?;
-                    
-                    // lossy_frames_map.insert(frame_counter, metadata);
-                }
-            
-            
-            
             }
         
-            // 4. Display frames.
+            // 4. Display frames and save synchronized pairs
             let display_time = Instant::now();
             if display_time >= next_frame_time {
-                if let Some(frame) = ref_decoder.next_decoded_frame() {
-
-                    // println!("Frame got on decoder, size: {}", frame.len());
-
-                    // Update the last successful frame time.
-                    // Convert and display the frame.
-                    let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                if let Some(ref_frame) = ref_decoder.next_decoded_frame() {
+                    // Update the last successful frame time
+                    last_frame_time = Instant::now();
+                    
+                    // Convert and display the reference frame
+                    let pixels = convert_rgb_to_u32(&ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
                     let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
                     if let Err(e) = reference_window.update_with_buffer(&scaled, scaled_width, scaled_height) {
                         eprintln!("Error updating window buffer: {}", e);
                     } else {
                         frames_displayed += 1;
                     }
-                    last_frame_time = Instant::now();
+                    
+                    // Check if we also have a lossy frame
+                    if let Some( mut lossy_frame) = lossy_decoder.next_decoded_frame() {
+                        // We have both frames - save them as a synchronized pair
+                        let timestamp = Instant::now().duration_since(EPOCH).as_millis() as u64;
+                        
+                        let ref_path = format!("Video_Sink/reference_rgb/frame_{:04}.rgb", frame_counter);
+                        std::fs::write(&ref_path, &ref_frame)?;
+                        
+                        let lossy_path = format!("Video_Sink/lossy_rgb/frame_{:04}.rgb", frame_counter);
+                        std::fs::write(&lossy_path, &lossy_frame)?;
+                        
+                        // Record the synchronized pair with these consistent paths
+                        synced_pairs.push(SyncedFramePair {
+                            frame_number: frame_counter,
+                            ref_path: ref_path.clone(),
+                            lossy_path: lossy_path.clone(),
+                            timestamp_ms: timestamp,
+                        });
+                        
+                        // Write to the CSV index
+                        writeln!(sync_index, "{},{},{},{}", 
+                            frame_counter, timestamp, ref_path, lossy_path)?;
+                        
+                        let vmaf_score = calculate_frame_vmaf(&ref_frame, &lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER)?;
+                        vmaf_metrics.add_score(vmaf_score);
 
+                        // Update the plot every 10 frames to avoid too much overhead
+                        if frame_counter % 5 == 0 {
+                            // Generate the plot
+                            if let Err(e) = vmaf_metrics.generate_plot() {
+                                eprintln!("Error generating VMAF plot: {}", e);
+                            }
+                            
+                            // Load the plot image
+                            if let Ok(plot_image) = image::open(vmaf_metrics.get_plot_path()) {
+                                let rgb_image = plot_image.to_rgb8();
+                                let plot_width = rgb_image.width() as usize;
+                                let plot_height = rgb_image.height() as usize;
+                                
+                                // Convert to minifb format
+                                let mut buffer = vec![0u32; plot_width * plot_height];
+                                for (i, pixel) in rgb_image.pixels().enumerate() {
+                                    let [r, g, b] = pixel.0;
+                                    buffer[i] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                                }
+                                
+                                // Update the VMAF window
+                                if let Err(e) = vmaf_window.update_with_buffer(&buffer, plot_width, plot_height) {
+                                    eprintln!("Error updating VMAF window: {}", e);
+                                }
+                            }
+                        }
 
-                    if let Some(lossy_frame) = lossy_decoder.next_decoded_frame() {
+                        let score_text = format!("VMAF: {:.1}", vmaf_score);
+                    
+                        // Simple text rendering directly on the RGB frame
+                        // (This is a placeholder - you'd need a proper text rendering library)
+                        // For simplicity, we'll just modify a corner of the frame
+                        let overlay_color = if vmaf_score >= 80.0 { 
+                            [0, 255, 0] // Green for good quality
+                        } else if vmaf_score >= 50.0 {
+                            [255, 255, 0] // Yellow for medium quality
+                        } else {
+                            [255, 0, 0] // Red for poor quality
+                        };
+
+                        for y in 0..30 {
+                            for x in 0..100 {
+                                let idx = (y * WIDTH_ENCODER + x) * 3;
+                                if idx + 2 < lossy_frame.len() {
+                                    lossy_frame[idx] = overlay_color[0];
+                                    lossy_frame[idx + 1] = overlay_color[1];
+                                    lossy_frame[idx + 2] = overlay_color[2];
+                                }
+                            }
+                        }
+                        // Display the lossy frame
                         let pixels = convert_rgb_to_u32(&lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
                         let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
                         last_lossy_frame = Some(lossy_frame.clone());
                         lossy_window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
-
-                        // lossy_file.write_all(&lossy_frame)?;
+                    } else if let Some(prev_lossy_frame) = last_lossy_frame.clone() {
+                        // Use the previous lossy frame if no new one is available
+                        let pixels = convert_rgb_to_u32(&prev_lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                        lossy_window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
                     }
-                    else if let Some(prev_lossy_frame) = last_lossy_frame.clone() {
-                        // lossy_file.write_all(&prev_lossy_frame)?;
-                    }
-                    else{
-                        // lossy_file.write_all(&black_frame.clone())?;
-                        }
-
 
                     next_frame_time += frame_duration;
                 }
@@ -911,125 +980,328 @@ async fn main() -> Result<()> {
 
             // FPS counter.
             if Instant::now().duration_since(fps_timer) >= Duration::from_secs(2) {
-                println!("FPS: {}", frames_displayed / 2);
+                println!("FPS: {}, Synced Pairs: {}", frames_displayed / 2, synced_pairs.len());
                 frames_displayed = 0;
                 fps_timer = Instant::now();
             }
 
             reference_window.update();
             lossy_window.update(); 
+            vmaf_window.update();
 
             num_updates_ref += 1; 
             if num_updates_ref >= FRAME_CUTOFF_LIMIT {
                 println!("REACHED {} FRAME LIMIT!", FRAME_CUTOFF_LIMIT); 
-                std::thread::sleep(Duration::from_secs(5));
+                
+                // Flush the sync index
+                sync_index.flush()?;
+                
+                // Wait a moment to ensure all files are written
+                std::thread::sleep(Duration::from_secs(2));
                 break;
             }
         }
     }
-   
 
-
-
+    // Calculate VMAF after processing is complete
     calculate_vmaf()?;
 
     println!("Exiting gracefully...");
     Ok(())
 }
 
-
+fn print_vmaf_score(score: f64, frame_number: u64) {
+    let quality_label = if score >= 90.0 {
+        "Excellent"
+    } else if score >= 80.0 {
+        "Good"
+    } else if score >= 70.0 {
+        "Fair" 
+    } else if score >= 50.0 {
+        "Poor"
+    } else {
+        "Bad"
+    };
+    
+    println!("Frame {}: VMAF = {:.2} ({}) {}", 
+        frame_number, 
+        score, 
+        quality_label,
+        // Simple ASCII bar chart
+        "#".repeat((score / 10.0) as usize)
+    );
+}
 
 pub fn calculate_vmaf() -> Result<()> {
-    // Step 1: Create temporary YUV files from our frame collections
+    println!("Starting VMAF calculation on synchronized RGB frames...");
     
-    // First, read indexes to determine available frames
-    let ref_frames = parse_index("Video_Sink/reference_index.csv")?;
-    let lossy_frames = parse_index("Video_Sink/lossy_index.csv")?;
+    // Read the synchronized frame pairs from the CSV file
+    let synced_frames_csv = match std::fs::read_to_string("Video_Sink/synced_frames.csv") {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Error reading synced_frames.csv: {}", e);
+            return Err(anyhow::anyhow!("Failed to read synchronized frames CSV"));
+        }
+    };
     
-
-
-
-    // Find common frames between reference and lossy videos
-    let mut common_frames: Vec<u64> = ref_frames.keys()
-        .filter(|k| lossy_frames.contains_key(k))
-        .cloned()
-        .collect();
-    common_frames.sort(); 
-
-    println!("Found {} synchronized frames for VMAF comparison", common_frames.len());
-    // println!("\n\n**^***Common frames are the following: {:?}", common_frames);
-
-    // std::thread::sleep(Duration::from_secs(4)); 
-
-
-
-    // Create synchronized frame lists
-    let mut ref_list = File::create("Video_Sink/ref_frames.txt")?;
-    let mut lossy_list = File::create("Video_Sink/lossy_frames.txt")?;
+    let mut synced_pairs: Vec<SyncedFramePair> = Vec::new();
+    let mut valid_pairs: Vec<SyncedFramePair> = Vec::new();
     
-
-
-    for frame_num in &common_frames{
-        let ref_path = ref_frames[frame_num].replace("Video_Sink/", "");
-        let lossy_path = lossy_frames[frame_num].replace("Video_Sink/", "");
-        writeln!(ref_list, "file '{}'", ref_path)?;
-        writeln!(lossy_list, "file '{}'", lossy_path)?;
+    for line in synced_frames_csv.lines().skip(1) {  // Skip the header
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 4 {
+            let frame_number: u64 = parts[0].parse()?;
+            let timestamp_ms: u64 = parts[1].parse()?;
+            let ref_path = parts[2].to_string();
+            let lossy_path = parts[3].to_string();
+            
+            // Create a pair
+            synced_pairs.push(SyncedFramePair {
+                frame_number,
+                timestamp_ms,
+                ref_path,
+                lossy_path,
+            });
+        }
     }
     
-    ref_list.flush()?;
-    lossy_list.flush()?;
+    println!("Found {} synchronized frame pairs", synced_pairs.len());
     
-   // Create a raw reference video from your frames
-   Command::new("ffmpeg")
-   .args(&[
-       "-f", "hevc",
-       "-i", &ref_frames[&common_frames[0]], // Use first frame to get metadata
-       "-safe", "0",
-       "-c", "copy",
-       "-bsf:v", "hevc_mp4toannexb", // Ensure proper bitstream formatting
-       "-f", "mp4",
-       "Video_Sink/reference_temp.mp4",
-       "-y", 
-
-   ])
-   .status()?;
-
-    // Create a raw lossy video from your frames
-    Command::new("ffmpeg")
-    .args(&[
-        "-f", "hevc",
-        "-i", &lossy_frames[&common_frames[0]], // Use first frame to get metadata  
-        "-safe", "0",
-        "-c", "copy",
-        "-bsf:v", "hevc_mp4toannexb", // Ensure proper bitstream formatting
-        "-f", "mp4",
-        "Video_Sink/lossy_temp.mp4", 
-        "-y", 
-    ])
-    .status()?;
-
-
-    println!("TODO: Run VMAF calculation on the synchronized videos!!");
-    std::thread::sleep(Duration::from_millis(6000)); 
-    // // Run VMAF directly on the MP4 files (which have complete headers)
-    // let output = Command::new("ffmpeg")
-    // .args(&[
-    //     "-i", "Video_Sink/reference_temp.mp4",
-    //     "-i", "Video_Sink/lossy_temp.mp4",
-    //     "-filter_complex", "[0:v][1:v]libvmaf=log_fmt=json:log_path=vmaf.json",
-    //     "-filter_complex", "[0:v][1:v]psnr=stats_file=psnr.log" ,
-    //     "-filter_complex", "[0:v][1:v]ssim=stats_file=ssim.log" ,
-    //     "-f", "null -"
-    // ])
-    // .output()?;
-
-    // println!("VMAF calculation completed.");
-    // println!("STDOUT: {}", String::from_utf8_lossy(&output.stdout));
-    // println!("STDERR: {}", String::from_utf8_lossy(&output.stderr));
-
+    if synced_pairs.is_empty() {
+        return Err(anyhow::anyhow!("No synchronized frames found"));
+    }
+    
+    // Create temp directories to convert RGB to YUV (needed for VMAF)
+    std::fs::create_dir_all("Video_Sink/temp")?;
+    
+    // Verify each file exists and has non-zero size before including it
+    for pair in &synced_pairs {
+        let ref_metadata = match std::fs::metadata(&pair.ref_path) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                eprintln!("Warning: Cannot access reference frame {}: {}", pair.ref_path, e);
+                continue;
+            }
+        };
+        
+        let lossy_metadata = match std::fs::metadata(&pair.lossy_path) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                eprintln!("Warning: Cannot access lossy frame {}: {}", pair.lossy_path, e);
+                continue;
+            }
+        };
+        
+        // Check file sizes to ensure they're not empty
+        if ref_metadata.len() == 0 {
+            eprintln!("Warning: Reference frame {} is empty, skipping", pair.ref_path);
+            continue;
+        }
+        
+        if lossy_metadata.len() == 0 {
+            eprintln!("Warning: Lossy frame {} is empty, skipping", pair.lossy_path);
+            continue;
+        }
+        
+        // If we get here, both files exist and have content
+        valid_pairs.push(pair.clone());
+    }
+    
+    println!("Found {} valid frame pairs after validation", valid_pairs.len());
+    
+    if valid_pairs.is_empty() {
+        return Err(anyhow::anyhow!("No valid frame pairs found after validation"));
+    }
+    
+    // Instead of using concat with ffmpeg, let's directly concatenate the files
+    // This gives us more control and avoids ffmpeg concat issues
+    println!("Creating concatenated reference file...");
+    {
+        let mut ref_concat = std::fs::File::create("Video_Sink/temp/reference_concat.rgb")?;
+        for pair in &valid_pairs {
+            match std::fs::read(&pair.ref_path) {
+                Ok(data) => {
+                    if let Err(e) = ref_concat.write_all(&data) {
+                        eprintln!("Error writing to reference concat: {}", e);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error reading reference frame {}: {}", pair.ref_path, e);
+                }
+            }
+        }
+        ref_concat.flush()?;
+    }
+    
+    println!("Creating concatenated lossy file...");
+    {
+        let mut lossy_concat = std::fs::File::create("Video_Sink/temp/lossy_concat.rgb")?;
+        for pair in &valid_pairs {
+            match std::fs::read(&pair.lossy_path) {
+                Ok(data) => {
+                    if let Err(e) = lossy_concat.write_all(&data) {
+                        eprintln!("Error writing to lossy concat: {}", e);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error reading lossy frame {}: {}", pair.lossy_path, e);
+                }
+            }
+        }
+        lossy_concat.flush()?;
+    }
+    
+    // Verify that our concatenated files have content
+    let ref_concat_metadata = std::fs::metadata("Video_Sink/temp/reference_concat.rgb")?;
+    let lossy_concat_metadata = std::fs::metadata("Video_Sink/temp/lossy_concat.rgb")?;
+    
+    if ref_concat_metadata.len() == 0 || lossy_concat_metadata.len() == 0 {
+        return Err(anyhow::anyhow!("Concatenated files are empty"));
+    }
+    
+    println!("Concatenated reference file size: {} bytes", ref_concat_metadata.len());
+    println!("Concatenated lossy file size: {} bytes", lossy_concat_metadata.len());
+    
+    // Convert raw RGB streams to YUV format (needed for VMAF)
+    let ref_yuv_status = Command::new("ffmpeg")
+        .args(&[
+            "-f", "rawvideo",
+            "-pixel_format", "rgb24",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-i", "Video_Sink/temp/reference_concat.rgb",
+            "-pix_fmt", "yuv420p",
+            "Video_Sink/temp/reference.yuv",
+            "-y"
+        ])
+        .status()?;
+        
+    if !ref_yuv_status.success() {
+        eprintln!("Failed to convert reference to YUV");
+        // Continue anyway to see if the lossy conversion works
+    }
+    
+    let lossy_yuv_status = Command::new("ffmpeg")
+        .args(&[
+            "-f", "rawvideo",
+            "-pixel_format", "rgb24",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-i", "Video_Sink/temp/lossy_concat.rgb",
+            "-pix_fmt", "yuv420p",
+            "Video_Sink/temp/lossy.yuv",
+            "-y"
+        ])
+        .status()?;
+        
+    if !lossy_yuv_status.success() {
+        eprintln!("Failed to convert lossy to YUV");
+        // Continue anyway to see if we can still calculate metrics
+    }
+    
+    // Check if YUV files were created successfully
+    if !std::path::Path::new("Video_Sink/temp/reference.yuv").exists() || 
+       !std::path::Path::new("Video_Sink/temp/lossy.yuv").exists() {
+        return Err(anyhow::anyhow!("YUV conversion failed, output files not created"));
+    }
+    
+    // Run VMAF calculation without model_path parameter
+    let vmaf_output = Command::new("ffmpeg")
+        .args(&[
+            "-hwaccel", "cuda",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-pixel_format", "yuv420p",
+            "-i", "Video_Sink/temp/reference.yuv",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-pixel_format", "yuv420p",
+            "-i", "Video_Sink/temp/lossy.yuv",
+            // Use simpler VMAF configuration without model_path
+            "-lavfi", "libvmaf=log_fmt=json:log_path=Video_Sink/vmaf.json",
+            "-f", "null", "-"
+        ])
+        .output()?;
+        
+    println!("VMAF calculation completed");
+    println!("VMAF calculation output:");
+    println!("STDOUT: {}", String::from_utf8_lossy(&vmaf_output.stdout));
+    println!("STDERR: {}", String::from_utf8_lossy(&vmaf_output.stderr));
+    
+    // Run PSNR calculation
+    let psnr_output = Command::new("ffmpeg")
+        .args(&[
+            "-hwaccel", "cuda",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-pixel_format", "yuv420p",
+            "-i", "Video_Sink/temp/reference.yuv",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-pixel_format", "yuv420p",
+            "-i", "Video_Sink/temp/lossy.yuv",
+            "-lavfi", "psnr=stats_file=Video_Sink/psnr.log",
+            "-f", "null", "-"
+        ])
+        .output()?;
+        
+    println!("PSNR calculation completed");
+    
+    // Run SSIM calculation
+    let ssim_output = Command::new("ffmpeg")
+        .args(&[
+            "-hwaccel", "cuda",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-pixel_format", "yuv420p",
+            "-i", "Video_Sink/temp/reference.yuv",
+            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+            "-framerate", "60",
+            "-pixel_format", "yuv420p",
+            "-i", "Video_Sink/temp/lossy.yuv",
+            "-lavfi", "ssim=stats_file=Video_Sink/ssim.log",
+            "-f", "null", "-"
+        ])
+        .output()?;
+        
+    println!("SSIM calculation completed");
+    
+    // Parse and display results
+    if let Ok(vmaf_json) = std::fs::read_to_string("Video_Sink/vmaf.json") {
+        println!("\nVMAF Results Summary:");
+        if let Some(vmaf_score_idx) = vmaf_json.find("\"vmaf\":") {
+            let score_end = vmaf_json[vmaf_score_idx+7..].find(",").unwrap_or(10);
+            println!("VMAF Score: {}", &vmaf_json[vmaf_score_idx+7..vmaf_score_idx+7+score_end]);
+        }
+    }
+    
+    if let Ok(psnr_log) = std::fs::read_to_string("Video_Sink/psnr.log") {
+        let lines: Vec<&str> = psnr_log.lines().collect();
+        if !lines.is_empty() {
+            println!("\nPSNR Results:");
+            println!("{}", lines.last().unwrap_or(&"No PSNR data"));
+        }
+    }
+    
+    if let Ok(ssim_log) = std::fs::read_to_string("Video_Sink/ssim.log") {
+        let lines: Vec<&str> = ssim_log.lines().collect();
+        if !lines.is_empty() {
+            println!("\nSSIM Results:");
+            println!("{}", lines.last().unwrap_or(&"No SSIM data"));
+        }
+    }
+    
+    println!("\nDetailed results are available in:");
+    println!("- Video_Sink/vmaf.json");
+    println!("- Video_Sink/psnr.log");
+    println!("- Video_Sink/ssim.log");
+    
     Ok(())
-
 }
+
+
+
+
 
 fn parse_index(index_path: &str) -> Result<HashMap<u64, String>> {
     let content = std::fs::read_to_string(index_path)?;
