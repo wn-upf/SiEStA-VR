@@ -33,7 +33,7 @@ pub const FRAME_CUTOFF_LIMIT: usize = 1000;
 
 pub const OFFSET_VIDEO: f64 = 0.0;
 
-pub const REENCODE: bool = true; 
+pub const REENCODE: bool = false; 
 
 #[derive(Debug, Clone)]
 struct FrameMetadata {
@@ -41,6 +41,135 @@ struct FrameMetadata {
     timestamp_ms: u64,
     is_keyframe: bool,
 }
+
+struct VmafTracker {
+    csv_writer: BufWriter<File>,
+    frame_counter: u64,
+    last_vmaf_score: Option<f64>,
+}
+
+impl VmafTracker {
+    fn new() -> Result<Self, io::Error> {
+        // Create directory if it doesn't exist
+        fs::create_dir_all("Video_Sink/vmaf")?;
+        
+        // Create CSV file for VMAF scores
+        let vmaf_file = File::create("Video_Sink/vmaf/vmaf_scores.csv")?;
+        let mut csv_writer = BufWriter::new(vmaf_file);
+        
+        // Write CSV header
+        writeln!(csv_writer, "frame_number,timestamp_ms,vmaf_score")?;
+        
+        Ok(VmafTracker {
+            csv_writer,
+            frame_counter: 0,
+            last_vmaf_score: None,
+        })
+    }
+    
+    fn save_frame_pair(&mut self, ref_frame: &[u8], lossy_frame: &[u8], width: usize, height: usize, timestamp_ms: u64) -> Result<(), io::Error> {
+        self.frame_counter += 1;
+        
+        // Create directories for YUV frames if they don't exist
+        fs::create_dir_all("Video_Sink/vmaf/reference_yuv")?;
+        fs::create_dir_all("Video_Sink/vmaf/lossy_yuv")?;
+        
+        // Convert RGB to YUV420p and save reference frame
+        let ref_yuv_path = format!("Video_Sink/vmaf/reference_yuv/frame_{:04}.yuv", self.frame_counter);
+        rgb_to_yuv420p(ref_frame, width, height, &ref_yuv_path)?;
+        
+        // Convert RGB to YUV420p and save lossy frame
+        let lossy_yuv_path = format!("Video_Sink/vmaf/lossy_yuv/frame_{:04}.yuv", self.frame_counter);
+        rgb_to_yuv420p(lossy_frame, width, height, &lossy_yuv_path)?;
+        
+        // Calculate VMAF for this frame pair
+        let vmaf_score = calculate_frame_vmaf(&ref_yuv_path, &lossy_yuv_path, width, height)?;
+        self.last_vmaf_score = Some(vmaf_score);
+        
+        // Write to CSV
+        writeln!(self.csv_writer, "{},{},{:.4}", self.frame_counter, timestamp_ms, vmaf_score)?;
+        self.csv_writer.flush()?;
+        
+        println!("Frame #{}: VMAF Score = {:.2}", self.frame_counter, vmaf_score);
+        
+        Ok(())
+    }
+    
+    fn get_last_vmaf_score(&self) -> Option<f64> {
+        self.last_vmaf_score
+    }
+}
+
+// Convert RGB to YUV420p and save to file
+fn rgb_to_yuv420p(rgb_data: &[u8], width: usize, height: usize, output_path: &str) -> Result<(), io::Error> {
+    // Create a temp RGB file
+    let temp_rgb_path = format!("{}.rgb", output_path);
+    let mut rgb_file = File::create(&temp_rgb_path)?;
+    rgb_file.write_all(rgb_data)?;
+    
+    // Use ffmpeg to convert RGB to YUV420p
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-f", "rawvideo",
+            "-pixel_format", "rgb24",
+            "-video_size", &format!("{}x{}", width, height),
+            "-i", &temp_rgb_path,
+            "-f", "rawvideo",
+            "-pix_fmt", "yuv420p",
+            "-y", output_path
+        ])
+        .status()?;
+    
+    // Remove temp RGB file
+    fs::remove_file(temp_rgb_path)?;
+    
+    if !status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "Failed to convert RGB to YUV420p"));
+    }
+    
+    Ok(())
+}
+
+// Calculate VMAF for a single frame pair
+fn calculate_frame_vmaf(ref_yuv_path: &str, lossy_yuv_path: &str, width: usize, height: usize) -> Result<f64, io::Error> {
+    // Create a temporary file to store VMAF output
+    let vmaf_output = "Video_Sink/vmaf/temp_vmaf_output.json";
+    
+    // Run ffmpeg with libvmaf to calculate VMAF
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-f", "rawvideo",
+            "-pixel_format", "yuv420p", 
+            "-video_size", &format!("{}x{}", width, height),
+            "-i", ref_yuv_path,
+            "-f", "rawvideo",
+            "-pixel_format", "yuv420p",
+            "-video_size", &format!("{}x{}", width, height),
+            "-i", lossy_yuv_path,
+            "-lavfi", "libvmaf=log_fmt=json:log_path=Video_Sink/vmaf/temp_vmaf_output.json:n_threads=4",
+            "-f", "null", "-"
+        ])
+        .status()?;
+    
+    if !status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "Failed to calculate VMAF"));
+    }
+    
+    // Parse the VMAF output
+    let vmaf_json = fs::read_to_string(vmaf_output)?;
+    
+    // Very simple JSON parsing to extract VMAF score
+    // In a real implementation, you would use a proper JSON parser
+    if let Some(idx) = vmaf_json.find("\"vmaf\":") {
+        let score_start = idx + 7; // length of "\"vmaf\":"
+        let score_end = vmaf_json[score_start..].find(',').unwrap_or(vmaf_json[score_start..].len());
+        let vmaf_score = vmaf_json[score_start..score_start+score_end].trim().parse::<f64>().unwrap_or(0.0);
+        return Ok(vmaf_score);
+    }
+    
+    Err(io::Error::new(io::ErrorKind::Other, "Failed to parse VMAF score"))
+}
+
 
 
 // New encoder type that chunks the video into fixed-duration segments.

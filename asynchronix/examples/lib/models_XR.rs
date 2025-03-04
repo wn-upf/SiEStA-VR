@@ -117,7 +117,7 @@ pub const CAPACITY_RX_BUFFER: usize = 2000;
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
-pub const DECODER_BUFFERING_FRAMES: usize = 10;
+pub const DECODER_BUFFERING_FRAMES: usize = 4;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
 
 

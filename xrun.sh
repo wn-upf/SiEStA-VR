@@ -19,7 +19,7 @@ VMAF_ANALYSIS=0
 N_BGs=(0)
 IS_UL_BG=(0)
 # N_XR=(1 2 3 4 5)
-N_XR=(1 )
+N_XR=(3 )
 initial_bitrate_mbps=100
 
 
