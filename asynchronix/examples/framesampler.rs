@@ -16,11 +16,11 @@ pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const INITIAL_BITRATE : &str= "30M"; 
-pub const WINDOW_SCALE_FACTOR: f64 = 1.0; 
+pub const WINDOW_SCALE_FACTOR: f64 = 0.5; 
 
 pub const IDR_FRAME_SIZE_GOP: usize = 600;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.00; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.03; 
 
 pub const CHUNK_SIZE_ENCODER_S: f64 = 10.0; 
 
@@ -731,19 +731,34 @@ async fn main() -> Result<()> {
     });
 
     // Create the decoder as before.
-    let mut decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+    let mut ref_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+
+
+    let mut lossy_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+
+
+
+
     println!("Encoder and decoder initialized");
 
     // Window setup.
     let scale_factor = WINDOW_SCALE_FACTOR;
     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
-    let mut window = Window::new(
-        "Video Stream",
+    let mut reference_window = Window::new(
+        "Reference Video",
         scaled_width,
         scaled_height,
         WindowOptions::default(),
     )?;
+
+    let mut lossy_window = Window::new("
+        Lossy Video", scaled_width,
+        scaled_height,
+        WindowOptions::default(),
+    )?; 
+
+
     println!("Window opened");
 
     // FPS control.
@@ -763,15 +778,22 @@ async fn main() -> Result<()> {
     let mut drop_probability = PACKET_LOSS_PROBABILITY;
     let mut rng = rand::thread_rng();
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    while reference_window.is_open() && lossy_window.is_open() 
+        && !reference_window.is_key_down(Key::Escape) 
+        && !lossy_window.is_key_down(Key::Escape) {
         // 1. Pipeline recovery: if no frame received in a while, try to recover using a keyframe.
         if Instant::now().duration_since(last_frame_time) > frame_timeout {
             println!("Pipeline stalled, attempting recovery...");
             // Await a frame (which should ideally be a keyframe) for recovery.
             if let Ok(keyframe) = frame_rx.recv() {
                 println!("Sending recovery keyframe");
-                if let Err(e) = decoder.process_packet(keyframe) {
+                
+                if let Err(e) = ref_decoder.process_packet(keyframe.clone()) {
                     eprintln!("Error sending recovery keyframe: {}", e);
+                }
+
+                if let Err(e) = lossy_decoder.process_packet(keyframe.clone()) {
+                    eprintln!("Error sending recovery keyframe to lossy decoder: {}", e);
                 }
             } else {
                 println!("No keyframe available for recovery");
@@ -784,8 +806,15 @@ async fn main() -> Result<()> {
         if now >= next_transmission_time {
             if let Ok(frame) = frame_rx.try_recv() {
                 // Simulate packet loss.
+
+
+
+                if let Err(e) = ref_decoder.process_packet(frame.clone()) {
+                    eprintln!("Reference decoder error: {}", e);
+                }
+
                 if rng.gen::<f64>() >= drop_probability {
-                    if let Err(e) = decoder.process_packet(frame) {
+                    if let Err(e) = lossy_decoder.process_packet(frame) {
                         eprintln!("Error sending frame to decoder: {}", e);
                     }
                 } else {
@@ -797,14 +826,17 @@ async fn main() -> Result<()> {
         }
 
         // 3. Process any decoded frames.
-        if let Err(e) = decoder.process_decoded_frames() {
+        if let Err(e) = ref_decoder.process_decoded_frames() {
             eprintln!("Error processing decoded frames: {}", e);
+        }
+        if let Err(e) = lossy_decoder.process_decoded_frames() {
+            eprintln!("Error lossy processing decoded frames: {}", e);
         }
 
         // 4. Display frames.
         let display_time = Instant::now();
         if display_time >= next_frame_time {
-            if let Some(frame) = decoder.next_decoded_frame() {
+            if let Some(frame) = ref_decoder.next_decoded_frame() {
 
                 // println!("Frame got on decoder, size: {}", frame.len());
 
@@ -813,11 +845,19 @@ async fn main() -> Result<()> {
                 // Convert and display the frame.
                 let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
                 let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-                if let Err(e) = window.update_with_buffer(&scaled, scaled_width, scaled_height) {
+                if let Err(e) = reference_window.update_with_buffer(&scaled, scaled_width, scaled_height) {
                     eprintln!("Error updating window buffer: {}", e);
                 } else {
                     frames_displayed += 1;
                 }
+
+                if let Some(frame) = lossy_decoder.next_decoded_frame() {
+                    let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                    let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                    lossy_window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
+                }
+
+
                 next_frame_time += frame_duration;
             }
         } else {
@@ -832,7 +872,8 @@ async fn main() -> Result<()> {
             fps_timer = Instant::now();
         }
 
-        window.update();
+        reference_window.update();
+        lossy_window.update(); 
     }
 
     println!("Exiting gracefully...");

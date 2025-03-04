@@ -75,8 +75,8 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: u64 = 20;
-pub const STEP1_TEND: u64 = 30;
+pub const STEP1_TBEGIN: u64 = 15;
+pub const STEP1_TEND: u64 = 20;
 
 pub const STEP2_TBEGIN: u64 = 40;
 pub const STEP2_TEND: u64 = 50;
@@ -84,7 +84,7 @@ pub const STEP2_TEND: u64 = 50;
 pub const STEP3_TBEGIN: u64 = 60;
 pub const STEP3_TEND: u64 = 70;
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
+pub const BANDWIDTH_LIMIT_S1: f64 = 50E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
 pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
@@ -452,15 +452,16 @@ impl QueueMechanism {
     pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
-        // let valid_from = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TBEGIN)).unwrap();
-        // let valid_until = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TEND)).unwrap();
+        let valid_from = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TBEGIN)).unwrap();
+        let valid_until = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TEND)).unwrap();
+
         // let valid_from2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TBEGIN)).unwrap();
         // let valid_until2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TEND)).unwrap();
 
         // let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TBEGIN)).unwrap();
         // let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap();
 
-        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
         let bandwidth_limit = BANDWIDTH_LIMIT_S1;
@@ -837,20 +838,14 @@ impl QueueModule {
                 stats_vec.insert(stats.sta_id.clone() as usize, sta_stats.clone());
             }
         }
-        let network_emulator = NetworkPatternEmulator::new();
+        let mut network_emulator = NetworkPatternEmulator::new();
 
         // println!("Scheduling EMU TX daemon in 1 second");
-        // network_emulator.add_pattern(NetworkPattern::Bandwidth {
-        //     max_bps: BANDWIDTH_LIMIT,
-        //     current_tokens: BANDWIDTH_LIMIT,
-        //     max_tokens: BANDWIDTH_LIMIT,
-        //     token_refill_rate: BANDWIDTH_LIMIT, // Tokens per second
-        // });
+
         let queue_mechanism = QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH);
 
-        // Example: Add probabilistic drop
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-        //     drop_probability: 0.001, //
+        //     drop_probability: 0.06, //
         // });
 
         // network_emulator.add_pattern(NetworkPattern::OnOffPeriodic {

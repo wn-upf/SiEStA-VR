@@ -82,7 +82,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
-pub const INITIAL_FRAMERATE_FPS: f32 = 60.0;
+pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 
 pub const CHUNK_DURATION_F64_s: f64 = 1.0;
@@ -1147,7 +1147,7 @@ impl StreamSocket {
             return try_again();
         };
 
-        print_pretty!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
+        debug_bgprint!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -1294,7 +1294,7 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            print_pretty!(DebugColor::Orange, "FRAME IS COMPLETE!",);
+            print_pretty!(DebugColor::Orange, "(socketRX) FRAME {} IS COMPLETE! ({} / {}) ", in_progress_packet.id_frame, in_progress_packet.received_shard_indices.len(), shard_recv_state_mut.shards_count);
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index);
@@ -1935,7 +1935,7 @@ impl<H: Serialize> StreamSender<H> {
             if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
                 let mut encoder = encoder_arc.lock().await;
                 
-                print_pretty!(DebugColor::Red, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
+                print_pretty!(DebugColor::SaddleBrown, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
                 
 
 
@@ -1946,7 +1946,7 @@ impl<H: Serialize> StreamSender<H> {
                         buffer = frame;
                     }
                     None => {
-                        print_pretty!(DebugColor::Red, "No frame available, restarting encoder", );
+                        print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
                         
                         // Clear ALL buffers before restart
                         encoder.parser.buffer.clear();

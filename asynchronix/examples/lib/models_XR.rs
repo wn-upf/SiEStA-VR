@@ -423,7 +423,7 @@ impl HevcDecoder {
             total_bytes_processed: 0.0,
             priming_complete: false,
             expected_frame_size: frame_size,
-            max_buffered_frames: 120, 
+            max_buffered_frames: 10, 
         }
     }
 
@@ -474,8 +474,8 @@ impl HevcDecoder {
     // Process incoming encoded packets with improved error handling
     pub fn process_packet(&mut self, packet: Vec<u8>) {
         // Add packet data to the parser
-        println!("🎬 Processing packet of size {} bytes (total: {} frames)", 
-                packet.len(), self.frames_processed);
+        // println!("🎬 Processing packet of size {} bytes (total: {} frames)", 
+        //         packet.len(), self.frames_processed);
 
 
 
@@ -579,7 +579,7 @@ impl HevcDecoder {
                     }
                     
                     // Don't buffer too many frames - it causes delay
-                    if self.decoded_frames.len() >= self.max_buffered_frames {
+                    if self.decoded_frames.len() >= self.max_buffered_frames/2 {
                         break;
                     }
                 },
@@ -616,7 +616,7 @@ impl HevcDecoder {
             
             // Then try to get a frame from the buffer
             if let Some(frame) = self.decoded_frames.pop_front() {
-                println!("🖼️ Returning decoded frame of size: {} bytes", frame.len());
+                // println!("🖼️ Returning decoded frame of size: {} bytes", frame.len());
                 Some(frame)
             } else {
                 if frames_added > 0 {
@@ -879,7 +879,7 @@ impl BitrateManager {
         //     self.last_target_bitrate_mbps = 0.01;
         // }
         if 10.0 <= dur && dur < 1000.0 {
-            self.last_target_bitrate_mbps = 10.0; // just CBR for now
+            // self.last_target_bitrate_mbps = 10.0; // just CBR for now
         }
         // } else if 12.0 <= dur && dur < 25.0 {
         //     self.last_target_bitrate_mbps = 0.9;
@@ -897,7 +897,7 @@ impl BitrateManager {
         //     self.last_target_bitrate_mbps = 1.0;
         
         print_pretty!(
-            DebugColor::DarkBlue,
+            DebugColor::Tan,
             "t = {}, [DBG bitrate set] {} Mbps",
             dur,
             self.last_target_bitrate_mbps
@@ -1078,7 +1078,7 @@ impl XRServer {
                     let shards_lost = inner.shards_lost;
 
                     for (frame, shard) in frames_lost.iter().zip(shards_lost.iter()) {
-                        println!("[DBG_DEAD_RX server] Frame {} lost {} shards", frame, shard);
+                        print_pretty!(DebugColor::Red ,"[DBG_DEAD_RX server] Frame {} lost {} shards", frame, shard);
                     }
                 }
 
@@ -1849,7 +1849,7 @@ impl XRClient {
                 // println!("result of output control: {:?}", result);
             }
             ClientControlPacket::DeadlineShardLossStat(inner) => {
-                println!("Shardloss packet sent");
+                // println!("Shardloss packet sent");
                 let result = Self::framed_send(self, &pack, context).await;
             }
             _ => eprintln!("Uncovered match case!!"),
@@ -1864,7 +1864,7 @@ impl XRClient {
         frames.truncate(MAX_DEADLINE_IN_STATS);
         shards_lost.truncate(MAX_DEADLINE_IN_STATS);
 
-        println!("REPORT FRAME LOSt");
+        // println!("REPORT FRAME LOSt");
         let net = DeadlineShardlossStatPacket {
             frame_indexes: frames,
             shards_lost: shards_lost,
@@ -2084,7 +2084,7 @@ impl XRClient {
             if let Some(frame) = decoder.next_decoded_frame() {
                 // Convert to RGB
                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                    println!("✅ Successfully decoded and converted frame #{}", frame_index);
+                    // println!("✅ Successfully decoded and converted frame #{}", frame_index);
                     self.is_decoder_ready = true; 
                     return pixels;
                 } else {
@@ -2217,8 +2217,8 @@ impl XRClient {
         
                                 // Use server_ip as the window identifier
                                 let window_title = format!("Decoded HEVC Frame - {}", self.server_ip);
-                                println!("DEBUG: Frame pixel count: {}, Window dimensions: {}x{} ({})", 
-                                  frame.len(), scaled_width, scaled_height, scaled_width * scaled_height);
+                                // println!("DEBUG: Frame pixel count: {}, Window dimensions: {}x{} ({})", 
+                                //   frame.len(), scaled_width, scaled_height, scaled_width * scaled_height);
 
                                 DISPLAY_WINDOWS.with(|windows_cell| {
                                     let mut windows = windows_cell.borrow_mut();
@@ -2261,26 +2261,26 @@ impl XRClient {
                 );
             }
     
-            // // Rest of your vsync logic remains the same
-            // if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-            //     T_vsync = T_vsync.mul_f64(2.0);
-            //     debug_bgprint!(
-            //         DebugColor::Violet,
-            //         "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})",
-            //         T_vsync.as_secs_f32(),
-            //         self.decoder_queue.len(),
-            //         TARGET_FRAMES_DECODER_QUEUE
-            //     );
-            // } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
-            //     T_vsync = T_vsync.mul_f64(0.5);
-            //     debug_bgprint!(
-            //         DebugColor::Violet,
-            //         "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})",
-            //         T_vsync.as_secs_f32(),
-            //         self.decoder_queue.len(),
-            //         TARGET_FRAMES_DECODER_QUEUE
-            //     );
-            // }
+            // Rest of your vsync logic remains the same
+            if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
+                T_vsync = T_vsync.mul_f64(2.0);
+                debug_bgprint!(
+                    DebugColor::Violet,
+                    "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})",
+                    T_vsync.as_secs_f32(),
+                    self.decoder_queue.len(),
+                    TARGET_FRAMES_DECODER_QUEUE
+                );
+            } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
+                T_vsync = T_vsync.mul_f64(0.5);
+                debug_bgprint!(
+                    DebugColor::Violet,
+                    "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})",
+                    T_vsync.as_secs_f32(),
+                    self.decoder_queue.len(),
+                    TARGET_FRAMES_DECODER_QUEUE
+                );
+            }
     
             context
                 .scheduler

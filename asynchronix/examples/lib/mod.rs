@@ -36,7 +36,7 @@ pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
-pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 10.0;
+pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
 
 // Define a constant to control debugging
 
@@ -62,8 +62,8 @@ pub const USE_FFMPEG: bool = true;
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
+            // let msg = format!($fmt, $($arg)*);
+            // println!("{}", $color.to_background_fn()(msg));
         // }
     };
 }
@@ -145,6 +145,8 @@ pub enum DebugColor {
     Rose,
     Crimson,
     Amber,
+    SaddleBrown,
+    Tan, 
 }
 #[allow(unused)]
 impl DebugColor {
@@ -187,6 +189,9 @@ impl DebugColor {
             DebugColor::Rose => |s| s.truecolor(255, 228, 225),
             DebugColor::Crimson => |s| s.truecolor(220, 20, 60),
             DebugColor::Amber => |s| s.truecolor(255, 191, 0),
+            DebugColor::SaddleBrown => |s| s.truecolor(139,69, 19),
+            DebugColor::Tan => |s| s.truecolor(160,82, 45),
+
         }
     }
     pub fn to_background_fn(&self) -> fn(String) -> colored::ColoredString {
@@ -228,6 +233,10 @@ impl DebugColor {
             DebugColor::Rose => |s| s.on_truecolor(255, 228, 225),
             DebugColor::Crimson => |s| s.on_truecolor(220, 20, 60),
             DebugColor::Amber => |s| s.on_truecolor(255, 191, 0),
+            DebugColor::SaddleBrown => |s| s.truecolor(139,69, 19),
+            DebugColor::Tan => |s| s.truecolor(160,82, 45),
+
+
         }
     }
 }
