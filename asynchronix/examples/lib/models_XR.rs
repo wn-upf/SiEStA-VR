@@ -129,14 +129,19 @@ pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
 
 
 pub const VMAF_FRAME_GROUP_SIZE: usize = 10;
-
-
-
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
+
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
 use crossbeam::channel::{Receiver, unbounded, bounded, Sender, TryRecvError};  
+
+
+lazy_static! {
+    static ref REFERENCE_DECODER: Arc<Mutex<Option<HevcDecoder>>> = Arc::new(Mutex::new(None));
+}
+
+
 
 fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
     if rgb_data.len() != width * height * 3 {
@@ -1616,7 +1621,7 @@ impl MetricsLogger {
         }
         
         // Print debug info
-        println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
+        print_pretty!(DebugColor::Cyan, "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
                 frame_number, vmaf_score, psnr_avg, ssim_score);
 
         let metrics = FrameMetrics {
@@ -1630,11 +1635,6 @@ impl MetricsLogger {
         // Log the metrics
         self.log_metrics(&metrics).await?;
                 
-        // Print progress information
-        if frame_number % 10 == 0 {
-            println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
-                frame_number, vmaf_score, psnr_avg, ssim_score);
-        }
 
         Ok(())
     }
@@ -1751,7 +1751,7 @@ impl XRClient {
             current_frame_group: None,
             group_tx: Some(group_tx),
             group_rx: Some(group_rx), 
-            enable_batch_processing: true, // Set to false if you don't want batch processing
+            enable_batch_processing: false,
             last_cleanup_time: now, // Use your simulator's initial time
             cleanup_interval: std::time::Duration::from_secs(20), // Clea
 
@@ -2291,7 +2291,7 @@ impl XRClient {
                             let now_systime = std::time::SystemTime::from(now.to_system_time(32).unwrap());
                             
                             if modified_time < now_systime - retention_period {
-                                if let Err(e) = async_std::fs::remove_file(entry.path()).await {
+                                if let Err(e) = std::fs::remove_file(entry.path()) {
                                     eprintln!("Failed to delete temporary file {}: {}", 
                                         entry.path().display(), e);
                                 }
@@ -2302,6 +2302,79 @@ impl XRClient {
             }
         }
     }
+
+
+    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> (Vec<u8>, Vec<u32>) {
+        // Validate input
+        let encoded_length = encoded_buffer.len();
+        if encoded_buffer.is_empty() {
+            println!("WARNING: Empty encoded buffer received!");
+            return (Vec::new(), Vec::new());
+        }
+        
+        // Use the globally shared reference decoder instead of the instance one
+        {
+            // First, check if we need to initialize the decoder
+            let mut decoder_ref = REFERENCE_DECODER.lock().unwrap();
+            if decoder_ref.is_none() {
+                print_pretty!(DebugColor::Cyan, "Initializing global reference decoder", );
+                *decoder_ref = Some(HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32));
+            }
+        }
+        
+        // Now use the decoder - second lock scope to minimize lock time
+        let result = {
+            let mut decoder_ref = REFERENCE_DECODER.lock().unwrap();
+            if let Some(decoder) = decoder_ref.as_mut() {
+                // Check if this is a keyframe for logging
+                let is_keyframe = decoder.contains_keyframe(&encoded_buffer);
+                let frame_display = if is_keyframe { "KEYFRAME" } else { "frame" };
+                print_pretty!(DebugColor::Cyan, 
+                    "Decoding reference HEVC {} #{} of size: {} bytes",
+                    frame_display, frame_index, encoded_length
+                );
+                
+                // Process the frame
+                decoder.process_packet(encoded_buffer);
+                
+                // Process any decoded frames and don't wait too long
+                // This is a non-blocking call
+                let frames_count = decoder.process_decoded_frames();
+                print_pretty!(DebugColor::Cyan, "Processed {} reference frames", frames_count);
+                
+                // Try to get a decoded frame
+                if let Some(frame) = decoder.next_decoded_frame() {
+                    // Convert to RGB
+                    let sample = frame.clone();
+                    if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                        print_pretty!(DebugColor::Green, "Successfully decoded reference frame #{}", frame_index);
+                        (sample, pixels)
+                    } else {
+                        print_pretty!(DebugColor::Red, "Failed to convert decoded frame to RGB", );
+                        (Vec::new(), Vec::new())
+                    }
+                } else {
+                    // Don't consider this an error during the priming phase
+                    if !decoder.priming_complete {
+                        print_pretty!(DebugColor::Yellow, 
+                            "Reference decoder still priming (processed: {}, keyframes: {})",
+                            decoder.frames_processed, decoder.keyframes_seen
+                        );
+                    } else {
+                        print_pretty!(DebugColor::Yellow, "No decoded reference frame available yet", );
+                    }
+                    (Vec::new(), Vec::new())
+                }
+            } else {
+                print_pretty!(DebugColor::Red, "ERROR: Reference decoder initialization failed", );
+                (Vec::new(), Vec::new())
+            }
+        };
+        
+        // Return the result
+        result
+    }
+
 
 
     pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> (Vec<u8>, Vec<u32>)  {
@@ -2406,7 +2479,7 @@ impl XRClient {
     
         // Create directories for temporary storage if they don't exist
         let base_dir = "Video_Sink";
-        if let Err(e) = async_std::fs::create_dir_all(base_dir).await {
+        if let Err(e) = std::fs::create_dir_all(base_dir) {
             eprintln!("Failed to create directory {}: {}", base_dir, e);
             return Ok(());
         }
@@ -2417,21 +2490,21 @@ impl XRClient {
         print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Writing frames to disk", );
 
         // Create parent directories
-        if let Err(e) = async_std::fs::create_dir_all(format!("{}/reference_rgb", base_dir)).await {
+        if let Err(e) = std::fs::create_dir_all(format!("{}/reference_rgb", base_dir)) {
             eprintln!("Failed to create reference directory: {}", e);
             return Ok(());
         }
-        if let Err(e) = async_std::fs::create_dir_all(format!("{}/lossy_rgb", base_dir)).await {
+        if let Err(e) = std::fs::create_dir_all(format!("{}/lossy_rgb", base_dir)) {
             eprintln!("Failed to create lossy directory: {}", e);
             return Ok(());
         }
     
         // Write frames to disk
-        if let Err(e) = async_std::fs::write(&ref_path, &ref_sample).await {
+        if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
             eprintln!("Failed to write reference frame: {}", e);
             return Ok(());
         }
-        if let Err(e) = async_std::fs::write(&lossy_path, &sample).await {
+        if let Err(e) = std::fs::write(&lossy_path, &sample) {
             eprintln!("Failed to write lossy frame: {}", e);
             return Ok(());
         }
@@ -2633,11 +2706,22 @@ impl XRClient {
                                             Err(e) => panic!("Failed to read HEVC frame after retries: {}", e),
                                         }
                                     };
+
+                                    let (rgb_ref_frame,v_u32) = self.decode_hevc_to_rgb2(ref_frame, id_frame).await; 
+                                    let path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_frame); 
+
+                                    if !rgb_ref_frame.is_empty(){
+                                        print_pretty!(DebugColor::Cyan, "NOT EMPTY", ); 
+
+                                        std::fs::write(&path,rgb_ref_frame ); 
+
+                                    }
+                                   
+                                    
                                     // Decode the HEVC frame to RGB using your existing function
                                     // let (rgb_ref_frame, _) = self.decode_hevc_to_rgb(ref_frame, id_frame).await;
 
-                                    let path = format!("Video_Sink/{}/hevc_ref/{}.rgb",ip_client, id_frame); 
-                                    if let Ok(rgb_ref_frame) = std::fs::read(path){
+                                    if let Ok(rgb_ref_frame) = std::fs::read(&path){
                                          // let (rgb_ref_frame, _) = self.decode_hevc_ref_frame_to_rgb(ref_frame, self.decoded_frame_index).await; 
                                         println!("REF RGB frame size: {}", rgb_ref_frame.len()); // Add this line
                                         println!("Starting VMAF analysis: "); 
