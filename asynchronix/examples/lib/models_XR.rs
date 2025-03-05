@@ -12,6 +12,10 @@ use std::{
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
+use anyhow::Result;
+use async_std::stream::StreamExt; // Add this import to fix the .next() error
+
+use tempfile::TempDir;
 use tokio::sync::Mutex as tokMutex; 
 use crate::lib::HevcParser;
 use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
@@ -34,7 +38,7 @@ use crate::debug_print;
 use crate::format_elapsed;
 use crate::lib::{HeaderALVRStream, USE_FFMPEG};
 use crate::print_pretty;
-use core::net;
+use core::{f64, net};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
@@ -109,6 +113,9 @@ static FFMPEG_COMMAND: OnceLock<Arc<Mutex<FfmpegCommand>>> = OnceLock::new();
 static FFMPEG_CHILD: OnceLock<Arc<Mutex<Option<(ChildStdin, BufReader<ChildStdout>)>>>> =
     OnceLock::new();
 
+
+pub const USE_VMAF: bool = true;
+
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
@@ -119,6 +126,10 @@ pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 pub const DECODER_BUFFERING_FRAMES: usize = 4;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = 2;
+
+
+pub const VMAF_FRAME_GROUP_SIZE: usize = 10;
+
 
 
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
@@ -288,12 +299,12 @@ pub struct HevcDecoder {
     ewma_frame_size: f64,
     last_update: Instant, 
 
-    frames_processed: usize,           // Count of frames we've sent to the decoder
-    keyframes_seen: usize,             // Count of keyframes observed
-    last_decoded_frame_time: Instant,  // Time when we last got a decoded frame
-    total_bytes_processed: f64,      // Total bytes of HEVC data processed
-    priming_complete: bool,            // Flag to indicate if decoder is primed and ready
-    expected_frame_size: usize,        // Expected size of decoded RGB frames
+    pub frames_processed: usize,           // Count of frames we've sent to the decoder
+    pub keyframes_seen: usize,             // Count of keyframes observed
+    pub last_decoded_frame_time: Instant,  // Time when we last got a decoded frame
+    pub total_bytes_processed: f64,      // Total bytes of HEVC data processed
+    pub priming_complete: bool,            // Flag to indicate if decoder is primed and ready
+    pub expected_frame_size: usize,        // Expected size of decoded RGB frames
 
     max_buffered_frames: usize,        // Maximum number of frames to buffer
 
@@ -309,6 +320,7 @@ impl HevcDecoder {
             .args(&["-f", "hevc", "-i", "-"])
             .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
+
             // .args(&["-flags", "+low_delay"])
             // .args(&["-fflags", "+nobuffer+flush_packets"])
             .args(&["-f", "rawvideo", "-"])
@@ -492,8 +504,8 @@ impl HevcDecoder {
         let is_keyframe = self.contains_keyframe(&packet);
         if is_keyframe {
             self.keyframes_seen += 1;
-            println!("🔑 KEYFRAME detected! Size: {}, Frame #{}, Total keyframes: {}", 
-                    frame_size, self.frames_processed, self.keyframes_seen);
+            // println!("🔑 KEYFRAME detected! Size: {}, Frame #{}, Total keyframes: {}", 
+                    // frame_size, self.frames_processed, self.keyframes_seen);
         }
 
         // Calculate smoothing factor α
@@ -597,8 +609,8 @@ impl HevcDecoder {
         }
         
         if frames_received > 0 {
-            println!("✅ Added {} frames to decoded buffer, now has {} frames (in {}ms)",
-                    frames_received, self.decoded_frames.len(), start_time.elapsed().as_millis());
+            // println!("✅ Added {} frames to decoded buffer, now has {} frames (in {}ms)",
+                    // frames_received, self.decoded_frames.len(), start_time.elapsed().as_millis());
         }
         
         frames_received
@@ -1281,7 +1293,7 @@ impl XRServer {
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
-            self.frames_sent_counter += 1;
+            
             // STEP 1: DEBUG VIDEO
             if let Some(mut send_socket) = self.video_app_sender.clone() {
                 let is_idr = false;
@@ -1294,7 +1306,7 @@ impl XRServer {
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
-                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self)
+                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self,  self.frames_sent_counter)
                         .await.unwrap();
 
                 if let Some(encoder_init) = send_socket.clone().ffmpeg_encoder{
@@ -1340,8 +1352,10 @@ impl XRServer {
                     .scheduler
                     .schedule_event(time_until_next_frame, Self::generate_video_frame, ())
                     .unwrap();
+            
             }
-        }
+            self.frames_sent_counter += 1;
+        } 
     }
 
     pub async fn connection_pipeline(&mut self, client_ip: IpAddr, context: &Context<Self>) {
@@ -1451,9 +1465,196 @@ impl<T> DroppingVecDeque<T> {
     }
 }
 
+
+
+
+
+#[derive(Debug, Clone)]
+struct FrameData {
+    ref_rgb: Vec<u8>,
+    lossy_rgb: Vec<u8>,
+    timestamp_ms: f64,
+    frame_number: u64,
+}
+struct FrameGroup {
+    frames: Vec<FrameData>,
+}
+#[derive(serde::Serialize)]
+struct FrameMetrics {
+    frame_number: u64,
+    timestamp_ms: f64,
+    vmaf: f64,
+    psnr: f64,
+    ssim: f64,
+}
+#[derive(Clone)]
+struct MetricsLogger {
+    writer: Arc<Mutex<csv::Writer<File>>>,
+}
+impl MetricsLogger {
+    fn new() -> Result<Self> {
+        let file = File::create("Video_Sink/metrics.csv")?;
+        let writer = csv::Writer::from_writer(file);
+        Ok(Self {
+            writer: Arc::new(Mutex::new(writer)),
+        })
+    }
+
+    pub async fn process_frame_metrics(
+        &self,
+        frame_number: u64,
+        timestamp_ms: f64,
+        ref_path: &str,
+        lossy_path: &str
+    ) -> Result<()> {
+        // Create a temporary directory for processing
+        let temp_dir = TempDir::new()?;
+        
+        // Convert RGB frames to Y4M format (better for VMAF processing)
+        let ref_y4m = temp_dir.path().join("reference.y4m").to_string_lossy().to_string();
+        let lossy_y4m = temp_dir.path().join("lossy.y4m").to_string_lossy().to_string();
+        
+        // Convert reference frame to Y4M
+        let ref_status = Command::new("ffmpeg")
+            .args(&[
+                "-y",
+                "-f", "rawvideo",
+                "-pixel_format", "rgb24",
+                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-i", ref_path,
+                "-pix_fmt", "yuv420p",
+                &ref_y4m
+            ])
+            .status()?;
+        
+        if !ref_status.success() {
+            return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
+        }
+        
+        // Convert lossy frame to Y4M
+        let lossy_status = Command::new("ffmpeg")
+            .args(&[
+                "-y",
+                "-f", "rawvideo",
+                "-pixel_format", "rgb24",
+                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-i", lossy_path,
+                "-pix_fmt", "yuv420p",
+                &lossy_y4m
+            ])
+            .status()?;
+        
+        if !lossy_status.success() {
+            return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
+        }
+                
+            // Create the Video_Sink directory within the temp directory
+        let video_sink_dir = temp_dir.path().join("Video_Sink");
+        std::fs::create_dir_all(&video_sink_dir)?;
+
+        // Set up paths correctly
+        let vmaf_json = video_sink_dir.join("vmaf.json").to_string_lossy().to_string();
+        let psnr_log = video_sink_dir.join("psnr.log").to_string_lossy().to_string();
+        let ssim_log = video_sink_dir.join("ssim.log").to_string_lossy().to_string();
+
+        // Calculate all metrics in a single ffmpeg call
+        let metrics_status = Command::new("ffmpeg")
+            .args(&[
+                "-i", &ref_y4m,
+                "-i", &lossy_y4m,
+                "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
+                "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
+                "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
+                "-f", "null", "-"
+            ])
+            .status()?;
+
+        if !metrics_status.success() {
+            return Err(anyhow::anyhow!("Failed to calculate video metrics"));
+        }
+                
+        // Parse VMAF score
+        let mut vmaf_score = 0.0;
+        if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
+            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
+                if let Some(score) = json_value["pooled_metrics"]["vmaf"]["mean"].as_f64() {
+                    vmaf_score = score;
+                } else if let Some(frames) = json_value["frames"].as_array() {
+                    if let Some(first_frame) = frames.first() {
+                        if let Some(score) = first_frame["metrics"]["vmaf"].as_f64() {
+                            vmaf_score = score;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Parse PSNR score
+        let mut psnr_avg = 0.0;
+        if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
+            if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
+                let remaining = &psnr_content[avg_idx+9..];
+                let end_idx = remaining.find(" ").unwrap_or(10);
+                let avg_str = &remaining[..end_idx];
+                if let Ok(value) = avg_str.trim().parse::<f64>() {
+                    psnr_avg = value;
+                }
+            }
+        }
+        
+        // Parse SSIM score
+        let mut ssim_score = 0.0;
+        if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
+            if let Some(all_idx) = ssim_content.find("All:") {
+                let remaining = &ssim_content[all_idx+4..];
+                let end_idx = remaining.find(" ").unwrap_or(10);
+                let all_str = &remaining[..end_idx];
+                if let Ok(value) = all_str.trim().parse::<f64>() {
+                    ssim_score = value;
+                }
+            }
+        }
+        
+        // Print debug info
+        println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
+                frame_number, vmaf_score, psnr_avg, ssim_score);
+
+        let metrics = FrameMetrics {
+            frame_number: frame_number,
+            timestamp_ms: timestamp_ms,
+            vmaf: vmaf_score,
+            psnr: psnr_avg,
+            ssim: ssim_score,
+        };
+            
+        // Log the metrics
+        self.log_metrics(&metrics).await?;
+                
+        // Print progress information
+        if frame_number % 10 == 0 {
+            println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
+                frame_number, vmaf_score, psnr_avg, ssim_score);
+        }
+
+        Ok(())
+    }
+
+
+    async fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
+        // Get a single mutex guard and use it for both operations
+        let mut guard = self.writer.lock().unwrap();
+        
+        // Now use the guard directly for both operations
+        guard.serialize(metrics)?;
+        guard.flush()?;
+        
+        Ok(())
+    }
+}
+
 #[allow(unused)]
 pub struct XRClient {
-    pub decoder_queue: DroppingVecDeque<Vec<u8>>,
+    pub decoder_queue: DroppingVecDeque<(usize,Vec<u8>)>,
 
     pub outport_tracking_network: Output<MpduPacket>,
 
@@ -1487,16 +1688,34 @@ pub struct XRClient {
     // pub has_decoder: Option<bool>, 
     pub decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>, 
 
+    pub ref_decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>, 
+
     pub is_decoder_ready: bool, 
+    pub is_ref_decoder_ready: bool, 
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>,  // Buffer to hold initial frames
     min_buffered_frames: usize,           // Minimum frames to buffer before decoding
     saw_keyframe: bool,     
+
+
+    metrics_logger: Option<MetricsLogger>,
+    current_frame_group: Option<FrameGroup>,
+    group_tx: Option<Sender<FrameGroup>>,
+    enable_batch_processing: bool,
+    last_cleanup_time: TaiTime<0>,
+    cleanup_interval: std::time::Duration,
+    group_rx: Option<Receiver<FrameGroup>>, 
+    
+
+
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
 impl XRClient {
     pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>) -> Self {
+        
+        let (group_tx, group_rx) = bounded(5); // Buffer up to 5 groups
+
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
             outport_tracking_network: Output::default(),
@@ -1519,17 +1738,28 @@ impl XRClient {
             t_0: now, 
             last_tracking_time: now, 
             decoder_arc: None, 
+            ref_decoder_arc: None, 
 
                         // Add these new fields:
             initialization_buffer: Vec::new(),   // Buffer to hold initial frames
             is_decoder_ready: false,                  // Flag to track if decoder is ready
+            is_ref_decoder_ready: false, 
             min_buffered_frames: 10,           // Minimum frames to buffer before decoding
             saw_keyframe: false,     
+
+            metrics_logger: None,
+            current_frame_group: None,
+            group_tx: Some(group_tx),
+            group_rx: Some(group_rx), 
+            enable_batch_processing: true, // Set to false if you don't want batch processing
+            last_cleanup_time: now, // Use your simulator's initial time
+            cleanup_interval: std::time::Duration::from_secs(20), // Clea
 
 
             // visualize_decoder_window: None,
         }
     }
+
     pub async fn configure_streams(&mut self, packet_size: usize ,context: &Context<Self> ) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
         let stream_port: u16 = 9944;
@@ -1973,7 +2203,7 @@ impl XRClient {
                         sized_vec
                     );
 
-                    self.decoder_queue.push(nal.to_vec());
+                    self.decoder_queue.push((data.get_frame_index() as usize, nal.to_vec()));
 
                     ()
                 }
@@ -2037,14 +2267,50 @@ impl XRClient {
         rgb
     }
 
-  
-    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> Vec<u32> {
+    pub async fn cleanup_old_frames(&mut self, now: TaiTime<0>) {
+        // Only run cleanup at specified intervals
+        let elapsed = now.duration_since(self.last_cleanup_time);
+        if elapsed < self.cleanup_interval {
+            return;
+        }
+        
+        println!("Cleaning up old VMAF analysis frames");
+        self.last_cleanup_time = now;
+        
+        // Calculate cutoff time (current time - retention period)
+        let retention_period = std::time::Duration::from_secs(20); // Keep files for 20 seconds
+        let cutoff_time = now - retention_period;
+        
+        // Clean up directories
+        for dir_name in &["Video_Sink/reference_rgb", "Video_Sink/lossy_rgb"] {
+            if let Ok(mut entries) = async_std::fs::read_dir(dir_name).await {
+                while let Some(Ok(entry)) = entries.next().await {
+                    if let Ok(metadata) = entry.metadata().await {
+                        if let Ok(modified) = metadata.modified() {
+                            let modified_time = std::time::SystemTime::from(modified);
+                            let now_systime = std::time::SystemTime::from(now.to_system_time(32).unwrap());
+                            
+                            if modified_time < now_systime - retention_period {
+                                if let Err(e) = async_std::fs::remove_file(entry.path()).await {
+                                    eprintln!("Failed to delete temporary file {}: {}", 
+                                        entry.path().display(), e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> (Vec<u8>, Vec<u32>)  {
         // Validate input
         let encoded_length = encoded_buffer.len();
         
         if encoded_buffer.is_empty() {
             println!("WARNING: Empty encoded buffer received!");
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         
         // Ensure decoder is initialized
@@ -2083,13 +2349,14 @@ impl XRClient {
             // Try to get a decoded frame
             if let Some(frame) = decoder.next_decoded_frame() {
                 // Convert to RGB
+                let sample = frame.clone(); 
                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     // println!("✅ Successfully decoded and converted frame #{}", frame_index);
                     self.is_decoder_ready = true; 
-                    return pixels;
+                    return (sample, pixels);
                 } else {
                     println!("ERROR: Failed to convert decoded frame to RGB");
-                    return Vec::new();
+                    return (Vec::new(), Vec::new());
                 }
             } else {
                 // Don't consider this an error during the priming phase
@@ -2099,13 +2366,139 @@ impl XRClient {
                 } else {
                     println!("No decoded frame available yet");
                 }
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         } else {
             println!("ERROR: Decoder not initialized properly");
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
     }
+
+    pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize) -> Result<()> {
+        // Skip if either sample is empty
+
+        println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
+            sample.len(), ref_sample.len());
+            println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
+            sample.len(), ref_sample.len());
+        
+        if sample.is_empty() || ref_sample.is_empty() {
+            println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
+                        frame_id, sample.len(), ref_sample.len());
+            return Ok(());  // Return early, don't try to process empty frames
+        }
+    
+        // Ensure metrics logger is initialized
+        if self.metrics_logger.is_none() {
+            match MetricsLogger::new() {
+                Ok(logger) => {
+                    println!("Initialized metrics logger for VMAF analysis");
+                    self.metrics_logger = Some(logger);
+                },
+                Err(e) => {
+                    eprintln!("Failed to initialize metrics logger: {}", e);
+                    return Ok(());
+                }
+            }
+        }
+
+        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis? ", ); 
+    
+        // Create directories for temporary storage if they don't exist
+        let base_dir = "Video_Sink";
+        if let Err(e) = async_std::fs::create_dir_all(base_dir).await {
+            eprintln!("Failed to create directory {}: {}", base_dir, e);
+            return Ok(());
+        }
+    
+        // Save frames to temporary files
+        let ref_path = format!("{}/reference_rgb/frame_{:04}.rgb", base_dir, frame_id);
+        let lossy_path = format!("{}/lossy_rgb/frame_{:04}.rgb", base_dir, frame_id);
+        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Writing frames to disk", );
+
+        // Create parent directories
+        if let Err(e) = async_std::fs::create_dir_all(format!("{}/reference_rgb", base_dir)).await {
+            eprintln!("Failed to create reference directory: {}", e);
+            return Ok(());
+        }
+        if let Err(e) = async_std::fs::create_dir_all(format!("{}/lossy_rgb", base_dir)).await {
+            eprintln!("Failed to create lossy directory: {}", e);
+            return Ok(());
+        }
+    
+        // Write frames to disk
+        if let Err(e) = async_std::fs::write(&ref_path, &ref_sample).await {
+            eprintln!("Failed to write reference frame: {}", e);
+            return Ok(());
+        }
+        if let Err(e) = async_std::fs::write(&lossy_path, &sample).await {
+            eprintln!("Failed to write lossy frame: {}", e);
+            return Ok(());
+        }
+        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Frame files written", );
+    
+        // Calculate timestamp in milliseconds - convert to f64 as required by process_frame_metrics
+        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
+        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", ); 
+
+        // Process frame metrics
+        if let Some(logger) = &self.metrics_logger {
+            match logger.process_frame_metrics(
+                frame_id as u64,
+                timestamp_ms, // This is now f64 as expected
+                &ref_path,
+                &lossy_path
+            ).await {
+                Ok(_) => {
+                    if frame_id % 10 == 0 {
+                        println!("Processed VMAF analysis for frame {}", frame_id);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
+                }
+            }
+        }
+        
+        // Add to frame group for batch processing if enabled
+        if self.enable_batch_processing {
+            if self.current_frame_group.is_none() {
+                self.current_frame_group = Some(FrameGroup { 
+                    frames: Vec::with_capacity(VMAF_FRAME_GROUP_SIZE) 
+                });
+            }
+    
+            if let Some(group) = &mut self.current_frame_group {
+                group.frames.push(FrameData {
+                    ref_rgb: ref_sample,
+                    lossy_rgb: sample,
+                    timestamp_ms: timestamp_ms, // Now using f64
+                    frame_number: frame_id as u64,
+                });
+    
+                // Send group when full
+                if group.frames.len() >= VMAF_FRAME_GROUP_SIZE {
+                    if let Some(tx) = &self.group_tx {
+                        // Create a new group to send
+                        let frames_to_send = std::mem::replace(&mut group.frames, Vec::with_capacity(VMAF_FRAME_GROUP_SIZE));
+                        let group_to_send = FrameGroup { frames: frames_to_send };
+                        
+                        if let Err(e) = tx.send(group_to_send) {
+                            eprintln!("Error sending frame group: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 33333333333333 ? ", ); 
+
+    
+        // Update clean-up timer
+        self.last_cleanup_time = now;
+        
+        Ok(())
+    }
+
 
     // Helper method to check if a frame contains a keyframe
     fn is_keyframe(&self, frame: &[u8]) -> bool {
@@ -2144,7 +2537,7 @@ impl XRClient {
                 static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
             }
     
-            if let Some(video_frame) = self.decoder_queue.pop() {
+            if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
                 let subsample = video_frame[0..10.min(video_frame.len())].to_vec();
                 
                 // Check if this is a keyframe and update our flag
@@ -2204,12 +2597,61 @@ impl XRClient {
                         );
                         
                         if USE_FFMPEG == true {
-                            let frame = self.decode_hevc_to_rgb(
+                            let (rgb, frame) = self.decode_hevc_to_rgb(
                                 video_frame.clone(),
                                 self.decoded_frame_index,
                             ).await;
 
                             if !frame.is_empty() {
+
+
+                                if USE_VMAF == true {
+                                    let id_frame = id_f; 
+                                    let mut ip_client: IpAddr = self.server_ip.clone();
+
+                                    if let IpAddr::V4(mut ip4) = ip_client {
+                                        let mut octets = ip4.octets();
+                                        if octets[3] == 2 {
+                                            octets[3] = 1; // Change last byte from 2 to 1
+                                            ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
+                                        }
+                                    }
+                                    print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_frame);                                                               
+
+                                    // Path to the stored HEVC frame
+                                    let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip_client,id_frame);
+                                     // Read the HEVC frame from the filesystem
+                                    // let ref_frame = std::fs::read(&hevc_file_path).expect("Failed to read HEVC frame");
+                                    let mut retries = 10;
+                                    let ref_frame = loop {
+                                        match fs::read(&hevc_file_path) {
+                                            Ok(data) => break data, // Successfully read file
+                                            Err(_) if retries > 0 => {
+                                                thread::sleep(Duration::from_millis(100)); // Wait 100ms before retrying
+                                                retries -= 1;
+                                            }
+                                            Err(e) => panic!("Failed to read HEVC frame after retries: {}", e),
+                                        }
+                                    };
+                                    // Decode the HEVC frame to RGB using your existing function
+                                    // let (rgb_ref_frame, _) = self.decode_hevc_to_rgb(ref_frame, id_frame).await;
+
+                                    let path = format!("Video_Sink/{}/hevc_ref/{}.rgb",ip_client, id_frame); 
+                                    if let Ok(rgb_ref_frame) = std::fs::read(path){
+                                         // let (rgb_ref_frame, _) = self.decode_hevc_ref_frame_to_rgb(ref_frame, self.decoded_frame_index).await; 
+                                        println!("REF RGB frame size: {}", rgb_ref_frame.len()); // Add this line
+                                        println!("Starting VMAF analysis: "); 
+                                        if let Ok(result) = self.vmaf_analysis(rgb, rgb_ref_frame, now, id_frame).await{
+                                            println!("SUCCESS VMAF!!!");
+                                        }
+                                        else{println!("SAAAD :(((("); }
+                                    } 
+                                    else{
+                                        println!("ERROR WITH RGB REF SAMPLE"); 
+                                    }
+
+                                }
+
                                 self.decoded_frame_index += 1;
                                 let scale_factor = SCALE_FACTOR_WINDOW;
                                 let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
@@ -2614,3 +3056,39 @@ impl STA_extended {
 }
 
 impl Model for STA_extended {}
+
+
+// Update the process_group function to use the enhanced method
+async fn process_group(group: FrameGroup, logger: &MetricsLogger) -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    
+    println!("Processing group with {} frames", group.frames.len());
+    
+    for frame in &group.frames {
+        // Save frames to temporary files
+        let ref_path = temp_dir.path().join(format!("ref_{}.rgb", frame.frame_number)).to_string_lossy().to_string();
+        let lossy_path = temp_dir.path().join(format!("lossy_{}.rgb", frame.frame_number)).to_string_lossy().to_string();
+        
+        std::fs::write(&ref_path, &frame.ref_rgb)?;
+        std::fs::write(&lossy_path, &frame.lossy_rgb)?;
+        
+        // Process and log metrics for this frame
+        match logger.process_frame_metrics(
+            frame.frame_number,
+            frame.timestamp_ms,
+            &ref_path,
+            &lossy_path
+        ).await {
+            Ok(_) => {
+                // Successfully processed
+                println!("Processed frame {}", frame.frame_number);
+            },
+            Err(e) => {
+                eprintln!("Error processing metrics for frame {}: {}", frame.frame_number, e);
+            }
+        }
+    }
+    
+    println!("Group processing complete");
+    Ok(())
+}
