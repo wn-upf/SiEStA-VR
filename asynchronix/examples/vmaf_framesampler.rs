@@ -37,7 +37,7 @@ pub const WINDOW_SCALE_FACTOR: f64 = 0.7;
 
 pub const IDR_FRAME_SIZE_GOP: usize = 120;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.02; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.01; 
 
 pub const CHUNK_SIZE_ENCODER_S: f64 = 3.0; 
 pub const FRAME_CUTOFF_LIMIT: usize = 1200; 
@@ -75,7 +75,66 @@ struct QualityMetrics {
     ssim_score: f64,
 }
 
-
+// Add this function to clean up old frames
+fn cleanup_old_data(
+    synced_pairs: &mut Vec<SyncedFramePair>,
+    current_time: Instant,
+    epoch: Instant,
+    retention_duration: Duration,
+) -> Result<(), Box<dyn Error>> {
+    // Calculate cutoff timestamp (current time - 20 seconds)
+    let cutoff_time_ms = current_time.duration_since(epoch).as_millis() as u64 
+        - retention_duration.as_millis() as u64;
+    
+    println!("Cleaning up frames older than {} seconds (before timestamp {}ms)", 
+        retention_duration.as_secs(), cutoff_time_ms);
+    
+    // Track how many files we clean up
+    let mut cleaned_count = 0;
+    
+    // Remove old frame pairs and delete their files
+    synced_pairs.retain(|pair| {
+        let keep = pair.timestamp_ms >= cutoff_time_ms;
+        
+        if !keep {
+            // Delete the RGB files from disk
+            if let Err(e) = std::fs::remove_file(&pair.ref_path) {
+                eprintln!("Failed to delete {}: {}", pair.ref_path, e);
+            }
+            if let Err(e) = std::fs::remove_file(&pair.lossy_path) {
+                eprintln!("Failed to delete {}: {}", pair.lossy_path, e);
+            }
+            cleaned_count += 1;
+        }
+        
+        keep
+    });
+    
+    // Also clean up temporary Y4M files
+    for dir_name in &["Video_Sink/reference_rgb", "Video_Sink/lossy_rgb"] {
+        if let Ok(entries) = std::fs::read_dir(dir_name) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    if let Ok(metadata) = entry.metadata() {
+                        if let Ok(modified) = metadata.modified() {
+                            if modified < std::time::SystemTime::now() - retention_duration {
+                                if let Err(e) = std::fs::remove_file(entry.path()) {
+                                    eprintln!("Failed to delete temporary file: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if cleaned_count > 0 {
+        println!("Cleaned up {} old frame pairs", cleaned_count);
+    }
+    
+    Ok(())
+}
 /// Buffer for frame analysis that processes frames in batches
 pub struct FrameAnalysisBuffer {
     // Queue of frame pairs waiting to be analyzed
@@ -108,255 +167,6 @@ struct MetricsResult {
     psnr: f64,
     ssim: f64,
 }
-
-// Function to calculate metrics for a single frame pair
-async fn calculate_frame_metrics(
-    frame_number: u64, 
-    timestamp_ms: u64,
-    ref_path: &str, 
-    lossy_path: &str
-) -> Result<MetricsResult, Box<dyn Error>> {
-    let temp_dir = TempDir::new()?;
-    
-    // Convert RGB frames to Y4M format
-    let ref_y4m = temp_dir.path().join("reference.y4m").to_string_lossy().to_string();
-    let lossy_y4m = temp_dir.path().join("lossy.y4m").to_string_lossy().to_string();
-    
-    // Convert reference frame to Y4M
-    let ref_status = Command::new("ffmpeg")
-        .args(&[
-            "-y",
-            "-f", "rawvideo",
-            "-pixel_format", "rgb24",
-            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-i", ref_path,
-            "-pix_fmt", "yuv420p",
-            &ref_y4m
-        ])
-        .status()?;
-    
-    if !ref_status.success() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to convert reference frame to Y4M"
-        )));
-    }
-    
-    // Convert lossy frame to Y4M
-    let lossy_status = Command::new("ffmpeg")
-        .args(&[
-            "-y",
-            "-f", "rawvideo",
-            "-pixel_format", "rgb24",
-            "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-i", lossy_path,
-            "-pix_fmt", "yuv420p",
-            &lossy_y4m
-        ])
-        .status()?;
-    
-    if !lossy_status.success() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to convert lossy frame to Y4M"
-        )));
-    }
-    
-    // Calculate VMAF
-    let vmaf_json = temp_dir.path().join("vmaf.json").to_string_lossy().to_string();
-    let vmaf_status = Command::new("ffmpeg")
-        .args(&[
-            "-i", &ref_y4m,
-            "-i", &lossy_y4m,
-            "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
-            "-f", "null", "-"
-        ])
-        .status()?;
-    
-    if !vmaf_status.success() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to calculate VMAF"
-        )));
-    }
-    
-    // Calculate PSNR
-    let psnr_log = temp_dir.path().join("psnr.log").to_string_lossy().to_string();
-    let psnr_status = Command::new("ffmpeg")
-        .args(&[
-            "-i", &ref_y4m,
-            "-i", &lossy_y4m,
-            "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-            "-f", "null", "-"
-        ])
-        .status()?;
-    
-    if !psnr_status.success() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to calculate PSNR"
-        )));
-    }
-    
-    // Calculate SSIM
-    let ssim_log = temp_dir.path().join("ssim.log").to_string_lossy().to_string();
-    let ssim_status = Command::new("ffmpeg")
-        .args(&[
-            "-i", &ref_y4m,
-            "-i", &lossy_y4m,
-            "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
-            "-f", "null", "-"
-        ])
-        .status()?;
-    
-    if !ssim_status.success() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to calculate SSIM"
-        )));
-    }
-    
-    // Parse metrics from output files
-    // Parse VMAF from JSON
-    let vmaf_content = std::fs::read_to_string(&vmaf_json)?;
-    let vmaf_score = if let Some(score_idx) = vmaf_content.find("\"vmaf\":") {
-        let end_idx = vmaf_content[score_idx+7..].find(",").unwrap_or(10);
-        let score_str = &vmaf_content[score_idx+7..score_idx+7+end_idx];
-        score_str.trim().parse::<f64>().unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    
-    // Parse PSNR
-    let psnr_content = std::fs::read_to_string(&psnr_log)?;
-    let psnr_avg = if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
-        let end_idx = psnr_content[avg_idx+9..].find(" ").unwrap_or(10);
-        let avg_str = &psnr_content[avg_idx+9..avg_idx+9+end_idx];
-        avg_str.trim().parse::<f64>().unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    
-    // Parse SSIM
-    let ssim_content = std::fs::read_to_string(&ssim_log)?;
-    let ssim_score = if let Some(all_idx) = ssim_content.find("All:") {
-        let end_idx = ssim_content[all_idx+4..].find(" ").unwrap_or(10);
-        let all_str = &ssim_content[all_idx+4..all_idx+4+end_idx];
-        all_str.trim().parse::<f64>().unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    
-    // Return metrics result
-    Ok(MetricsResult {
-        frame_number,
-        timestamp_ms,
-        vmaf: vmaf_score,
-        psnr: psnr_avg,
-        ssim: ssim_score,
-    })
-}
-
-// Create a metrics manager to handle CSV operations
-struct MetricsManager {
-    csv_path: String,
-    writer: Option<csv::Writer<File>>,
-    results: Vec<MetricsResult>,
-}
-
-impl MetricsManager {
-    // Initialize the metrics manager
-    async fn new(csv_path: &str) -> Result<Self, Box<dyn Error>> {
-        // Check if previous results exist and load them
-        let mut results = Vec::new();
-        let file_exists = Path::new(csv_path).exists();
-        
-        if file_exists {
-            let mut rdr = csv::Reader::from_path(csv_path)?;
-            for result in rdr.deserialize() {
-                let record: MetricsResult = result?;
-                results.push(record);
-            }
-            println!("Loaded {} previous metric results", results.len());
-        }
-        
-        // Create a new CSV writer
-        let writer = if file_exists {
-            // Append to existing file
-            let file = OpenOptions::new()
-                .write(true)
-                .append(true)
-                .open(csv_path).unwrap();
-            Some(csv::Writer::from_writer(file))
-        } else {
-            // Create new file with header
-            let file = File::create(csv_path)?;
-            let mut wtr = csv::Writer::from_writer(file);
-            // If it's a new file, write header
-            wtr.write_record(&["frame_number", "timestamp_ms", "vmaf", "psnr", "ssim"])?;
-            Some(wtr)
-        };
-        
-        Ok(Self {
-            csv_path: csv_path.to_string(),
-            writer,
-            results,
-        })
-    }
-    
-    // Add a new metrics result
-    fn add_result(&mut self, result: MetricsResult) -> Result<(), Box<dyn Error>> {
-        if let Some(writer) = &mut self.writer {
-            writer.serialize(&result)?;
-            writer.flush()?;
-        }
-        self.results.push(result);
-        Ok(())
-    }
-    
-    // Get statistics from all results
-    fn get_stats(&self) -> (f64, f64, f64, usize) {
-        if self.results.is_empty() {
-            return (0.0, 0.0, 0.0, 0);
-        }
-        
-        let total_frames = self.results.len();
-        let vmaf_sum: f64 = self.results.iter().map(|r| r.vmaf).sum();
-        let psnr_sum: f64 = self.results.iter().map(|r| r.psnr).sum();
-        let ssim_sum: f64 = self.results.iter().map(|r| r.ssim).sum();
-        
-        (
-            vmaf_sum / total_frames as f64,
-            psnr_sum / total_frames as f64,
-            ssim_sum / total_frames as f64,
-            total_frames
-        )
-    }
-    
-    // Print summary of metrics
-    fn print_summary(&self) {
-        let (avg_vmaf, avg_psnr, avg_ssim, total_frames) = self.get_stats();
-        
-        println!("\n=== Video Quality Metrics Summary ===");
-        println!("Total frames analyzed: {}", total_frames);
-        println!("Average VMAF: {:.2}", avg_vmaf);
-        println!("Average PSNR: {:.2} dB", avg_psnr);
-        println!("Average SSIM: {:.4}", avg_ssim);
-        
-        // Quality category based on VMAF score
-        let quality = match avg_vmaf {
-            score if score >= 90.0 => "Excellent",
-            score if score >= 80.0 => "Good",
-            score if score >= 70.0 => "Fair",
-            score if score >= 60.0 => "Poor",
-            _ => "Bad"
-        };
-        
-        println!("Overall Quality: {}", quality);
-        println!("Results saved to: {}", self.csv_path);
-    }
-}
-
 // 
 // Update the process_group function to use the enhanced method
 async fn process_group(group: FrameGroup, logger: &MetricsLogger) -> Result<()> {
@@ -883,54 +693,32 @@ impl MetricsLogger {
         if !lossy_status.success() {
             return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
         }
-        
-            // Calculate VMAF, PSNR, and SSIM in a single ffmpeg call
-        let vmaf_json = temp_dir.path().join("vmaf.json").to_string_lossy().to_string();
-        let psnr_log = temp_dir.path().join("psnr.log").to_string_lossy().to_string();
-        let ssim_log = temp_dir.path().join("ssim.log").to_string_lossy().to_string();
-        
-        // Calculate VMAF
-        let vmaf_status = Command::new("ffmpeg")
+                
+            // Create the Video_Sink directory within the temp directory
+        let video_sink_dir = temp_dir.path().join("Video_Sink");
+        std::fs::create_dir_all(&video_sink_dir)?;
+
+        // Set up paths correctly
+        let vmaf_json = video_sink_dir.join("vmaf.json").to_string_lossy().to_string();
+        let psnr_log = video_sink_dir.join("psnr.log").to_string_lossy().to_string();
+        let ssim_log = video_sink_dir.join("ssim.log").to_string_lossy().to_string();
+
+        // Calculate all metrics in a single ffmpeg call
+        let metrics_status = Command::new("ffmpeg")
             .args(&[
                 "-i", &ref_y4m,
                 "-i", &lossy_y4m,
                 "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
-                "-f", "null", "-"
-            ])
-            .status()?;
-
-            if !vmaf_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate VMAF"));
-            }
-
-            // Calculate PSNR
-            let psnr_status = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
                 "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-                "-f", "null", "-"
-            ])
-            .status()?;
-
-            if !psnr_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate PSNR"));
-            }
-
-            // Calculate SSIM
-            let ssim_status = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
                 "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
                 "-f", "null", "-"
             ])
             .status()?;
 
-            if !ssim_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate SSIM"));
-            }
-        
+        if !metrics_status.success() {
+            return Err(anyhow::anyhow!("Failed to calculate video metrics"));
+        }
+                
         // Parse VMAF score
         let mut vmaf_score = 0.0;
         if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
@@ -1002,158 +790,6 @@ impl MetricsLogger {
         let mut writer = self.writer.lock().await;
         writer.serialize(metrics)?;
         writer.flush()?;
-        Ok(())
-    }
-    // Add a method to log frame metrics directly
-    pub async fn log_frame_metrics(&self, 
-        frame_number: u64,
-        timestamp_ms: u64,
-        vmaf: f64,
-        psnr: f64,
-        ssim: f64
-    ) -> Result<()> {
-        self.log_metrics(&FrameMetrics {
-            frame_number,
-            timestamp_ms,
-            vmaf,
-            psnr,
-            ssim,
-        }).await
-    }
-    
-    // Add a method to calculate metrics for a single frame pair
-    pub async fn calculate_and_log_frame(&self,
-        frame_number: u64,
-        timestamp_ms: u64,
-        ref_path: &str,
-        lossy_path: &str
-    ) -> Result<()> {
-        // Create a temporary directory for processing
-        let temp_dir = TempDir::new()?;
-        
-        // Convert RGB frames to Y4M format
-        let ref_y4m = temp_dir.path().join("reference.y4m").to_string_lossy().to_string();
-        let lossy_y4m = temp_dir.path().join("lossy.y4m").to_string_lossy().to_string();
-        
-        // Convert reference frame to Y4M
-        let ref_status = Command::new("ffmpeg")
-            .args(&[
-                "-y",
-                "-f", "rawvideo",
-                "-pixel_format", "rgb24",
-                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-i", ref_path,
-                "-pix_fmt", "yuv420p",
-                &ref_y4m
-            ])
-            .status()?;
-        
-        if !ref_status.success() {
-            return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
-        }
-        
-        // Convert lossy frame to Y4M
-        let lossy_status = Command::new("ffmpeg")
-            .args(&[
-                "-y",
-                "-f", "rawvideo",
-                "-pixel_format", "rgb24",
-                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-i", lossy_path,
-                "-pix_fmt", "yuv420p",
-                &lossy_y4m
-            ])
-            .status()?;
-        
-        if !lossy_status.success() {
-            return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
-        }
-        
-        // Calculate VMAF
-        let vmaf_json = temp_dir.path().join("vmaf.json").to_string_lossy().to_string();
-        let vmaf_status = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
-                "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
-                "-f", "null", "-"
-            ])
-            .status()?;
-        
-        if !vmaf_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate VMAF"));
-        }
-        
-        // Calculate PSNR
-        let psnr_log = temp_dir.path().join("psnr.log").to_string_lossy().to_string();
-        let psnr_status = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
-                "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-                "-f", "null", "-"
-            ])
-            .status()?;
-        
-        if !psnr_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate PSNR"));
-        }
-        
-        // Calculate SSIM
-        let ssim_log = temp_dir.path().join("ssim.log").to_string_lossy().to_string();
-        let ssim_status = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
-                "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
-                "-f", "null", "-"
-            ])
-            .status()?;
-        
-        if !ssim_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate SSIM"));
-        }
-        
-        // Parse metrics from output files
-        // Parse VMAF from JSON
-        let vmaf_content = std::fs::read_to_string(&vmaf_json)?;
-        let vmaf_score = if let Some(score_idx) = vmaf_content.find("\"vmaf\":") {
-            let end_idx = vmaf_content[score_idx+7..].find(",").unwrap_or(10);
-            let score_str = &vmaf_content[score_idx+7..score_idx+7+end_idx];
-            score_str.trim().parse::<f64>().unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        
-        // Parse PSNR
-        let psnr_content = std::fs::read_to_string(&psnr_log)?;
-        let psnr_avg = if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
-            let end_idx = psnr_content[avg_idx+9..].find(" ").unwrap_or(10);
-            let avg_str = &psnr_content[avg_idx+9..avg_idx+9+end_idx];
-            avg_str.trim().parse::<f64>().unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        
-        // Parse SSIM
-        let ssim_content = std::fs::read_to_string(&ssim_log)?;
-        let ssim_score = if let Some(all_idx) = ssim_content.find("All:") {
-            let end_idx = ssim_content[all_idx+4..].find(" ").unwrap_or(10);
-            let all_str = &ssim_content[all_idx+4..all_idx+4+end_idx];
-            all_str.trim().parse::<f64>().unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        
-        // Log the calculated metrics
-        self.log_frame_metrics(
-            frame_number,
-            timestamp_ms,
-            vmaf_score,
-            psnr_avg,
-            ssim_score
-        ).await?;
-        
         Ok(())
     }
 }
@@ -2138,7 +1774,7 @@ impl ChunkedHevcEncoder {
             height,
             bitrate: bitrate.to_string(),
             chunk_duration,
-            current_offset: random_offset, 
+            current_offset: OFFSET_VIDEO, 
             frame_tx,
             frame_rx,
         }
@@ -2679,7 +2315,12 @@ async fn main() -> Result<()> {
             });
         }
     });
-    
+
+
+    let retention_duration = Duration::from_secs(20); // 20-second retention window
+    let mut last_cleanup_time = Instant::now();
+    let cleanup_interval = Duration::from_secs(5); // Check for cleanup every 5 seconds
+
     // Create the chunked encoder.
     let mut chunked_encoder = ChunkedHevcEncoder::new(
         input_path,
@@ -2770,6 +2411,17 @@ async fn main() -> Result<()> {
         while reference_window.is_open() && lossy_window.is_open()
             && !reference_window.is_key_down(Key::Escape) 
             && !lossy_window.is_key_down(Key::Escape) {
+
+
+
+            // Check if it's time to clean up old data
+            // if Instant::now().duration_since(last_cleanup_time) >= cleanup_interval {
+            //     if let Err(e) = cleanup_old_data(&mut synced_pairs, Instant::now(), EPOCH, retention_duration) {
+            //         eprintln!("Error during cleanup: {}", e);
+            //     }
+            //     last_cleanup_time = Instant::now();
+            // }
+
             // 1. Pipeline recovery: if no frame received in a while, try to recover using a keyframe.
             if Instant::now().duration_since(last_frame_time) > frame_timeout {
                 println!("Pipeline stalled, attempting recovery...");
