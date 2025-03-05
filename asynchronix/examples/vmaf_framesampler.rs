@@ -820,7 +820,6 @@ struct FrameData {
     timestamp_ms: u64,
     frame_number: u64,
 }
-
 struct FrameGroup {
     frames: Vec<FrameData>,
 }
@@ -828,7 +827,6 @@ struct FrameGroup {
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
 }
-
 impl MetricsLogger {
     fn new() -> Result<Self> {
         let file = File::create("Video_Sink/metrics.csv")?;
@@ -886,25 +884,56 @@ impl MetricsLogger {
             return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
         }
         
-        // Calculate VMAF with output capture
+            // Calculate VMAF, PSNR, and SSIM in a single ffmpeg call
         let vmaf_json = temp_dir.path().join("vmaf.json").to_string_lossy().to_string();
-        let vmaf_output = Command::new("ffmpeg")
+        let psnr_log = temp_dir.path().join("psnr.log").to_string_lossy().to_string();
+        let ssim_log = temp_dir.path().join("ssim.log").to_string_lossy().to_string();
+        
+        // Calculate VMAF
+        let vmaf_status = Command::new("ffmpeg")
             .args(&[
                 "-i", &ref_y4m,
                 "-i", &lossy_y4m,
                 "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
                 "-f", "null", "-"
             ])
-            .output()?;
-        
-        if !vmaf_output.status.success() {
+            .status()?;
+
+            if !vmaf_status.success() {
             return Err(anyhow::anyhow!("Failed to calculate VMAF"));
-        }
+            }
+
+            // Calculate PSNR
+            let psnr_status = Command::new("ffmpeg")
+            .args(&[
+                "-i", &ref_y4m,
+                "-i", &lossy_y4m,
+                "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
+                "-f", "null", "-"
+            ])
+            .status()?;
+
+            if !psnr_status.success() {
+            return Err(anyhow::anyhow!("Failed to calculate PSNR"));
+            }
+
+            // Calculate SSIM
+            let ssim_status = Command::new("ffmpeg")
+            .args(&[
+                "-i", &ref_y4m,
+                "-i", &lossy_y4m,
+                "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
+                "-f", "null", "-"
+            ])
+            .status()?;
+
+            if !ssim_status.success() {
+            return Err(anyhow::anyhow!("Failed to calculate SSIM"));
+            }
         
-        // Improved VMAF parsing - first try to extract from the JSON file
+        // Parse VMAF score
         let mut vmaf_score = 0.0;
         if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
-            // Approach 1: Parse using proper JSON if the file exists and is valid
             if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
                 if let Some(score) = json_value["pooled_metrics"]["vmaf"]["mean"].as_f64() {
                     vmaf_score = score;
@@ -916,50 +945,9 @@ impl MetricsLogger {
                     }
                 }
             }
-            
-            // Approach 2: If JSON parsing failed, try regex/string parsing
-            if vmaf_score == 0.0 {
-                if let Some(score_idx) = vmaf_content.find("\"vmaf\":") {
-                    let remaining = &vmaf_content[score_idx+7..];
-                    let end_idx = remaining.find(",").unwrap_or_else(|| remaining.find("}").unwrap_or(10));
-                    let score_str = &remaining[..end_idx];
-                    if let Ok(score) = score_str.trim().parse::<f64>() {
-                        vmaf_score = score;
-                    }
-                }
-            }
         }
         
-        // Backup approach: If the JSON parsing failed, try to extract from the ffmpeg output
-        if vmaf_score == 0.0 {
-            let stderr = String::from_utf8_lossy(&vmaf_output.stderr);
-            if let Some(vmaf_idx) = stderr.find("VMAF score:") {
-                let remaining = &stderr[vmaf_idx + 11..];
-                if let Some(end_idx) = remaining.find('\n') {
-                    let score_str = &remaining[..end_idx];
-                    if let Ok(score) = score_str.trim().parse::<f64>() {
-                        vmaf_score = score;
-                    }
-                }
-            }
-        }
-        
-        // Calculate PSNR
-        let psnr_log = temp_dir.path().join("psnr.log").to_string_lossy().to_string();
-        let psnr_output = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
-                "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-                "-f", "null", "-"
-            ])
-            .output()?;
-        
-        if !psnr_output.status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate PSNR"));
-        }
-        
-        // Parse PSNR with better handling
+        // Parse PSNR score
         let mut psnr_avg = 0.0;
         if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
             if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
@@ -972,36 +960,7 @@ impl MetricsLogger {
             }
         }
         
-        // Backup approach: Parse from stderr
-        if psnr_avg == 0.0 {
-            let stderr = String::from_utf8_lossy(&psnr_output.stderr);
-            if let Some(avg_idx) = stderr.find("average:") {
-                let remaining = &stderr[avg_idx+8..];
-                if let Some(end_idx) = remaining.find(" ") {
-                    let avg_str = &remaining[..end_idx];
-                    if let Ok(value) = avg_str.trim().parse::<f64>() {
-                        psnr_avg = value;
-                    }
-                }
-            }
-        }
-        
-        // Calculate SSIM
-        let ssim_log = temp_dir.path().join("ssim.log").to_string_lossy().to_string();
-        let ssim_output = Command::new("ffmpeg")
-            .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
-                "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
-                "-f", "null", "-"
-            ])
-            .output()?;
-        
-        if !ssim_output.status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate SSIM"));
-        }
-        
-        // Parse SSIM with better handling
+        // Parse SSIM score
         let mut ssim_score = 0.0;
         if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
             if let Some(all_idx) = ssim_content.find("All:") {
@@ -1014,36 +973,27 @@ impl MetricsLogger {
             }
         }
         
-        // Backup approach: Parse from stderr
-        if ssim_score == 0.0 {
-            let stderr = String::from_utf8_lossy(&ssim_output.stderr);
-            if let Some(all_idx) = stderr.find("All:") {
-                let remaining = &stderr[all_idx+4..];
-                if let Some(paren_idx) = remaining.find("(") {
-                    let all_str = &remaining[..paren_idx];
-                    if let Ok(value) = all_str.trim().parse::<f64>() {
-                        ssim_score = value;
-                    }
-                }
-            }
-        }
-        
         // Print debug info
         println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
                 frame_number, vmaf_score, psnr_avg, ssim_score);
-        
-        // Create and log frame metrics
+
         let metrics = FrameMetrics {
-            frame_number,
-            timestamp_ms,
+            frame_number: frame_number,
+            timestamp_ms: timestamp_ms,
             vmaf: vmaf_score,
             psnr: psnr_avg,
             ssim: ssim_score,
         };
-        
+            
         // Log the metrics
         self.log_metrics(&metrics).await?;
-        
+                
+        // Print progress information
+        if frame_number % 10 == 0 {
+            println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
+                frame_number, vmaf_score, psnr_avg, ssim_score);
+        }
+
         Ok(())
     }
 
