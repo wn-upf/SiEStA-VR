@@ -452,8 +452,8 @@ impl QueueMechanism {
     pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
-        // let valid_from = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TBEGIN)).unwrap();
-        // let valid_until = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TEND)).unwrap();
+        let valid_from = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TBEGIN)).unwrap();
+        let valid_until = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TEND)).unwrap();
 
         // let valid_from2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TBEGIN)).unwrap();
         // let valid_until2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TEND)).unwrap();
@@ -461,7 +461,7 @@ impl QueueMechanism {
         // let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TBEGIN)).unwrap();
         // let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap();
 
-        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
         let bandwidth_limit = BANDWIDTH_LIMIT_S1;

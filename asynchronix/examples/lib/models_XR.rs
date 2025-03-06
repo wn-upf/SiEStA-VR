@@ -51,6 +51,7 @@ use once_cell::sync::Lazy;
 use glam::{Vec3, Quat};
 
 use std::sync::mpsc::{};
+use minifb_fonts::font6x8;
 
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
@@ -92,7 +93,7 @@ use serde::Deserialize;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 1.0;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.4;
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -114,7 +115,7 @@ static FFMPEG_CHILD: OnceLock<Arc<Mutex<Option<(ChildStdin, BufReader<ChildStdou
     OnceLock::new();
 
 
-pub const USE_VMAF: bool = true;
+pub const USE_VMAF: bool = false;
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -142,6 +143,243 @@ lazy_static! {
 }
 
 
+fn render_text(buffer: &mut [u32], text: &str, x: usize, y: usize, stride: usize, color: u32, scale: usize) {
+    // Simple 5x7 pixel font (common for basic bitmap fonts)
+    // Each character is represented as an array of 7 bytes, where each byte represents a row
+    // and the bits in each byte represent the pixels in that row
+    const FONT_WIDTH: usize = 5;
+    const FONT_HEIGHT: usize = 7;
+    const CHAR_SPACING: usize = 1;
+    
+    // Apply scaling
+    let scaled_font_width = FONT_WIDTH * scale;
+    let scaled_font_height = FONT_HEIGHT * scale;
+    let scaled_char_spacing = CHAR_SPACING * scale;
+    
+    // Define a simple bitmap font (only uppercase letters and some basic characters)
+    // Each character is 5x7 pixels
+    let font = [
+        // Space
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        // ! 
+        [0x04, 0x04, 0x04, 0x04, 0x00, 0x04, 0x00],
+        // " 
+        [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00],
+        // # 
+        [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
+        // $ 
+        [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
+        // % 
+        [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
+        // & 
+        [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
+        // ' 
+        [0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
+        // ( 
+        [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+        // ) 
+        [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        // * 
+        [0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00],
+        // + 
+        [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        // , 
+        [0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08],
+        // - 
+        [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        // . 
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
+        // / 
+        [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
+        // 0 
+        [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        // 1 
+        [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        // 2 
+        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        // 3 
+        [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
+        // 4 
+        [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        // 5 
+        [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+        // 6 
+        [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        // 7 
+        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        // 8 
+        [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        // 9 
+        [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+        // : 
+        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
+        // ; 
+        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08],
+        // < 
+        [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
+        // = 
+        [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
+        // > 
+        [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+        // ? 
+        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        // @ 
+        [0x0E, 0x11, 0x01, 0x0D, 0x15, 0x15, 0x0E],
+        // A 
+        [0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11],
+        // B 
+        [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+        // C 
+        [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
+        // D 
+        [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
+        // E 
+        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        // F 
+        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+        // G 
+        [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
+        // H 
+        [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        // I 
+        [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        // J 
+        [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+        // K 
+        [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        // L 
+        [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+        // M 
+        [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+        // N 
+        [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
+        // O 
+        [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        // P 
+        [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+        // Q 
+        [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+        // R 
+        [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+        // S 
+        [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+        // T 
+        [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        // U 
+        [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        // V 
+        [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+        // W 
+        [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
+        // X 
+        [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+        // Y 
+        [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
+        // Z 
+        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        // [ 
+        [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
+        // \ 
+        [0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00],
+        // ] 
+        [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
+        // ^ 
+        [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
+        // _ 
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F]
+    ];
+
+    let mut char_x = x;
+    
+    for c in text.chars() {
+        let index = match c {
+            ' ' => 0,
+            '!' => 1,
+            '"' => 2,
+            '#' => 3,
+            '$' => 4,
+            '%' => 5,
+            '&' => 6,
+            '\'' => 7,
+            '(' => 8,
+            ')' => 9,
+            '*' => 10,
+            '+' => 11,
+            ',' => 12,
+            '-' => 13,
+            '.' => 14,
+            '/' => 15,
+            '0'..='9' => (c as usize) - ('0' as usize) + 16,
+            ':' => 26,
+            ';' => 27,
+            '<' => 28,
+            '=' => 29,
+            '>' => 30,
+            '?' => 31,
+            '@' => 32,
+            'A'..='Z' => (c as usize) - ('A' as usize) + 33,
+            'a'..='z' => (c as usize) - ('a' as usize) + 33, // Map lowercase to uppercase
+            '[' => 59,
+            '\\' => 60,
+            ']' => 61,
+            '^' => 62,
+            '_' => 63,
+            _ => 0, // Default to space for unknown characters
+        };
+
+        // Draw the character with scaling
+        for row in 0..FONT_HEIGHT {
+            for scaled_row in 0..scale {
+                let buffer_y = y + (row * scale) + scaled_row;
+                
+                for col in 0..FONT_WIDTH {
+                    // Check if the current pixel is set in the font bitmap
+                    if (font[index][row] & (1 << (FONT_WIDTH - 1 - col))) != 0 {
+                        for scaled_col in 0..scale {
+                            let buffer_x = char_x + (col * scale) + scaled_col;
+                            
+                            // Calculate buffer index and check bounds
+                            if buffer_y < buffer.len() / stride && buffer_x < stride {
+                                let buffer_index = buffer_y * stride + buffer_x;
+                                if buffer_index < buffer.len() {
+                                    buffer[buffer_index] = color;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Move to the next character position
+        char_x += scaled_font_width + scaled_char_spacing;
+    }
+}
+
+fn resize_buffer(buffer: &[u32], orig_width: usize, orig_height: usize, new_width: usize, new_height: usize) -> Vec<u32> {
+    let mut scaled = vec![0u32; new_width * new_height];
+    
+    // Calculate scaling ratios (use floating point for better precision)
+    let x_ratio = orig_width as f64 / new_width as f64;
+    let y_ratio = orig_height as f64 / new_height as f64;
+
+    for y in 0..new_height {
+        for x in 0..new_width {
+            // Calculate source pixel coordinates
+            let src_x = (x as f64 * x_ratio).floor() as usize;
+            let src_y = (y as f64 * y_ratio).floor() as usize;
+            
+            // Ensure we don't go out of bounds
+            let src_x = src_x.min(orig_width - 1);
+            let src_y = src_y.min(orig_height - 1);
+            
+            // Get source pixel and store in destination buffer
+            scaled[y * new_width + x] = buffer[src_y * orig_width + src_x];
+        }
+    }
+    
+    scaled
+}
 
 fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
     if rgb_data.len() != width * height * 3 {
@@ -1497,8 +1735,8 @@ struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
 }
 impl MetricsLogger {
-    fn new() -> Result<Self> {
-        let file = File::create("Video_Sink/metrics.csv")?;
+    fn new(ip: IpAddr) -> Result<Self> {
+        let file = File::create(format!("Video_Sink/{}/metrics.csv", ip))?;
         let writer = csv::Writer::from_writer(file);
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
@@ -2447,7 +2685,7 @@ impl XRClient {
         }
     }
 
-    pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize) -> Result<()> {
+    pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
         // Skip if either sample is empty
 
         println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
@@ -2463,7 +2701,7 @@ impl XRClient {
     
         // Ensure metrics logger is initialized
         if self.metrics_logger.is_none() {
-            match MetricsLogger::new() {
+            match MetricsLogger::new(ip) {
                 Ok(logger) => {
                     println!("Initialized metrics logger for VMAF analysis");
                     self.metrics_logger = Some(logger);
@@ -2609,10 +2847,54 @@ impl XRClient {
             thread_local! {
                 static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
             }
-    
+
+     
             if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
                 let subsample = video_frame[0..10.min(video_frame.len())].to_vec();
                 
+
+
+
+                let id_frame = id_f; 
+                let mut ip_client = self.server_ip.clone();
+
+                if let IpAddr::V4(mut ip4) = ip_client {
+                    let mut octets = ip4.octets();
+                    if octets[3] == 2 {
+                        octets[3] = 1; // Change last byte from 2 to 1
+                        ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
+                    }
+                }
+                print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_frame);                                                               
+
+
+
+
+                // Path to the stored HEVC frame
+                let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip_client,id_frame);
+                // Read the HEVC frame from the filesystem
+                // let ref_frame = std::fs::read(&hevc_file_path).expect("Failed to read HEVC frame");
+                let mut retries = 10;
+                let ref_frame = loop {
+                    match fs::read(&hevc_file_path) {
+                        Ok(data) => break data, // Successfully read file
+                        Err(_) if retries > 0 => {
+                            thread::sleep(Duration::from_millis(100)); // Wait 100ms before retrying
+                            retries -= 1;
+                        }
+                        Err(e) => panic!("Failed to read HEVC frame after retries: {}", e),
+                    }
+                };
+
+                let (rgb_ref_frame,v_u32) = self.decode_hevc_to_rgb2(ref_frame, id_frame).await; 
+                let path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_frame); 
+
+                if !rgb_ref_frame.is_empty(){
+                    print_pretty!(DebugColor::Cyan, "NOT EMPTY", ); 
+
+                    std::fs::write(&path,rgb_ref_frame ); 
+
+                }
                 // Check if this is a keyframe and update our flag
                 if self.is_keyframe(&video_frame) {
                     self.saw_keyframe = true;
@@ -2657,6 +2939,7 @@ impl XRClient {
                     // Normal decoding phase
                     if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                         let miin: usize = usize::min(video_frame.len(), 50);
+
                         print_pretty!(
                             DebugColor::Violet,
                             "[DBG VSYNC {}] Frame decoded OK! Size frame: {} ,Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
@@ -2679,43 +2962,6 @@ impl XRClient {
 
 
                                 if USE_VMAF == true {
-                                    let id_frame = id_f; 
-                                    let mut ip_client: IpAddr = self.server_ip.clone();
-
-                                    if let IpAddr::V4(mut ip4) = ip_client {
-                                        let mut octets = ip4.octets();
-                                        if octets[3] == 2 {
-                                            octets[3] = 1; // Change last byte from 2 to 1
-                                            ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
-                                        }
-                                    }
-                                    print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_frame);                                                               
-
-                                    // Path to the stored HEVC frame
-                                    let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip_client,id_frame);
-                                     // Read the HEVC frame from the filesystem
-                                    // let ref_frame = std::fs::read(&hevc_file_path).expect("Failed to read HEVC frame");
-                                    let mut retries = 10;
-                                    let ref_frame = loop {
-                                        match fs::read(&hevc_file_path) {
-                                            Ok(data) => break data, // Successfully read file
-                                            Err(_) if retries > 0 => {
-                                                thread::sleep(Duration::from_millis(100)); // Wait 100ms before retrying
-                                                retries -= 1;
-                                            }
-                                            Err(e) => panic!("Failed to read HEVC frame after retries: {}", e),
-                                        }
-                                    };
-
-                                    let (rgb_ref_frame,v_u32) = self.decode_hevc_to_rgb2(ref_frame, id_frame).await; 
-                                    let path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_frame); 
-
-                                    if !rgb_ref_frame.is_empty(){
-                                        print_pretty!(DebugColor::Cyan, "NOT EMPTY", ); 
-
-                                        std::fs::write(&path,rgb_ref_frame ); 
-
-                                    }
                                    
                                     
                                     // Decode the HEVC frame to RGB using your existing function
@@ -2725,7 +2971,7 @@ impl XRClient {
                                          // let (rgb_ref_frame, _) = self.decode_hevc_ref_frame_to_rgb(ref_frame, self.decoded_frame_index).await; 
                                         println!("REF RGB frame size: {}", rgb_ref_frame.len()); // Add this line
                                         println!("Starting VMAF analysis: "); 
-                                        if let Ok(result) = self.vmaf_analysis(rgb, rgb_ref_frame, now, id_frame).await{
+                                        if let Ok(result) = self.vmaf_analysis(rgb, rgb_ref_frame, now, id_frame, ip_client).await{
                                             println!("SUCCESS VMAF!!!");
                                         }
                                         else{println!("SAAAD :(((("); }
@@ -2740,36 +2986,101 @@ impl XRClient {
                                 let scale_factor = SCALE_FACTOR_WINDOW;
                                 let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
                                 let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+                                
+                                // Create a wider window to hold both frames with a separator
+                                let window_width = scaled_width * 2 + 10; // Add 10px separator between frames
+                                let window_title = format!("Frame Compare - {}", self.server_ip);
+                                
+                                let mut combined_buffer = vec![0u32; window_width * scaled_height];
+                                
+
+                        
+
+                                // First properly scale the buffers before combining them
+                                if let Ok(rgb_ref_frame) = std::fs::read(&path){
+
+                                    let scaled_current = resize_buffer(&frame, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                                    let scaled_reference = if let Some(ref_pixels) = convert_rgb_to_u32(&rgb_ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                                        resize_buffer(&ref_pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height)
+                                    } else {
+                                        vec![0xFF0000; scaled_width * scaled_height] // Red for error
+                                    };
+                                
+                                     // Create the combined buffer
+
+                                    // Copy the scaled current frame to the left side
+                                    for y in 0..scaled_height {
+                                        for x in 0..scaled_width {
+                                            combined_buffer[y * window_width + x] = scaled_current[y * scaled_width + x];
+                                        }
+                                    }
+
+                                    // Draw a separator line
+                                    for y in 0..scaled_height {
+                                        for x in 0..10 {
+                                            combined_buffer[y * window_width + scaled_width + x] = 0x808080;
+                                        }
+                                    }
+
+                                    // Copy the scaled reference frame to the right side
+                                    for y in 0..scaled_height {
+                                        for x in 0..scaled_width {
+                                            combined_buffer[y * window_width + scaled_width + 10 + x] = scaled_reference[y * scaled_width + x];
+                                        }
+                                    }
+                                }
+                                let window_title = format!("Frame Compare - {}", self.server_ip);
+
+                                let color = 0x00FF00; // "Nvidia green"
+                                // Draw 3x larger "DECODED" label on the left side
+                                render_text(&mut combined_buffer, "DECODED", 10, 10, window_width, color, 3);
+
+                                // Draw 3x larger "REFERENCE" label on the right side
+                                render_text(&mut combined_buffer, "REFERENCE", scaled_width + 15, 10, window_width, color, 3);
+
+                                // Frame info with 3x larger text
+                                let frame_info = format!("FRAME #{}", id_frame);
+                                render_text(&mut combined_buffer, &frame_info, 
+                                            (window_width - frame_info.len() * 6 * 3) / 2, // Adjust centering for larger text
+                                            scaled_height - 25, window_width, color , 3);
+
+                                // let mut text_renderer = font6x8::new_renderer(WIDTH_ENCODER, HEIGHT_ENCODER, 0xFFFFFF); 
+                                
+                                // text_renderer.draw_text(&mut combined_buffer,  10, 10, "DECODED");
+                                // // Draw "REFERENCE" label on the right side
+                                // text_renderer.draw_text(&mut combined_buffer, scaled_width + 15, 10, "REFERENCE");
+                                // let frame_info = format!("FRAME #{}", id_f);
+                                // text_renderer.draw_text(&mut combined_buffer, (window_width - frame_info.len() * 6) / 2, 
+                                //         scaled_height - 15, &frame_info);
         
-                                // Use server_ip as the window identifier
-                                let window_title = format!("Decoded HEVC Frame - {}", self.server_ip);
-                                // println!("DEBUG: Frame pixel count: {}, Window dimensions: {}x{} ({})", 
-                                //   frame.len(), scaled_width, scaled_height, scaled_width * scaled_height);
 
                                 DISPLAY_WINDOWS.with(|windows_cell| {
                                     let mut windows = windows_cell.borrow_mut();
                                     
-                                    // Create window for this instance if it doesn't exist
+                                    // Create window if it doesn't exist
                                     if !windows.contains_key(&self.server_ip) {
                                         windows.insert(
                                             self.server_ip.clone(),
                                             Window::new(
                                                 &window_title,
-                                                scaled_width,
+                                                window_width,
                                                 scaled_height,
                                                 WindowOptions::default(),
                                             )
                                             .expect("Failed to create window"),
                                         );
                                     }
-        
-                                    // Update the specific window for this instance
+
+                                    // Update the window with the combined buffer
                                     if let Some(window) = windows.get_mut(&self.server_ip) {
-                                        if let Err(e) = window.update_with_buffer(&frame, scaled_width, scaled_height) {
+                                        window.set_title(&format!("Frame Compare #{} - {}", id_f, self.server_ip));
+                                        
+                                        if let Err(e) = window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
                                             println!("Failed to update window buffer: {}", e);
                                         }
                                     }
                                 });
+
                             } else {
                                 println!("Empty frame received, skipping display update");
                             }
