@@ -93,6 +93,9 @@ use serde::Deserialize;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
+
+pub const FRAMERATE_WINDOWS: usize =  60;  
+
 pub const SCALE_FACTOR_WINDOW: f64 = 0.4;
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -1839,6 +1842,11 @@ pub struct XRClient {
     dec_saw_keyframe: bool,     
     ref_saw_keyframe: bool, 
 
+    dec_saw_keyframe_last_t: TaiTime<0>, 
+    ref_saw_keyframe_last_t: TaiTime<0>, 
+
+    stream_offset: f64, 
+
     metrics_logger: Option<MetricsLogger>,
     current_frame_group: Option<FrameGroup>,
     group_tx: Option<Sender<FrameGroup>>,
@@ -1901,6 +1909,10 @@ impl XRClient {
             min_buffered_frames: 10,           // Minimum frames to buffer before decoding
             dec_saw_keyframe: false,     
             ref_saw_keyframe: false, 
+
+            dec_saw_keyframe_last_t: TaiTime::EPOCH,
+            ref_saw_keyframe_last_t: TaiTime::EPOCH, 
+            stream_offset: 0.0, 
 
             metrics_logger: None,
             current_frame_group: None,
@@ -2489,7 +2501,7 @@ impl XRClient {
                     "Initializing reference decoder for client {}", client_ip);
                 decoders.insert(
                     client_ip.clone(), 
-                    HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)
+                    HevcDecoder::new(FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)
                 );
             }
         }
@@ -2561,7 +2573,7 @@ impl XRClient {
         // Ensure decoder is initialized
         if self.decoder_arc.is_none() {
             println!("Initializing decoder on first frame");
-            let decoder = HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32); 
+            let decoder = HevcDecoder::new( FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32); 
             self.decoder_arc = Some(Arc::new(tokMutex::new(decoder)));
         }
         
@@ -2768,13 +2780,13 @@ impl XRClient {
         false
     }
 
-        // Then modify your vsync function
-        pub fn vsync<'a>(
-            &'a mut self,
-            _: (),
-            context: &'a Context<Self>,
-        ) -> impl Future<Output = ()> + Send + 'a {
-            async move {
+    // Then modify your vsync function
+    pub fn vsync<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
 
                     // local Helper function to display synchronized frame pairs, it's kinda wrong/ugly but works for now
                     fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: usize) {
@@ -2933,6 +2945,8 @@ impl XRClient {
                     if self.is_keyframe(&video_frame) {
                         self.dec_saw_keyframe = true;
                         println!("*** KEYFRAME DETECTED DEC *** Size: {}", video_frame.len());
+
+                        self.dec_saw_keyframe_last_t = now;
                         
              
                         // self.flush_decoders_and_buffers();
@@ -2940,7 +2954,17 @@ impl XRClient {
                     if self.is_keyframe(&ref_frame){
                         self.ref_saw_keyframe = true; 
                         println!("*** KEYFRAME DETECTED REF *** Size: {}", ref_frame.len());
+                        self.ref_saw_keyframe_last_t = now;
                     } 
+                    if let Some(offset) = self.ref_saw_keyframe_last_t.checked_duration_since(self.dec_saw_keyframe_last_t)
+                    {
+                        self.stream_offset = -1.0 *offset.as_secs_f64(); 
+                    }
+                    else if let Some(offset) = self.dec_saw_keyframe_last_t.checked_duration_since(self.ref_saw_keyframe_last_t)
+                    {
+                        self.stream_offset =  offset.as_secs_f64(); 
+                    }
+
                     
                     // Buffering phase logic (existing code)
                     if !self.is_decoder_ready {
@@ -3004,22 +3028,34 @@ impl XRClient {
                                     self.cleanup_old_frames(now, ip_client).await; 
                                 }
 
+                                // When processing a decoded frame
                                 if !frame.is_empty() {
-                                    // Store the decoded frame in our frame pairs map
-                                    if !self.frame_pairs.contains_key(&id_frame) {
-                                        self.frame_pairs.insert(id_frame, FramePair {
+                                    // Calculate the adjusted frame ID based on the stream offset
+                                    let time_offset_frames = (self.stream_offset * FRAMERATE_WINDOWS as f64).round() as i64;
+                                    let adjusted_id = id_frame as i64 + time_offset_frames;
+                                    let adjusted_id = if adjusted_id < 0 { 0 } else { adjusted_id as usize };
+                                    
+                                    print_pretty!(DebugColor::Cyan, "Adjusting frame ID {} to {} (offset: {}s, {}frames)", 
+                                                id_frame, adjusted_id, self.stream_offset, time_offset_frames);
+                                    
+                                    // Store the decoded frame using the adjusted ID
+                                    if !self.frame_pairs.contains_key(&adjusted_id) {
+                                        self.frame_pairs.insert(adjusted_id, FramePair {
                                             decoded: Some(frame.clone()),
                                             reference: None,
-                                            frame_id: id_frame,
+                                            frame_id: id_frame, // Keep original ID for reference
                                             timestamp: Instant::now(),
                                         });
-                                        print_pretty!(DebugColor::Green, "Created new frame pair for #{}", id_frame);
-                                    } else if let Some(pair) = self.frame_pairs.get_mut(&id_frame) {
+                                        print_pretty!(DebugColor::Green, "Created new frame pair for #{} (orig: #{})", 
+                                                    adjusted_id, id_frame);
+                                    } else if let Some(pair) = self.frame_pairs.get_mut(&adjusted_id) {
                                         pair.decoded = Some(frame.clone());
-                                        print_pretty!(DebugColor::Yellow, "Updated decoded frame for pair #{}", id_frame);
+                                        print_pretty!(DebugColor::Yellow, "Updated decoded frame for pair #{} (orig: #{})", 
+                                                    adjusted_id, id_frame);
                                     }
                                     
-                                    // Now check if we have a reference frame for this ID
+                                    // Now check if we have a reference frame for this adjusted ID
+                                    // (Use the original reference frame ID since we're adjusting the decoded frame)
                                     if !ref_pixels.is_empty() {
                                         if let Some(pair) = self.frame_pairs.get_mut(&id_frame) {
                                             pair.reference = Some(ref_pixels);
@@ -3035,46 +3071,25 @@ impl XRClient {
                                     }
                                     
                                     // Display synchronized pair if both parts are available
-                                    if let Some(pair) = self.frame_pairs.get(&id_frame) {
-                                        if pair.decoded.is_some() && pair.reference.is_some() {
-                                            // Now display the synchronized pair
-                                            display_frame_pair(pair, &self.server_ip, id_frame);
-                                            self.last_displayed_pair_id = id_frame;
-                                            print_pretty!(DebugColor::Magenta, "Displayed synchronized frame #{}", id_frame);
-                                            
-                                            // Cleanup old pairs to avoid memory leaks
-                                            self.frame_pairs.retain(|&id, _| 
-                                                id >= self.last_displayed_pair_id.saturating_sub(30));
-                                        } else {
-                                            print_pretty!(DebugColor::Yellow, 
-                                                "Frame pair #{} not complete (decoded: {}, reference: {})", 
-                                                id_frame, 
-                                                pair.decoded.is_some(),
-                                                pair.reference.is_some());
+                                    // Check both original and adjusted IDs for complete pairs
+                                    for check_id in [id_frame, adjusted_id] {
+                                        if let Some(pair) = self.frame_pairs.get(&check_id) {
+                                            if pair.decoded.is_some() && pair.reference.is_some() {
+                                                // Now display the synchronized pair
+                                                display_frame_pair(pair, &self.server_ip, check_id);
+                                                self.last_displayed_pair_id = check_id;
+                                                print_pretty!(DebugColor::Magenta, "Displayed synchronized frame #{} (offset applied)", check_id);
+                                                
+                                                // Cleanup old pairs to avoid memory leaks
+                                                self.frame_pairs.retain(|&id, _| 
+                                                    id >= self.last_displayed_pair_id.saturating_sub(30));
+                                                
+                                                // We found and displayed a complete pair, so break the loop
+                                                break;
+                                            }
                                         }
                                     }
-                                    
-                                    // VMAF analysis (if enabled)
-                                    if USE_VMAF == true {
-                                        if let Ok(rgb_ref_frame) = std::fs::read(&ref_path){
-                                            // let (rgb_ref_frame, _) = self.decode_hevc_ref_frame_to_rgb(ref_frame, self.decoded_frame_index).await; 
-                                           println!("REF RGB frame size: {}", rgb_ref_frame.len()); // Add this line
-                                           println!("Starting VMAF analysis: "); 
-                                           if let Ok(result) = self.vmaf_analysis(rgb, rgb_ref_frame, now, id_frame, ip_client).await{
-                                               println!("SUCCESS VMAF!!!");
-                                           }
-                                           else{println!("SAAAD :(((("); }
-                                       } 
-                                       else{
-                                           println!("ERROR WITH RGB REF SAMPLE"); 
-                                       }
-
-
-
-                                    }
-
-                                    self.decoded_frame_index += 1;
-                                } else {
+                                }else {
                                     println!("Empty frame received, skipping display update");
                                 }
                             }
