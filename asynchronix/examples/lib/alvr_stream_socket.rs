@@ -763,7 +763,7 @@ impl ChunkedHevcEncoder {
         // Update offset for the next chunk.
         self.current_offset += self.chunk_duration;
             // Add a safety check to clear parser buffer if it gets too large
-        if self.parser.buffer.len() > 1_000_000 {  // 1MB limit
+        if self.parser.buffer.len() > 1_000_000_00 {  // 100MB limit
             println!("Parser buffer getting too large ({}), clearing", self.parser.buffer.len());
             self.parser.buffer.clear();
         }
