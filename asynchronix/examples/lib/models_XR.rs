@@ -1772,6 +1772,26 @@ impl MetricsLogger {
         Ok(())
     }
 }
+    // Add to your struct
+    struct KeyframeSyncState {
+        last_keyframe_id: usize,
+        keyframe_timestamps: HashMap<usize, Instant>,
+        frames_since_keyframe: usize,
+        resync_requested: bool,
+        max_drift_frames: usize,
+    }
+
+    impl Default for KeyframeSyncState {
+        fn default() -> Self {
+            Self {
+                last_keyframe_id: 0,
+                keyframe_timestamps: HashMap::new(),
+                frames_since_keyframe: 0,
+                resync_requested: false,
+                max_drift_frames: 10, // Maximum allowed drift before forced resync
+            }
+        }
+    }
 
 #[allow(unused)]
 pub struct XRClient {
@@ -1816,8 +1836,8 @@ pub struct XRClient {
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>,  // Buffer to hold initial frames
     min_buffered_frames: usize,           // Minimum frames to buffer before decoding
-    saw_keyframe: bool,     
-
+    dec_saw_keyframe: bool,     
+    ref_saw_keyframe: bool, 
 
     metrics_logger: Option<MetricsLogger>,
     current_frame_group: Option<FrameGroup>,
@@ -1837,6 +1857,9 @@ pub struct XRClient {
     frame_pairs: HashMap<usize, FramePair>,
     last_displayed_pair_id: usize,
     display_queue: VecDeque<usize>, // Queue of frame IDs ready to display
+
+
+    keyframe_sync_state: KeyframeSyncState, 
 
 
     // pub visualize_decoder_window: Option<Window>,
@@ -1876,7 +1899,8 @@ impl XRClient {
             is_decoder_ready: false,                  // Flag to track if decoder is ready
             is_ref_decoder_ready: false, 
             min_buffered_frames: 10,           // Minimum frames to buffer before decoding
-            saw_keyframe: false,     
+            dec_saw_keyframe: false,     
+            ref_saw_keyframe: false, 
 
             metrics_logger: None,
             current_frame_group: None,
@@ -1893,6 +1917,7 @@ impl XRClient {
             frame_pairs: HashMap::new(), 
             last_displayed_pair_id: 0, 
             display_queue: VecDeque::new(), 
+            keyframe_sync_state: KeyframeSyncState::default(),
             // visualize_decoder_window: None,
         }
     }
@@ -2223,6 +2248,10 @@ impl XRClient {
         }
         ()
     }
+
+
+
+
     pub fn report_frame_lost(
         mut frames: Vec<u32>,
         mut shards_lost: Vec<usize>,
@@ -2460,7 +2489,7 @@ impl XRClient {
                     "Initializing reference decoder for client {}", client_ip);
                 decoders.insert(
                     client_ip.clone(), 
-                    HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)
+                    HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)
                 );
             }
         }
@@ -2532,7 +2561,7 @@ impl XRClient {
         // Ensure decoder is initialized
         if self.decoder_arc.is_none() {
             println!("Initializing decoder on first frame");
-            let decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32); 
+            let decoder = HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32); 
             self.decoder_arc = Some(Arc::new(tokMutex::new(decoder)));
         }
         
@@ -2739,549 +2768,12 @@ impl XRClient {
         false
     }
 
-
-
-    // pub fn vsync_old<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-         
-    //     async move {
-    //         let now = context.scheduler.time();
-    //         let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-            
-    //         let mut is_frame_lost = false; 
-    //         // Use a HashMap to store windows, keyed by server_ip
-    //         thread_local! {
-    //             static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
-    //         }
-    //         self.missing_frames_buffer.retain(|&id, &mut processed| {
-    //             !processed || id > self.last_processed_frame_id - 200
-    //         });
-
-            
-    //         if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
-    //             let subsample = video_frame[0..10.min(video_frame.len())].to_vec();
-                
-
-
-
-    //             let id_frame = id_f; 
-    //             let mut ip_client = self.server_ip.clone();
-
-    //             if let IpAddr::V4(mut ip4) = ip_client {
-    //                 let mut octets = ip4.octets();
-    //                 if octets[3] == 2 {
-    //                     octets[3] = 1; // Change last byte from 2 to 1
-    //                     ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
-    //                 }
-    //             }
-    //             print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_frame);                                                               
-
-    //             if id_f > self.last_processed_frame_id + 1 {
-    //                 let missing_start = self.last_processed_frame_id + 1;
-    //                 let missing_end = id_f - 1;
-                    
-    //                 print_pretty!(DebugColor::Red, 
-    //                     "Detected missing frames between {} and {}", 
-    //                     missing_start, missing_end);
-                    
-    //                 // First add all missing frames to the hashmap
-    //                 for missing_id in missing_start..=missing_end {
-                        
-    //                     if let Some(a) = self.missing_frames_buffer.get(&missing_id){
-    //                         // do nothing, it's already in
-    //                     }
-    //                     else{
-    //                         self.missing_frames_buffer.insert(missing_id, false);
-    //                         print_pretty!(DebugColor::Yellow, 
-    //                             "Added missing frame {} to tracking buffer", missing_id);
-    //                         }
-                        
-                        
-    //                 }
-                    
-    //                 // Now process each missing frame one by one
-    //                 for missing_id in missing_start..=missing_end {
-    //                     // Check if this frame needs processing
-    //                     if let Some(false) = self.missing_frames_buffer.get(&missing_id) {
-    //                         let hevc_path = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, missing_id);
-    //                         let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, missing_id);
-                            
-    //                         // Skip if RGB file already exists
-    //                         if std::path::Path::new(&rgb_path).exists() {
-    //                             print_pretty!(DebugColor::Cyan, 
-    //                                 "RGB file for frame {} already exists, marking as processed", missing_id);
-    //                             self.missing_frames_buffer.insert(missing_id, true);
-    //                             continue;
-    //                         }
-                            
-    //                         // Only proceed if HEVC file exists
-    //                         if std::path::Path::new(&hevc_path).exists() {
-    //                             print_pretty!(DebugColor::Azure, 
-    //                                 "Processing missing frame #{} (HEVC file exists)", missing_id);
-                                
-    //                             // Read HEVC file with retries
-    //                             let mut retries = 5;
-    //                             let ref_frame = loop {
-    //                                 match fs::read(&hevc_path) {
-    //                                     Ok(data) if !data.is_empty() => break data,
-    //                                     Err(_) if retries > 0 => {
-    //                                         thread::sleep(Duration::from_millis(10));
-    //                                         retries -= 1;
-    //                                         continue;
-    //                                     }
-    //                                     _ => break Vec::new(),
-    //                                 }
-    //                             };
-                                
-    //                             if !ref_frame.is_empty() {
-    //                                 // Decode the reference frame
-    //                                 let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(ref_frame, missing_id, ip_client).await;
-                                    
-    //                                 if !rgb_ref_frame.is_empty() {
-    //                                                                             // Save the decoded RGB file
-    //                                     if let Err(e) = std::fs::write(&rgb_path, &rgb_ref_frame) {
-    //                                         print_pretty!(DebugColor::Red, 
-    //                                             "Failed to save RGB for frame #{}: {}", missing_id, e);
-    //                                     } else {
-    //                                         // Mark as processed
-    //                                         self.missing_frames_buffer.insert(missing_id, true);
-    //                                         print_pretty!(DebugColor::Green, 
-    //                                             "Successfully processed missing frame #{}", missing_id);
-    //                                     }
-    //                                 } else {
-    //                                     print_pretty!(DebugColor::Yellow, 
-    //                                         "Failed to decode HEVC for frame #{}", missing_id);
-    //                                 }
-    //                             } else {
-    //                                 print_pretty!(DebugColor::Yellow, 
-    //                                     "Empty or unreadable HEVC file for frame #{}", missing_id);
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //             self.last_processed_frame_id = id_f; 
-
-
-
-                
-
-    //             if self.decoder_queue.deque.is_empty() && !self.missing_frames_buffer.is_empty() {
-    //                 // Find the next missing frame that has been processed
-    //                 if let Some((&next_missing_id, &processed)) = self.missing_frames_buffer.iter()
-    //                     .filter(|(&id, &processed)| processed && id > self.last_displayed_frame_id)
-    //                     .min_by_key(|(&id, _)| id) {
-                        
-    //                     // Only display if this frame has been properly processed
-    //                     let ref_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, next_missing_id);
-                        
-    //                     if std::path::Path::new(&ref_path).exists() {
-    //                         print_pretty!(DebugColor::Cyan, 
-    //                             "Displaying missing frame #{} from buffer", next_missing_id);
-                            
-    //                         // Read the reference RGB file
-    //                         if let Ok(rgb_ref_frame) = std::fs::read(&ref_path) {
-    //                             let scale_factor = SCALE_FACTOR_WINDOW;
-    //                             let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
-    //                             let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
-                                
-    //                             // Create window dimensions (same as your current window)
-    //                             let window_width = scaled_width * 2 + 10;
-    //                             let window_title = format!("Frame Compare - {}", self.server_ip);
-                                
-    //                             // Create a combined buffer (same as your current code)
-    //                             let mut combined_buffer = vec![0u32; window_width * scaled_height];
-                                
-    //                             // Use black frame for decoded side (or could use a placeholder image)
-    //                             let decoded_placeholder = vec![0x000000; WIDTH_ENCODER * HEIGHT_ENCODER];
-                                
-    //                             // Scale buffers
-    //                             let scaled_placeholder = resize_buffer(&decoded_placeholder, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-    //                             let scaled_reference = if let Some(ref_pixels) = convert_rgb_to_u32(&rgb_ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-    //                                 resize_buffer(&ref_pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height)
-    //                             } else {
-    //                                 vec![0xFF0000; scaled_width * scaled_height] // Red for error
-    //                             };
-                                
-    //                             // Copy the scaled placeholder to the left side
-    //                             for y in 0..scaled_height {
-    //                                 for x in 0..scaled_width {
-    //                                     combined_buffer[y * window_width + x] = scaled_placeholder[y * scaled_width + x];
-    //                                 }
-    //                             }
-                                
-    //                             // Draw separator line
-    //                             for y in 0..scaled_height {
-    //                                 for x in 0..10 {
-    //                                     combined_buffer[y * window_width + scaled_width + x] = 0x808080;
-    //                                 }
-    //                             }
-                                
-    //                             // Copy the scaled reference frame to the right side
-    //                             for y in 0..scaled_height {
-    //                                 for x in 0..scaled_width {
-    //                                     combined_buffer[y * window_width + scaled_width + 10 + x] = scaled_reference[y * scaled_width + x];
-    //                                 }
-    //                             }
-                                
-    //                             // Add text overlays
-    //                             let color = 0x00FF00; // green
-    //                             let neon_red = 0xFF0033; // Neon Red
-                                
-    //                             // Mark decoded side as "NO DECODED FRAME"
-    //                             render_text(&mut combined_buffer, "NO DECODED FRAME", 10, 10, window_width, neon_red, 2);
-                                
-    //                             // Mark reference side
-    //                             render_text(&mut combined_buffer, "REFERENCE (MISSING)", scaled_width + 15, 10, window_width, color, 2);
-                                
-    //                             // Frame info
-    //                             let frame_info = format!("MISSING FRAME #{}", next_missing_id);
-    //                             render_text(&mut combined_buffer, &frame_info, 
-    //                                        (window_width - frame_info.len() * 6 * 3) / 2,
-    //                                        scaled_height - 25, window_width, color, 3);
-                                
-    //                             // Update the display window
-    //                             DISPLAY_WINDOWS.with(|windows_cell| {
-    //                                 let mut windows = windows_cell.borrow_mut();
-                                    
-    //                                 // Create window if it doesn't exist
-    //                                 if !windows.contains_key(&self.server_ip) {
-    //                                     windows.insert(
-    //                                         self.server_ip.clone(),
-    //                                         Window::new(
-    //                                             &window_title,
-    //                                             window_width,
-    //                                             scaled_height,
-    //                                             WindowOptions::default(),
-    //                                         )
-    //                                         .expect("Failed to create window"),
-    //                                     );
-    //                                 }
-    //                                 print_pretty!(DebugColor::Navy, "Displaying lost ref frame {}",next_missing_id ); 
-
-    //                                 // Update the window with the combined buffer
-    //                                 if let Some(window) = windows.get_mut(&self.server_ip) {
-    //                                     window.set_title(&format!("Frame Compare #{} (Missing) - {}", next_missing_id, self.server_ip));
-                                        
-    //                                     if let Err(e) = window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
-    //                                         println!("Failed to update window buffer: {}", e);
-    //                                     }
-    //                                 }
-    //                             });
-                                
-    //                             // Track that we displayed this frame
-    //                             self.last_displayed_frame_id = next_missing_id;
-    //                         }
-    //                     }
-    //                 }
-    //             }
-                
-                
-
-
-    //             let ref_path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_frame); 
-    //             let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip_client,id_frame);
-
-
-    //             let mut retries = 10;
-    //             let ref_frame = loop {
-    //                 match fs::read(&hevc_file_path) {
-    //                     Ok(data) => break data, // Successfully read file
-    //                     Err(_) if retries > 0 => {
-    //                         thread::sleep(Duration::from_millis(100)); // Wait 100ms before retrying
-    //                         retries -= 1;
-    //                     }
-    //                     Err(e) => {break Vec::new()} // do nothing, 
-    //                 }
-    //             };
-
-    //             let (rgb_ref_frame,v_u32) = self.decode_hevc_to_rgb2(ref_frame, id_frame, ip_client).await; 
-
-    //             if !rgb_ref_frame.is_empty(){
-    //                 // print_pretty!(DebugColor::Cyan, "NOT EMPTY", ); 
-    //                 std::fs::write(&ref_path,rgb_ref_frame ); 
-    //             }
-    //             // Check if this is a keyframe and update our flag
-    //             if self.is_keyframe(&video_frame) {
-    //                 self.saw_keyframe = true;
-    //                 println!("*** KEYFRAME DETECTED *** Size: {}", video_frame.len());
-    //             }
-                
-    //             // Buffering phase - collect frames without decoding
-    //             if !self.is_decoder_ready {
-    //                 // Add frame to initialization buffer
-    //                 self.initialization_buffer.push(video_frame.clone());
-                    
-    //                 // Check if we're ready to start decoding
-    //                 let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
-                    
-    //                 if has_enough_frames && self.saw_keyframe {
-    //                     println!("Decoder initialization complete! Buffered {} frames including keyframe.",
-    //                             self.initialization_buffer.len());
-                        
-    //                     // Process all buffered frames
-    //                     if let Some(decoder_arc) = &self.decoder_arc {
-    //                         let mut decoder_guard = decoder_arc.lock().await;
-                            
-    //                         for frame in &self.initialization_buffer {
-    //                             decoder_guard.process_packet(frame.clone());
-                                
-                                
-    //                             decoder_guard.process_decoded_frames(); 
-                                
-    //                         }
-    //                     }
-                        
-    //                     // Mark decoder as ready and clear buffer
-    //                     self.is_decoder_ready = true;
-    //                     self.initialization_buffer.clear();
-    //                 } else {
-    //                     println!("Buffering frame {} of {} (keyframe: {})", 
-    //                             self.initialization_buffer.len(), 
-    //                             self.min_buffered_frames,
-    //                             self.saw_keyframe);
-    //                 }
-    //             } else { // decoder is ready
-
-    //                 if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
-    //                     let miin: usize = usize::min(video_frame.len(), 50);
-
-    //                     print_pretty!(
-    //                         DebugColor::Violet,
-    //                         "{} - [DBG VSYNC {}] Frame decoded OK! Size frame: {} ,Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
-    //                         format_elapsed!(now), 
-    //                         self.server_ip, 
-    //                         video_frame.len(),
-    //                         self.decoder_queue.len(),
-    //                         interarrival.as_secs_f32(),
-    //                         self.decoder_queue.ok_dequed_frame_counter,
-    //                         self.decoder_queue.dropped_frame_counter,
-    //                         &video_frame[0..miin]
-    //                     );
-                        
-    //                     if USE_FFMPEG == true {
-    //                         let (rgb, frame) = self.decode_hevc_to_rgb(
-    //                             video_frame.clone(),
-    //                             self.decoded_frame_index,
-    //                         ).await;
-
-    //                         self.cleanup_old_frames(now, ip_client).await; 
-    //                         if !frame.is_empty() {
-    //                             if !self.frame_pairs.contains_key(&id_frame) {  // Store the decoded frame in our pairs map
-    //                                 self.frame_pairs.insert(id_frame, FramePair {
-    //                                     decoded: Some(frame.clone()),
-    //                                     reference: None,
-    //                                     frame_id: id_frame,
-    //                                     timestamp: Instant::now(),
-    //                                 });
-    //                             } else if let Some(pair) = self.frame_pairs.get_mut(&id_frame) {
-    //                                 pair.decoded = Some(frame.clone());
-    //                             }
-                                
-    //                             // Now check if we have a reference frame for this ID already
-    //                             if let Ok(rgb_ref_frame) = std::fs::read(&ref_path) {
-    //                                 if let Some(ref_pixels) = convert_rgb_to_u32(&rgb_ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-    //                                     if let Some(pair) = self.frame_pairs.get_mut(&id_frame) {
-    //                                         pair.reference = Some(ref_pixels);
-    //                                     }
-    //                                 }
-    //                             }
-                                
-    //                             // Only display frames when we have both decoded and reference available
-    //                             if let Some(pair) = self.frame_pairs.get(&id_frame) {
-    //                                 if pair.decoded.is_some() && pair.reference.is_some() {
-    //                                     // Now display the synchronized pair
-    //                                     self.display_frame_pair(pair, &self.server_ip);
-    //                                     self.last_displayed_pair_id = id_frame;
-                                        
-    //                                     // Cleanup old pairs
-    //                                     self.frame_pairs.retain(|&id, _| id >= self.last_displayed_pair_id.saturating_sub(30));
-    //                                 }
-    //                             }
-                        
-
-    //                             if USE_VMAF == true {
-
-    //                                 if let Ok(rgb_ref_frame) = std::fs::read(&ref_path){
-    //                                      // let (rgb_ref_frame, _) = self.decode_hevc_ref_frame_to_rgb(ref_frame, self.decoded_frame_index).await; 
-    //                                     println!("REF RGB frame size: {}", rgb_ref_frame.len()); // Add this line
-    //                                     println!("Starting VMAF analysis: "); 
-    //                                     if let Ok(result) = self.vmaf_analysis(rgb, rgb_ref_frame, now, id_frame, ip_client).await{
-    //                                         println!("SUCCESS VMAF!!!");
-    //                                     }
-    //                                     else{println!("SAAAD :(((("); }
-    //                                 } 
-    //                                 else{
-    //                                     println!("ERROR WITH RGB REF SAMPLE"); 
-    //                                 }
-
-    //                             }
-
-    //                             self.decoded_frame_index += 1;
-    //                             let scale_factor = SCALE_FACTOR_WINDOW;
-    //                             let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
-    //                             let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
-                                
-    //                             // Create a wider window to hold both frames with a separator
-    //                             let window_width = scaled_width * 2 + 10; // Add 10px separator between frames
-    //                             let window_title = format!("Frame Compare - {}", self.server_ip);
-                                
-    //                             let mut combined_buffer = vec![0u32; window_width * scaled_height];
-
-    //                             // First properly scale the buffers before combining them
-    //                             if let Ok(rgb_ref_frame) = std::fs::read(&ref_path){
-
-    //                                 let scaled_current = resize_buffer(&frame, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-    //                                 let scaled_reference = if let Some(ref_pixels) = convert_rgb_to_u32(&rgb_ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-    //                                     resize_buffer(&ref_pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height)
-    //                                 } else {
-    //                                     vec![0xFF0000; scaled_width * scaled_height] // Red for error
-    //                                 };
-                                
-    //                                  // Create the combined buffer
-
-    //                                 // Copy the scaled current frame to the left side
-    //                                 for y in 0..scaled_height {
-    //                                     for x in 0..scaled_width {
-    //                                         combined_buffer[y * window_width + x] = scaled_current[y * scaled_width + x];
-    //                                     }
-    //                                 }
-
-    //                                 // Draw a separator line
-    //                                 for y in 0..scaled_height {
-    //                                     for x in 0..10 {
-    //                                         combined_buffer[y * window_width + scaled_width + x] = 0x808080;
-    //                                     }
-    //                                 }
-
-    //                                 // Copy the scaled reference frame to the right side
-    //                                 for y in 0..scaled_height {
-    //                                     for x in 0..scaled_width {
-    //                                         combined_buffer[y * window_width + scaled_width + 10 + x] = scaled_reference[y * scaled_width + x];
-    //                                     }
-    //                                 }
-    //                             }
-    //                             let window_title = format!("Frame Compare - {}", self.server_ip);
-
-    //                             let color = 0x00FF00; // green
-
-    //                             let neon_red = 0xFF0033; // Neon Red
-    //                             // Draw 3x larger "DECODED" label on the left side
-    //                             render_text(&mut combined_buffer, "DECODED", 10, 10, window_width, color, 3);
-
-    //                             // Draw 3x larger "REFERENCE" label on the right side
-    //                             render_text(&mut combined_buffer, "REFERENCE", scaled_width + 15, 10, window_width, color, 3);
-
-    //                             // Frame info with 3x larger text
-    //                             let frame_info = format!("FRAME #{}", id_frame);
-    //                             print_pretty!(DebugColor::Navy, "***Displaying FRAME {} ***", id_frame); 
-    //                             render_text(&mut combined_buffer, &frame_info, 
-    //                                         (window_width - frame_info.len() * 6 * 3) / 2, // Adjust centering for larger text
-    //                                         scaled_height - 25, window_width, color , 3);
-
-    //                             if is_frame_lost == true {
-    //                                 render_text(&mut combined_buffer, "FRAME LOST", 
-    //                                 10, // Small left margin
-    //                                 scaled_height - 50, // Place near the bottom
-    //                                 window_width, neon_red , 4);
-    //                             }
-
-
-    //                             let mut text_renderer = font6x8::new_renderer(WIDTH_ENCODER, HEIGHT_ENCODER, 0xFFFFFF); 
-                                
-    //                             text_renderer.draw_text(&mut combined_buffer,  10, 10, "DECODED");
-    //                             // Draw "REFERENCE" label on the right side
-    //                             text_renderer.draw_text(&mut combined_buffer, scaled_width + 15, 10, "REFERENCE");
-    //                             let frame_info = format!("FRAME #{}", id_f);
-    //                             text_renderer.draw_text(&mut combined_buffer, (window_width - frame_info.len() * 6) / 2, 
-    //                                     scaled_height - 15, &frame_info);
-        
-
-    //                             DISPLAY_WINDOWS.with(|windows_cell| {
-    //                                 let mut windows = windows_cell.borrow_mut();
-                                    
-    //                                 // Create window if it doesn't exist
-    //                                 if !windows.contains_key(&self.server_ip) {
-    //                                     windows.insert(
-    //                                         self.server_ip.clone(),
-    //                                         Window::new(
-    //                                             &window_title,
-    //                                             window_width,
-    //                                             scaled_height,
-    //                                             WindowOptions::default(),
-    //                                         )
-    //                                         .expect("Failed to create window"),
-    //                                     );
-    //                                 }
-
-    //                                 // Update the window with the combined buffer
-    //                                 if let Some(window) = windows.get_mut(&self.server_ip) {
-    //                                     window.set_title(&format!("Frame Compare #{} - {}", id_f, self.server_ip));
-                                        
-    //                                     if let Err(e) = window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
-    //                                         println!("Failed to update window buffer: {}", e);
-    //                                     }
-    //                                 }
-    //                             });
-    //                         }
-
-    //                         } else {
-    //                             println!("Empty frame received, skipping display update");
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    
-    //             self.last_decoded_frame_instant = now;
-    //             self.out_video_decoded.send(subsample).await;
-    //         } else {
-    //             println!(
-    //                 " Decoder queue is empty! |  queue len: {}, T_VSYNC: {:.3} ms",
-    //                 self.decoder_queue.len(),
-    //                 T_vsync.as_secs_f32() * 1000.0
-    //             );
-    //         }
-    
-    //         // Rest of your vsync logic remains the same
-    //         if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-    //             T_vsync = T_vsync.mul_f64(2.0);
-    //             debug_bgprint!(
-    //                 DebugColor::Violet,
-    //                 "[DBG VSYNC] Doubling time ({}) until frame deque due to length ({}) UNDER target ({})",
-    //                 T_vsync.as_secs_f32(),
-    //                 self.decoder_queue.len(),
-    //                 TARGET_FRAMES_DECODER_QUEUE
-    //             );
-    //         } else if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
-    //             T_vsync = T_vsync.mul_f64(0.5);
-    //             debug_bgprint!(
-    //                 DebugColor::Violet,
-    //                 "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})",
-    //                 T_vsync.as_secs_f32(),
-    //                 self.decoder_queue.len(),
-    //                 TARGET_FRAMES_DECODER_QUEUE
-    //             );
-    //         }
-    
-    //         context
-    //             .scheduler
-    //             .schedule_event(T_vsync, Self::vsync, ())
-    //             .unwrap();
-    // }
-    
-
         // Then modify your vsync function
         pub fn vsync<'a>(
             &'a mut self,
             _: (),
             context: &'a Context<Self>,
         ) -> impl Future<Output = ()> + Send + 'a {
-
-
-
             async move {
 
                     // local Helper function to display synchronized frame pairs, it's kinda wrong/ugly but works for now
@@ -3431,7 +2923,7 @@ impl XRClient {
                         }
                     };
 
-                    let (rgb_ref_frame, ref_pixels) = self.decode_hevc_to_rgb2(ref_frame, id_frame, ip_client).await; 
+                    let (rgb_ref_frame, ref_pixels) = self.decode_hevc_to_rgb2(ref_frame.clone(), id_frame, ip_client).await; 
 
                     if !rgb_ref_frame.is_empty(){
                         std::fs::write(&ref_path, rgb_ref_frame);
@@ -3439,9 +2931,16 @@ impl XRClient {
                     
                     // Keyframe detection
                     if self.is_keyframe(&video_frame) {
-                        self.saw_keyframe = true;
-                        println!("*** KEYFRAME DETECTED *** Size: {}", video_frame.len());
+                        self.dec_saw_keyframe = true;
+                        println!("*** KEYFRAME DETECTED DEC *** Size: {}", video_frame.len());
+                        
+             
+                        // self.flush_decoders_and_buffers();
                     }
+                    if self.is_keyframe(&ref_frame){
+                        self.ref_saw_keyframe = true; 
+                        println!("*** KEYFRAME DETECTED REF *** Size: {}", ref_frame.len());
+                    } 
                     
                     // Buffering phase logic (existing code)
                     if !self.is_decoder_ready {
@@ -3451,7 +2950,7 @@ impl XRClient {
                         // Check if we're ready to start decoding
                         let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
                         
-                        if has_enough_frames && self.saw_keyframe {
+                        if has_enough_frames && self.dec_saw_keyframe {
                             println!("Decoder initialization complete! Buffered {} frames including keyframe.",
                                     self.initialization_buffer.len());
                             
@@ -3475,7 +2974,7 @@ impl XRClient {
                             println!("Buffering frame {} of {} (keyframe: {})", 
                                     self.initialization_buffer.len(), 
                                     self.min_buffered_frames,
-                                    self.saw_keyframe);
+                                    self.dec_saw_keyframe);
                         }
                     } else {
                         // Normal decoding phase

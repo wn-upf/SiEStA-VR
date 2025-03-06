@@ -1447,8 +1447,6 @@ impl StreamSocket {
             time_since_last_update: t0, 
             last_buffer_size: 0,
             static_buffer_count: 0,
-            ref_decoder_arc: None,
-            is_decoder_ready: false, 
         }
     }
 
@@ -2327,8 +2325,6 @@ pub struct StreamSender<H> {
     last_buffer_size: usize,
     static_buffer_count: u32,
 
-    pub ref_decoder_arc:  Option<Arc<tokMutex<HevcDecoder2>>>, 
-    pub is_decoder_ready: bool, 
 }
 
 #[allow(unused)]
@@ -2461,62 +2457,6 @@ impl<H: Serialize> StreamSender<H> {
                         let mut file = std::fs::File::create(filename).unwrap();
                         file.write_all(&buffer).unwrap();
 
-
-                        
-                        // if self.ref_decoder_arc.is_none() {
-                        //     print_pretty!(DebugColor::Cyan, "Initializing HEVC stream decoder", );
-                        //     match HevcDecoder2::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32) {
-                        //             decoder=> {
-                        //                 self.ref_decoder_arc = Some(Arc::new(tokio::sync::Mutex::new(decoder)));
-                        //             }
-                        //             _ => {
-                        //                 print_pretty!(DebugColor::Red, "Failed to initialize HEVC decoder",);
-                        //             }
-                        //         }
-                        //     }
-                        // else{
-
-                        // }
-                    
-
-                        // if let Some(decoder_arc) = &self.ref_decoder_arc {
-                        //     let mut decoder = decoder_arc.lock().await;
-                            
-                        //     // Process the HEVC chunk
-                        //     decoder.process_packet(buffer.clone());
-                            
-                        //     // Handle decoded frames
-                        //     let frames_available = decoder.process_decoded_frames();
-                        //     if frames_available > 0 {
-                        //         print_pretty!(DebugColor::Green, "[decode] Got {} decoded frames", frames_available);
-                                
-                        //         // Save decoded RGB frames
-                        //         let rgb_path = format!("Video_Sink/{}/rgb_decoded", ip);
-                        //         std::fs::create_dir_all(&rgb_path).unwrap();
-                                
-                        //         while let Some(frame) = decoder.next_decoded_frame() {
-                        //             let filename = format!("{}/{}.rgb", rgb_path, id_frame);
-                        //             if let Err(e) = std::fs::write(&filename, &frame) {
-                        //                 print_pretty!(DebugColor::Red, "Error writing RGB frame: {}", e);
-                        //             } else {
-                        //                 print_pretty!(DebugColor::Green, 
-                        //                     "[decode] Saved RGB frame {} ({} bytes)", 
-                        //                     filename, 
-                        //                     frame.len()
-                        //                 );
-                        //             }
-                        //         }
-                        //     }
-                            
-                        //     // Handle decoder state
-                        //     if !decoder.is_ready() {
-                        //         print_pretty!(DebugColor::Yellow, 
-                        //             "Decoder warming up... (processed: {}, keyframes: {})", 
-                        //             decoder.frames_processed, 
-                        //             decoder.keyframes_seen
-                        //         );
-                        //     }
-                        // }
 
                     }
                     None => {
