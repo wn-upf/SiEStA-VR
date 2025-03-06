@@ -36,7 +36,7 @@ use std::{fs::File, thread, write};
 use crate::debug_bgprint;
 use crate::debug_print;
 use crate::format_elapsed;
-use crate::lib::{HeaderALVRStream, USE_FFMPEG};
+use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
 use crate::print_pretty;
 use core::{f64, net};
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -115,7 +115,6 @@ static FFMPEG_CHILD: OnceLock<Arc<Mutex<Option<(ChildStdin, BufReader<ChildStdou
     OnceLock::new();
 
 
-pub const USE_VMAF: bool = false;
 
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -140,6 +139,11 @@ use crossbeam::channel::{Receiver, unbounded, bounded, Sender, TryRecvError};
 
 lazy_static! {
     static ref REFERENCE_DECODER: Arc<Mutex<Option<HevcDecoder>>> = Arc::new(Mutex::new(None));
+}
+
+lazy_static! {
+    static ref REFERENCE_DECODERS: Arc<Mutex<HashMap<IpAddr, HevcDecoder>>> = 
+        Arc::new(Mutex::new(HashMap::new()));
 }
 
 
@@ -399,135 +403,6 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
     Some(pixels)
 }
 
-
-// pub struct NalUnit {
-//     pub nal_type: u8,
-//     pub data: Vec<u8>,
-//     pub is_keyframe: bool,
-// // }
-
-// /// A parser for HEVC bitstreams to extract individual frames
-// pub struct HevcParser {
-//     buffer: Vec<u8>,
-// }
-
-// impl HevcParser {
-//     pub fn new() -> Self {
-//         Self { buffer: Vec::new() }
-//     }
-
-//     /// Add more encoded data to the parser buffer
-//     pub fn add_data(&mut self, data: &[u8]) {
-//         self.buffer.extend_from_slice(data);
-//     }
-
-//     /// Find the next NAL unit start code in the buffer
-//     fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
-//         for i in start_pos..self.buffer.len() - 3 {
-//             // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-//             if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-//                (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-//                 self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
-//                 return Some(i);
-//             }
-//         }
-//         None
-//     }
-//     pub fn clear(&mut self) {
-//         println!("Clearing parser buffer: {} bytes", self.buffer.len());
-//         self.buffer.clear();
-//     }
-//     /// Extract the next complete NAL unit from the buffer
-//     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
-//         // Find the first start code
-//         let start_pos = self.find_next_start_code(0)?;
-        
-//         // Determine start code length (3 or 4 bytes)
-//         let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
-//             4
-//         } else {
-//             3
-//         };
-        
-//         // Find the next start code
-//         let next_start = self.find_next_start_code(start_pos + start_code_len);
-        
-//         let (nal_end, has_next) = match next_start {
-//             Some(pos) => (pos, true),
-//             None => (self.buffer.len(), false)
-//         };
-        
-//         // If we don't have a complete NAL unit yet, wait for more data
-//         if !has_next {
-//             return None;
-//         }
-        
-//         // Extract NAL header and determine NAL type
-//         let nal_header_pos = start_pos + start_code_len;
-//         if nal_header_pos >= self.buffer.len() {
-//             return None;
-//         }
-        
-//         let nal_header = self.buffer[nal_header_pos];
-//         let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-        
-//         // Extract the complete NAL unit data (including header)
-//         let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
-        
-//         // Remove the processed NAL unit from the buffer
-//         self.buffer.drain(0..nal_end);
-        
-//         // Determine if this is a keyframe (I-frame)
-//         // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-//         let is_keyframe = (16..=21).contains(&nal_type);
-        
-//         Some(NalUnit {
-//             nal_type,
-//             data: nal_data,
-//             is_keyframe,
-//         })
-//     }
-
-//     /// Get all complete frames currently in the buffer
-//     pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
-//         let mut frames = Vec::new();
-//         let mut current_frame = Vec::new();
-//         let mut saw_vcl = false;
-        
-//         while let Some(nal) = self.next_nal_unit() {
-//             // VCL NAL units (0-31) contain the actual picture data
-//             let is_vcl = nal.nal_type <= 31;
-            
-//             // If we see a VCL NAL and already saw one before, it's a new frame
-//             if is_vcl && saw_vcl {
-//                 if !current_frame.is_empty() {
-//                     frames.push(current_frame);
-//                     current_frame = Vec::new();
-//                 }
-//                 saw_vcl = false;
-//             }
-            
-//             if is_vcl {
-//                 saw_vcl = true;
-//             }
-            
-//             // Add start code and NAL data to current frame
-//             current_frame.extend_from_slice(&[0, 0, 0, 1]);
-//             current_frame.extend_from_slice(&nal.data);
-//         }
-        
-//         // Add the last frame if it's not empty
-//         if !current_frame.is_empty() {
-//             frames.push(current_frame);
-//         }
-//         if self.buffer.len() > 100000 {
-//             println!("Auto-clearing oversized parser buffer: {} bytes", self.buffer.len());
-//             self.buffer.clear();
-//         }
-//         frames
-//     }
-// }
-
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
     packet_tx: Sender<Vec<u8>>,
@@ -550,6 +425,7 @@ pub struct HevcDecoder {
     pub expected_frame_size: usize,        // Expected size of decoded RGB frames
 
     max_buffered_frames: usize,        // Maximum number of frames to buffer
+
 
 
 }
@@ -679,6 +555,8 @@ impl HevcDecoder {
             priming_complete: false,
             expected_frame_size: frame_size,
             max_buffered_frames: 10, 
+
+        
         }
     }
 
@@ -807,6 +685,8 @@ impl HevcDecoder {
         }
         None
     }
+
+
         // Better implementation of process_decoded_frames
     pub fn process_decoded_frames(&mut self) -> usize {
         let mut frames_received = 0;
@@ -1333,7 +1213,7 @@ impl XRServer {
                     let shards_lost = inner.shards_lost;
 
                     for (frame, shard) in frames_lost.iter().zip(shards_lost.iter()) {
-                        print_pretty!(DebugColor::Red ,"[DBG_DEAD_RX server] Frame {} lost {} shards", frame, shard);
+                        print_pretty!(DebugColor::Red ,"[DBG_DEAD_RX server {}] Frame {} lost {} shards", self.ip_self, frame, shard);
                     }
                 }
 
@@ -1660,7 +1540,7 @@ impl XRServer {
 
 impl Model for XRServer {}
 
-struct DroppingVecDeque<T> {
+pub struct DroppingVecDeque<T> {
     deque: VecDeque<T>,
     capacity: usize,
     dropped_frame_counter: usize,
@@ -1943,7 +1823,10 @@ pub struct XRClient {
     last_cleanup_time: TaiTime<0>,
     cleanup_interval: std::time::Duration,
     group_rx: Option<Receiver<FrameGroup>>, 
+
     
+    last_processed_frame_id: usize, // Keep track of the last processed frame ID
+    missing_frames_buffer: HashMap<usize, bool>, // Track missing frames
 
 
     // pub visualize_decoder_window: Option<Window>,
@@ -1993,10 +1876,80 @@ impl XRClient {
             last_cleanup_time: now, // Use your simulator's initial time
             cleanup_interval: std::time::Duration::from_secs(20), // Clea
 
-
+            last_processed_frame_id: 0,
+            missing_frames_buffer: HashMap::new(),
             // visualize_decoder_window: None,
         }
     }
+
+
+
+    // async fn retrieve_missing_frames(&mut self, current_frame_id: usize, ip_client: IpAddr) -> Vec<usize> {
+    //     let mut retrieved_frames = Vec::new();
+        
+    //     // Check if there's a gap in frame IDs
+    //     if current_frame_id > self.last_processed_frame_id + 1 {
+    //         print_pretty!(DebugColor::Yellow, 
+    //             "Detected missing frames between {} and {}", 
+    //             self.last_processed_frame_id, 
+    //             current_frame_id);
+            
+    //         // Identify the missing frame IDs
+    //         for missing_id in (self.last_processed_frame_id + 1)..current_frame_id {
+    //             // Skip if we've already tried to recover this frame
+    //             if self.missing_frames_buffer.contains_key(&missing_id) {
+    //                 continue;
+    //             }
+                
+    //             // Try to retrieve the missing reference frame
+    //             print_pretty!(DebugColor::Yellow, "Attempting to recover missing frame {}", missing_id);
+                
+    //             // Path to the stored HEVC frame
+    //             let hevc_file_path = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, missing_id);
+                
+    //             // Try to read the HEVC frame file with retries
+    //             let mut retries = 5;
+    //             let missing_frame = loop {
+    //                 match fs::read(&hevc_file_path) {
+    //                     Ok(data) => {
+    //                         print_pretty!(DebugColor::Green, "Successfully recovered frame {}", missing_id);
+    //                         retrieved_frames.push(missing_id);
+    //                         self.missing_frames_buffer.insert(missing_id, true); // Mark as recovered
+    //                         break Some(data);
+    //                     },
+    //                     Err(_) if retries > 0 => {
+    //                         thread::sleep(Duration::from_millis(100));
+    //                         retries -= 1;
+    //                     },
+    //                     Err(_) => {
+    //                         print_pretty!(DebugColor::Red, "Failed to recover frame {}", missing_id);
+    //                         self.missing_frames_buffer.insert(missing_id, false); // Mark as unrecoverable
+    //                         break None;
+    //                     }
+    //                 }
+    //             };
+                
+    //             // Process the recovered frame if we found it
+    //             if let Some(frame_data) = missing_frame {
+    //                 // Decode the recovered frame
+    //                 let (rgb_data, _) = self.decode_hevc_to_rgb2(frame_data, missing_id, ip_client).await;
+                    
+    //                 // Save the decoded RGB frame
+    //                 if !rgb_data.is_empty() {
+    //                     let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, missing_id);
+    //                     if let Err(e) = std::fs::write(&rgb_path, rgb_data) {
+    //                         print_pretty!(DebugColor::Red, "Failed to write recovered RGB frame {}: {}", missing_id, e);
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+        
+    //     // Update last processed frame ID
+    //     self.last_processed_frame_id = current_frame_id;
+        
+    //     retrieved_frames
+    // }
 
     pub async fn configure_streams(&mut self, packet_size: usize ,context: &Context<Self> ) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
@@ -2381,10 +2334,11 @@ impl XRClient {
                         };
 
                     let mut packets_lost_deadline = 0;
+                    let frame_id = data.get_frame_index(); 
 
                     let net = NetworkStatisticsPacket {
                         // Frame specific metrics
-                        frame_index: data.get_frame_index() as i32, // index of the current frame
+                        frame_index: frame_id as i32, // index of the current frame
                         frame_span: data.get_frame_span(),          // duration of the current frame
 
                         bytes_in_frame: data.get_bytes_in_frame(), // bytes received for the current frame, including both prefixes and network headers
@@ -2441,7 +2395,7 @@ impl XRClient {
                         sized_vec
                     );
 
-                    self.decoder_queue.push((data.get_frame_index() as usize, nal.to_vec()));
+                    self.decoder_queue.push((frame_id as usize, nal.to_vec()));
 
                     ()
                 }
@@ -2505,7 +2459,7 @@ impl XRClient {
         rgb
     }
 
-    pub async fn cleanup_old_frames(&mut self, now: TaiTime<0>) {
+    pub async fn cleanup_old_frames(&mut self, now: TaiTime<0>, ip: IpAddr) {
         // Only run cleanup at specified intervals
         let elapsed = now.duration_since(self.last_cleanup_time);
         if elapsed < self.cleanup_interval {
@@ -2519,8 +2473,11 @@ impl XRClient {
         let retention_period = std::time::Duration::from_secs(20); // Keep files for 20 seconds
         let cutoff_time = now - retention_period;
         
+        let ref_path = format!("Video_Sink/{}/reference_rgb", ip);
+        let lossy_path = format!("Video_Sink/{}/lossy_rgb", ip);
+
         // Clean up directories
-        for dir_name in &["Video_Sink/reference_rgb", "Video_Sink/lossy_rgb"] {
+        for dir_name in &[ ref_path, lossy_path] {
             if let Ok(mut entries) = async_std::fs::read_dir(dir_name).await {
                 while let Some(Ok(entry)) = entries.next().await {
                     if let Ok(metadata) = entry.metadata().await {
@@ -2542,7 +2499,7 @@ impl XRClient {
     }
 
 
-    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> (Vec<u8>, Vec<u32>) {
+    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr) -> (Vec<u8>, Vec<u32>) {
         // Validate input
         let encoded_length = encoded_buffer.len();
         if encoded_buffer.is_empty() {
@@ -2550,20 +2507,22 @@ impl XRClient {
             return (Vec::new(), Vec::new());
         }
         
-        // Use the globally shared reference decoder instead of the instance one
         {
-            // First, check if we need to initialize the decoder
-            let mut decoder_ref = REFERENCE_DECODER.lock().unwrap();
-            if decoder_ref.is_none() {
-                print_pretty!(DebugColor::Cyan, "Initializing global reference decoder", );
-                *decoder_ref = Some(HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32));
+            let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+            if !decoders.contains_key(&client_ip) {
+                print_pretty!(DebugColor::Cyan, 
+                    "Initializing reference decoder for client {}", client_ip);
+                decoders.insert(
+                    client_ip.clone(), 
+                    HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)
+                );
             }
         }
         
         // Now use the decoder - second lock scope to minimize lock time
         let result = {
-            let mut decoder_ref = REFERENCE_DECODER.lock().unwrap();
-            if let Some(decoder) = decoder_ref.as_mut() {
+            let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+            if let Some(decoder) = decoders.get_mut(&client_ip) {
                 // Check if this is a keyframe for logging
                 let is_keyframe = decoder.contains_keyframe(&encoded_buffer);
                 let frame_display = if is_keyframe { "KEYFRAME" } else { "frame" };
@@ -2723,16 +2682,16 @@ impl XRClient {
         }
     
         // Save frames to temporary files
-        let ref_path = format!("{}/reference_rgb/frame_{:04}.rgb", base_dir, frame_id);
-        let lossy_path = format!("{}/lossy_rgb/frame_{:04}.rgb", base_dir, frame_id);
+        let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
+        let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
         print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Writing frames to disk", );
 
         // Create parent directories
-        if let Err(e) = std::fs::create_dir_all(format!("{}/reference_rgb", base_dir)) {
+        if let Err(e) = std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, ip)) {
             eprintln!("Failed to create reference directory: {}", e);
             return Ok(());
         }
-        if let Err(e) = std::fs::create_dir_all(format!("{}/lossy_rgb", base_dir)) {
+        if let Err(e) = std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, ip)) {
             eprintln!("Failed to create lossy directory: {}", e);
             return Ok(());
         }
@@ -2750,7 +2709,7 @@ impl XRClient {
     
         // Calculate timestamp in milliseconds - convert to f64 as required by process_frame_metrics
         let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
-        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", ); 
+        // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", ); 
 
         // Process frame metrics
         if let Some(logger) = &self.metrics_logger {
@@ -2867,7 +2826,13 @@ impl XRClient {
                 }
                 print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_frame);                                                               
 
-
+                if id_f > self.last_processed_frame_id + 1 {
+                    print_pretty!(DebugColor::Red, 
+                        "Detected missing frames between {} and {}", 
+                        self.last_processed_frame_id, 
+                        id_f);
+                }
+                self.last_processed_frame_id = id_f; 
 
 
                 // Path to the stored HEVC frame
@@ -2882,15 +2847,16 @@ impl XRClient {
                             thread::sleep(Duration::from_millis(100)); // Wait 100ms before retrying
                             retries -= 1;
                         }
-                        Err(e) => panic!("Failed to read HEVC frame after retries: {}", e),
+                        Err(e) => {break Vec::new()} // do nothing, 
+                        // Err(e) => println!("Failed to read HEVC frame after retries: {}, possibly uninitialized?", e),
                     }
                 };
 
-                let (rgb_ref_frame,v_u32) = self.decode_hevc_to_rgb2(ref_frame, id_frame).await; 
+                let (rgb_ref_frame,v_u32) = self.decode_hevc_to_rgb2(ref_frame, id_frame, ip_client).await; 
                 let path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_frame); 
 
                 if !rgb_ref_frame.is_empty(){
-                    print_pretty!(DebugColor::Cyan, "NOT EMPTY", ); 
+                    // print_pretty!(DebugColor::Cyan, "NOT EMPTY", ); 
 
                     std::fs::write(&path,rgb_ref_frame ); 
 
@@ -2957,6 +2923,8 @@ impl XRClient {
                                 video_frame.clone(),
                                 self.decoded_frame_index,
                             ).await;
+
+                            self.cleanup_old_frames(now, ip_client).await; 
 
                             if !frame.is_empty() {
 

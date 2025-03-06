@@ -90,7 +90,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_s: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 15.0;
+pub const OFFSET_VIDEO: f64 = 150.0;
 
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300; 
@@ -666,13 +666,16 @@ impl ChunkedHevcEncoder {
         // We use a bounded channel to store parsed frames.
         println!("Initializing chunkedhevcencoder"); 
         let (frame_tx, frame_rx) = bounded(100);
+        
+        // let random_offset = 
+        let rand =  rand::thread_rng().gen_range(0.0..OFFSET_VIDEO); 
         Self {
             input: input.to_string(),
             width,
             height,
             bitrate: bitrate.to_string(),
             chunk_duration,
-            current_offset: OFFSET_VIDEO,
+            current_offset: rand,
             frame_tx,
             frame_rx,
             frame_queue: VecDeque::new(),  // Initialize the queue
@@ -788,7 +791,7 @@ impl ChunkedHevcEncoder {
         }
         
         // Only now try channel
-        if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(10)) {
+        if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(1)) {
             return Some(frame);
         }
         
@@ -2949,142 +2952,3 @@ lazy_static! {
     // static ref FFMPEG_DECODE_POOL: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
-
-
-#[rustfmt::skip]
-pub fn generate_sample_ffmpeg_opti(current_bitrate_mbps: f32, timestamp: f64, fps: f64, ip: IpAddr) -> Vec<u8> {
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_sunflower_2160p_60fps_stereo_abl.mp4";
-    // given this sample video, choosing 100
-
-    // Create a unique key for this specific encoding configuration
-    let config_key = format!(
-        "{}_{}_{}_{}_{}",
-        input_path, current_bitrate_mbps, timestamp, WIDTH_ENCODER, HEIGHT_ENCODER,
-    );
-
-    let offset_video = 
-        {
-            let mut hasher = DefaultHasher::new();
-            ip.hash(&mut hasher);
-            let hash = hasher.finish(); 
-            (hash%500) as f64
-        }; // keep offset of video between 0-500
-
-    // How many times to retry before giving up
-    let max_retries = 3;
-    let mut attempt = 0;
-
-    loop {
-        {
-            // Lock the pool and either get an existing process or create a new one.
-            let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
-            if !pool.contains_key(&config_key) {
-                let timestamp_ = timestamp + offset_video;
-                let hours = (timestamp_ / 3600.0) as u32;
-                let minutes = ((timestamp_ % 3600.0) / 60.0) as u32;
-                let seconds = timestamp_ % 60.0;
-                let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds);
-                print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
-
-                let bitrate_command = format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0);
-
-                print_pretty!(
-                    DebugColor::DarkBlue,
-                    "[DBG bitrate] frame: {}, per second: {}; command {}",
-                    current_bitrate_mbps,
-                    current_bitrate_mbps * INITIAL_FRAMERATE_FPS,
-                    bitrate_command
-                );
-
-               
-                let process = Command::new("ffmpeg")
-                .args([
-                        "-hwaccel", "cuda",
-                        "-ss", &formatted_timestamp,
-                        "-i", input_path,
-                        "-pix_fmt", "yuv420p",
-                        "-vf", &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-                        "-c:v", "hevc_nvenc",
-                        "-preset", "fast",
-                        "-rc", "cbr",
-                        "-b_ref_mode", "2",
-                        "-bf", "3",
-                        "-temporal-aq", "1",
-                        "-spatial-aq", "1",
-                        "-aq-strength", "8",
-                        "-frames:v", "1",
-                        "-b:v", &bitrate_command,
-                        "-an", // no audio
-                        "-f", "mp4", 
-                        "-bsf:v", "hevc_mp4toannexb", // to follow GoP 
-                        "-movflags", "+frag_keyframe+empty_moov", // don't remember why
-                        "-", // out through stdout
-                    ])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to spawn FFmpeg encoder");
-
-                pool.insert(config_key.clone(), process);
-            }
-        } // End of pool lock
-
-        // Read the encoded buffer.
-        let mut buf = Vec::new();
-        {
-            // Lock again to get a mutable reference to the process.
-            let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
-            let ffmpeg = pool.get_mut(&config_key).expect("Process not found in pool");
-            ffmpeg
-                .stdout
-                .as_mut()
-                .unwrap()
-                .read_to_end(&mut buf)
-                .expect("Failed to read encoded buffer");
-        }
-
-        print_pretty!(
-            DebugColor::Salmon,
-            "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
-            buf.len(),
-            buf.len() / 1024,
-            &buf[..std::cmp::min(50, buf.len())]
-        );
-
-        if !buf.is_empty() {
-            return buf;
-        } else {
-            attempt += 1;
-            if attempt >= max_retries {
-                panic!("Failed to generate a non-empty encoded frame after {} attempts", max_retries);
-            }
-            // Remove the problematic process so that a new one is spawned next time.
-            let mut pool = FFMPEG_ENCODE_POOL.lock().unwrap();
-            pool.remove(&config_key);
-            print_pretty!(
-                DebugColor::Red,
-                "Encoded frame is empty, retrying (attempt {}/{})",
-                attempt,
-                max_retries
-            );
-        }
-    }
-}
-
-
-pub fn generate_random_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
-    // Initialize the random number generator
-    let mut rng = rand::thread_rng();
-
-    // Generate a random u8
-    let _random_u8: u8 = rng.gen();
-
-    // Calculate the payload size based on bitrate
-    let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;
-
-    // Create buffer with random values
-    let buffer_inner = vec![7; no_bytes_based_bitrate]; // TODO: MAKE EACH RANDOM; NOW FOR DBG is 7!
-
-    buffer_inner
-}
