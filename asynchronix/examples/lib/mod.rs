@@ -57,7 +57,7 @@ pub mod alvr_control_socket;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool = false;
+pub const USE_VMAF: bool = true;
 
 
 #[macro_export]
@@ -1179,7 +1179,7 @@ impl MpduPacket {
     }
 
     pub fn print(&self, color: DebugColor) {
-        debug_bgprint!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
+        print_pretty!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
     }
 }
 #[derive(Debug, Clone)]

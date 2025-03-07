@@ -343,8 +343,8 @@ impl HevcDecoder2 {
 
         let alpha = temporal_constant - (-delta_t / temporal_constant).exp();
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
-        println!("Parsing frame #{}: size={}, keyframe={}, EWMA size={:.2}", 
-        self.frames_processed, frame_size, is_keyframe, self.ewma_frame_size);
+        // println!("Parsing frame #{}: size={}, keyframe={}, EWMA size={:.2}", 
+            // self.frames_processed, frame_size, is_keyframe, self.ewma_frame_size);
 
         self.parser.add_data(&packet);
         
@@ -1541,6 +1541,7 @@ impl StreamSocket {
 
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
+        ip_client: IpAddr, 
         arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
         context: &Context<T>,
     ) -> ConResult {
@@ -1797,7 +1798,7 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            print_pretty!(DebugColor::Orange, "(socketRX) FRAME {} IS COMPLETE! ({} / {}) ", in_progress_packet.id_frame, in_progress_packet.received_shard_indices.len(), shard_recv_state_mut.shards_count);
+            print_pretty!(DebugColor::Orange, "(socketRX {} ) FRAME {} IS COMPLETE! ({} / {}) ",ip_client ,in_progress_packet.id_frame, in_progress_packet.received_shard_indices.len(), shard_recv_state_mut.shards_count);
             if shard_recv_state_mut.stream_id == VIDEO {
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index);
@@ -2441,7 +2442,7 @@ impl<H: Serialize> StreamSender<H> {
             if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
                 let mut encoder = encoder_arc.lock().await;
                 
-                print_pretty!(DebugColor::SaddleBrown, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
+                // print_pretty!(DebugColor::SaddleBrown, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
                 
 
                 match encoder.next_frame().await {
@@ -2453,7 +2454,7 @@ impl<H: Serialize> StreamSender<H> {
                         
                         std::fs::create_dir_all(hevc_file_path).unwrap();
                         let filename = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame); 
-                        print_pretty!(DebugColor::ForestGreen, "[encode] REF FRAME {}", filename ); 
+                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SENT", filename ); 
                         let mut file = std::fs::File::create(filename).unwrap();
                         file.write_all(&buffer).unwrap();
 
