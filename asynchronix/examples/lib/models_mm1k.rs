@@ -1,5 +1,6 @@
 use crate::{debug_bgprint, print_pretty};
 use asynchronix::time;
+use ffmpeg_next::codec::Debug;
 use core::net;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use crossbeam::queue;
@@ -75,16 +76,16 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: u64 = 12;
-pub const STEP1_TEND: u64 = 15;
+pub const STEP1_TBEGIN: u64 = 13;
+pub const STEP1_TEND: u64 = 16;
 
-pub const STEP2_TBEGIN: u64 = 18;
-pub const STEP2_TEND: u64 = 20;
+pub const STEP2_TBEGIN: u64 = 17;
+pub const STEP2_TEND: u64 = 19;
 
-pub const STEP3_TBEGIN: u64 = 60;
-pub const STEP3_TEND: u64 = 70;
+pub const STEP3_TBEGIN: u64 = 35;
+pub const STEP3_TEND: u64 = 40;
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 15E6;
+pub const BANDWIDTH_LIMIT_S1: f64 = 60E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 25E6;
 pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
@@ -374,6 +375,8 @@ pub enum NetworkPattern {
     },
     ProbabilisticDrop {
         drop_probability: f64,
+        valid_from: TaiTime<0>,
+        valid_until: TaiTime<0>, 
     },
     Bandwidth {
         max_bps: f64,
@@ -455,14 +458,19 @@ impl QueueMechanism {
         let valid_from: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TBEGIN)).unwrap();
         let valid_until: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP1_TEND)).unwrap();
 
-        let valid_from2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TBEGIN)).unwrap();
-        let valid_until2 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TEND)).unwrap();
+        let valid_from2: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TBEGIN)).unwrap();
+        let valid_until2: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP2_TEND)).unwrap();
 
-        // let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TBEGIN)).unwrap();
-        // let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap();
+        let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TBEGIN)).unwrap();
+        let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap();
 
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
-        network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.005), valid_from: valid_from, valid_until: valid_until });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.03), valid_from: valid_from3, valid_until: valid_until3 });
+
+
+        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
         let bandwidth_limit = BANDWIDTH_LIMIT_S1;
 
@@ -711,7 +719,18 @@ impl NetworkPatternEmulator {
                     } else {
                         None
                     }
-                } else {
+                } else if let NetworkPattern::ProbabilisticDrop {
+                    valid_from,
+                    valid_until,
+                    drop_probability,
+                    } = pattern { 
+                        if current_time >= *valid_from && current_time <= *valid_until {
+                        Some(pattern)
+                        } else {
+                            None
+                        }  
+                    }
+                else{
                     None
                 }
             })
@@ -727,6 +746,22 @@ impl NetworkPatternEmulator {
 
         match active_patterns.first_mut() {
             Some(pattern) => match pattern {
+
+                NetworkPattern::ProbabilisticDrop { drop_probability, valid_from, valid_until } => {
+                        let mut rng = rand::thread_rng(); // Create a random number generator
+                        let rand_value: f64 = rng.gen(); // Generate a random value between 0 and 1
+                
+                        if rand_value < *drop_probability {
+                            print_pretty!(DebugColor::Red, "RANDOM LOSS with p={:.4}! {:?}", *drop_probability, packet.print(DebugColor::Red)); 
+                            return None; // Drop the packet
+                        }
+                        else{
+                            return Some(Duration::ZERO); // transmit inmediately
+
+                        }
+                }, 
+
+
                 NetworkPattern::Bandwidth {
                     current_tokens,
                     max_tokens,

@@ -57,16 +57,16 @@ pub mod alvr_control_socket;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool = true;
+pub const USE_VMAF: bool = false;
 
 
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // if DEBUG_PRINT_ENABLED == true {
-            // let msg = format!($fmt, $($arg)*);
-            // println!("{}", $color.to_background_fn()(msg));
-        // }
+        if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        }
     };
 }
 
@@ -1178,8 +1178,10 @@ impl MpduPacket {
         }
     }
 
-    pub fn print(&self, color: DebugColor) {
+    pub fn print(&self, color: DebugColor) -> String {
         print_pretty!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
+        let a = format!("Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
+        a
     }
 }
 #[derive(Debug, Clone)]

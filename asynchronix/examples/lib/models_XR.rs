@@ -80,7 +80,7 @@ use crate::lib::{exponential, AmpduPacket, Coords, DebugColor, MpduPacket, Slidi
 use crate::lib::alvr_statistics::StatisticsManager;
 // use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 use super::alvr_packets::DeadlineShardlossStatPacket;
-use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
+use super::alvr_stream_socket::{SocketWriter, StreamSocket, IDR_FRAME_SIZE_GOP, MAX_PACKET_SIZE_RECV};
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::{SlidingWindowTimely, _INITIAL_BITRATE_MBPS_SIM};
 // use async_process::Child;
@@ -96,7 +96,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize =  60;  
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.4;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.65;
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -432,14 +432,18 @@ pub struct HevcDecoder {
 
     max_buffered_frames: usize,        // Maximum number of frames to buffer
 
+    decoder_string: String, 
 
 
 }
 
 
 impl HevcDecoder {
-    pub fn new(framerate: u32, width: u32, height: u32) -> Self  {
+    pub fn new(framerate: u32, width: u32, height: u32, decoder_str: &str) -> Self  {
         let frame_size = (width as usize) * (height as usize) * 3;
+
+        let decoder_string = decoder_str.to_string();
+
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
             .args(&["-f", "hevc", "-i", "-"])
@@ -454,14 +458,19 @@ impl HevcDecoder {
         let stdout = child.take_stdout().unwrap();
         let stdin = child.take_stdin().unwrap();
         let stderr = child.take_stderr().unwrap();
+        
 
         let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
         let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
-        
+
+
+
         // Start stdout reader thread with more explicit error handling
         std::thread::spawn({
             let frame_size = frame_size;
             let frame_tx = frame_tx.clone(); // Clone for the thread
+            let decoder_str_clone = decoder_string.clone(); 
+
             move || {
                 let mut reader = BufReader::new(stdout);
                 let mut buffer = Vec::with_capacity(frame_size * 2);
@@ -470,7 +479,7 @@ impl HevcDecoder {
                 loop {
                     match reader.read(&mut chunk) {
                         Ok(0) => {
-                            println!("Decoder stdout closed");
+                            println!("{decoder_str_clone} Decoder stdout closed");
                             break;
                         },
                         Ok(n) => {
@@ -486,40 +495,43 @@ impl HevcDecoder {
                                 // println!("Sending complete decoded frame of size: {}", frame_size);
 
                                 if let Err(e) = frame_tx.send(frame) {
-                                    eprintln!("Decoder frame send error: {}", e);
+                                    eprintln!("{decoder_str_clone} Decoder frame send error: {}", e);
                                     break;
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Decoder read error: {}", e);
+                            eprintln!("{decoder_str_clone} Decoder read error: {}", e);
                             break;
                         }
                     }
                 }
-                println!("Decoder stdout reader thread exit");
+                println!("{decoder_str_clone} Decoder stdout reader thread exit");
             }
         });
+        let decoder_str_clone2 = decoder_string.clone(); 
 
         let stdin_handle = std::thread::spawn(move || {
             let mut writer = stdin;
             for packet in packet_rx {
                 // println!("Decoder feeding packet of size: {}", packet.len());
                 if let Err(e) = writer.write_all(&packet) {
-                    eprintln!("Decoder write error: {}", e);
+                    eprintln!("{decoder_str_clone2} Decoder write error: {}", e);
                     break;
                 }
                 
                 if let Err(e) = writer.flush() {
-                    eprintln!("Decoder flush error: {}", e);
+                    eprintln!("{decoder_str_clone2} Decoder flush error: {}", e);
                     break;
                 }
             }
-            println!("Decoder stdin writer thread exit");
+            println!("{decoder_str_clone2} Decoder stdin writer thread exit");
         });
+        
 
-        // Stderr handler with improved debug output
+        let decoder_string3 = decoder_string.clone();        // Stderr handler with improved debug output
         let stderr_handle = std::thread::spawn(move || {
+
             let mut reader = BufReader::new(stderr);
             let mut buf = String::new();
             loop {
@@ -528,19 +540,19 @@ impl HevcDecoder {
                     Ok(0) => break,
                     Ok(n) => {
                         if !buf.trim().is_empty() {
-                            println!("Decoder stderr: {} bytes", n);
+                            println!("{decoder_string3} Decoder stderr: {} bytes", n);
                             eprint!("{}", buf);
                         }
                     },
                     Err(e) => {
-                        eprintln!("Decoder stderr read error: {}", e);
+                        eprintln!("{decoder_string3} Decoder stderr read error: {}", e);
                         break;
                     }
                 }
             }
-            println!("Decoder stderr reader thread exit");
+            println!("{decoder_string3} Decoder stderr reader thread exit");
         });
-        println!("📹 HevcDecoder initialized with {}x{} resolution", width, height);
+        println!("{decoder_str} 📹 HevcDecoder initialized with {}x{} resolution", width, height);
 
         Self {
             frame_rx,
@@ -562,7 +574,7 @@ impl HevcDecoder {
             expected_frame_size: frame_size,
             max_buffered_frames: 10, 
 
-        
+            decoder_string: decoder_str.clone().to_string(), 
         }
     }
 
@@ -656,14 +668,14 @@ impl HevcDecoder {
         
         // Forward t  // Forward packet to ffmpeg decoder
         if let Err(e) = self.packet_tx.send(packet) {
-            println!("ERROR: Failed to send packet to decoder: {}", e);
+            println!("{} ERROR: Failed to send packet to decoder: {}", self.decoder_string, e);
             return;
         }
         
         // If we've processed enough frames, consider the decoder primed
         if !self.priming_complete && self.keyframes_seen >= 1 && self.frames_processed >= 5 {
-            println!("🚀 Decoder priming complete! Processed {} frames including {} keyframes",
-                    self.frames_processed, self.keyframes_seen);
+            println!("{} 🚀 Decoder priming complete! Processed {} frames including {} keyframes",
+                    self.decoder_string ,self.frames_processed, self.keyframes_seen);
             self.priming_complete = true;
         }
         
@@ -684,7 +696,7 @@ impl HevcDecoder {
                     continue;
                 },
                 Err(TryRecvError::Disconnected) => {
-                    println!("Decoder frame channel disconnected");
+                    println!("{} Decoder frame channel disconnected", self.decoder_string);
                     return None;
                 }
             }
@@ -710,8 +722,8 @@ impl HevcDecoder {
                     if frame.len() == self.expected_frame_size {
                         self.decoded_frames.push_back(frame);
                     } else {
-                        println!("⚠️ Received malformed frame (size={}), expected {}", 
-                                frame.len(), self.expected_frame_size);
+                        println!("{} ⚠️ Received malformed frame (size={}), expected {}", 
+                            self.decoder_string,frame.len(), self.expected_frame_size);
                         // Only add if it's close - this helps avoid complete corruption
                         if frame.len() >= self.expected_frame_size * 9 / 10 && 
                         frame.len() <= self.expected_frame_size * 11 / 10 {
@@ -729,7 +741,7 @@ impl HevcDecoder {
                     break;
                 },
                 Err(TryRecvError::Disconnected) => {
-                    println!("🛑 Decoder output channel disconnected!");
+                    println!("{} 🛑 Decoder output channel disconnected!", self.decoder_string);
                     // Trigger restart at next opportunity
                     // self.needs_restart = true;
                     break;
@@ -761,11 +773,11 @@ impl HevcDecoder {
                 Some(frame)
             } else {
                 if frames_added > 0 {
-                    println!("Strange: Added frames but buffer is now empty?");
+                    println!("{} Strange: Added frames but buffer is now empty?", self.decoder_string);
                 } else if self.priming_complete {
                     println!("\n\n******************************No decoded frames available (buffer empty)");
                 } else {
-                    println!("Decoder still priming ({}/{} frames processed)", 
+                    println!("{} Decoder still priming ({}/{} frames processed)", self.decoder_string, 
                             self.frames_processed, 5);
                 }
                 None
@@ -780,10 +792,10 @@ impl HevcDecoder {
                 Some(frame)
             },
             Err(TryRecvError::Empty) => {
-                println!("DECODER: No frame available yet."); // ADDED LOGGING
+                println!("{}  No frame available yet.", self.decoder_string); // ADDED LOGGING
                 None
             },
-            Err(TryRecvError::Disconnected) => {println!("WARNING! Decoder frame channel disconnected");
+            Err(TryRecvError::Disconnected) => {println!("WARNING! {} frame channel disconnected", self.decoder_string);
                                                  None
                                                 } ,
         }
@@ -1037,7 +1049,7 @@ impl BitrateManager {
         // } else if 75.0 <= dur && dur < 85.0 {
         //     self.last_target_bitrate_mbps = 1.0;
         
-        print_pretty!(
+        debug_bgprint!(
             DebugColor::Tan,
             "t = {}, [DBG bitrate set] {} Mbps",
             dur,
@@ -1870,6 +1882,8 @@ pub struct XRClient {
 
 
     keyframe_sync_state: KeyframeSyncState, 
+    last_keyframe_id: usize, 
+
 
 
     // pub visualize_decoder_window: Option<Window>,
@@ -1933,6 +1947,7 @@ impl XRClient {
             last_displayed_pair_id: 0, 
             display_queue: VecDeque::new(), 
             keyframe_sync_state: KeyframeSyncState::default(),
+            last_keyframe_id: 0, 
             // visualize_decoder_window: None,
         }
     }
@@ -2472,8 +2487,11 @@ impl XRClient {
                 while let Some(Ok(entry)) = entries.next() {
                     if let Ok(metadata) = entry.metadata() {
                         if let Ok(modified) = metadata.modified() {
+
+
                             let modified_time = std::time::SystemTime::from(modified);
-                            let now_systime = std::time::SystemTime::from(now.to_system_time(32).unwrap());
+                            let now_systime = std::time::SystemTime::now(); 
+                            // let now_systime = std::time::SystemTime::from(now.to_system_time(32).unwrap());
                             
                             if modified_time < now_systime - retention_period {
                                 if let Err(e) = std::fs::remove_file(entry.path()) {
@@ -2491,6 +2509,18 @@ impl XRClient {
 
     pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr) -> (Vec<u8>, Vec<u32>) {
         // Validate input
+        let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", client_ip, frame_index);
+        if std::path::Path::new(&rgb_path).exists() {
+            match fs::read(&rgb_path) {
+                Ok(rgb_data) if !rgb_data.is_empty() => {
+                    if let Some(pixels) = convert_rgb_to_u32(&rgb_data, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                        return (rgb_data, pixels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        
         let encoded_length = encoded_buffer.len();
         if encoded_buffer.is_empty() {
             println!("WARNING: Empty encoded buffer received!");
@@ -2504,7 +2534,7 @@ impl XRClient {
                     "Initializing reference decoder for client {}", client_ip);
                 decoders.insert(
                     client_ip.clone(), 
-                    HevcDecoder::new(FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32)
+                    HevcDecoder::new(FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[REF_DECODER {}]", client_ip))
                 );
             }
         }
@@ -2564,7 +2594,7 @@ impl XRClient {
 
 
 
-    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize) -> (Vec<u8>, Vec<u32>)  {
+    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, ip: IpAddr) -> (Vec<u8>, Vec<u32>)  {
         // Validate input
         let encoded_length = encoded_buffer.len();
         
@@ -2576,7 +2606,7 @@ impl XRClient {
         // Ensure decoder is initialized
         if self.decoder_arc.is_none() {
             println!("Initializing decoder on first frame");
-            let decoder = HevcDecoder::new( FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32); 
+            let decoder = HevcDecoder::new( FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[MAIN_DECODER {}]", ip)); 
             self.decoder_arc = Some(Arc::new(tokMutex::new(decoder)));
         }
         
@@ -2785,7 +2815,7 @@ impl XRClient {
         async move {
 
                     // local Helper function to display synchronized frame pairs, it's kinda wrong/ugly but works for now
-                    fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: usize) {
+                    fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: usize, now: TaiTime<0>) {
                         let decoded = pair.decoded.as_ref().unwrap();
                         let reference = pair.reference.as_ref().unwrap();
 
@@ -2801,7 +2831,7 @@ impl XRClient {
                         
                         // Create a wider window to hold both frames with a separator
                         let window_width = scaled_width * 2 + 10;
-                        let window_title = format!("Frame Compare - {}", server_ip);
+                        let window_title = format!("{} - Frame Compare {}", format_elapsed!(now),server_ip);
                         
                         // Create combined buffer
                         let mut combined_buffer = vec![0u32; window_width * scaled_height];
@@ -2835,12 +2865,13 @@ impl XRClient {
                         let color = 0xFF0033; // red
                         let text_color = 0x00FF00; // green
                         
+
                         // Mark decoded and reference sides
                         render_text(&mut combined_buffer, "DECODED FRAME", 10, 10, window_width, text_color, 2);
                         render_text(&mut combined_buffer, "REFERENCE FRAME", scaled_width + 15, 10, window_width, text_color, 2);
                         
                         // Frame info
-                        let frame_info = format!("SYNCED FRAME #{}", display_frame_id);
+                        let frame_info = format!("FRAME #{}", display_frame_id);
                         render_text(&mut combined_buffer, &frame_info, 
                                   (window_width - frame_info.len() * 6 * 3) / 2,
                                   scaled_height - 25, window_width, color, 3);
@@ -2873,7 +2904,7 @@ impl XRClient {
                             
                             // Update the window with the combined buffer
                             if let Some(window) = windows.get_mut(server_ip) {
-                                window.set_title(&format!("Frame Compare #{} (Synchronized) - {}", display_frame_id, server_ip));
+                                window.set_title(&format!("{} | Frame Compare #{} - {}", format_elapsed!(now), display_frame_id, server_ip));
                                 
                                 if let Err(e) = window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
                                     println!("Failed to update window buffer: {}", e);
@@ -2896,7 +2927,7 @@ impl XRClient {
                     static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
                 }
                 self.missing_frames_buffer.retain(|&id, &mut processed| {
-                    !processed || id > self.last_processed_frame_id - 100
+                    !processed || id > self.last_processed_frame_id - 1000
                 });
 
                 
@@ -2914,6 +2945,8 @@ impl XRClient {
                     }
                     print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_f);                                                               
 
+                                        // Before decoding the reference frame, ensure decoder consistency
+
                     if id_f > self.last_processed_frame_id + 1 {
 
                         let missing_start = self.last_processed_frame_id + 1;
@@ -2923,83 +2956,52 @@ impl XRClient {
                             "{} Detected missing frames between {} and {}", 
                             ip_client, missing_start, missing_end);
                         
-                        // First add all missing frames to the hashmap
-                        for missing_id in missing_start..=missing_end {
-                            
-                            if let Some(a) = self.missing_frames_buffer.get(&missing_id)
-                                {
-                                    // do nothing, it's already in
-                                }
-                            else{
-                                self.missing_frames_buffer.insert(missing_id, false);
+
+                        for missing_id in (self.last_processed_frame_id + 1)..id_f {
+                            if !self.missing_frames_buffer.contains_key(&missing_id) {
                                 print_pretty!(DebugColor::DarkOrange, 
-                                    "{} |{} Added missing frame {} to missing reference buffer", format_elapsed!(now), ip_client,  missing_id);
-                                }
+                                    "{} Added missing frame {} to tracking system", ip_client, missing_id); 
+                                self.missing_frames_buffer.insert(missing_id,  false);
+                            }
                         }
                         
-                        // Now process each missing frame one by one
-                        for missing_id in missing_start..=missing_end {
-                            // Check if this frame needs processing
-                            if let Some(false) = self.missing_frames_buffer.get(&missing_id) {
-                                let hevc_path = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, missing_id);
-                                let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, missing_id);
-                                
-                                // Skip if RGB file already exists
-                                if std::path::Path::new(&rgb_path).exists() {
-                                    print_pretty!(DebugColor::Cyan, 
-                                        "{} |{} - RGB file for frame {} already exists, marking as processed", format_elapsed!(now), ip_client, missing_id);
-                                    self.missing_frames_buffer.insert(missing_id, true);
+                        let mut next_frame_id = self.last_processed_frame_id + 1;
+                        let process_limit = id_f + 3000;
+
+                        while next_frame_id < process_limit {
+                            if let Some(frame_state) = self.missing_frames_buffer.get(&next_frame_id) {
+                                if *frame_state == true {
+                                    // Already processed, move to next
+                                    println!("continue, Next frame id = {}",next_frame_id ); 
+                                    next_frame_id += 1;
                                     continue;
                                 }
-                                
-                                // Only proceed if HEVC file exists
-                                if std::path::Path::new(&hevc_path).exists() {
-                                    print_pretty!(DebugColor::Azure, 
-                                        "Processing missing frame #{} (HEVC file exists)", missing_id);
-                                    
-                                    // Read HEVC file with retries
-                                    let mut retries = 5;
-                                    let ref_frame = loop {
-                                        match fs::read(&hevc_path) {
-                                            Ok(data) if !data.is_empty() => break data,
-                                            Err(_) if retries > 0 => {
-                                                thread::sleep(Duration::from_millis(10));
-                                                retries -= 1;
-                                                continue;
-                                            }
-                                            _ => break Vec::new(),
-                                        }
-                                    };
-                                    
-                                    if !ref_frame.is_empty() {
-                                        // Decode the reference frame
-                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(ref_frame, missing_id, ip_client).await;
-                                        
+                            }
+                            let hevc_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, next_frame_id);
+                            // println!("[DBG1] Processing frame ID: {}", next_frame_id); 
+                            if std::path::Path::new(&hevc_path).exists(){
+                                if let Ok(hevc_data) =  fs::read(&hevc_path) {
+                                    if !hevc_data.is_empty(){
+                                        print_pretty!(DebugColor::Lime, "DECODING REFERENCE FRAME {}", next_frame_id, ); 
+                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client).await;         
                                         if !rgb_ref_frame.is_empty() {
-                                                                                    // Save the decoded RGB file
+                                            let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, next_frame_id);                                                                                     // Save the decoded RGB file
                                             if let Err(e) = std::fs::write(&rgb_path, &rgb_ref_frame) {
                                                 print_pretty!(DebugColor::Red, 
-                                                    "Failed to save RGB for frame #{}: {}", missing_id, e);
+                                                    "Failed to save RGB for frame #{}: {}", next_frame_id, e);
                                             } else {
                                                 // Mark as processed
-                                                self.missing_frames_buffer.insert(missing_id, true);
+                                                self.missing_frames_buffer.insert(next_frame_id, true);
                                                 print_pretty!(DebugColor::Green, 
-                                                    "Successfully processed missing frame #{}", missing_id);
+                                                    "Successfully processed missing frame #{}", next_frame_id);
                                             }
-                                        } else {
-                                            print_pretty!(DebugColor::Yellow, 
-                                                "Failed to decode HEVC for frame #{}", missing_id);
                                         }
-                                    } else {
-                                        print_pretty!(DebugColor::Yellow, 
-                                            "Empty or unreadable HEVC file for frame #{}", missing_id);
                                     }
                                 }
-                            }
-                            else{
-                                
-                            }
-                        }
+                            }     
+                            // println!("[DBG2] Finished processing {}", next_frame_id); 
+                            next_frame_id +=1;                    
+                        } //end while
                     }
                     self.last_processed_frame_id = id_f;
 
@@ -3087,9 +3089,10 @@ impl XRClient {
                             let miin: usize = usize::min(video_frame.len(), 50);
                             print_pretty!(
                                 DebugColor::Violet,
-                                "{} - [DBG VSYNC {}] Frame decoded OK! Size frame: {} ,Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
+                                "{} - [DBG VSYNC {}] Frame id {} decoded OK! Size frame: {} ,Q: {}, Interarrival: {},  ok: {} | dropped: {}|\nData: {:?}", 
                                 format_elapsed!(now), 
                                 self.server_ip, 
+                                id_f, 
                                 video_frame.len(),
                                 self.decoder_queue.len(),
                                 interarrival.as_secs_f32(),
@@ -3100,11 +3103,12 @@ impl XRClient {
 
                             if USE_FFMPEG == true {
                                 let (rgb_ref_frame, ref_pixels) = self.decode_hevc_to_rgb2(ref_frame.clone(), id_f, ip_client).await; 
-                                let (rgb, frame) =                self.decode_hevc_to_rgb(video_frame.clone(), id_f).await;
+                                
+                                let (rgb, frame) =                self.decode_hevc_to_rgb(video_frame.clone(), id_f, ip_client).await;
 
 
                                 if !rgb_ref_frame.is_empty(){
-                                    std::fs::write(&ref_path, rgb_ref_frame);
+                                    std::fs::write(&ref_path, rgb_ref_frame.clone());
                                 }
                                 if self.is_keyframe(&ref_frame){
                                     self.ref_saw_keyframe = true; 
@@ -3128,12 +3132,11 @@ impl XRClient {
                                         }
                                     }
                                     else if let Ok(rgb_ref_frame) = std::fs::read(&ref_path) {
-                                        if let Some(ref_pixels) = convert_rgb_to_u32(&rgb_ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                                             if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
                                                 pair.reference = Some(ref_pixels.clone());
                                                 print_pretty!(DebugColor::Yellow, "Updated reference (from file) for pair #{}, len = {}", id_f, ref_pixels.len());
+                                            
                                             }
-                                        }
                                     }
                                         // Create a frame pair with both frames
                                     let pair = FramePair {
@@ -3146,7 +3149,21 @@ impl XRClient {
                                     print_pretty!(DebugColor::Lavender, "Inserting frame {} : decoded size = {}, ref size = {} ", id_f, frame.len(), ref_pixels.len()); 
                                         
                                     self.frame_pairs.insert(id_f, pair);
-                                
+                                    
+                                    // Perform VMAF analysis on directly matched frames
+                                    if !rgb.is_empty() && !rgb_ref_frame.is_empty() && USE_VMAF {
+                                    self.vmaf_analysis(
+                                        rgb.clone(),
+                                        rgb_ref_frame.clone(),
+                                        now,
+                                        id_f,
+                                        ip_client
+                                    ).await.unwrap_or_else(|e| {
+                                        eprintln!("VMAF analysis error: {}", e);
+                                    });
+                                }
+
+
                                     // Display synchronized pair if both parts are available
                                     // Check both original and adjusted IDs for complete pairs
                                     if let Some(pair) = self.frame_pairs.get(&id_f) {
@@ -3155,9 +3172,9 @@ impl XRClient {
                                             // Now display the synchronized pair
                                             
                                             
-                                            display_frame_pair(pair, &self.server_ip, id_f);
+                                            display_frame_pair(pair, &self.server_ip, id_f, now);
                                             self.last_displayed_pair_id = id_f;
-                                            print_pretty!(DebugColor::Magenta, "Displayed synchronized frame #{} (offset applied)", id_f);
+                                            // print_pretty!(DebugColor::Magenta, "{} Displayed synchronized frame #{} (offset applied)", id_f);
                                             
                                             // Cleanup old pairs to avoid memory leaks
                                             self.frame_pairs.retain(|&id, _| 

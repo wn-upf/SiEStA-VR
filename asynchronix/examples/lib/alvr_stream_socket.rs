@@ -94,7 +94,7 @@ pub const OFFSET_VIDEO: f64 = 150.0;
 
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300; 
-pub const IDR_FRAME_SIZE_GOP: usize = 30; 
+pub const IDR_FRAME_SIZE_GOP: usize = 60; 
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -109,385 +109,6 @@ pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 
 use std::time::Instant;
-
-pub struct HevcDecoder2 {
-    frame_rx: Receiver<Vec<u8>>,
-    packet_tx: Sender<Vec<u8>>,
-    _stdin_handle: std::thread::JoinHandle<()>,
-    _stderr_handle: std::thread::JoinHandle<()>,
-    width: u32,
-    height: u32,
-    parser: HevcParser,
-    frame_buffer: VecDeque<Vec<u8>>,  // Buffer for parsed HEVC frames
-    decoded_frames: VecDeque<Vec<u8>>, // Buffer for decoded RGB frames
-
-    ewma_frame_size: f64,
-    last_update: Instant, 
-
-    pub frames_processed: usize,           // Count of frames we've sent to the decoder
-    pub keyframes_seen: usize,             // Count of keyframes observed
-    pub last_decoded_frame_time: Instant,  // Time when we last got a decoded frame
-    pub total_bytes_processed: f64,      // Total bytes of HEVC data processed
-    pub priming_complete: bool,            // Flag to indicate if decoder is primed and ready
-    pub expected_frame_size: usize,        // Expected size of decoded RGB frames
-
-    max_buffered_frames: usize,        // Maximum number of frames to buffer
-
-
-}
-
-
-impl HevcDecoder2 {
-    pub fn new(framerate: u32, width: u32, height: u32) -> Self  {
-        let frame_size = (width as usize) * (height as usize) * 3;
-        let mut child = FfmpegCommand::new()
-            // .hwaccel("cuda")
-            // .args(&["-extra_hw_frames", "3"]) // Limit buffer frames
-            // .args(&["-hwaccel_output_format", "cuda"]) // Better memory management
-            .args(&["-f", "hevc", "-i", "-"])
-            .args(&["-vf", &format!("fps={}", framerate)])
-            .args(&["-pix_fmt", "rgb24"])
-
-            // .args(&["-flags", "+low_delay"])
-            // .args(&["-fflags", "+nobuffer+flush_packets"])
-            .args(&["-f", "rawvideo", "-"])
-            .spawn().unwrap();
-
-        let stdout = child.take_stdout().unwrap();
-        let stdin = child.take_stdin().unwrap();
-        let stderr = child.take_stderr().unwrap();
-
-        let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
-        let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
-        
-        // Start stdout reader thread with more explicit error handling
-        std::thread::spawn({
-            let frame_size = frame_size;
-            let frame_tx = frame_tx.clone(); // Clone for the thread
-            move || {
-                let mut reader = BufReader::new(stdout);
-                let mut buffer = Vec::with_capacity(frame_size * 2);
-                let mut chunk = vec![0u8; 4096];
-                
-                loop {
-                    match reader.read(&mut chunk) {
-                        Ok(0) => {
-                            println!("Decoder stdout closed");
-                            break;
-                        },
-                        Ok(n) => {
-                            buffer.extend_from_slice(&chunk[..n]);
-                            
-                            // Print debug info about buffer accumulation
-                            // println!("Decoder received {} bytes, buffer size: {}/{}", 
-                            //     n, buffer.len(), frame_size);
-                                
-                            while buffer.len() >= frame_size {
-                                let frame = buffer.drain(..frame_size).collect::<Vec<u8>>();
-                                // frame_tx.send(frame).unwrap();
-                                // println!("Sending complete decoded frame of size: {}", frame_size);
-
-                                if let Err(e) = frame_tx.send(frame) {
-                                    eprintln!("Decoder frame send error: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Decoder read error: {}", e);
-                            break;
-                        }
-                    }
-                }
-                println!("Decoder stdout reader thread exit");
-            }
-        });
-
-        let stdin_handle = std::thread::spawn(move || {
-            let mut writer = stdin;
-            for packet in packet_rx {
-                // println!("Decoder feeding packet of size: {}", packet.len());
-                if let Err(e) = writer.write_all(&packet) {
-                    eprintln!("Decoder write error: {}", e);
-                    break;
-                }
-                
-                if let Err(e) = writer.flush() {
-                    eprintln!("Decoder flush error: {}", e);
-                    break;
-                }
-            }
-            println!("Decoder stdin writer thread exit");
-        });
-
-        // Stderr handler with improved debug output
-        let stderr_handle = std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match reader.read_to_string(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if !buf.trim().is_empty() {
-                            println!("Decoder stderr: {} bytes", n);
-                            eprint!("{}", buf);
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Decoder stderr read error: {}", e);
-                        break;
-                    }
-                }
-            }
-            println!("Decoder stderr reader thread exit");
-        });
-        println!("📹 HevcDecoder initialized with {}x{} resolution", width, height);
-
-        Self {
-            frame_rx,
-            packet_tx,
-            _stdin_handle: stdin_handle,
-            _stderr_handle: stderr_handle,
-            width,
-            height,
-            parser: HevcParser::new(),
-            frame_buffer: VecDeque::new(),
-            decoded_frames: VecDeque::new(),
-            ewma_frame_size: 0.0,
-            last_update: Instant::now(), // use real time here, not simu
-            frames_processed: 0,
-            keyframes_seen: 0,
-            last_decoded_frame_time: Instant::now(),
-            total_bytes_processed: 0.0,
-            priming_complete: false,
-            expected_frame_size: frame_size,
-            max_buffered_frames: 10, 
-        }
-    }
-
-    pub fn is_ready(&self) -> bool {
-        // A decoder is ready when:
-        // 1. We've seen at least one keyframe
-        // 2. We've processed at least 10 frames
-        // 3. Priming is marked complete
-        self.keyframes_seen >= 1
-    }
-
-    // New function to check if a frame contains valid HEVC data
-    fn is_valid_hevc_frame(frame: &[u8]) -> bool {
-        // Check for HEVC start code (0x000001 or 0x00000001)
-        for i in 0..frame.len().saturating_sub(4) {
-            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
-               (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
-                return true;
-            }
-        }
-        false
-    }
-
-     // Check if a buffer contains a keyframe
-     pub fn contains_keyframe(&self, buffer: &[u8]) -> bool {
-        // For HEVC, keyframes are signaled by NAL types 16-21 (IRAP pictures)
-        for i in 0..buffer.len().saturating_sub(5) {
-            if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1) || 
-               (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 0 && buffer[i + 3] == 1) {
-                
-                let start_code_len = if buffer[i + 2] == 0 { 4 } else { 3 };
-                let nal_header_pos = i + start_code_len;
-                
-                if nal_header_pos < buffer.len() {
-                    let nal_header = buffer[nal_header_pos];
-                    let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-                    
-                    // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-                    if (16..=21).contains(&nal_type) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    // Process incoming encoded packets with improved error handling
-    pub fn process_packet(&mut self, packet: Vec<u8>) {
-        // Add packet data to the parser
-        // println!("🎬 Processing packet of size {} bytes (total: {} frames)", 
-        //         packet.len(), self.frames_processed);
-
-
-
-        let frame_size = packet.len() as f64;
-        let now = Instant::now();
-        let delta_t = now.duration_since(self.last_update).as_secs_f64();
-        self.last_update = now;
-
-
-        self.total_bytes_processed += frame_size;
-        self.frames_processed += 1;
-        
-        // Check if this is a keyframe
-        let is_keyframe = self.contains_keyframe(&packet);
-        if is_keyframe {
-            self.keyframes_seen += 1;
-            // println!("🔑 KEYFRAME detected! Size: {}, Frame #{}, Total keyframes: {}", 
-                    // frame_size, self.frames_processed, self.keyframes_seen);
-        }
-
-        // Calculate smoothing factor α
-        let now = Instant::now();
-        let delta_t = now.duration_since(self.last_update).as_secs_f64();
-        self.last_update = now;
-        let temporal_constant :f64 = 1.0;  // 1 second EWMA
-
-        let alpha = temporal_constant - (-delta_t / temporal_constant).exp();
-        self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
-        // println!("Parsing frame #{}: size={}, keyframe={}, EWMA size={:.2}", 
-            // self.frames_processed, frame_size, is_keyframe, self.ewma_frame_size);
-
-        self.parser.add_data(&packet);
-        
-        // Extract frames from the parser and buffer them
-        let frames = self.parser.get_frames();
-        for frame in frames {
-            self.frame_buffer.push_back(frame);
-        }
-        
-        // Forward t  // Forward packet to ffmpeg decoder
-        if let Err(e) = self.packet_tx.send(packet) {
-            println!("ERROR: Failed to send packet to decoder: {}", e);
-            return;
-        }
-        
-        // If we've processed enough frames, consider the decoder primed
-        if !self.priming_complete && self.keyframes_seen >= 1 && self.frames_processed >= 5 {
-            println!("🚀 Decoder priming complete! Processed {} frames including {} keyframes",
-                    self.frames_processed, self.keyframes_seen);
-            self.priming_complete = true;
-        }
-        
-        // Ok(())
-    }
-
-        // Your existing method to get raw frames from ffmpeg
-    // Modified try_next_decoded_frame with timeout
-    fn try_next_decoded_frame_with_timeout(&self, timeout_ms: u64) -> Option<Vec<u8>> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        
-        while start.elapsed() < timeout {
-            match self.frame_rx.try_recv() {
-                Ok(frame) => return Some(frame),
-                Err(TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                },
-                Err(TryRecvError::Disconnected) => {
-                    println!("Decoder frame channel disconnected");
-                    return None;
-                }
-            }
-        }
-        None
-    }
-        // Better implementation of process_decoded_frames
-    pub fn process_decoded_frames(&mut self) -> usize {
-        let mut frames_received = 0;
-        let start_time = Instant::now();
-        let max_processing_time = Duration::from_millis(50);  // Prevent blocking too long
-        
-        // Process frames with a time limit
-        while start_time.elapsed() < max_processing_time {
-            match self.frame_rx.try_recv() {
-                Ok(frame) => {
-                    frames_received += 1;
-                    self.last_decoded_frame_time = Instant::now();
-                    
-                    // Check frame is the expected size
-                    if frame.len() == self.expected_frame_size {
-                        self.decoded_frames.push_back(frame);
-                    } else {
-                        println!("⚠️ Received malformed frame (size={}), expected {}", 
-                                frame.len(), self.expected_frame_size);
-                        // Only add if it's close - this helps avoid complete corruption
-                        if frame.len() >= self.expected_frame_size * 9 / 10 && 
-                        frame.len() <= self.expected_frame_size * 11 / 10 {
-                            self.decoded_frames.push_back(frame);
-                        }
-                    }
-                    
-                    // Don't buffer too many frames - it causes delay
-                    if self.decoded_frames.len() >= self.max_buffered_frames/2 {
-                        break;
-                    }
-                },
-                Err(TryRecvError::Empty) => {
-                    // No more frames available now
-                    break;
-                },
-                Err(TryRecvError::Disconnected) => {
-                    println!("🛑 Decoder output channel disconnected!");
-                    // Trigger restart at next opportunity
-                    // self.needs_restart = true;
-                    break;
-                }
-            }
-        }
-        
-        if frames_received > 0 {
-            // println!("✅ Added {} frames to decoded buffer, now has {} frames (in {}ms)",
-                    // frames_received, self.decoded_frames.len(), start_time.elapsed().as_millis());
-        }
-        
-        frames_received
-    }
-    
-        // Get the next available encoded frame
-        pub fn next_encoded_frame(&mut self) -> Option<Vec<u8>> {
-            self.frame_buffer.pop_front()
-        }
-    
-        // Get the next available decoded RGB frame
-        pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
-            // First try to process any newly available frames
-            let frames_added = self.process_decoded_frames();
-            
-            // Then try to get a frame from the buffer
-            if let Some(frame) = self.decoded_frames.pop_front() {
-                // println!("🖼️ Returning decoded frame of size: {} bytes", frame.len());
-                Some(frame)
-            } else {
-                if frames_added > 0 {
-                    println!("Strange: Added frames but buffer is now empty?");
-                } else if self.priming_complete {
-                    println!("\n\n******************************No decoded frames available (buffer empty)");
-                } else {
-                    println!("Decoder still priming ({}/{} frames processed)", 
-                            self.frames_processed, 5);
-                }
-                None
-            }
-        }
-        
-    pub fn try_next_frame(&self) -> Option<Vec<u8>> {
-        // println!("TRY READ FRAME"); // ADDED LOGGING
-        match self.frame_rx.try_recv() {
-            Ok(frame) => {
-                // println!("Frame received!"); // ADDED LOGGING
-                Some(frame)
-            },
-            Err(TryRecvError::Empty) => {
-                println!("DECODER: No frame available yet."); // ADDED LOGGING
-                None
-            },
-            Err(TryRecvError::Disconnected) => {println!("WARNING! Decoder frame channel disconnected");
-                                                 None
-                                                } ,
-        }
-    }
-}
-
 
 // Structure to manage the continuous HEVC decoding process
 pub struct HEVCStreamDecoder {
@@ -658,11 +279,13 @@ pub struct ChunkedHevcEncoder {
 
     frame_queue: VecDeque<Vec<u8>>,  // Add this new field for queuing frames
     parser: HevcParser, 
+    encoder_str: String, 
+
 }
 
 impl ChunkedHevcEncoder {
     /// Create a new ChunkedHevcEncoder.
-    pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64) -> Self {
+    pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64, string: String) -> Self {
         // We use a bounded channel to store parsed frames.
         println!("Initializing chunkedhevcencoder"); 
         let (frame_tx, frame_rx) = bounded(100);
@@ -680,6 +303,8 @@ impl ChunkedHevcEncoder {
             frame_rx,
             frame_queue: VecDeque::new(),  // Initialize the queue
             parser: HevcParser::new(), 
+            encoder_str: string.clone(), 
+
         }
     }
 
@@ -692,7 +317,7 @@ impl ChunkedHevcEncoder {
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self)  {
-        println!("CHUNKING!"); 
+        println!("{} CHUNKING!", self.encoder_str); 
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         command
@@ -727,7 +352,7 @@ impl ChunkedHevcEncoder {
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
-        print!("SPAWN CHUNK..."); 
+        print!("{} SPAWN CHUNK...", self.encoder_str ,); 
         // let loop_limit = 1000000;
         let mut i = 0;  
         // Read data from the process until it ends.
@@ -747,12 +372,12 @@ impl ChunkedHevcEncoder {
                     let frames = self.parser.get_frames();
                     for frame in frames {
                         if let Err(e) = self.frame_tx.send(frame) {
-                            eprintln!("Error sending frame: {}", e);
+                            eprintln!("{} Error sending frame: {}", e, self.encoder_str ,);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error reading ffmpeg chunk: {}", e);
+                    eprintln!("{} Error reading ffmpeg chunk: {}", e, self.encoder_str ,);
                     break;
                 }
             }
@@ -764,7 +389,7 @@ impl ChunkedHevcEncoder {
         self.current_offset += self.chunk_duration;
             // Add a safety check to clear parser buffer if it gets too large
         if self.parser.buffer.len() > 1_000_000_00 {  // 100MB limit
-            println!("Parser buffer getting too large ({}), clearing", self.parser.buffer.len());
+            println!("{} Parser buffer getting too large ({}), clearing", self.parser.buffer.len(), self.encoder_str ,);
             self.parser.buffer.clear();
         }
 
@@ -773,7 +398,7 @@ impl ChunkedHevcEncoder {
 
         let extracted_frames = self.parser.get_frames();
         if !extracted_frames.is_empty() {
-            println!("Extracted {} frames from parser buffer, size {}", 
+            println!("{} Extracted {} frames from parser buffer, size {}", self.encoder_str , 
                      extracted_frames.len(), self.parser.buffer.len());
             
             // Store all but first frame for future use
@@ -1798,8 +1423,9 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            print_pretty!(DebugColor::Orange, "(socketRX {} ) FRAME {} IS COMPLETE! ({} / {}) ",ip_client ,in_progress_packet.id_frame, in_progress_packet.received_shard_indices.len(), shard_recv_state_mut.shards_count);
+            print_pretty!(DebugColor::DarkGreen, "(socketRX {} ) FRAME {} IS COMPLETE! ({} / {}) ",ip_client ,in_progress_packet.id_frame, in_progress_packet.received_shard_indices.len(), shard_recv_state_mut.shards_count);
             if shard_recv_state_mut.stream_id == VIDEO {
+
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index);
 
@@ -2422,6 +2048,7 @@ impl<H: Serialize> StreamSender<H> {
                     HEIGHT_ENCODER as u32,
                     &bitrate_cmd,
                     CHUNK_DURATION_F64_s, // Chunk duration in seconds
+                    format!("[ENCODER {}]", ip), 
                 );
                 
                 // Wrap the encoder in an Arc<Mutex<_>>
