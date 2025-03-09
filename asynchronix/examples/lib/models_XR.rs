@@ -1687,6 +1687,8 @@ impl MetricsLogger {
         let lossy_status = Command::new("ffmpeg")
             .args(&[
                 "-y",
+                "-v", "quiet", 
+                "-loglevel", "error", // Set log level to 'error'
                 "-f", "rawvideo",
                 "-pixel_format", "rgb24",
                 "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
@@ -1712,6 +1714,8 @@ impl MetricsLogger {
         // Calculate all metrics in a single ffmpeg call
         let metrics_status = Command::new("ffmpeg")
             .args(&[
+                "-loglevel", "error", // Set log level to 'error'
+                "-v", "quiet", 
                 "-i", &ref_y4m,
                 "-i", &lossy_y4m,
                 "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
@@ -2677,92 +2681,8 @@ impl XRClient {
         }
     }
 
-    pub async fn process_vmaf_batch(&mut self, now: TaiTime<0>) -> Result<()> {
-        if self.frame_batch.is_empty() {
-            return Ok(());  // Nothing to process
-        }
-        
-        println!("Processing VMAF batch of {} frames", self.frame_batch.len());
-        
-        // Ensure metrics logger is initialized (once per batch)
-        if self.metrics_logger.is_none() {
-            if let Ok(logger) = MetricsLogger::new(self.server_ip, &self.name_folder) {
-                println!("Initialized metrics logger for VMAF batch analysis");
-                self.metrics_logger = Some(logger);
-            } else {
-                eprintln!("Failed to initialize metrics logger for batch");
-                return Ok(());
-            }
-        }
-        
-        // Process all frames in the batch
-        if let Some(logger) = &self.metrics_logger {
-            for (frame_id, sample, ref_sample, timestamp_ms) in self.frame_batch.drain(..) {
-                // Save frames to temporary files (still needed for VMAF)
-                let base_dir = &format!("Video_Sink/{}", &self.name_folder);
-                let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
-                let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
-                
-                // Create directories lazily
-                std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, self.server_ip))
-                    .unwrap_or_else(|e| eprintln!("Failed to create reference directory: {}", e));
-                std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, self.server_ip))
-                    .unwrap_or_else(|e| eprintln!("Failed to create lossy directory: {}", e));
-                    
-                // Write frames to disk
-                if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
-                    eprintln!("Failed to write reference frame: {}", e);
-                    continue;
-                }
-                if let Err(e) = std::fs::write(&lossy_path, &sample) {
-                    eprintln!("Failed to write lossy frame: {}", e);
-                    continue;
-                }
-                
-                // Process frame metrics
-                if let Err(e) = logger.process_frame_metrics(
-                    frame_id as u64,
-                    timestamp_ms,
-                    &ref_path,
-                    &lossy_path
-                ).await {
-                    eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
-                }
-            }
-        }
-        
-        // Update cleanup timer
-        self.last_cleanup_time = now;
-        self.last_batch_process_time = now;
-        
-        Ok(())
-    }
 
-    pub async fn vmaf_analysis_batch(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
-        // Skip if either sample is empty
-        if sample.is_empty() || ref_sample.is_empty() {
-            println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
-                     frame_id, sample.len(), ref_sample.len());
-            return Ok(());
-        }
-        
-        // Calculate timestamp in milliseconds
-        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
-        
-        // Add frame to batch
-        self.frame_batch.push((frame_id, sample, ref_sample, timestamp_ms));
-        
-        // Process batch if it's full or timeout occurred
-        let should_process_batch = self.frame_batch.len() >= VMAF_BATCH_SIZE || 
-                                  now.duration_since(self.last_batch_process_time).as_millis() >= VMAF_BATCH_TIMEOUT_MS as u128;
-        
-        if should_process_batch {
-            self.process_vmaf_batch(now).await?;
-        }
-        
-        Ok(())
-    }
-
+   
 
     pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
         // Skip if either sample is empty
@@ -3327,7 +3247,7 @@ impl XRClient {
                                     
                                         // Perform VMAF analysis on directly matched frames
                                     if !rgb.is_empty() && !rgb_ref_frame.is_empty() && USE_VMAF {
-                                        self.vmaf_analysis_batch(
+                                        self.vmaf_analysis(
                                             rgb.clone(),
                                             rgb_ref_frame.clone(),
                                             now,

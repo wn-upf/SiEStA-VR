@@ -1,4 +1,4 @@
-NUMBER_OF_JOBS=7
+NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 
 
@@ -19,7 +19,7 @@ PL=0.00
 N_BGs=(0)
 IS_UL_BG=(0)
 # N_XR=(1 2 3 4 5)
-N_XR=(1 )
+N_XR=(2)
 initial_bitrate_mbps=100
 
 
