@@ -2932,7 +2932,7 @@ impl XRClient {
                     static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
                 }
                 self.missing_frames_buffer.retain(|&id, &mut processed| {
-                    !processed || id > self.last_processed_frame_id - 1000
+                    !processed || id > self.last_processed_frame_id - 100
                 });
 
                 
@@ -3248,7 +3248,7 @@ impl XRClient {
                                             
                                             // Cleanup old pairs to avoid memory leaks
                                             self.frame_pairs.retain(|&id, _| 
-                                                id >= self.last_displayed_pair_id.saturating_sub(3000));
+                                                id >= self.last_displayed_pair_id.saturating_sub(30));
                                             
                  
                                         }
