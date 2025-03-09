@@ -57,7 +57,7 @@ pub mod alvr_control_socket;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool = false;
+pub const USE_VMAF: bool = true;
 
 
 #[macro_export]
@@ -75,7 +75,7 @@ macro_rules! print_pretty {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
             let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
+            println!("{}", $color.to_color_fn()(msg));
         }
     // };
 }
@@ -85,7 +85,7 @@ macro_rules! print_prettyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
             let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_color_fn()(msg));
+            println!("{}", $color.to_background_fn()(msg));
         }
     // };
 }

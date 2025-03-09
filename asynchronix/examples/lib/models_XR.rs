@@ -33,7 +33,7 @@ use minifb::Key;
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread, write};
 
-use crate::debug_bgprint;
+use crate::{debug_bgprint, print_prettyy};
 use crate::debug_print;
 use crate::format_elapsed;
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
@@ -96,7 +96,9 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize =  60;  
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.65;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.35;
+pub const VMAF_BATCH_SIZE: usize = 10;  // Process 10 frames at a time
+pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000;  // Process batch after 1 second even if
 
 static STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -131,7 +133,7 @@ pub const DECODER_BUFFERING_FRAMES: usize = 10;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES/2;
 
 
-pub const VMAF_FRAME_GROUP_SIZE: usize = 10;
+pub const VMAF_FRAME_GROUP_SIZE: usize = 2;
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
 
 
@@ -579,7 +581,7 @@ impl HevcDecoder {
             expected_frame_size: frame_size,
             max_buffered_frames: 10, 
 
-            decoder_string: decoder_str.clone().to_string(), 
+            decoder_string: decoder_str.to_string(), 
         }
     }
 
@@ -1130,6 +1132,7 @@ pub struct XRServer {
 
     pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>,
     pub STATISTICS_MANAGER: StatisticsManager,
+    pub name_folder: String, 
 }
 #[allow(unused)]
 impl XRServer {
@@ -1166,6 +1169,7 @@ impl XRServer {
             fps: frame_rate,
             // sockets,
             frames_sent_counter: 0,
+            name_folder: name_folder.to_string(), 
 
             map_rtt: Arc::new(DashMap::new()),
             STATISTICS_MANAGER: StatisticsManager::new(
@@ -1452,7 +1456,7 @@ impl XRServer {
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
-                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self,  self.frames_sent_counter)
+                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self,  self.frames_sent_counter, &self.name_folder)
                         .await.unwrap();
 
                 if let Some(encoder_init) = send_socket.clone().ffmpeg_encoder{
@@ -1636,13 +1640,15 @@ struct FrameMetrics {
 #[derive(Clone)]
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
+    name_folder: String, 
 }
 impl MetricsLogger {
-    fn new(ip: IpAddr) -> Result<Self> {
-        let file = File::create(format!("Video_Sink/{}/metrics.csv", ip))?;
+    fn new(ip: IpAddr, name_folder: &str) -> Result<Self> {
+        let file = File::create(format!("Video_Sink/{}/{}/metrics.csv", name_folder, ip))?;
         let writer = csv::Writer::from_writer(file);
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
+            name_folder: name_folder.to_string(), 
         })
     }
 
@@ -1695,7 +1701,7 @@ impl MetricsLogger {
         }
                 
             // Create the Video_Sink directory within the temp directory
-        let video_sink_dir = temp_dir.path().join("Video_Sink");
+        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Video_Sink");
         std::fs::create_dir_all(&video_sink_dir)?;
 
         // Set up paths correctly
@@ -1762,7 +1768,7 @@ impl MetricsLogger {
         }
         
         // Print debug info
-        print_pretty!(DebugColor::Cyan, "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
+        print_prettyy!(DebugColor::ForestGreen, "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
                 frame_number, vmaf_score, psnr_avg, ssim_score);
 
         let metrics = FrameMetrics {
@@ -1889,13 +1895,17 @@ pub struct XRClient {
     keyframe_sync_state: KeyframeSyncState, 
     last_keyframe_id: usize, 
 
+    name_folder: String, 
+    frame_batch: Vec<(usize, Vec<u8>, Vec<u8>, f64)>,  // (frame_id, sample, ref_sample, timestamp)
+    last_batch_process_time: TaiTime<0>,
+
 
 
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
 impl XRClient {
-    pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>) -> Self {
+    pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>, name_folder: &str) -> Self {
         
         let (group_tx, group_rx) = bounded(5); // Buffer up to 5 groups
 
@@ -1953,6 +1963,10 @@ impl XRClient {
             display_queue: VecDeque::new(), 
             keyframe_sync_state: KeyframeSyncState::default(),
             last_keyframe_id: 0, 
+            name_folder: name_folder.to_string(),
+
+            frame_batch: Vec::new(),
+            last_batch_process_time: TaiTime::EPOCH, 
             // visualize_decoder_window: None,
         }
     }
@@ -2483,8 +2497,8 @@ impl XRClient {
         let retention_period = self.cleanup_interval;  // Keep files for N seconds
         let cutoff_time = now - retention_period;
         
-        let ref_path = format!("Video_Sink/{}/reference_rgb", ip);
-        let lossy_path = format!("Video_Sink/{}/lossy_rgb", ip);
+        let ref_path = format!("Video_Sink/{}/{}/reference_rgb", self.name_folder,ip);
+        let lossy_path = format!("Video_Sink/{}/{}/lossy_rgb", self.name_folder ,ip);
 
         // Clean up directories
         for dir_name in &[ ref_path, lossy_path] {
@@ -2514,7 +2528,7 @@ impl XRClient {
 
     pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr) -> (Vec<u8>, Vec<u32>) {
         // Validate input
-        let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", client_ip, frame_index);
+        let rgb_path = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,client_ip, frame_index);
         if std::path::Path::new(&rgb_path).exists() {
             match fs::read(&rgb_path) {
                 Ok(rgb_data) if !rgb_data.is_empty() => {
@@ -2663,129 +2677,216 @@ impl XRClient {
         }
     }
 
-    pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
-        // Skip if either sample is empty
-
-        println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
-            sample.len(), ref_sample.len());
-            println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
-            sample.len(), ref_sample.len());
-        
-        if sample.is_empty() || ref_sample.is_empty() {
-            println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
-                        frame_id, sample.len(), ref_sample.len());
-            return Ok(());  // Return early, don't try to process empty frames
+    pub async fn process_vmaf_batch(&mut self, now: TaiTime<0>) -> Result<()> {
+        if self.frame_batch.is_empty() {
+            return Ok(());  // Nothing to process
         }
-    
-        // Ensure metrics logger is initialized
+        
+        println!("Processing VMAF batch of {} frames", self.frame_batch.len());
+        
+        // Ensure metrics logger is initialized (once per batch)
         if self.metrics_logger.is_none() {
-            match MetricsLogger::new(ip) {
-                Ok(logger) => {
-                    println!("Initialized metrics logger for VMAF analysis");
-                    self.metrics_logger = Some(logger);
-                },
-                Err(e) => {
-                    eprintln!("Failed to initialize metrics logger: {}", e);
-                    return Ok(());
-                }
+            if let Ok(logger) = MetricsLogger::new(self.server_ip, &self.name_folder) {
+                println!("Initialized metrics logger for VMAF batch analysis");
+                self.metrics_logger = Some(logger);
+            } else {
+                eprintln!("Failed to initialize metrics logger for batch");
+                return Ok(());
             }
         }
-
-        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis? ", ); 
-    
-        // Create directories for temporary storage if they don't exist
-        let base_dir = "Video_Sink";
-        if let Err(e) = std::fs::create_dir_all(base_dir) {
-            eprintln!("Failed to create directory {}: {}", base_dir, e);
-            return Ok(());
-        }
-    
-        // Save frames to temporary files
-        let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
-        let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
-        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Writing frames to disk", );
-
-        // Create parent directories
-        if let Err(e) = std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, ip)) {
-            eprintln!("Failed to create reference directory: {}", e);
-            return Ok(());
-        }
-        if let Err(e) = std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, ip)) {
-            eprintln!("Failed to create lossy directory: {}", e);
-            return Ok(());
-        }
-    
-        // Write frames to disk
-        if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
-            eprintln!("Failed to write reference frame: {}", e);
-            return Ok(());
-        }
-        if let Err(e) = std::fs::write(&lossy_path, &sample) {
-            eprintln!("Failed to write lossy frame: {}", e);
-            return Ok(());
-        }
-        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Frame files written", );
-    
-        // Calculate timestamp in milliseconds - convert to f64 as required by process_frame_metrics
-        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
-        // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", ); 
-
-        // Process frame metrics
+        
+        // Process all frames in the batch
         if let Some(logger) = &self.metrics_logger {
-            match logger.process_frame_metrics(
-                frame_id as u64,
-                timestamp_ms, // This is now f64 as expected
-                &ref_path,
-                &lossy_path
-            ).await {
-                Ok(_) => {
-                    if frame_id % 10 == 0 {
-                        println!("Processed VMAF analysis for frame {}", frame_id);
-                    }
-                },
-                Err(e) => {
+            for (frame_id, sample, ref_sample, timestamp_ms) in self.frame_batch.drain(..) {
+                // Save frames to temporary files (still needed for VMAF)
+                let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+                let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
+                let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
+                
+                // Create directories lazily
+                std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, self.server_ip))
+                    .unwrap_or_else(|e| eprintln!("Failed to create reference directory: {}", e));
+                std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, self.server_ip))
+                    .unwrap_or_else(|e| eprintln!("Failed to create lossy directory: {}", e));
+                    
+                // Write frames to disk
+                if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
+                    eprintln!("Failed to write reference frame: {}", e);
+                    continue;
+                }
+                if let Err(e) = std::fs::write(&lossy_path, &sample) {
+                    eprintln!("Failed to write lossy frame: {}", e);
+                    continue;
+                }
+                
+                // Process frame metrics
+                if let Err(e) = logger.process_frame_metrics(
+                    frame_id as u64,
+                    timestamp_ms,
+                    &ref_path,
+                    &lossy_path
+                ).await {
                     eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
                 }
             }
         }
         
-        // Add to frame group for batch processing if enabled
-        if self.enable_batch_processing {
-            if self.current_frame_group.is_none() {
-                self.current_frame_group = Some(FrameGroup { 
-                    frames: Vec::with_capacity(VMAF_FRAME_GROUP_SIZE) 
-                });
+        // Update cleanup timer
+        self.last_cleanup_time = now;
+        self.last_batch_process_time = now;
+        
+        Ok(())
+    }
+
+    pub async fn vmaf_analysis_batch(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
+        // Skip if either sample is empty
+        if sample.is_empty() || ref_sample.is_empty() {
+            println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
+                     frame_id, sample.len(), ref_sample.len());
+            return Ok(());
+        }
+        
+        // Calculate timestamp in milliseconds
+        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
+        
+        // Add frame to batch
+        self.frame_batch.push((frame_id, sample, ref_sample, timestamp_ms));
+        
+        // Process batch if it's full or timeout occurred
+        let should_process_batch = self.frame_batch.len() >= VMAF_BATCH_SIZE || 
+                                  now.duration_since(self.last_batch_process_time).as_millis() >= VMAF_BATCH_TIMEOUT_MS as u128;
+        
+        if should_process_batch {
+            self.process_vmaf_batch(now).await?;
+        }
+        
+        Ok(())
+    }
+
+
+    pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
+        // Skip if either sample is empty
+
+            println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
+                sample.len(), ref_sample.len());
+                println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
+                sample.len(), ref_sample.len());
+            
+            if sample.is_empty() || ref_sample.is_empty() {
+                println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
+                            frame_id, sample.len(), ref_sample.len());
+                return Ok(());  // Return early, don't try to process empty frames
             }
-    
-            if let Some(group) = &mut self.current_frame_group {
-                group.frames.push(FrameData {
-                    ref_rgb: ref_sample,
-                    lossy_rgb: sample,
-                    timestamp_ms: timestamp_ms, // Now using f64
-                    frame_number: frame_id as u64,
-                });
-    
-                // Send group when full
-                if group.frames.len() >= VMAF_FRAME_GROUP_SIZE {
-                    if let Some(tx) = &self.group_tx {
-                        // Create a new group to send
-                        let frames_to_send = std::mem::replace(&mut group.frames, Vec::with_capacity(VMAF_FRAME_GROUP_SIZE));
-                        let group_to_send = FrameGroup { frames: frames_to_send };
-                        
-                        if let Err(e) = tx.send(group_to_send) {
-                            eprintln!("Error sending frame group: {}", e);
+        
+            // Ensure metrics logger is initialized
+            if self.metrics_logger.is_none() {
+                match MetricsLogger::new(ip, &self.name_folder) {
+                    Ok(logger) => {
+                        println!("Initialized metrics logger for VMAF analysis");
+                        self.metrics_logger = Some(logger);
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to initialize metrics logger: {}", e);
+                        return Ok(());
+                    }
+                }
+            }
+
+            print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis? ", ); 
+        
+            // Create directories for temporary storage if they don't exist
+            let base_dir = &format!("Video_Sink/{}",&self.name_folder ); 
+            if let Err(e) = std::fs::create_dir_all(base_dir) {
+                eprintln!("Failed to create directory {}: {}", base_dir, e);
+                return Ok(());
+            }
+        
+            // Save frames to temporary files
+            let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
+            let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
+            print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Writing frames to disk", );
+
+            // Create parent directories
+            if let Err(e) = std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, ip)) {
+                eprintln!("Failed to create reference directory: {}", e);
+                return Ok(());
+            }
+            if let Err(e) = std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, ip)) {
+                eprintln!("Failed to create lossy directory: {}", e);
+                return Ok(());
+            }
+        
+            // Write frames to disk
+            if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
+                eprintln!("Failed to write reference frame: {}", e);
+                return Ok(());
+            }
+            if let Err(e) = std::fs::write(&lossy_path, &sample) {
+                eprintln!("Failed to write lossy frame: {}", e);
+                return Ok(());
+            }
+            // print_prettyy!(DebugColor::ForestGreen, "Inside VMAF analysis - Frame files written", );
+        
+            // Calculate timestamp in milliseconds - convert to f64 as required by process_frame_metrics
+            let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
+            // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", ); 
+
+            // Process frame metrics
+            if let Some(logger) = &self.metrics_logger {
+                match logger.process_frame_metrics(
+                    frame_id as u64,
+                    timestamp_ms, // This is now f64 as expected
+                    &ref_path,
+                    &lossy_path
+                ).await {
+                    Ok(_) => {
+                        if frame_id % 10 == 0 {
+                            println!("Processed VMAF analysis for frame {}", frame_id);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
+                    }
+                }
+            }
+            
+            // Add to frame group for batch processing if enabled
+            if self.enable_batch_processing {
+                if self.current_frame_group.is_none() {
+                    self.current_frame_group = Some(FrameGroup { 
+                        frames: Vec::with_capacity(VMAF_FRAME_GROUP_SIZE) 
+                    });
+                }
+        
+                if let Some(group) = &mut self.current_frame_group {
+                    group.frames.push(FrameData {
+                        ref_rgb: ref_sample,
+                        lossy_rgb: sample,
+                        timestamp_ms: timestamp_ms, // Now using f64
+                        frame_number: frame_id as u64,
+                    });
+        
+                    // Send group when full
+                    if group.frames.len() >= VMAF_FRAME_GROUP_SIZE {
+                        if let Some(tx) = &self.group_tx {
+                            // Create a new group to send
+                            let frames_to_send = std::mem::replace(&mut group.frames, Vec::with_capacity(VMAF_FRAME_GROUP_SIZE));
+                            let group_to_send = FrameGroup { frames: frames_to_send };
+                            
+                            if let Err(e) = tx.send(group_to_send) {
+                                eprintln!("Error sending frame group: {}", e);
+                            }
                         }
                     }
                 }
             }
-        }
-        print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 33333333333333 ? ", ); 
+            // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 33333333333333 ? ", ); 
 
-    
-        // Update clean-up timer
-        self.last_cleanup_time = now;
         
-        Ok(())
+            // Update clean-up timer
+            self.last_cleanup_time = now;
+            
+            Ok(())
     }
 
 
@@ -2927,6 +3028,8 @@ impl XRClient {
                 let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
                 
                 let mut is_frame_lost = false; 
+                let mut difference = 0; 
+
                 // Use a HashMap to store windows, keyed by server_ip
                 thread_local! {
                     static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
@@ -2953,6 +3056,8 @@ impl XRClient {
                                         // Before decoding the reference frame, ensure decoder consistency
 
                     if id_f > self.last_processed_frame_id + 1 {
+                        is_frame_lost = true; 
+                        difference = id_f - self.last_processed_frame_id - 1; 
 
                         let missing_start = self.last_processed_frame_id + 1;
                         let missing_end = id_f - 1;
@@ -2982,7 +3087,7 @@ impl XRClient {
                                     continue;
                                 }
                             }
-                            let hevc_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, next_frame_id);
+                            let hevc_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", self.name_folder, ip_client, next_frame_id);
                             // println!("[DBG1] Processing frame ID: {}", next_frame_id); 
                             if std::path::Path::new(&hevc_path).exists(){
                                 if let Ok(hevc_data) =  fs::read(&hevc_path) {
@@ -2990,7 +3095,7 @@ impl XRClient {
                                         print_pretty!(DebugColor::Lime, "DECODING REFERENCE FRAME {}", next_frame_id, ); 
                                         let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client).await;         
                                         if !rgb_ref_frame.is_empty() {
-                                            let rgb_path = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, next_frame_id);                                                                                     // Save the decoded RGB file
+                                            let rgb_path = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb", self.name_folder ,ip_client, next_frame_id);                                                                                     // Save the decoded RGB file
                                             if let Err(e) = std::fs::write(&rgb_path, &rgb_ref_frame) {
                                                 print_pretty!(DebugColor::Red, 
                                                     "Failed to save RGB for frame #{}: {}", next_frame_id, e);
@@ -3011,8 +3116,8 @@ impl XRClient {
                     self.last_processed_frame_id = id_f;
 
                     // Reference frame handling
-                    let ref_path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_f); 
-                    let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, id_f);
+                    let ref_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,ip_client, id_f); 
+                    let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", self.name_folder, ip_client, id_f);
 
                     let mut retries = 100;
                     let mut ref_frame = Vec::new(); 
@@ -3220,20 +3325,18 @@ impl XRClient {
                                         
                                     self.frame_pairs.insert(id_f, pair);
                                     
-                                    // Perform VMAF analysis on directly matched frames
+                                        // Perform VMAF analysis on directly matched frames
                                     if !rgb.is_empty() && !rgb_ref_frame.is_empty() && USE_VMAF {
-                                    self.vmaf_analysis(
-                                        rgb.clone(),
-                                        rgb_ref_frame.clone(),
-                                        now,
-                                        id_f,
-                                        ip_client
-                                    ).await.unwrap_or_else(|e| {
+                                        self.vmaf_analysis_batch(
+                                            rgb.clone(),
+                                            rgb_ref_frame.clone(),
+                                            now,
+                                            id_f,
+                                            ip_client
+                                        ).await.unwrap_or_else(|e| {
                                         eprintln!("VMAF analysis error: {}", e);
                                     });
-                                }
-
-
+                                    }
                                     // Display synchronized pair if both parts are available
                                     // Check both original and adjusted IDs for complete pairs
                                     if let Some(pair) = self.frame_pairs.get(&id_f) {

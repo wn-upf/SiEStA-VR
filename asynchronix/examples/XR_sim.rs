@@ -95,7 +95,7 @@ impl VRPair {
             initial_bitrate as f32,
             name_folder,
         );
-        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0);
+        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0, name_folder);
 
         let mut sta_server = STA_extended::new(
             initial_bitrate * 1e6,

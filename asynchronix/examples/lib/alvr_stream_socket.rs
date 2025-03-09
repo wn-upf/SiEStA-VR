@@ -94,7 +94,7 @@ pub const OFFSET_VIDEO: f64 = 150.0;
 
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300; 
-pub const IDR_FRAME_SIZE_GOP: usize = 60; 
+pub const IDR_FRAME_SIZE_GOP: usize = 120; 
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -106,165 +106,6 @@ pub const STATISTICS: u16 = 4;
 pub const CONTROL_STREAM: u16 = 5;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
-
-
-use std::time::Instant;
-
-// Structure to manage the continuous HEVC decoding process
-pub struct HEVCStreamDecoder {
-    // FFmpeg process that stays alive for the duration
-    decoder_process: Child,
-    // Tracks the frame count
-    frame_count: Arc<Mutex<usize>>,
-    // Storage base path
-    output_base_path: String,
-    // Frame dimensions
-    width: usize,
-    height: usize,
-    // Client identifier
-    client_id: String,
-}
-
-impl HEVCStreamDecoder {
-    pub fn new(width: usize, height: usize, client_id: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        // Create output directories
-        let output_base_path = format!("Video_Sink/{}/rgb_frames", client_id);
-        fs::create_dir_all(&output_base_path)?;
-        
-        // Start a persistent FFmpeg process that will decode the HEVC stream
-        // as it comes in, maintaining GOP structure and state between frames
-        let decoder_process = Command::new("ffmpeg")
-            .args(&[
-                "-f", "hevc",              // Input format is HEVC
-                "-i", "pipe:0",            // Read from stdin
-                "-pix_fmt", "rgb24",       // Output pixel format
-                "-f", "rawvideo",          // Output format is raw video
-                "pipe:1"                   // Output to stdout
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        
-        Ok(Self {
-            decoder_process,
-            frame_count: Arc::new(Mutex::new(0)),
-            output_base_path,
-            width,
-            height,
-            client_id: client_id.to_string(),
-        })
-    }
-    
-    // Process a new chunk of the HEVC stream
-    pub fn process_hevc_chunk(&mut self, hevc_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Write the HEVC data to the FFmpeg process stdin
-        if let Some(stdin) = self.decoder_process.stdin.as_mut() {
-            stdin.write_all(hevc_data)?;
-            stdin.flush()?;
-            
-            // Store the HEVC chunk for reference
-            let frame_count = *self.frame_count.lock().unwrap();
-            let hevc_dir = format!("Video_Sink/{}/hevc_ref", self.client_id);
-            fs::create_dir_all(&hevc_dir)?;
-            let hevc_path = format!("{}/{}.hevc", hevc_dir, frame_count);
-            fs::write(&hevc_path, hevc_data)?;
-            
-            println!("Processed HEVC chunk #{} (size: {} bytes)", frame_count, hevc_data.len());
-            
-            // Check if the HEVC chunk contains a keyframe
-            if is_hevc_keyframe(hevc_data) {
-                println!("  -> Chunk contains KEYFRAME");
-            }
-            
-            // Increment frame count
-            *self.frame_count.lock().unwrap() += 1;
-        }
-        
-        Ok(())
-    }
-    
-    // Read available decoded frames from the FFmpeg process
-    pub fn read_decoded_frames(&mut self) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
-        let mut decoded_frames = Vec::new();
-        let frame_size = self.width * self.height * 3; // RGB has 3 bytes per pixel
-        
-        // Try to read available frames from stdout
-        if let Some(stdout) = self.decoder_process.stdout.as_mut() {
-            let mut reader = BufReader::new(stdout);
-            let mut frame_buffer = vec![0u8; frame_size];
-            
-            // Non-blocking reads to get available frames
-            loop {
-                // Try to fill the buffer for one frame
-                match reader.read_exact(&mut frame_buffer) {
-                    Ok(_) => {
-                        // Successfully read a complete frame
-                        let frame_number = decoded_frames.len() + *self.frame_count.lock().unwrap() - 1;
-                        let rgb_path = format!("{}/{}.rgb", self.output_base_path, frame_number);
-                        
-                        // Save the RGB frame
-                        fs::write(&rgb_path, &frame_buffer)?;
-                        println!("Saved decoded RGB frame #{} to {}", frame_number, rgb_path);
-                        
-                        // Add to our collection of decoded frames
-                        decoded_frames.push(frame_buffer.clone());
-                    },
-                    Err(e) => {
-                        // If we get an error (like WouldBlock), stop reading
-                        if e.kind() != std::io::ErrorKind::WouldBlock && 
-                           e.kind() != std::io::ErrorKind::TimedOut &&
-                           !decoded_frames.is_empty() {
-                            // Only report error if it's not from a non-blocking read
-                            println!("Stopped reading frames: {}", e);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        
-        Ok(decoded_frames)
-    }
-    
-    // Check if a frame is a keyframe (I-frame)
-    pub fn is_keyframe(&self, hevc_data: &[u8]) -> bool {
-        is_hevc_keyframe(hevc_data)
-    }
-}
-
-// Function to check if HEVC data contains a keyframe
-pub fn is_hevc_keyframe(data: &[u8]) -> bool {
-    // Look for HEVC NAL units and check if any are keyframe types
-    for i in 0..data.len().saturating_sub(5) {
-        if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
-            // Found a 3-byte start code
-            let nal_type = (data[i+3] >> 1) & 0x3F;
-            if (16..=21).contains(&nal_type) { // IRAP (keyframe) NAL types in HEVC
-                return true;
-            }
-        } else if i < data.len().saturating_sub(6) && 
-                  data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
-            // Found a 4-byte start code
-            let nal_type = (data[i+4] >> 1) & 0x3F;
-            if (16..=21).contains(&nal_type) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-impl Drop for HEVCStreamDecoder {
-    fn drop(&mut self) {
-        // Ensure we properly close the FFmpeg process
-        if let Err(e) = self.decoder_process.kill() {
-            eprintln!("Failed to kill decoder process: {}", e);
-        }
-    }
-}
-
-
 
 
 pub struct ChunkedHevcEncoder {
@@ -298,7 +139,7 @@ impl ChunkedHevcEncoder {
             height,
             bitrate: bitrate.to_string(),
             chunk_duration,
-            current_offset: OFFSET_VIDEO,
+            current_offset: random_offset,
             frame_tx,
             frame_rx,
             frame_queue: VecDeque::new(),  // Initialize the queue
@@ -2033,12 +1874,13 @@ impl<H: Serialize> StreamSender<H> {
         now: TaiTime<0>,
         ip: IpAddr,
         id_frame: usize, 
+        name_folder: &str, 
     ) -> Result<Buffer<H>> {
 
         let id_frame_files_ref = id_frame + 1; 
         let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
         let mut buffer: Vec<u8> = Vec::new();
-        print_pretty!(DebugColor::DarkBlue, "[BUFFEREMU] SENDING FRAME {} from SERVER", id_frame_files_ref ); 
+        print_pretty!(DebugColor::Blue, "[BUFFEREMU] SENDING FRAME {} from SERVER", id_frame_files_ref ); 
         if USE_FFMPEG {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
@@ -2079,10 +1921,10 @@ impl<H: Serialize> StreamSender<H> {
                         buffer = frame;
 
                         // println!("Storing original frame as .hevc in Sink_Video");
-                        let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref", ip);
+                        let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
                         
                         std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame_files_ref); 
+                        let filename = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref); 
                         print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY", id_frame_files_ref); 
                         let mut file = std::fs::File::create(filename).unwrap();
                         file.write_all(&buffer).unwrap();
@@ -2103,10 +1945,10 @@ impl<H: Serialize> StreamSender<H> {
                         // Try again after waiting
                         match encoder.next_frame().await {
                             Some(frame) => {
-                                    let hevc_file_path = format!("Video_Sink/{}/hevc_ref", ip);
+                                    let hevc_file_path = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
                                     
                                     std::fs::create_dir_all(hevc_file_path).unwrap();
-                                    let mut file = std::fs::File::create(format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame_files_ref)).unwrap();
+                                    let mut file = std::fs::File::create(format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
                                     print_pretty!(DebugColor::Peach, "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}", id_frame_files_ref, buffer.len() ); 
 
                                     file.write_all(&frame.clone()).unwrap();
