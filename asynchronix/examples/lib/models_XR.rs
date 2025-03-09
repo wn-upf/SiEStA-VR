@@ -152,6 +152,11 @@ struct FramePair {
     frame_id: usize,
     timestamp: Instant,
 }
+impl FramePair{
+    pub fn new() -> Self {
+        Self { decoded: None, reference: None, frame_id: 0, timestamp: Instant::now() }
+    }
+}
 
 fn render_text(buffer: &mut [u32], text: &str, x: usize, y: usize, stride: usize, color: u32, scale: usize) {
     // Simple 5x7 pixel font (common for basic bitmap fonts)
@@ -2523,7 +2528,7 @@ impl XRClient {
         
         let encoded_length = encoded_buffer.len();
         if encoded_buffer.is_empty() {
-            println!("WARNING: Empty encoded buffer received!");
+            println!("[XRClient DECODE REF {}] WARNING: Empty encoded buffer received!", client_ip );
             return (Vec::new(), Vec::new());
         }
         
@@ -2599,13 +2604,13 @@ impl XRClient {
         let encoded_length = encoded_buffer.len();
         
         if encoded_buffer.is_empty() {
-            println!("WARNING: Empty encoded buffer received!");
+            println!("[XRClient DECODE {}] WARNING: Empty encoded buffer received!", ip);
             return (Vec::new(), Vec::new());
         }
         
         // Ensure decoder is initialized
         if self.decoder_arc.is_none() {
-            println!("Initializing decoder on first frame");
+            println!("[XRClient DECODE {}] Initializing decoder on first frame", ip);
             let decoder = HevcDecoder::new( FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[MAIN_DECODER {}]", ip)); 
             self.decoder_arc = Some(Arc::new(tokMutex::new(decoder)));
         }
@@ -2639,21 +2644,21 @@ impl XRClient {
                     self.is_decoder_ready = true; 
                     return (sample, pixels);
                 } else {
-                    println!("ERROR: Failed to convert decoded frame to RGB");
+                    println!("[XRClient DECODE {}] ERROR: Failed to convert decoded frame to RGB", ip);
                     return (Vec::new(), Vec::new());
                 }
             } else {
                 // Don't consider this an error during the priming phase
                 if !decoder.priming_complete {
-                    println!("Decoder still priming, frame buffered (processed: {}, keyframes: {})",
-                             decoder.frames_processed, decoder.keyframes_seen);
+                    println!("[XRClient DECODE {}] Decoder still priming, frame buffered (processed: {}, keyframes: {})",
+                            ip,  decoder.frames_processed, decoder.keyframes_seen);
                 } else {
                     println!("No decoded frame available yet");
                 }
                 return (Vec::new(), Vec::new());
             }
         } else {
-            println!("ERROR: Decoder not initialized properly");
+            println!("[XRClient DECODE {}] ERROR: Decoder not initialized properly", ip);
             return (Vec::new(), Vec::new());
         }
     }
@@ -2966,7 +2971,7 @@ impl XRClient {
                         }
                         
                         let mut next_frame_id = self.last_processed_frame_id + 1;
-                        let process_limit = id_f + 3000;
+                        let process_limit = id_f + 2;
 
                         while next_frame_id < process_limit {
                             if let Some(frame_state) = self.missing_frames_buffer.get(&next_frame_id) {
@@ -3009,17 +3014,49 @@ impl XRClient {
                     let ref_path: String = format!("Video_Sink/{}/hevc_ref/{}.rgb", ip_client, id_f); 
                     let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref/{}.hevc", ip_client, id_f);
 
-                    let mut retries = 10;
-                    let ref_frame = loop {
+                    let mut retries = 100;
+                    let mut ref_frame = Vec::new(); 
+                    // Try reading the file with a more robust retry loop
+                    for attempt in 1..=retries {
                         match fs::read(&hevc_file_path) {
-                            Ok(data) => break data, // Successfully read file
-                            Err(_) if retries > 0 => {
-                                thread::sleep(Duration::from_millis(100)); // Wait 100ms before retrying
-                                retries -= 1;
+                            Ok(data) if !data.is_empty() => {
+                                // Successfully read non-empty data
+                                ref_frame = data;
+                                // println!("Successfully read HEVC file ({} bytes) for frame #{} on attempt {}", 
+                                //         ref_frame.len(), id_f, attempt);
+                                break;
+                            },
+                            Ok(_) => {
+                                // File exists but is empty - wait a bit and retry
+                                println!("HEVC file for frame #{} exists but is empty (attempt {}/{})", 
+                                        id_f, attempt, retries);
+                                if id_f <10 {
+                                    continue; // prevent hanging at start of sim
+                                    
+                                }
+                                else{
+                                    thread::sleep(Duration::from_millis(1000));
+                                    continue;
+                                } 
+                          
+                            },
+                            Err(e) => {
+                                if attempt < retries {
+                                    println!("Error reading HEVC file for frame #{} (attempt {}/{}): {}", 
+                                            id_f, attempt, retries, e);
+                                    if id_f <10 {
+                                        continue; // prevent hanging at start of sim                                 
+                                    }
+                                    thread::sleep(Duration::from_millis(1000));
+                                    continue;
+                                } else {
+                                    println!("Failed to read HEVC file for frame #{} after {} attempts: {}", 
+                                            id_f, retries, e);
+                                    break;
+                                }
                             }
-                            Err(_) => break Vec::new() // do nothing 
                         }
-                    };
+                    }
 
                     // Keyframe detection
                     if self.is_keyframe(&video_frame) {
@@ -3123,6 +3160,39 @@ impl XRClient {
 
                                 // When processing a decoded frame
                                 if !frame.is_empty() {
+
+                                    // let mut pair_final = FramePair::new();   /// DOES NOT WORK!! ////
+
+                                    // // Now check if we have a reference frame for this adjusted ID
+                                    // if !ref_pixels.is_empty() {
+                                    //     if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
+                                    //         pair.reference = Some(ref_pixels.clone());
+                                    //         pair_final.reference = Some(ref_pixels.clone());
+                                    //         print_pretty!(DebugColor::Yellow, "Updated reference for pair #{}, len = {}", id_f, ref_pixels.len());
+                                    //     }
+                                    // }
+                                    // else if let Ok(rgb_ref_frame) = std::fs::read(&ref_path) {
+                                    //         if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
+                                    //             let veec = convert_rgb_to_u32(&rgb_ref_frame.clone(), WIDTH_ENCODER, HEIGHT_ENCODER).unwrap(); 
+                                    //             pair.reference = Some(veec.clone());
+                                    //             pair_final.reference = Some(veec);
+
+                                    //             print_pretty!(DebugColor::Yellow, "Updated reference (from file) for pair #{}, len = {}", id_f, ref_pixels.len());           
+                                    //         }
+                                    // }
+                                    // else{
+                                    //     pair_final.reference = None; 
+                                    //     println!("ERROOOOOOOOR WITH REFERENCE SAMPLE!!! NO FILE OR DATA"); 
+                                    // }
+                                    // pair_final.decoded = Some(frame.clone()); 
+                                    // pair_final.frame_id = id_f;
+                                    // pair_final.timestamp = Instant::now();  
+
+                                    // print_pretty!(DebugColor::Lavender, "Inserting frame {} : decoded size = {}, ref size = {} ", id_f, frame.len(), ref_pixels.len()); 
+                                        
+                                    // self.frame_pairs.insert(id_f, pair_final);
+                                    
+
 
                                     // Now check if we have a reference frame for this adjusted ID
                                     if !ref_pixels.is_empty() {

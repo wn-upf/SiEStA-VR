@@ -38,7 +38,7 @@ use std::sync::atomic::Ordering as AtOrdering;
 use tokio::time::{sleep, Duration as Durtokio};
 
 
-use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
+use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
 
 use crate::{debug_bgprint, format_elapsed};
 
@@ -291,14 +291,14 @@ impl ChunkedHevcEncoder {
         let (frame_tx, frame_rx) = bounded(100);
         
         // let random_offset = 
-        let rand =  rand::thread_rng().gen_range(0.0..OFFSET_VIDEO); 
+        let random_offset =  rand::thread_rng().gen_range(0.0..OFFSET_VIDEO); 
         Self {
             input: input.to_string(),
             width,
             height,
             bitrate: bitrate.to_string(),
             chunk_duration,
-            current_offset: rand,
+            current_offset: OFFSET_VIDEO,
             frame_tx,
             frame_rx,
             frame_queue: VecDeque::new(),  // Initialize the queue
@@ -1276,7 +1276,7 @@ impl StreamSocket {
             return try_again();
         };
 
-        debug_bgprint!( DebugColor::Orange, "{:.9} [DBG StreamSocket RX] frame_id: {} deadline_current: {:?} in_progress_packets: {:?}, indices {:?}, shard: {:2.0} / {:2.0}" ,format_elapsed!(now) ,shard_recv_state_mut.packet_index, format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys(), shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1);
+        // print_prettyy!( DebugColor::Orange, "{:.9} [DBG Socket RX {}] F: {}, S:{:2.0}/{:2.0} |deadline_current: {:?}|in_progress_packets: {:?}| indices {:?}| " ,format_elapsed!(now),ip_client ,shard_recv_state_mut.packet_index, shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1 ,format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys());
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -2034,9 +2034,11 @@ impl<H: Serialize> StreamSender<H> {
         ip: IpAddr,
         id_frame: usize, 
     ) -> Result<Buffer<H>> {
+
+        let id_frame_files_ref = id_frame + 1; 
         let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
         let mut buffer: Vec<u8> = Vec::new();
-        
+        print_pretty!(DebugColor::DarkBlue, "[BUFFEREMU] SENDING FRAME {} from SERVER", id_frame_files_ref ); 
         if USE_FFMPEG {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
@@ -2077,15 +2079,13 @@ impl<H: Serialize> StreamSender<H> {
                         buffer = frame;
 
                         // println!("Storing original frame as .hevc in Sink_Video");
-                        let hevc_file_path = format!("Video_Sink/{}/hevc_ref", ip);
+                        let hevc_file_path: String = format!("Video_Sink/{}/hevc_ref", ip);
                         
                         std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame); 
-                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SENT", filename ); 
+                        let filename = format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame_files_ref); 
+                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY", id_frame_files_ref); 
                         let mut file = std::fs::File::create(filename).unwrap();
                         file.write_all(&buffer).unwrap();
-
-
                     }
                     None => {
                         print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
@@ -2106,8 +2106,11 @@ impl<H: Serialize> StreamSender<H> {
                                     let hevc_file_path = format!("Video_Sink/{}/hevc_ref", ip);
                                     
                                     std::fs::create_dir_all(hevc_file_path).unwrap();
-                                    let mut file = std::fs::File::create(format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame)).unwrap();
-                                    file.write_all(&buffer).unwrap();
+                                    let mut file = std::fs::File::create(format!("Video_Sink/{}/hevc_ref/{}.hevc",ip, id_frame_files_ref)).unwrap();
+                                    print_pretty!(DebugColor::Peach, "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}", id_frame_files_ref, buffer.len() ); 
+
+                                    file.write_all(&frame.clone()).unwrap();
+
                                     buffer = frame
                                     },
                             None => {
@@ -2135,8 +2138,9 @@ impl<H: Serialize> StreamSender<H> {
         }
         
         let buffer_len = buffer.len();
+
         self.next_packet_index += 1;
-        
+
         Ok(Buffer {
             inner: buffer,
             hidden_offset,

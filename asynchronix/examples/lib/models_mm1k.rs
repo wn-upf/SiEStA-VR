@@ -464,9 +464,9 @@ impl QueueMechanism {
         let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TBEGIN)).unwrap();
         let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs(STEP3_TEND)).unwrap();
 
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.005), valid_from: valid_from, valid_until: valid_until });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.03), valid_from: valid_from3, valid_until: valid_until3 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.001), valid_from: valid_from, valid_until: valid_until });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.002), valid_from: valid_from2, valid_until: valid_until2 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.003), valid_from: valid_from3, valid_until: valid_until3 });
 
 
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));

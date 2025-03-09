@@ -81,6 +81,16 @@ macro_rules! print_pretty {
 }
 
 #[macro_export]
+macro_rules! print_prettyy {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_color_fn()(msg));
+        }
+    // };
+}
+
+#[macro_export]
 macro_rules! debug_print {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         if DEBUG_PRINT_ENABLED == true {
