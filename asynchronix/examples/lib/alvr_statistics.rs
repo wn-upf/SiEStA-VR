@@ -209,6 +209,7 @@ impl StatisticsManager {
         network_stats: NetworkStatisticsPacket,
         rtt: Duration,
         now: TaiTime<0>,
+        current_bitrate_target_mbps: f32, 
     ) -> (f32, f32) {
         self.packets_skipped_total += network_stats.frames_skipped as usize;
         self.packets_skipped_partial_sum += network_stats.frames_skipped as usize;
@@ -344,7 +345,7 @@ impl StatisticsManager {
             instant_network_throughput_bps: instant_network_throughput_bps,
             peak_network_throughput_bps: peak_network_throughput_bps,
 
-            requested_bps: self.last_nominal_bitrate_stats.requested_bps.clone(),
+            requested_bps: current_bitrate_target_mbps,
 
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
         };

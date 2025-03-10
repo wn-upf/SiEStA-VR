@@ -157,8 +157,11 @@ impl ChunkedHevcEncoder {
     /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
-    pub async fn start_chunking(&mut self)  {
-        println!("{} CHUNKING!", self.encoder_str); 
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32)  {
+
+        self.bitrate = format!("{:.0}M", bitrate_mbps);
+
+        println!("{} CHUNKING with bitrate {}!", self.encoder_str, self.bitrate); 
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         command
@@ -908,6 +911,7 @@ impl StreamSocket {
             ref_time: t0,
             frame_tracker: FrameTracker::new(),
             ffmpeg_encoder: None, 
+            ffmpeg_maxbitrate_encoder: None, 
             chunk_frames: VecDeque::new(), 
             is_initializing_encoder: Arc::new(AtomicBool::new(false)), 
             time_since_last_update: t0, 
@@ -1785,6 +1789,8 @@ pub struct StreamSender<H> {
 
     // encoder_wrapper: Option<Arc<tokMutex<HevcEncoder>>>,
     pub ffmpeg_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
+    pub ffmpeg_maxbitrate_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
+
     // Keep the initialization flag:
     is_initializing_encoder: Arc<AtomicBool>,
 
@@ -1875,6 +1881,7 @@ impl<H: Serialize> StreamSender<H> {
         ip: IpAddr,
         id_frame: usize, 
         name_folder: &str, 
+        max_bitrate_ladder_mbps: f32, 
     ) -> Result<Buffer<H>> {
 
         let id_frame_files_ref = id_frame + 1; 
@@ -1885,6 +1892,8 @@ impl<H: Serialize> StreamSender<H> {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
+
+                let maxbitrate_cmd = format!("{:.0}M", max_bitrate_ladder_mbps); 
     
                 let encoder = ChunkedHevcEncoder::new(
                     input_path,
@@ -1894,76 +1903,142 @@ impl<H: Serialize> StreamSender<H> {
                     CHUNK_DURATION_F64_s, // Chunk duration in seconds
                     format!("[ENCODER {}]", ip), 
                 );
+                let max_encoder = ChunkedHevcEncoder::new(
+                    input_path,
+                    WIDTH_ENCODER as u32,
+                    HEIGHT_ENCODER as u32,
+                    &maxbitrate_cmd,
+                    CHUNK_DURATION_F64_s, // Chunk duration in seconds
+                    format!("[Bitrate MAX ENCODER {}]", ip), 
+                );
                 
                 // Wrap the encoder in an Arc<Mutex<_>>
                 let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
+
+                let maxencoder_arc = Arc::new(async_std::sync::Mutex::new(max_encoder));
+
                 
                 // Initialize the encoder BEFORE storing it
                 {
-                    let mut encoder = encoder_arc.lock().await;
-                    encoder.start_chunking().await;
+
+                    let mut maxencoder = maxencoder_arc.lock().await; 
+                    maxencoder.start_chunking(max_bitrate_ladder_mbps).await; 
+
+                    let mut encoder: async_std::sync::MutexGuard<'_, ChunkedHevcEncoder> = encoder_arc.lock().await;
+                    encoder.start_chunking(current_bitrate_mbps).await;
+
                 } // Lock is dropped here
                 
+
                 // Store the initialized encoder
                 self.ffmpeg_encoder = Some(encoder_arc);
+                self.ffmpeg_maxbitrate_encoder = Some(maxencoder_arc); 
                 self.time_since_last_update = now;
             }
             
             // Now that the encoder is initialized and the lock released, get a frame
             if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
-                let mut encoder = encoder_arc.lock().await;
-                
-                // print_pretty!(DebugColor::SaddleBrown, "\n\n******** ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
-                
 
-                match encoder.next_frame().await {
-                    Some(frame) => {
-                        buffer = frame;
+                if let Some(maxb_encoder_arc) = self.ffmpeg_maxbitrate_encoder.as_ref() {
 
-                        // println!("Storing original frame as .hevc in Sink_Video");
-                        let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
-                        
-                        std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref); 
-                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY", id_frame_files_ref); 
-                        let mut file = std::fs::File::create(filename).unwrap();
-                        file.write_all(&buffer).unwrap();
-                    }
-                    None => {
-                        print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
-                        
-                        // Clear ALL buffers before restart
-                        encoder.parser.buffer.clear();
-                        encoder.frame_queue.clear();
-                        
-                        // Restart chunking
-                        encoder.start_chunking().await;
-                        
-                        // Wait for encoder to produce frames
-                        // task::sleep(Duration::from_millis(100)).await;
-                        
-                        // Try again after waiting
-                        match encoder.next_frame().await {
-                            Some(frame) => {
-                                    let hevc_file_path = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
-                                    
-                                    std::fs::create_dir_all(hevc_file_path).unwrap();
-                                    let mut file = std::fs::File::create(format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
-                                    print_pretty!(DebugColor::Peach, "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}", id_frame_files_ref, buffer.len() ); 
+                    let mut encoder = encoder_arc.lock().await;
+                    let mut maxencoder = maxb_encoder_arc.lock().await; 
+                    
+                    print_pretty!(DebugColor::SaddleBrown, "\n\n******** MAX ENCODER FOUND!! ******* | parser buffer size: {}", encoder.parser.buffer.len());
+                    
+                    match maxencoder.next_frame().await {
+                        Some(frame) => {
+                            // buffer = frame;
+                            // println!("Storing original frame as .hevc in Sink_Video");
+                            let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
+                            
+                            std::fs::create_dir_all(hevc_file_path).unwrap();
+                            let filename = format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc",name_folder,ip, id_frame_files_ref); 
+                            print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME MAX {} SAVED TO MEMORY", id_frame_files_ref); 
+                            let mut file = std::fs::File::create(filename).unwrap();
+                            file.write_all(&frame).unwrap();
+                        }
+                        None => {
+                            print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
+                            
+                            // Clear ALL buffers before restart
+                            maxencoder.parser.buffer.clear();
+                            maxencoder.frame_queue.clear();
+                            
+                            // Restart chunking
+                            maxencoder.start_chunking(max_bitrate_ladder_mbps).await;
+                            
+                            // Wait for encoder to produce frames
+                            // task::sleep(Duration::from_millis(100)).await;
+                            
+                            // Try again after waiting
+                            match maxencoder.next_frame().await {
+                                Some(frame) => {
+                                        let hevc_file_path = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
+                                        
+                                        std::fs::create_dir_all(hevc_file_path).unwrap();
+                                        let mut file = std::fs::File::create(format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME MAX {} SAVED TO MEMORY", id_frame_files_ref); 
+                                        file.write_all(&frame.clone()).unwrap();
 
-                                    file.write_all(&frame.clone()).unwrap();
-
-                                    buffer = frame
-                                    },
-                            None => {
-                                print_pretty!(DebugColor::Red, "Still no frame after restart, using empty buffer", );
-                                buffer = Vec::new();
+                                        // buffer = frame
+                                        },
+                                None => {
+                                    print_pretty!(DebugColor::Red, "Still no MAX frame after restart, using empty buffer", );
+                                    buffer = Vec::new();
+                                }
                             }
                         }
                     }
-                }
 
-                
+                    match encoder.next_frame().await {
+                        Some(frame) => {
+                            buffer = frame;
+
+                            // println!("Storing original frame as .hevc in Sink_Video");
+                            // let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
+                            
+                            // std::fs::create_dir_all(hevc_file_path).unwrap();
+                            // let filename = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref); 
+                            // print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY", id_frame_files_ref); 
+                            // let mut file = std::fs::File::create(filename).unwrap();
+                            // file.write_all(&buffer).unwrap();
+                        }
+                        None => {
+                            print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
+                            
+                            // Clear ALL buffers before restart
+                            encoder.parser.buffer.clear();
+                            encoder.frame_queue.clear();
+                            
+                            // Restart chunking
+                            encoder.start_chunking(current_bitrate_mbps).await;
+                            
+                            // Wait for encoder to produce frames
+                            // task::sleep(Duration::from_millis(100)).await;
+                            
+                            // Try again after waiting
+                            match encoder.next_frame().await {
+                                Some(frame) => {
+                                        // let hevc_file_path = format!("Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
+                                        
+                                        // std::fs::create_dir_all(hevc_file_path).unwrap();
+                                        // let mut file = std::fs::File::create(format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                        // print_pretty!(DebugColor::Peach, "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}", id_frame_files_ref, buffer.len() ); 
+
+                                        // file.write_all(&frame.clone()).unwrap();
+
+                                        buffer = frame
+                                        },
+                                None => {
+                                    print_pretty!(DebugColor::Red, "Still no frame after restart, using empty buffer", );
+                                    buffer = Vec::new();
+                                }
+                            }
+                        }
+                    }
+
+                }
             }
         } else {
             // Fallback for non-FFMPEG mode

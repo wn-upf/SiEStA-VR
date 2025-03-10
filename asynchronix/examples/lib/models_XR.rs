@@ -1,7 +1,7 @@
 use crate::lib::alvr_control_socket::{
     framed_recv, framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
 };
-use crate::lib::alvr_stream_socket::{Buffer, StreamReceiver};
+use crate::lib::{HeuristicStats, alvr_stream_socket::{Buffer, StreamReceiver}};
 use rand_distr::{Distribution, Normal};
 use rand::distributions::Uniform;
 use rand::{thread_rng, Rng};
@@ -811,23 +811,6 @@ impl HevcDecoder {
 }
 
 
-
-#[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
-pub struct HeuristicStats {
-        pub frame_interval_s: f32,
-        pub server_fps: f32,
-        pub steps_bps: f32,
-    
-        pub network_heur_fps: f32,
-        pub rtt_avg_heur_s: f32,
-        pub random_prob: f32,
-    
-        pub threshold_fps: f32,
-        pub threshold_rtt_s: f32,
-        pub threshold_u: f32,
-    
-        pub requested_bitrate_bps: f32,
-    }
 #[derive(Clone)]
 pub struct EncoderLatencyLimiter{
     pub max_saturation_multiplier: f32, 
@@ -885,7 +868,8 @@ pub struct BitrateManager {
     frame_interarrival_average: SlidingWindowAverage<f32>,
 
     last_target_bitrate_bps : f32, 
-    
+
+
 }
 
 impl BitrateManager {
@@ -931,6 +915,9 @@ impl BitrateManager {
                 rtt_thresh_scaling_factor,
                 ..
             } => {
+
+
+
                 fn floor_to_nearest_mult_from_initial(value: f32, step: f32, initial: f32) -> f32 {
                     initial + ((value - initial) / step).floor() * step
                 }
@@ -947,6 +934,7 @@ impl BitrateManager {
                     bitrate
                 }
                 print_prettyy!(DebugColor::Purple ,"{} ONE PASS OF NEST-VR!", format_elapsed!(now )); 
+
                 // Sample from uniform distribution
                 let mut rng = rand::thread_rng();
                 let uniform_dist = Uniform::new(0.0, 1.0);
@@ -970,10 +958,6 @@ impl BitrateManager {
 
                 let estimated_capacity_bps = self.peak_throughput_average.get_average();
                 let steps_bps = step_size_mbps * 1E6;
-
-
-
-
 
                 let threshold_fps = nfr_thresh * server_fps;
                 let threshold_rtt = frame_interval_s * rtt_thresh_scaling_factor;
@@ -1015,7 +999,7 @@ impl BitrateManager {
                 let heur_stats = HeuristicStats {
                     frame_interval_s: frame_interval_s,
                     server_fps: server_fps, // fps_tx
-                    steps_bps: steps_bps,
+                    steps_mbps: steps_bps / 1e6,
 
                     network_heur_fps: heur_fps, // fps_rx
                     rtt_avg_heur_s: rtt_avg_heur_s,
@@ -1025,12 +1009,15 @@ impl BitrateManager {
                     threshold_rtt_s: threshold_rtt,
                     threshold_u: threshold_u,
 
-                    requested_bitrate_bps: bitrate_bps,
+                    capacity_estimated_mbps: estimated_capacity_bps / 1E6, 
+
+                    requested_bitrate_mbps: bitrate_bps / 1e6,
                 };
 
                 print_prettyy!(DebugColor::Purple , " ------NeSt-VR STATS-------: {:#?}", heur_stats); 
 
                 self.last_target_bitrate_bps = bitrate_bps; 
+                self.last_target_bitrate_mbps = bitrate_bps / 1E6;  
                 bitrate_bps
             }
 
@@ -1042,41 +1029,41 @@ impl BitrateManager {
 
 
 
-    pub fn report_timestamp_change_bitrate(&mut self, now: TaiTime<0>) {
-        let dur = now.duration_since(TaiTime::EPOCH).as_secs_f64();
-        // TODO: ACTUAL IMPLEMENTATION OF ABR, now just:
+    // pub fn report_timestamp_change_bitrate(&mut self, now: TaiTime<0>) {
+    //     let dur = now.duration_since(TaiTime::EPOCH).as_secs_f64();
+    //     // TODO: ACTUAL IMPLEMENTATION OF ABR, now just:
 
-        // if dur < 5.0{
-        //     self.last_target_bitrate_mbps = 10.0;
-        // }
-        // else if 5.0 <= dur && dur < 10.0 {
-        //     self.last_target_bitrate_mbps = 0.01;
-        // }
-        if 10.0 <= dur && dur < 1000.0 {
-            // self.last_target_bitrate_mbps = 10.0; // just CBR for now
-        }
-        // } else if 12.0 <= dur && dur < 25.0 {
-        //     self.last_target_bitrate_mbps = 0.9;
-        // } else if 25.0 <= dur && dur < 30.0 {
-        //     self.last_target_bitrate_mbps = 10.0;
-        // } else if 35.0 <= dur && dur < 45.0 {
-        //     self.last_target_bitrate_mbps = 0.2;
-        // } else if 45.0 <= dur && dur < 55.0 {
-        //     self.last_target_bitrate_mbps = 10.0;
-        // } else if 55.0 <= dur && dur < 65.0 {
-        //     self.last_target_bitrate_mbps = 0.5;
-        // } else if 65.0 <= dur && dur < 75.0 {
-        //     self.last_target_bitrate_mbps = 10.0;
-        // } else if 75.0 <= dur && dur < 85.0 {
-        //     self.last_target_bitrate_mbps = 1.0;
+    //     // if dur < 5.0{
+    //     //     self.last_target_bitrate_mbps = 10.0;
+    //     // }
+    //     // else if 5.0 <= dur && dur < 10.0 {
+    //     //     self.last_target_bitrate_mbps = 0.01;
+    //     // }
+    //     if 10.0 <= dur && dur < 1000.0 {
+    //         // self.last_target_bitrate_mbps = 10.0; // just CBR for now
+    //     }
+    //     // } else if 12.0 <= dur && dur < 25.0 {
+    //     //     self.last_target_bitrate_mbps = 0.9;
+    //     // } else if 25.0 <= dur && dur < 30.0 {
+    //     //     self.last_target_bitrate_mbps = 10.0;
+    //     // } else if 35.0 <= dur && dur < 45.0 {
+    //     //     self.last_target_bitrate_mbps = 0.2;
+    //     // } else if 45.0 <= dur && dur < 55.0 {
+    //     //     self.last_target_bitrate_mbps = 10.0;
+    //     // } else if 55.0 <= dur && dur < 65.0 {
+    //     //     self.last_target_bitrate_mbps = 0.5;
+    //     // } else if 65.0 <= dur && dur < 75.0 {
+    //     //     self.last_target_bitrate_mbps = 10.0;
+    //     // } else if 75.0 <= dur && dur < 85.0 {
+    //     //     self.last_target_bitrate_mbps = 1.0;
         
-        debug_bgprint!(
-            DebugColor::Tan,
-            "t = {}, [DBG bitrate set] {} Mbps",
-            dur,
-            self.last_target_bitrate_mbps,
-        );
-    }
+    //     debug_bgprint!(
+    //         DebugColor::Tan,
+    //         "t = {}, [DBG bitrate set] {} Mbps",
+    //         dur,
+    //         self.last_target_bitrate_mbps,
+    //     );
+    // }
 }
 
 // static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> =
@@ -1232,27 +1219,11 @@ impl XRServer {
                         rtt = Duration::ZERO;
                     }
 
-                    // // Before removing an entry, check whether its lifetime has exceeded the expected range.
-                    // if let Some(send_instant) = map_rtt_lock.remove(&frame_id) {// Process RTT normally
-                    //         rtt = now.duration_since(send_instant);
-                    // } else {
-                    //     println!("Frame {} missing in map_rtt, possible packet loss or eviction!", frame_id);
-                    //     rtt = Duration::ZERO;
-                    // }
-                    // if let Some(send_instant) = hashmap.remove(&frame_id) {
-                    //     rtt = now.duration_since(send_instant);
-                    //     println!("rtt = {:.9}", rtt.as_secs_f64());
-                    // }
-                    // else {
-                    //     println!("frame {} RTT ZEROOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!",  network_stats.frame_index);
-                    //     rtt = Duration::ZERO;
-                    // }
-
                     debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
 
                     let (peak_network_throughput_bps, frame_interarrival_s) = self
                         .STATISTICS_MANAGER
-                        .report_network_statistics(network_stats, rtt, now);
+                        .report_network_statistics(network_stats, rtt, now, self.bitrate_manager.last_target_bitrate_bps);
 
                     // BITRATE_MANAGER.lock().report_network_statistics
                     self.bitrate_manager.report_network_statistics(
@@ -1261,11 +1232,6 @@ impl XRServer {
                         frame_interarrival_s,
                     );
 
-                    if now.duration_since(self.bitrate_manager.last_update_instant) >= Duration::from_secs(1){
-
-                        self.bitrate_manager.one_pass_abr(now); 
-                        self.bitrate_manager.last_update_instant = now; 
-                    }
                 }
                 ClientControlPacket::DeadlineShardLossStat(inner) => {
                     let frames_lost = inner.frame_indexes;
@@ -1481,14 +1447,25 @@ impl XRServer {
                 let is_idr = false;
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
 
-                self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
+                // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
+
+                if now.duration_since(self.bitrate_manager.last_update_instant) >= Duration::from_secs(1){
+
+                    self.bitrate_manager.one_pass_abr(now); 
+                    self.bitrate_manager.last_update_instant = now; 
+                }
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
-                // 
+                let max_bitrate_ladder_mbps : f32 = match self.bitrate_manager.bitrate_mode {
+                    BitrateMode::NestVr { max_bitrate_mbps, .. } => max_bitrate_mbps, // Extract max_bitrate_mbps
+                    _ => 100.0, 
+                };
+                
+                                // 
                 // let current_bitrate_mbps: f32 = self.bitrate_manager.one_pass_abr(); // for ABR bitrates
 
                 let mut buffer_emu =
                     send_socket // generate the actual video frame data
-                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self,  self.frames_sent_counter, &self.name_folder)
+                        .get_buffer_emu(&header, current_bitrate_mbps, now, self.ip_self,  self.frames_sent_counter, &self.name_folder, max_bitrate_ladder_mbps)
                         .await.unwrap();
 
                 if let Some(encoder_init) = send_socket.clone().ffmpeg_encoder{
@@ -3205,7 +3182,7 @@ impl XRClient {
                                     continue;
                                 }
                             }
-                            let hevc_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", self.name_folder, ip_client, next_frame_id);
+                            let hevc_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc", self.name_folder, ip_client, next_frame_id);
                             // println!("[DBG1] Processing frame ID: {}", next_frame_id); 
                             if std::path::Path::new(&hevc_path).exists(){
                                 if let Ok(hevc_data) =  fs::read(&hevc_path) {
@@ -3235,12 +3212,14 @@ impl XRClient {
 
                     // Reference frame handling
                     let ref_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,ip_client, id_f); 
-                    let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.hevc", self.name_folder, ip_client, id_f);
+                    let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc", self.name_folder, ip_client, id_f);
 
                     let mut retries = 100;
                     let mut ref_frame = Vec::new(); 
                     // Try reading the file with a more robust retry loop
                     for attempt in 1..=retries {
+                        println!("trying to read {hevc_file_path}\n");
+
                         match fs::read(&hevc_file_path) {
                             Ok(data) if !data.is_empty() => {
                                 // Successfully read non-empty data

@@ -1655,23 +1655,27 @@ pub struct GraphStatistics {
     pub actual_bitrate_bps: f32,
 }
 
+
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
 pub struct HeuristicStats {
-    pub frame_interval_s: f32,
-    pub server_fps: f32,
-    pub steps_bps: f32,
+        pub frame_interval_s: f32,
+        pub server_fps: f32,
+        pub steps_mbps: f32,
+    
+        pub network_heur_fps: f32,
+        pub rtt_avg_heur_s: f32,
+        pub random_prob: f32,
+    
+        pub threshold_fps: f32,
+        pub threshold_rtt_s: f32,
+        pub threshold_u: f32,
 
-    pub network_heur_fps: f32,
-    pub rtt_avg_heur_s: f32,
-    pub random_prob: f32,
+        pub capacity_estimated_mbps: f32, 
+    
+        pub requested_bitrate_mbps: f32,
+    }
 
-    pub threshold_fps: f32,
-    pub threshold_rtt_s: f32,
-    pub threshold_u: f32,
-
-    pub requested_bitrate_bps: f32,
-}
-
+    
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HapticsEvent {
     pub path: String,
