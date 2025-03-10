@@ -96,7 +96,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize =  60;  
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.35;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.55;
 pub const VMAF_BATCH_SIZE: usize = 10;  // Process 10 frames at a time
 pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000;  // Process batch after 1 second even if
 
@@ -120,7 +120,6 @@ static FFMPEG_CHILD: OnceLock<Arc<Mutex<Option<(ChildStdin, BufReader<ChildStdou
     OnceLock::new();
 
 
-
 pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
@@ -133,8 +132,10 @@ pub const DECODER_BUFFERING_FRAMES: usize = 10;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES/2;
 
 
-pub const VMAF_FRAME_GROUP_SIZE: usize = 2;
+pub const VMAF_FRAME_GROUP_SIZE: usize = 10;
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10); 
+pub const KEEP_FRAMES_DISK_INDEX: usize = 200; 
+
 
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -864,8 +865,8 @@ pub enum BitrateMode {
 #[allow(unused)]
 #[derive(Clone)]
 pub struct BitrateManager {
-    last_frame_instant: Instant,
-    last_update_instant: Instant,
+    last_frame_instant: TaiTime<0>,
+    last_update_instant: TaiTime<0>,
 
     pub bitrate_mode: BitrateMode, 
     frame_index: usize,
@@ -888,6 +889,18 @@ pub struct BitrateManager {
 }
 
 impl BitrateManager {
+
+    pub fn report_encoded_frame_server(&mut self, now: TaiTime<0> ){
+
+        print_prettyy!(DebugColor::Purple , "[bitrateManager] submitted encoded frame. avg_fps = {}", 1.0 / self.frame_interval_average.get_average().as_secs_f32());  
+        if self.last_frame_instant != TaiTime::EPOCH{
+            let dur = now.duration_since(self.last_frame_instant); 
+            self.frame_interval_average.submit_sample(dur);
+
+        }
+        self.last_frame_instant = now; 
+    }
+
     pub fn report_network_statistics(
         &mut self,
         network_rtt: Duration,
@@ -903,7 +916,7 @@ impl BitrateManager {
             .submit_sample(frame_interarrival_s);
     }
 
-    pub fn one_pass_abr(&mut self, ) -> f32 {
+    pub fn one_pass_abr(&mut self, now: TaiTime<0>, ) -> f32 {
         let bitrate_bps = match self.bitrate_mode{
             BitrateMode::ConstantMbps(bitrate_mbps) => bitrate_mbps as f32 * 1e6,
 
@@ -933,13 +946,13 @@ impl BitrateManager {
 
                     bitrate
                 }
-
+                print_prettyy!(DebugColor::Purple ,"{} ONE PASS OF NEST-VR!", format_elapsed!(now )); 
                 // Sample from uniform distribution
                 let mut rng = rand::thread_rng();
                 let uniform_dist = Uniform::new(0.0, 1.0);
                 let random_prob = rng.sample(uniform_dist);
 
-                let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
+                let mut bitrate_bps: f32 = self.last_target_bitrate_bps; 
 
                 let frame_interval_s = self.frame_interval_average.get_average().as_secs_f32();
                 let rtt_avg_heur_s = self.rtt_average.get_average().as_secs_f32();
@@ -958,22 +971,34 @@ impl BitrateManager {
                 let estimated_capacity_bps = self.peak_throughput_average.get_average();
                 let steps_bps = step_size_mbps * 1E6;
 
+
+
+
+
                 let threshold_fps = nfr_thresh * server_fps;
                 let threshold_rtt = frame_interval_s * rtt_thresh_scaling_factor;
                 let threshold_u = rtt_explor_prob;
+                print_prettyy!(DebugColor::Purple , "Server FPS = {}, nfr_thresh = {}, rtt_thresh = {}", server_fps, threshold_fps, threshold_rtt);  
+
 
                 if heur_fps >= threshold_fps {
                     if rtt_avg_heur_s > threshold_rtt {
                         if random_prob >= threshold_u {
+                            print_prettyy!(DebugColor::Purple , " BITRATE DECREASE", );  
+
                             bitrate_bps -= steps_bps; // decrease bitrate by 1 step
                         }
                     } else {
                         if random_prob <= threshold_u {
+                            print_prettyy!(DebugColor::Purple , " BITRATE INCREASE", );  
+
                             bitrate_bps += steps_bps; // increase bitrate by 1 step
                         }
                     }
                 } else {
                     bitrate_bps -= steps_bps; // decrease bitrate by 1 step
+                    print_prettyy!(DebugColor::Purple , " BITRATE DECREASE 2", );  
+
                 }
 
                 // Ensure bitrate is within allowed range
@@ -1003,25 +1028,14 @@ impl BitrateManager {
                     requested_bitrate_bps: bitrate_bps,
                 };
 
-                debug_bgprint!(DebugColor::Purple , " ------NeSt-VR STATS-------: {:#?}", heur_stats); 
-
-                // alvr_events::send_event(EventType::HeuristicStats(heur_stats));
-
-                // if let Switch::Enabled(max) = max_bitrate_mbps {
-                //     let maxi = *max as f32 * 1e6;
-                //     stats.manual_max_bps = Some(maxi);
-                // }
-                // if let Switch::Enabled(min) = min_bitrate_mbps {
-                //     let mini = *min as f32 * 1e6;
-                //     stats.manual_min_bps = Some(mini);
-                // }
+                print_prettyy!(DebugColor::Purple , " ------NeSt-VR STATS-------: {:#?}", heur_stats); 
 
                 self.last_target_bitrate_bps = bitrate_bps; 
                 bitrate_bps
             }
 
         }; 
-        debug_bgprint!(DebugColor::Purple , " Bitrate chosen -> {:.3} mbps", bitrate_bps / 1e6); 
+        print_prettyy!(DebugColor::Purple , " Bitrate chosen -> {:.3} mbps  (last = {:.2})", bitrate_bps / 1e6, self.last_target_bitrate_bps / 1e6); 
         bitrate_bps
     }
 
@@ -1080,8 +1094,8 @@ impl BitrateManager {
     // TODO: Add method for CBR
     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32) -> Self {
         Self {
-            last_frame_instant: Instant::now(),
-            last_update_instant: Instant::now(),
+            last_frame_instant: TaiTime::EPOCH,
+            last_update_instant: TaiTime::EPOCH,
 
             frame_index: 0,
 
@@ -1100,7 +1114,19 @@ impl BitrateManager {
                 max_history_size,
             ),
 
-            bitrate_mode: BitrateMode::ConstantMbps(_INITIAL_BITRATE_MBPS_SIM as u64),   // ONLY CBR FOR NOW!!!
+            // bitrate_mode: BitrateMode::ConstantMbps( initial_bitrate_mbps as u64),   // ONLY CBR FOR NOW!!!
+            bitrate_mode: BitrateMode::NestVr { 
+                update_interval_nestvr_s: 1.0, 
+                max_bitrate_mbps: 100.0,
+                min_bitrate_mbps: 10.0,
+                initial_bitrate_mbps: 100.0, 
+                step_size_mbps: 5.0 ,
+                capacity_scaling_factor: 0.9, 
+                rtt_explor_prob: 0.25,
+                nfr_thresh: 0.99,
+                rtt_thresh_scaling_factor: 22.0,  
+            }, 
+
             last_target_bitrate_bps: 0.0, 
         }
     }
@@ -1234,6 +1260,12 @@ impl XRServer {
                         peak_network_throughput_bps,
                         frame_interarrival_s,
                     );
+
+                    if now.duration_since(self.bitrate_manager.last_update_instant) >= Duration::from_secs(1){
+
+                        self.bitrate_manager.one_pass_abr(now); 
+                        self.bitrate_manager.last_update_instant = now; 
+                    }
                 }
                 ClientControlPacket::DeadlineShardLossStat(inner) => {
                     let frames_lost = inner.frame_indexes;
@@ -1493,10 +1525,14 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-                let normal = Normal::new(0.0, 2.0).unwrap(); // Mean = 0, Std dev = 5
-                let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
+                // let normal = Normal::new(0.0, 2.0).unwrap(); // Mean = 0, Std dev = 5
+                // let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
                 
-                let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps + epsilon));
+                let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps )); // no epsilon for now, deterministic FPS at server. 
+
+
+                self.bitrate_manager.report_encoded_frame_server(now); 
+
 
                 context
                     .scheduler
@@ -1669,6 +1705,7 @@ impl MetricsLogger {
         // Convert reference frame to Y4M
         let ref_status = Command::new("ffmpeg")
             .args(&[
+                "-loglevel", "error", // Add this line to reduce verbosity
                 "-y",
                 "-f", "rawvideo",
                 "-pixel_format", "rgb24",
@@ -1686,9 +1723,8 @@ impl MetricsLogger {
         // Convert lossy frame to Y4M
         let lossy_status = Command::new("ffmpeg")
             .args(&[
+                "-loglevel", "error", // Add this line to reduce verbosity
                 "-y",
-                "-v", "quiet", 
-                "-loglevel", "error", // Set log level to 'error'
                 "-f", "rawvideo",
                 "-pixel_format", "rgb24",
                 "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
@@ -1714,8 +1750,7 @@ impl MetricsLogger {
         // Calculate all metrics in a single ffmpeg call
         let metrics_status = Command::new("ffmpeg")
             .args(&[
-                "-loglevel", "error", // Set log level to 'error'
-                "-v", "quiet", 
+                "-loglevel", "error", // Add this line to reduce verbosity
                 "-i", &ref_y4m,
                 "-i", &lossy_y4m,
                 "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
@@ -1880,7 +1915,6 @@ pub struct XRClient {
     current_frame_group: Option<FrameGroup>,
     group_tx: Option<Sender<FrameGroup>>,
     enable_batch_processing: bool,
-    last_cleanup_time: TaiTime<0>,
     cleanup_interval: std::time::Duration,
     group_rx: Option<Receiver<FrameGroup>>, 
 
@@ -1955,7 +1989,6 @@ impl XRClient {
             group_tx: Some(group_tx),
             group_rx: Some(group_rx), 
             enable_batch_processing: false,
-            last_cleanup_time: now, // Use your simulator's initial time
             cleanup_interval: std::time::Duration::from_secs(8), // Clea
 
             last_processed_frame_id: 0,
@@ -2487,49 +2520,6 @@ impl XRClient {
         rgb
     }
 
-    pub async fn cleanup_old_frames(&mut self, now: TaiTime<0>, ip: IpAddr) {
-        // Only run cleanup at specified intervals
-        let elapsed = now.duration_since(self.last_cleanup_time);
-        if elapsed < self.cleanup_interval {
-            return;
-        }
-        
-        print_pretty!(DebugColor::DarkRed, "Cleaning up old VMAF analysis frames", );
-        self.last_cleanup_time = now;
-        
-        // Calculate cutoff time (current time - retention period)
-        let retention_period = self.cleanup_interval;  // Keep files for N seconds
-        let cutoff_time = now - retention_period;
-        
-        let ref_path = format!("Video_Sink/{}/{}/reference_rgb", self.name_folder,ip);
-        let lossy_path = format!("Video_Sink/{}/{}/lossy_rgb", self.name_folder ,ip);
-
-        // Clean up directories
-        for dir_name in &[ ref_path, lossy_path] {
-            if let Ok(mut entries) = std::fs::read_dir(dir_name) {
-                while let Some(Ok(entry)) = entries.next() {
-                    if let Ok(metadata) = entry.metadata() {
-                        if let Ok(modified) = metadata.modified() {
-
-
-                            let modified_time = std::time::SystemTime::from(modified);
-                            let now_systime = std::time::SystemTime::now(); 
-                            // let now_systime = std::time::SystemTime::from(now.to_system_time(32).unwrap());
-                            
-                            if modified_time < now_systime - retention_period {
-                                if let Err(e) = std::fs::remove_file(entry.path()) {
-                                    eprintln!("Failed to delete temporary file {}: {}", 
-                                        entry.path().display(), e);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-
     pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr) -> (Vec<u8>, Vec<u32>) {
         // Validate input
         let rgb_path = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,client_ip, frame_index);
@@ -2681,12 +2671,139 @@ impl XRClient {
         }
     }
 
+    pub async fn process_vmaf_batch(&mut self, now: TaiTime<0>) -> Result<()> {
+        if self.frame_batch.is_empty() {
+            return Ok(());  // Nothing to process
+        }
+        
+        println!("Processing VMAF batch of {} frames", self.frame_batch.len());
+        
+        // Ensure metrics logger is initialized (once per batch)
+        if self.metrics_logger.is_none() {
+            if let Ok(logger) = MetricsLogger::new(self.server_ip, &self.name_folder) {
+                println!("Initialized metrics logger for VMAF batch analysis");
+                self.metrics_logger = Some(logger);
+            } else {
+                eprintln!("Failed to initialize metrics logger for batch");
+                return Ok(());
+            }
+        }
+        
+        // Process all frames in the batch
+        if let Some(logger) = &self.metrics_logger {
+            for (frame_id, sample, ref_sample, timestamp_ms) in self.frame_batch.drain(..) {
+                // Save frames to temporary files (still needed for VMAF)
+                let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+                let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
+                let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
+                
+                // Create directories lazily
+                std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, self.server_ip))
+                    .unwrap_or_else(|e| eprintln!("Failed to create reference directory: {}", e));
+                std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, self.server_ip))
+                    .unwrap_or_else(|e| eprintln!("Failed to create lossy directory: {}", e));
+                    
+                // Write frames to disk
+                if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
+                    eprintln!("Failed to write reference frame: {}", e);
+                    continue;
+                }
+                if let Err(e) = std::fs::write(&lossy_path, &sample) {
+                    eprintln!("Failed to write lossy frame: {}", e);
+                    continue;
+                }
+                
+                // Process frame metrics
+                if let Err(e) = logger.process_frame_metrics(
+                    frame_id as u64,
+                    timestamp_ms,
+                    &ref_path,
+                    &lossy_path
+                ).await {
+                    eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
+                }
+            }
+        }
+        
+        // Update cleanup timer
+        self.last_batch_process_time = now;
+        
+        Ok(())
+    }
 
-   
+    pub async fn vmaf_analysis_batch(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
+        // Skip if either sample is empty
+        if sample.is_empty() || ref_sample.is_empty() {
+            println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
+                     frame_id, sample.len(), ref_sample.len());
+            return Ok(());
+        }
+        
+        // Calculate timestamp in milliseconds
+        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
+        
+        // Add frame to batch
+        self.frame_batch.push((frame_id, sample, ref_sample, timestamp_ms));
+        
+        // Process batch if it's full or timeout occurred
+        let should_process_batch = self.frame_batch.len() >= VMAF_BATCH_SIZE || 
+                                  now.duration_since(self.last_batch_process_time).as_millis() >= VMAF_BATCH_TIMEOUT_MS as u128;
+        
+        if should_process_batch {
+            self.process_vmaf_batch(now).await?;
+        }
+        
+        Ok(())
+    }
+
+    fn cleanup_old_frames_vmaf(&self, current_frame_id: usize, ip: IpAddr) -> Result<()> {
+        // Only clean up frames that are at least 100 frames behind
+        if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
+            return Ok(());
+        }
+
+        let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
+        let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+        
+        // Define paths to reference and lossy directories
+        let ref_dir = format!("{}/{}/reference_rgb", base_dir, ip);
+        let lossy_dir = format!("{}/{}/lossy_rgb", base_dir, ip);
+        
+        // Function to remove older frames from a directory
+        let remove_old_frames = |dir: &str| -> Result<()> {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                        // Parse frame number from filename (e.g., "frame_0042.rgb")
+                        if let Some(frame_str) = filename.strip_prefix("frame_").and_then(|s| s.strip_suffix(".rgb")) {
+                            if let Ok(frame_num) = frame_str.parse::<usize>() {
+                                if frame_num < oldest_frame_to_keep {
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        eprintln!("Failed to remove old frame {}: {}", path.display(), e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        
+        // Clean up both directories
+        remove_old_frames(&ref_dir)?;
+        remove_old_frames(&lossy_dir)?;
+        
+        if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
+            println!("Cleaned up frames older than {}", oldest_frame_to_keep);
+        }
+        
+        Ok(())
+    }
 
     pub async fn vmaf_analysis(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
         // Skip if either sample is empty
-
             println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
                 sample.len(), ref_sample.len());
                 println!("VMAF analysis - Current frame size: {}, Reference frame size: {}", 
@@ -2801,10 +2918,8 @@ impl XRClient {
                 }
             }
             // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 33333333333333 ? ", ); 
-
         
             // Update clean-up timer
-            self.last_cleanup_time = now;
             
             Ok(())
     }
@@ -2832,6 +2947,70 @@ impl XRClient {
         }
         false
     }
+
+    fn cleanup_hevc_rgb_files(&self, current_frame_id: usize, ip: IpAddr) -> Result<()> {
+        // Only clean up frames that are at least 100 frames behind
+        if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
+            return Ok(());
+        }
+    
+        let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
+        let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+        
+        // Define path to hevc_ref directory
+        let hevc_ref_dir = format!("{}/{}/hevc_ref", base_dir, ip);
+        
+        // Ensure the directory exists before trying to read it
+        if !std::path::Path::new(&hevc_ref_dir).exists() {
+            return Ok(());  // Nothing to clean if directory doesn't exist
+        }
+        
+        // Read the directory and find .rgb files to remove
+        if let Ok(entries) = std::fs::read_dir(&hevc_ref_dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                
+                // Only process .rgb files
+                if let Some(extension) = path.extension() {
+                    if extension == "rgb" {
+                        if let Some(filename) = path.file_stem() {
+                            if let Some(file_str) = filename.to_str() {
+                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
+                                if let Ok(frame_num) = file_str.parse::<usize>() {
+                                    if frame_num < oldest_frame_to_keep {
+                                        if let Err(e) = std::fs::remove_file(&path) {
+                                            eprintln!("Failed to remove old RGB file {}: {}", path.display(), e);
+                                        } 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else if extension == "hevc" {
+                        if let Some(filename) = path.file_stem() {
+                            if let Some(file_str) = filename.to_str() {
+                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
+                                if let Ok(frame_num) = file_str.parse::<usize>() {
+                                    if frame_num < oldest_frame_to_keep {
+                                        if let Err(e) = std::fs::remove_file(&path) {
+                                            eprintln!("Failed to remove old RGB file {}: {}", path.display(), e);
+                                        } 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
+            println!("Cleaned up HEVC RGB files older than frame {}", oldest_frame_to_keep);
+        }
+        
+        Ok(())
+    }
+
 
     pub fn vsync<'a>(
         &'a mut self,
@@ -2893,8 +3072,8 @@ impl XRClient {
                         
 
                         // Mark decoded and reference sides
-                        render_text(&mut combined_buffer, "DECODED FRAME", 10, 10, window_width, text_color, 2);
-                        render_text(&mut combined_buffer, "REFERENCE FRAME", scaled_width + 15, 10, window_width, text_color, 2);
+                        render_text(&mut combined_buffer, "DECODED FRAME", 10, 10, window_width, text_color, 3);
+                        render_text(&mut combined_buffer, "REFERENCE FRAME", scaled_width + 15, 10, window_width, text_color, 3);
                         
                         // Frame info
                         let frame_info = format!("FRAME #{}", display_frame_id);
@@ -2960,6 +3139,12 @@ impl XRClient {
 
                 
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
+
+
+
+
+
+
                     let subsample = video_frame[0..10.min(video_frame.len())].to_vec();
                     
                     let mut ip_client = self.server_ip.clone();
@@ -2973,7 +3158,20 @@ impl XRClient {
                     }
                     print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_f);                                                               
 
-                                        // Before decoding the reference frame, ensure decoder consistency
+                    if id_f % 10 == 0 {
+
+                        if USE_VMAF
+                        {
+                            if let Err(e) = self.cleanup_old_frames_vmaf(id_f, ip_client) {
+                                eprintln!("Error during frame cleanup: {}", e);
+                            }
+                        }
+                    
+    
+                        if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client){
+                            eprintln!("Error during hevc ref frame cleanup: {}", e); 
+                        }
+                    }
 
                     if id_f > self.last_processed_frame_id + 1 {
                         is_frame_lost = true; 
@@ -3178,45 +3376,8 @@ impl XRClient {
                                     self.ref_saw_keyframe_last_t = now;                                
                                 } 
 
-                                if now.duration_since(self.t_0) >= Duration::from_secs(13)  // just some starting time before cleaning. 
-                                {
-                                    self.cleanup_old_frames(now, ip_client).await; 
-                                }
-
                                 // When processing a decoded frame
                                 if !frame.is_empty() {
-
-                                    // let mut pair_final = FramePair::new();   /// DOES NOT WORK!! ////
-
-                                    // // Now check if we have a reference frame for this adjusted ID
-                                    // if !ref_pixels.is_empty() {
-                                    //     if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
-                                    //         pair.reference = Some(ref_pixels.clone());
-                                    //         pair_final.reference = Some(ref_pixels.clone());
-                                    //         print_pretty!(DebugColor::Yellow, "Updated reference for pair #{}, len = {}", id_f, ref_pixels.len());
-                                    //     }
-                                    // }
-                                    // else if let Ok(rgb_ref_frame) = std::fs::read(&ref_path) {
-                                    //         if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
-                                    //             let veec = convert_rgb_to_u32(&rgb_ref_frame.clone(), WIDTH_ENCODER, HEIGHT_ENCODER).unwrap(); 
-                                    //             pair.reference = Some(veec.clone());
-                                    //             pair_final.reference = Some(veec);
-
-                                    //             print_pretty!(DebugColor::Yellow, "Updated reference (from file) for pair #{}, len = {}", id_f, ref_pixels.len());           
-                                    //         }
-                                    // }
-                                    // else{
-                                    //     pair_final.reference = None; 
-                                    //     println!("ERROOOOOOOOR WITH REFERENCE SAMPLE!!! NO FILE OR DATA"); 
-                                    // }
-                                    // pair_final.decoded = Some(frame.clone()); 
-                                    // pair_final.frame_id = id_f;
-                                    // pair_final.timestamp = Instant::now();  
-
-                                    // print_pretty!(DebugColor::Lavender, "Inserting frame {} : decoded size = {}, ref size = {} ", id_f, frame.len(), ref_pixels.len()); 
-                                        
-                                    // self.frame_pairs.insert(id_f, pair_final);
-                                    
 
 
                                     // Now check if we have a reference frame for this adjusted ID
@@ -3305,16 +3466,8 @@ impl XRClient {
                         TARGET_FRAMES_DECODER_QUEUE
                     );
                 } 
-                //  if self.decoder_queue.len() > TARGET_FRAMES_DECODER_QUEUE {
-                //     T_vsync = T_vsync.mul_f64(0.5);
-                //     print_pretty!(
-                //         DebugColor::Violet,
-                //         "[DBG VSYNC] Dividing time ({}) until frame deque due to length ({}) OVER target ({})",
-                //         T_vsync.as_secs_f32(),
-                //         self.decoder_queue.len(),
-                //         TARGET_FRAMES_DECODER_QUEUE
-                //     );
-                // }
+                
+           
 
                 context
                     .scheduler

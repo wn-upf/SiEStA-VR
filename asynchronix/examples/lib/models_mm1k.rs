@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, print_pretty};
+use crate::{debug_bgprint, print_pretty, print_prettyy};
 use asynchronix::time;
 use ffmpeg_next::codec::Debug;
 use core::net;
@@ -77,10 +77,10 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
 pub const STEP1_TBEGIN: f64 = 13.0;
-pub const STEP1_TEND: f64 =   14.0;
+pub const STEP1_TEND: f64 =   16.0;
 
-pub const STEP2_TBEGIN: f64 = 18.0;
-pub const STEP2_TEND: f64 =   18.5;
+pub const STEP2_TBEGIN: f64 = 30.0;
+pub const STEP2_TEND: f64 =   32.5;
 
 pub const STEP3_TBEGIN: f64 = 20.0;
 pub const STEP3_TEND: f64 =   20.1;
@@ -461,12 +461,12 @@ impl QueueMechanism {
         let valid_from2: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP2_TBEGIN)).unwrap();
         let valid_until2: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP2_TEND)).unwrap();
 
-        let valid_from3= TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP3_TBEGIN)).unwrap();
-        let valid_until3 = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP3_TEND)).unwrap();
+        let valid_from3: TaiTime<0>= TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP3_TBEGIN)).unwrap();
+        let valid_until3: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP3_TEND)).unwrap();
 
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.001), valid_from: valid_from, valid_until: valid_until });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.1), valid_from: valid_from3, valid_until: valid_until3 });
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.008), valid_from: valid_from, valid_until: valid_until });
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.1), valid_from: valid_from3, valid_until: valid_until3 });
 
 
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
@@ -752,7 +752,7 @@ impl NetworkPatternEmulator {
                         let rand_value: f64 = rng.gen(); // Generate a random value between 0 and 1
                 
                         if rand_value < *drop_probability {
-                            print_pretty!(DebugColor::Red, "[RANDOM LOSS ( {} -> {} )]  prob= {:.4}! {:?}",format_elapsed!(valid_from), format_elapsed!(valid_until),*drop_probability, packet.print(DebugColor::Red)); 
+                            print_prettyy!(DebugColor::Red, "[RANDOM LOSS ( {} -> {} )]  prob= {:.4}! {:?}",format_elapsed!(valid_from), format_elapsed!(valid_until),*drop_probability, packet.print(DebugColor::Red)); 
                             return None; // Drop the packet
                         }
                         else{
