@@ -681,7 +681,7 @@ impl HevcDecoder {
         }
         
         // If we've processed enough frames, consider the decoder primed
-        if !self.priming_complete && self.keyframes_seen >= 1 && self.frames_processed >= 5 {
+        if !self.priming_complete && self.keyframes_seen >= 10 && self.frames_processed >= 10 {
             println!("{} 🚀 Decoder priming complete! Processed {} frames including {} keyframes",
                     self.decoder_string ,self.frames_processed, self.keyframes_seen);
             self.priming_complete = true;
@@ -1471,6 +1471,9 @@ impl XRServer {
                 if let Some(encoder_init) = send_socket.clone().ffmpeg_encoder{
                     self.video_app_sender.as_mut().unwrap().ffmpeg_encoder = Some(encoder_init);
                     // println!("ENCODER INITIALIZED"); 
+                }
+                if let Some(maxencoder_init) = send_socket.clone().ffmpeg_maxbitrate_encoder{
+                    self.video_app_sender.as_mut().unwrap().ffmpeg_maxbitrate_encoder = Some(maxencoder_init);  // ACTUALLY CONSERVE THE COPY, CRITICAL! 
                 }
 
                 // Use DashMap's thread-safe `insert` API instead of write locks
@@ -3214,7 +3217,7 @@ impl XRClient {
                     let ref_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,ip_client, id_f); 
                     let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc", self.name_folder, ip_client, id_f);
 
-                    let mut retries = 100;
+                    let mut retries = 10;
                     let mut ref_frame = Vec::new(); 
                     // Try reading the file with a more robust retry loop
                     for attempt in 1..=retries {
