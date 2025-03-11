@@ -14,7 +14,7 @@ use std::{
 };
 use anyhow::Result;
 use async_std::stream::StreamExt; // Add this import to fix the .next() error
-
+use std::net::Ipv4Addr;
 use tempfile::TempDir;
 use tokio::sync::Mutex as tokMutex; 
 use crate::lib::HevcParser;
@@ -681,7 +681,7 @@ impl HevcDecoder {
         }
         
         // If we've processed enough frames, consider the decoder primed
-        if !self.priming_complete && self.keyframes_seen >= 10 && self.frames_processed >= 10 {
+        if !self.priming_complete && self.keyframes_seen >= 20 && self.frames_processed >= 200 {
             println!("{} 🚀 Decoder priming complete! Processed {} frames including {} keyframes",
                     self.decoder_string ,self.frames_processed, self.keyframes_seen);
             self.priming_complete = true;
@@ -1104,9 +1104,9 @@ impl BitrateManager {
             // bitrate_mode: BitrateMode::ConstantMbps( initial_bitrate_mbps as u64),   // ONLY CBR FOR NOW!!!
             bitrate_mode: BitrateMode::NestVr { 
                 update_interval_nestvr_s: 1.0, 
-                max_bitrate_mbps: 100.0,
-                min_bitrate_mbps: 10.0,
-                initial_bitrate_mbps: 100.0, 
+                max_bitrate_mbps: 100.2,
+                min_bitrate_mbps: 0.2,
+                initial_bitrate_mbps: 100.2 , 
                 step_size_mbps: 5.0 ,
                 capacity_scaling_factor: 0.9, 
                 rtt_explor_prob: 0.25,
@@ -1881,6 +1881,7 @@ pub struct XRClient {
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>,  // Buffer to hold initial frames
     initialization_buffer_ref: Vec<Vec<u8>>, 
+    initialization_buffer_max: Vec<Vec<u8>>, 
 
     min_buffered_frames: usize,           // Minimum frames to buffer before decoding
     dec_saw_keyframe: bool,     
@@ -1906,6 +1907,7 @@ pub struct XRClient {
 
         // Add this to your struct
     frame_pairs: HashMap<usize, FramePair>,
+    ref_max_pairs: HashMap<usize, FramePair>, 
     last_displayed_pair_id: usize,
     display_queue: VecDeque<usize>, // Queue of frame IDs ready to display
 
@@ -1954,6 +1956,7 @@ impl XRClient {
                         // Add these new fields:
             initialization_buffer: Vec::new(),   // Buffer to hold initial frames
             initialization_buffer_ref: Vec::new(), 
+            initialization_buffer_max: Vec::new(), 
             is_decoder_ready: false,                  // Flag to track if decoder is ready
             is_ref_decoder_ready: false, 
             min_buffered_frames: 10,           // Minimum frames to buffer before decoding
@@ -1976,6 +1979,7 @@ impl XRClient {
             last_displayed_frame_id: 0, 
 
             frame_pairs: HashMap::new(), 
+            ref_max_pairs: HashMap::new(), 
             last_displayed_pair_id: 0, 
             display_queue: VecDeque::new(), 
             keyframe_sync_state: KeyframeSyncState::default(),
@@ -2499,10 +2503,37 @@ impl XRClient {
 
         rgb
     }
-
-    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr) -> (Vec<u8>, Vec<u32>) {
+        // Generate decoder key from client IP and stream type
+    fn get_decoder_key(&mut self, client_ip: IpAddr, is_max_bitrate: bool) -> IpAddr {
+        if is_max_bitrate {
+            // Use original IP for max bitrate streams
+            return client_ip;
+        }
+        
+        match client_ip {
+            IpAddr::V4(ipv4) => {
+                let mut octets = ipv4.octets();
+                // Modify last octet to create a virtual IP for regular streams
+                // Adding 100 creates sufficient separation while staying within valid IPv4 range
+                octets[3] = octets[3].saturating_add(100);
+                IpAddr::V4(Ipv4Addr::from(octets))
+            },
+            _ => {  println!("use ipv4 for now!! warning");
+                    client_ip  
+                 }
+        }
+    }
+    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr, is_max_bitrate: bool) -> (Vec<u8>, Vec<u32>) {
         // Validate input
-        let rgb_path = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,client_ip, frame_index);
+        
+        let decoder_key: IpAddr = self.get_decoder_key(client_ip, is_max_bitrate);
+        
+        let rgb_path = if is_max_bitrate{
+            format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}.rgb",self.name_folder ,client_ip, frame_index)
+            }
+            else{
+                format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,client_ip, frame_index)
+            }; 
         if std::path::Path::new(&rgb_path).exists() {
             match fs::read(&rgb_path) {
                 Ok(rgb_data) if !rgb_data.is_empty() => {
@@ -2516,18 +2547,19 @@ impl XRClient {
         
         let encoded_length = encoded_buffer.len();
         if encoded_buffer.is_empty() {
-            println!("[XRClient DECODE REF {}] WARNING: Empty encoded buffer received!", client_ip );
+            println!("[XRClient DECODE REF {}] WARNING: Empty encoded buffer received!", decoder_key );
             return (Vec::new(), Vec::new());
         }
-        
         {
             let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+            
+            
             if !decoders.contains_key(&client_ip) {
                 print_pretty!(DebugColor::Cyan, 
-                    "Initializing reference decoder for client {}", client_ip);
+                    "Initializing reference decoder for client {}", decoder_key);
                 decoders.insert(
-                    client_ip.clone(), 
-                    HevcDecoder::new(FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[REF_DECODER {}]", client_ip))
+                    decoder_key.clone(), 
+                    HevcDecoder::new(FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[REF_DECODER {}]", decoder_key))
                 );
             }
         }
@@ -2535,13 +2567,13 @@ impl XRClient {
         // Now use the decoder - second lock scope to minimize lock time
         let result = {
             let mut decoders = REFERENCE_DECODERS.lock().unwrap();
-            if let Some(decoder) = decoders.get_mut(&client_ip) {
+            if let Some(decoder) = decoders.get_mut(&decoder_key) {
                 // Check if this is a keyframe for logging
                 let is_keyframe = decoder.contains_keyframe(&encoded_buffer);
                 let frame_display = if is_keyframe { "KEYFRAME" } else { "frame" };
                 print_pretty!(DebugColor::Cyan, 
                     "{} - Decoding reference HEVC {} #{} of size: {} bytes",
-                    client_ip,frame_display, frame_index, encoded_length
+                    decoder_key,frame_display, frame_index, encoded_length
                 );
                 
                 // Process the frame
@@ -2651,91 +2683,7 @@ impl XRClient {
         }
     }
 
-    pub async fn process_vmaf_batch(&mut self, now: TaiTime<0>) -> Result<()> {
-        if self.frame_batch.is_empty() {
-            return Ok(());  // Nothing to process
-        }
-        
-        println!("Processing VMAF batch of {} frames", self.frame_batch.len());
-        
-        // Ensure metrics logger is initialized (once per batch)
-        if self.metrics_logger.is_none() {
-            if let Ok(logger) = MetricsLogger::new(self.server_ip, &self.name_folder) {
-                println!("Initialized metrics logger for VMAF batch analysis");
-                self.metrics_logger = Some(logger);
-            } else {
-                eprintln!("Failed to initialize metrics logger for batch");
-                return Ok(());
-            }
-        }
-        
-        // Process all frames in the batch
-        if let Some(logger) = &self.metrics_logger {
-            for (frame_id, sample, ref_sample, timestamp_ms) in self.frame_batch.drain(..) {
-                // Save frames to temporary files (still needed for VMAF)
-                let base_dir = &format!("Video_Sink/{}", &self.name_folder);
-                let ref_path = format!("{}/{}/reference_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
-                let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, self.server_ip, frame_id);
-                
-                // Create directories lazily
-                std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, self.server_ip))
-                    .unwrap_or_else(|e| eprintln!("Failed to create reference directory: {}", e));
-                std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, self.server_ip))
-                    .unwrap_or_else(|e| eprintln!("Failed to create lossy directory: {}", e));
-                    
-                // Write frames to disk
-                if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
-                    eprintln!("Failed to write reference frame: {}", e);
-                    continue;
-                }
-                if let Err(e) = std::fs::write(&lossy_path, &sample) {
-                    eprintln!("Failed to write lossy frame: {}", e);
-                    continue;
-                }
-                
-                // Process frame metrics
-                if let Err(e) = logger.process_frame_metrics(
-                    frame_id as u64,
-                    timestamp_ms,
-                    &ref_path,
-                    &lossy_path
-                ).await {
-                    eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
-                }
-            }
-        }
-        
-        // Update cleanup timer
-        self.last_batch_process_time = now;
-        
-        Ok(())
-    }
-
-    pub async fn vmaf_analysis_batch(&mut self, sample: Vec<u8>, ref_sample: Vec<u8>, now: TaiTime<0>, frame_id: usize, ip: IpAddr) -> Result<()> {
-        // Skip if either sample is empty
-        if sample.is_empty() || ref_sample.is_empty() {
-            println!("Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}", 
-                     frame_id, sample.len(), ref_sample.len());
-            return Ok(());
-        }
-        
-        // Calculate timestamp in milliseconds
-        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
-        
-        // Add frame to batch
-        self.frame_batch.push((frame_id, sample, ref_sample, timestamp_ms));
-        
-        // Process batch if it's full or timeout occurred
-        let should_process_batch = self.frame_batch.len() >= VMAF_BATCH_SIZE || 
-                                  now.duration_since(self.last_batch_process_time).as_millis() >= VMAF_BATCH_TIMEOUT_MS as u128;
-        
-        if should_process_batch {
-            self.process_vmaf_batch(now).await?;
-        }
-        
-        Ok(())
-    }
-
+ 
     fn cleanup_old_frames_vmaf(&self, current_frame_id: usize, ip: IpAddr) -> Result<()> {
         // Only clean up frames that are at least 100 frames behind
         if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
@@ -2935,17 +2883,21 @@ impl XRClient {
         }
     
         let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
-        let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+        let base_dir = &format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}", &self.name_folder);
         
         // Define path to hevc_ref directory
         let hevc_ref_dir = format!("{}/{}/hevc_ref", base_dir, ip);
+        let max_ref_dir = format!("{}/{}/hevc_max", base_dir, ip);
         
         // Ensure the directory exists before trying to read it
         if !std::path::Path::new(&hevc_ref_dir).exists() {
             return Ok(());  // Nothing to clean if directory doesn't exist
         }
+        if !std::path::Path::new(&max_ref_dir).exists() {
+            return Ok(());  // Nothing to clean if directory doesn't exist
+        }
         
-        // Read the directory and find .rgb files to remove
+
         if let Ok(entries) = std::fs::read_dir(&hevc_ref_dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
@@ -2983,6 +2935,46 @@ impl XRClient {
                 }
             }
         }
+
+
+        // Read the directory and find .rgb files to remove
+        if let Ok(entries) = std::fs::read_dir(&max_ref_dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                
+                // Only process .rgb files
+                if let Some(extension) = path.extension() {
+                    if extension == "rgb" {
+                        if let Some(filename) = path.file_stem() {
+                            if let Some(file_str) = filename.to_str() {
+                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
+                                if let Ok(frame_num) = file_str.parse::<usize>() {
+                                    if frame_num < oldest_frame_to_keep {
+                                        if let Err(e) = std::fs::remove_file(&path) {
+                                            eprintln!("Failed to remove old MAX RGB file {}: {}", path.display(), e);
+                                        } 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else if extension == "hevc" {
+                        if let Some(filename) = path.file_stem() {
+                            if let Some(file_str) = filename.to_str() {
+                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
+                                if let Ok(frame_num) = file_str.parse::<usize>() {
+                                    if frame_num < oldest_frame_to_keep {
+                                        if let Err(e) = std::fs::remove_file(&path) {
+                                            eprintln!("Failed to remove old MAX RGB file {}: {}", path.display(), e);
+                                        } 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
             println!("Cleaned up HEVC RGB files older than frame {}", oldest_frame_to_keep);
@@ -2991,6 +2983,119 @@ impl XRClient {
         Ok(())
     }
 
+    pub fn display_bitrate_comparison(
+        &mut self, 
+        max_bitrate_pixels: &[u32],
+        current_bitrate_pixels: &[u32],
+        frame_id: usize,
+        server_ip: &IpAddr,
+        now: TaiTime<0>,
+    ) {
+        // Validate input - ensure both frames contain data
+        if max_bitrate_pixels.is_empty() || current_bitrate_pixels.is_empty() {
+            print_pretty!(DebugColor::Red, 
+                "{} - Cannot display bitrate comparison for frame #{}, one or both frames are empty", 
+                server_ip, frame_id, );
+            return;
+        }
+    
+        // Setup scaling factors to match existing display logic
+        let scale_factor = SCALE_FACTOR_WINDOW;
+        let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+        let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+        
+        // Create a wider window to hold both frames with a separator
+        let window_width = scaled_width * 2 + 10;
+        let window_title = format!("{} - Bitrate Compare {}", format_elapsed!(now), server_ip);
+        
+        // Create combined buffer
+        let mut combined_buffer = vec![0u32; window_width * scaled_height];
+        
+        // Scale and combine the frames
+        let scaled_max = resize_buffer(max_bitrate_pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+        let scaled_current = resize_buffer(current_bitrate_pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+        
+        // Copy the max bitrate frame to the left side
+        for y in 0..scaled_height {
+            for x in 0..scaled_width {
+                combined_buffer[y * window_width + x] = scaled_max[y * scaled_width + x];
+            }
+        }
+        
+        // Draw separator line
+        for y in 0..scaled_height {
+            for x in 0..10 {
+                combined_buffer[y * window_width + scaled_width + x] = 0x808080;
+            }
+        }
+        
+        // Copy the current bitrate frame to the right side
+        for y in 0..scaled_height {
+            for x in 0..scaled_width {
+                combined_buffer[y * window_width + scaled_width + 10 + x] = scaled_current[y * scaled_width + x];
+            }
+        }
+        
+        // Define colors for text overlays
+        let color = 0xFF0033; // red
+        let text_color_max = 0x00FF00; // green
+        let text_color_current = 0xFFFF00; // yellow
+        
+        // Mark max and current bitrate sides
+        render_text(&mut combined_buffer, "MAX BITRATE REF", 10, 10, window_width, text_color_max, 3);
+        render_text(&mut combined_buffer, "CURRENT BITRATE REF", scaled_width + 15, 10, window_width, text_color_current, 3);
+        
+        // Frame info
+        let frame_info = format!("BITRATE COMPARISON FRAME #{}", frame_id);
+        render_text(&mut combined_buffer, &frame_info, 
+                  (window_width - frame_info.len() * 6 * 3) / 2,
+                  scaled_height - 25, window_width, color, 3);
+        
+        print_pretty!(DebugColor::Cyan, 
+            "{} - Displaying bitrate comparison for frame #{} (window size: {}x{})", 
+            server_ip, frame_id, window_width, scaled_height, );
+        
+        // Define a separate thread_local for bitrate comparison windows
+        thread_local! {
+            static BITRATE_COMPARISON_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
+        }
+        
+        BITRATE_COMPARISON_WINDOWS.with(|windows_cell| {
+            let mut windows = windows_cell.borrow_mut();
+            
+            // Create window if it doesn't exist yet
+            if !windows.contains_key(server_ip) {
+                print_pretty!(DebugColor::Magenta, "Creating new bitrate comparison window for {}", server_ip, );
+                let window = Window::new(
+                    &window_title,
+                    window_width,
+                    scaled_height,
+                    WindowOptions::default()
+                );
+                
+                if let Ok(new_window) = window {
+                    windows.insert(server_ip.clone(), new_window);
+                    print_pretty!(DebugColor::Green, "Successfully created bitrate comparison window!", );
+                } else {
+                    print_pretty!(DebugColor::Red, "Failed to create bitrate comparison window for {}", server_ip, );
+                    return; // Exit early if window creation failed
+                }
+            }
+            
+            // Update the window with the combined buffer
+            if let Some(window) = windows.get_mut(server_ip) {
+                window.set_title(&format!("{} | Bitrate Compare #{} - {}", format_elapsed!(now), frame_id, server_ip));
+                
+                if let Err(e) = window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
+                    print_pretty!(DebugColor::Red, "Failed to update bitrate comparison window buffer: {}", e, );
+                } else {
+                    print_pretty!(DebugColor::Green, "Successfully updated bitrate comparison window with frame #{}", frame_id, );
+                }
+            } else {
+                print_pretty!(DebugColor::Red, "Bitrate comparison window not found for {}", server_ip, );
+            }
+        });
+    }
 
     pub fn vsync<'a>(
         &'a mut self,
@@ -2998,9 +3103,8 @@ impl XRClient {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
                     // local Helper function to display synchronized frame pairs, it's kinda wrong/ugly but works for now
-                    fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: usize, now: TaiTime<0>) {
+                    fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: usize, now: TaiTime<0>,) {
                         let decoded = pair.decoded.as_ref().unwrap();
                         let reference = pair.reference.as_ref().unwrap();
 
@@ -3106,6 +3210,9 @@ impl XRClient {
                 let now = context.scheduler.time();
                 let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
                 
+
+
+
                 let mut is_frame_lost = false; 
                 let mut difference = 0; 
 
@@ -3120,11 +3227,6 @@ impl XRClient {
                 
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
 
-
-
-
-
-
                     let subsample = video_frame[0..10.min(video_frame.len())].to_vec();
                     
                     let mut ip_client = self.server_ip.clone();
@@ -3136,7 +3238,16 @@ impl XRClient {
                             ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
                         }
                     }
-                    print_pretty!(DebugColor::ForestGreen, "{} Extracting ref frame {}",ip_client , id_f);                                                               
+
+                                        // Reference frame handling
+                    let currentb_path: String = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc",self.name_folder ,ip_client, id_f); 
+                    let maxb_file_path: String = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc", self.name_folder, ip_client, id_f);
+                    
+                    let max_rgb_write_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.rgb", self.name_folder, ip_client, id_f);
+                    let ref_rgb_write_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb", self.name_folder, ip_client, id_f);
+                    
+                    
+
 
                     if id_f % 10 == 0 {
 
@@ -3185,16 +3296,41 @@ impl XRClient {
                                     continue;
                                 }
                             }
-                            let hevc_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc", self.name_folder, ip_client, next_frame_id);
+                            let hevc_path: String = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}_max.hevc", 
+                                                            self.name_folder, ip_client, next_frame_id);
+                            
+                            let current_bitrate_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_sink/{}/{}/hevc_ref/{}.hevc", 
+                                                            self.name_folder, ip_client, next_frame_id); 
+                            
                             // println!("[DBG1] Processing frame ID: {}", next_frame_id); 
-                            if std::path::Path::new(&hevc_path).exists(){
+                            if std::path::Path::new(&maxb_file_path).exists(){
                                 if let Ok(hevc_data) =  fs::read(&hevc_path) {
                                     if !hevc_data.is_empty(){
-                                        print_pretty!(DebugColor::Lime, "DECODING REFERENCE FRAME {}", next_frame_id, ); 
-                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client).await;         
+                                        print_pretty!(DebugColor::Lime, "DECODING MAX BITRATE REFERENCE FRAME {}", next_frame_id, ); 
+                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client, true).await;         
                                         if !rgb_ref_frame.is_empty() {
-                                            let rgb_path = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb", self.name_folder ,ip_client, next_frame_id);                                                                                     // Save the decoded RGB file
-                                            if let Err(e) = std::fs::write(&rgb_path, &rgb_ref_frame) {
+                                            if let Err(e) = std::fs::write(&max_rgb_write_path, &rgb_ref_frame) {
+                                                print_pretty!(DebugColor::Red, 
+                                                    "Failed to save MAXB RGB for frame #{}: {}", next_frame_id, e);
+                                            } else {
+                                                // Mark as processed
+                                                self.missing_frames_buffer.insert(next_frame_id, true);
+                                                print_pretty!(DebugColor::Green, 
+                                                    "Successfully processed missing MAXB frame #{}", next_frame_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }     
+
+                            if std::path::Path::new(&current_bitrate_path).exists(){
+                                if let Ok(hevc_data) =  fs::read(&current_bitrate_path) {
+                                    if !hevc_data.is_empty(){
+                                        print_pretty!(DebugColor::Lime, "DECODING REFERENCE FRAME {}", next_frame_id, ); 
+                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client, false).await;         
+                                        if !rgb_ref_frame.is_empty() {                                            
+                                                                                                                          // Save the decoded RGB file
+                                            if let Err(e) = std::fs::write(&ref_rgb_write_path, &rgb_ref_frame) {
                                                 print_pretty!(DebugColor::Red, 
                                                     "Failed to save RGB for frame #{}: {}", next_frame_id, e);
                                             } else {
@@ -3213,27 +3349,27 @@ impl XRClient {
                     }
                     self.last_processed_frame_id = id_f;
 
-                    // Reference frame handling
-                    let ref_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,ip_client, id_f); 
-                    let hevc_file_path: String = format!("Video_Sink/{}/{}/hevc_ref/{}_max.hevc", self.name_folder, ip_client, id_f);
+                    
 
-                    let mut retries = 10;
+                    let mut retries = 5;
                     let mut ref_frame = Vec::new(); 
+                    let mut max_frame = Vec::new(); 
+
                     // Try reading the file with a more robust retry loop
                     for attempt in 1..=retries {
-                        println!("trying to read {hevc_file_path}\n");
+                        println!("trying to read {maxb_file_path}\n");
 
-                        match fs::read(&hevc_file_path) {
+                        match fs::read(&maxb_file_path) {
                             Ok(data) if !data.is_empty() => {
                                 // Successfully read non-empty data
-                                ref_frame = data;
+                                max_frame = data;
                                 // println!("Successfully read HEVC file ({} bytes) for frame #{} on attempt {}", 
                                 //         ref_frame.len(), id_f, attempt);
                                 break;
                             },
                             Ok(_) => {
                                 // File exists but is empty - wait a bit and retry
-                                println!("HEVC file for frame #{} exists but is empty (attempt {}/{})", 
+                                println!("HEVC file for MAX frame #{} exists but is empty (attempt {}/{})", 
                                         id_f, attempt, retries);
                                 if id_f <10 {
                                     continue; // prevent hanging at start of sim
@@ -3247,8 +3383,51 @@ impl XRClient {
                             },
                             Err(e) => {
                                 if attempt < retries {
-                                    println!("Error reading HEVC file for frame #{} (attempt {}/{}): {}", 
+                                    println!("Error reading MAX HEVC file for frame #{} (attempt {}/{}): {}", 
                                             id_f, attempt, retries, e);
+                                    if id_f <10 {
+                                        continue; // prevent hanging at start of sim                                 
+                                    }
+                                    thread::sleep(Duration::from_millis(1000));
+                                    continue;
+                                } else {
+                                    println!("Failed to read MAX HEVC file for frame #{} after {} attempts: {}", 
+                                            id_f, retries, e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    for attempt_ref in 1..=retries {
+                        println!("trying to read {currentb_path}\n");
+
+                        match fs::read(&currentb_path) {
+                            Ok(data) if !data.is_empty() => {
+                                // Successfully read non-empty data
+                                ref_frame = data;
+                                // println!("Successfully read HEVC file ({} bytes) for frame #{} on attempt {}", 
+                                //         ref_frame.len(), id_f, attempt);
+                                break;
+                            },
+                            Ok(_) => {
+                                // File exists but is empty - wait a bit and retry
+                                println!("HEVC file for frame #{} exists but is empty (attempt {}/{})", 
+                                        id_f, attempt_ref, retries);
+                                if id_f <10 {
+                                    continue; // prevent hanging at start of sim
+                                    
+                                }
+                                else{
+                                    thread::sleep(Duration::from_millis(1000));
+                                    continue;
+                                } 
+                          
+                            },
+                            Err(e) => {
+                                if attempt_ref < retries {
+                                    println!("Error reading HEVC file for frame #{} (attempt {}/{}): {}", 
+                                            id_f, attempt_ref, retries, e);
                                     if id_f <10 {
                                         continue; // prevent hanging at start of sim                                 
                                     }
@@ -3262,6 +3441,7 @@ impl XRClient {
                             }
                         }
                     }
+
 
                     // Keyframe detection
                     if self.is_keyframe(&video_frame) {
@@ -3280,6 +3460,7 @@ impl XRClient {
                         // Add frame to initialization buffer
                         self.initialization_buffer.push(video_frame.clone());
                         self.initialization_buffer_ref.push(ref_frame.clone()); 
+                        self.initialization_buffer_max.push(max_frame).clone(); 
                         
                         // Check if we're ready to start decoding
                         let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
@@ -3344,55 +3525,62 @@ impl XRClient {
                             );
 
                             if USE_FFMPEG == true {
-                                let (rgb_ref_frame, ref_pixels) = self.decode_hevc_to_rgb2(ref_frame.clone(), id_f, ip_client).await; 
+                                let (rgb_ref_currentb, ref_pixels_currentb) = self.decode_hevc_to_rgb2(ref_frame.clone(), id_f, ip_client, false).await; 
+
+                                let (rgb_max_frame, ref_pixels_maxb) = self.decode_hevc_to_rgb2(max_frame.clone(), id_f, ip_client, true).await; 
                                 
                                 let (rgb, frame) =                self.decode_hevc_to_rgb(video_frame.clone(), id_f, ip_client).await;
 
 
-                                if !rgb_ref_frame.is_empty(){
-                                    std::fs::write(&ref_path, rgb_ref_frame.clone());
+                                if !rgb_max_frame.is_empty(){
+                                    std::fs::write(&max_rgb_write_path, rgb_max_frame.clone());
+                                }; 
+                                if !rgb_ref_currentb.is_empty(){
+                                    std::fs::write(&ref_rgb_write_path, rgb_ref_currentb.clone()); 
                                 }
+
                                 if self.is_keyframe(&ref_frame){
                                     self.ref_saw_keyframe = true; 
                                     println!("*** KEYFRAME DETECTED REF *** Size: {}", ref_frame.len());
                                     self.ref_saw_keyframe_last_t = now;                                
-                                } 
+                                }
 
                                 // When processing a decoded frame
                                 if !frame.is_empty() {
-
-
                                     // Now check if we have a reference frame for this adjusted ID
-                                    if !ref_pixels.is_empty() {
+                                    if !ref_pixels_maxb.is_empty() {
                                         if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
-                                            pair.reference = Some(ref_pixels.clone());
-                                            print_pretty!(DebugColor::Yellow, "Updated reference for pair #{}, len = {}", id_f, ref_pixels.len());
+                                            pair.reference = Some(ref_pixels_maxb.clone());
+                                            print_pretty!(DebugColor::Yellow, "Updated reference for pair #{}, len = {}", id_f, ref_pixels_maxb.len());
                                         }
                                     }
-                                    else if let Ok(rgb_ref_frame) = std::fs::read(&ref_path) {
+                                    else if let Ok(rgb_ref_frame) = std::fs::read(&maxb_file_path) {
                                             if let Some(pair) = self.frame_pairs.get_mut(&id_f) {
-                                                pair.reference = Some(ref_pixels.clone());
-                                                print_pretty!(DebugColor::Yellow, "Updated reference (from file) for pair #{}, len = {}", id_f, ref_pixels.len());
+                                                pair.reference = Some(ref_pixels_maxb.clone());
+                                                print_pretty!(DebugColor::Yellow, "Updated reference (from file) for pair #{}, len = {}", id_f, ref_pixels_currentb.len());
                                             
                                             }
                                     }
-                                        // Create a frame pair with both frames
+
+                                    // Create a frame pair with both frames
                                     let pair = FramePair {
                                         decoded: Some(frame.clone()),
-                                        reference: Some(ref_pixels.clone()),
+                                        reference: Some(ref_pixels_maxb.clone()),
                                         frame_id: id_f,
                                         timestamp: Instant::now(),
            
                                     };
-                                    print_pretty!(DebugColor::Lavender, "Inserting frame {} : decoded size = {}, ref size = {} ", id_f, frame.len(), ref_pixels.len()); 
+                                    // print_pretty!(DebugColor::Lavender, "Inserting frame {} : decoded size = {}, ref size = {} ", id_f, frame.len(), ref_pixels.len()); 
                                         
                                     self.frame_pairs.insert(id_f, pair);
-                                    
+
+                                    self.display_bitrate_comparison( &ref_pixels_maxb, &ref_pixels_currentb, id_f, &ip_client, now);
+
                                         // Perform VMAF analysis on directly matched frames
-                                    if !rgb.is_empty() && !rgb_ref_frame.is_empty() && USE_VMAF {
+                                    if !rgb.is_empty() && !rgb_max_frame.is_empty() && USE_VMAF {
                                         self.vmaf_analysis(
                                             rgb.clone(),
-                                            rgb_ref_frame.clone(),
+                                            rgb_max_frame.clone(),
                                             now,
                                             id_f,
                                             ip_client
