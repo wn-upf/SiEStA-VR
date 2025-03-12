@@ -1953,7 +1953,6 @@ impl<H: Serialize> StreamSender<H> {
                     Some(frame) => {
                         buffer = frame;
 
-                        println!("Storing original frame as .hevc in Sink_Video");
                         let hevc_file_path: String = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
                         
                         std::fs::create_dir_all(hevc_file_path).unwrap();

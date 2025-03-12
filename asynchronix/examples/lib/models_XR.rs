@@ -446,6 +446,78 @@ pub struct HevcDecoder {
 }
 
 
+/// Standalone function for finding the next NAL start code in a buffer
+pub fn find_next_start_code(buffer: &[u8], start_pos: usize) -> Option<usize> {
+    for i in start_pos..buffer.len().saturating_sub(3) {
+        // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
+        if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1) || 
+           (i < buffer.len() - 4 && buffer[i] == 0 && buffer[i + 1] == 0 && 
+            buffer[i + 2] == 0 && buffer[i + 3] == 1) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Function to initialize and synchronize reference decoders with main decoder
+pub async fn ensure_synchronized_decoders(
+    main_decoder: &mut HevcDecoder,
+    ref_decoders: &mut HashMap<IpAddr, HevcDecoder>,
+    client_ips: &[IpAddr],
+    framerate: u32, 
+    width: u32, 
+    height: u32
+) -> bool {
+    // First ensure all needed decoders exist
+    let mut new_decoders_created = false;
+    
+    for &ip in client_ips {
+        if !ref_decoders.contains_key(&ip) {
+            print_pretty!(DebugColor::Cyan, 
+                "Creating new reference decoder for client {}", ip);
+            
+            let decoder = HevcDecoder::new(
+                framerate, 
+                width, 
+                height, 
+                &format!("[REF_DECODER {}]", ip)
+            );
+            
+            ref_decoders.insert(ip, decoder);
+            new_decoders_created = true;
+        }
+    }
+    
+    // If the main decoder has valid parameter sets, synchronize with all reference decoders
+    if main_decoder.is_ready() {
+        let (vps, sps, pps) = main_decoder.get_parameter_sets();
+        
+        if vps.is_some() || sps.is_some() || pps.is_some() {
+            print_pretty!(DebugColor::Magenta, 
+                "Synchronizing all reference decoders with main decoder parameter sets", );
+            
+            for (ip, ref_decoder) in ref_decoders.iter_mut() {
+                // Only sync decoders that aren't ready yet
+                if !ref_decoder.is_ready() {
+                    ref_decoder.inject_parameter_sets(
+                        vps.clone(), 
+                        sps.clone(), 
+                        pps.clone()
+                    );
+                    
+                    print_pretty!(DebugColor::Green, 
+                        "Synchronized decoder for {} with main decoder", ip);
+                }
+            }
+        }
+    }
+    
+    // Return whether we created new decoders
+    new_decoders_created
+}
+
+
+
 impl HevcDecoder {
     pub fn new(framerate: u32, width: u32, height: u32, decoder_str: &str) -> Self  {
         let frame_size = (width as usize) * (height as usize) * 3;
@@ -586,24 +658,108 @@ impl HevcDecoder {
         }
     }
 
+
+    pub fn inject_parameter_sets(&mut self, vps: Option<Vec<u8>>, sps: Option<Vec<u8>>, pps: Option<Vec<u8>>) {
+        if let Some(vps_data) = vps {
+            println!("{} Injecting VPS ({} bytes)", self.decoder_string, vps_data.len());
+            self.process_packet(vps_data);
+        }
+        
+        if let Some(sps_data) = sps {
+            println!("{} Injecting SPS ({} bytes)", self.decoder_string, sps_data.len());
+            self.process_packet(sps_data);
+        }
+        
+        if let Some(pps_data) = pps {
+            println!("{} Injecting PPS ({} bytes)", self.decoder_string, pps_data.len());
+            self.process_packet(pps_data);
+        }
+        
+        // After injecting parameter sets, process any frames in buffer
+        self.process_decoded_frames();
+    }
+    
+    /// Synchronize this decoder with another decoder's parameter sets
+    pub fn sync_with_decoder(&mut self, source_decoder: &HevcDecoder) {
+        println!("{} Synchronizing with {} decoder", 
+                self.decoder_string, source_decoder.decoder_string);
+        
+        let (vps, sps, pps) = source_decoder.get_parameter_sets();
+        self.inject_parameter_sets(vps, sps, pps);
+        
+        // Reset internal state to match the source decoder
+        self.keyframes_seen = source_decoder.keyframes_seen;
+        
+        // Set the priming complete flag if the source decoder is primed
+        if source_decoder.priming_complete && !self.priming_complete {
+            self.priming_complete = true;
+            println!("{} 🔄 Synchronized with {} decoder (keyframes: {})", 
+                    self.decoder_string, source_decoder.decoder_string, self.keyframes_seen);
+        }
+    }
+    
+    /// Extract complete parameter set packets from a buffer
+    /// This is useful when you want to extract the parameter sets as complete NAL units
+    /// including the start code, which is necessary for feeding to another decoder
+    pub fn extract_complete_parameter_sets(&self, buffer: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+        let mut temp_parser = HevcParser::new();
+        temp_parser.add_data(buffer);
+        
+        let mut vps_packet = None;
+        let mut sps_packet = None;
+        let mut pps_packet = None;
+        
+        let mut start_pos = 0;
+        
+        // Extract complete NAL units with start codes
+        while let Some(pos) = find_next_start_code(buffer, start_pos) {
+            // Determine start code length (3 or 4 bytes)
+            let start_code_len = if pos + 3 < buffer.len() && buffer[pos + 2] == 0 && buffer[pos + 3] == 1 {
+                4
+            } else {
+                3
+            };
+            
+            let nal_header_pos = pos + start_code_len;
+            if nal_header_pos >= buffer.len() {
+                break;
+            }
+            
+            // Get the NAL type
+            let nal_header = buffer[nal_header_pos];
+            let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+            
+            // Find the end of this NAL unit (next start code or end of buffer)
+            let next_pos = find_next_start_code(buffer, pos + start_code_len).unwrap_or(buffer.len());
+            
+            // Extract the complete NAL unit with start code
+            match nal_type {
+                32 => { // VPS
+                    vps_packet = Some(buffer[pos..next_pos].to_vec());
+                },
+                33 => { // SPS
+                    sps_packet = Some(buffer[pos..next_pos].to_vec());
+                },
+                34 => { // PPS
+                    pps_packet = Some(buffer[pos..next_pos].to_vec());
+                }
+                _ => {}
+            }
+            
+            start_pos = next_pos;
+        }
+        
+        (vps_packet, sps_packet, pps_packet)
+    }
+
+
+
     pub fn is_ready(&self) -> bool {
         // A decoder is ready when:
         // 1. We've seen at least one keyframe
         // 2. We've processed at least 10 frames
         // 3. Priming is marked complete
         self.keyframes_seen >= 1
-    }
-
-    // New function to check if a frame contains valid HEVC data
-    fn is_valid_hevc_frame(frame: &[u8]) -> bool {
-        // Check for HEVC start code (0x000001 or 0x00000001)
-        for i in 0..frame.len().saturating_sub(4) {
-            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
-               (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
-                return true;
-            }
-        }
-        false
     }
 
      // Check if a buffer contains a keyframe
@@ -631,18 +787,16 @@ impl HevcDecoder {
     }
 
     // Process incoming encoded packets with improved error handling
-    pub fn process_packet(&mut self, packet: Vec<u8>) {
-        // Add packet data to the parser
-        // println!("🎬 Processing packet of size {} bytes (total: {} frames)", 
-        //         packet.len(), self.frames_processed);
-
-
-
+      // Modify the process_packet method to call extract_parameter_sets
+      pub fn process_packet(&mut self, packet: Vec<u8>) {
+        // First, check for parameter sets in this packet
+        self.extract_parameter_sets(&packet);
+        
+        // The rest of your existing process_packet code remains unchanged
         let frame_size = packet.len() as f64;
         let now = Instant::now();
         let delta_t = now.duration_since(self.last_update).as_secs_f64();
         self.last_update = now;
-
 
         self.total_bytes_processed += frame_size;
         self.frames_processed += 1;
@@ -651,8 +805,8 @@ impl HevcDecoder {
         let is_keyframe = self.contains_keyframe(&packet);
         if is_keyframe {
             self.keyframes_seen += 1;
-            // println!("🔑 KEYFRAME detected! Size: {}, Frame #{}, Total keyframes: {}", 
-                    // frame_size, self.frames_processed, self.keyframes_seen);
+            // Check for parameter sets on keyframes specifically
+            println!("{} 🔑 KEYFRAME detected, checking for parameter sets", self.decoder_string);
         }
 
         // Calculate smoothing factor α
@@ -663,8 +817,6 @@ impl HevcDecoder {
 
         let alpha = temporal_constant - (-delta_t / temporal_constant).exp();
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
-        // println!("Parsing frame #{}: size={}, keyframe={}, EWMA size={:.2}", 
-            // self.frames_processed, frame_size, is_keyframe, self.ewma_frame_size);
 
         self.parser.add_data(&packet);
         
@@ -674,7 +826,7 @@ impl HevcDecoder {
             self.frame_buffer.push_back(frame);
         }
         
-        // Forward t  // Forward packet to ffmpeg decoder
+        // Forward packet to ffmpeg decoder
         if let Err(e) = self.packet_tx.send(packet) {
             println!("{} ERROR: Failed to send packet to decoder: {}", self.decoder_string, e);
             return;
@@ -683,33 +835,13 @@ impl HevcDecoder {
         // If we've processed enough frames, consider the decoder primed
         if !self.priming_complete && self.keyframes_seen >= 20 && self.frames_processed >= 200 {
             println!("{} 🚀 Decoder priming complete! Processed {} frames including {} keyframes",
-                    self.decoder_string ,self.frames_processed, self.keyframes_seen);
+                    self.decoder_string, self.frames_processed, self.keyframes_seen);
             self.priming_complete = true;
+            
+            // After priming, print all parameter sets we've found
+            println!("{} 📊 Final parameter sets after priming:", self.decoder_string);
+            self.parser.print_parameter_sets();
         }
-        
-        // Ok(())
-    }
-
-        // Your existing method to get raw frames from ffmpeg
-    // Modified try_next_decoded_frame with timeout
-    fn try_next_decoded_frame_with_timeout(&self, timeout_ms: u64) -> Option<Vec<u8>> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        
-        while start.elapsed() < timeout {
-            match self.frame_rx.try_recv() {
-                Ok(frame) => return Some(frame),
-                Err(TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                },
-                Err(TryRecvError::Disconnected) => {
-                    println!("{} Decoder frame channel disconnected", self.decoder_string);
-                    return None;
-                }
-            }
-        }
-        None
     }
 
 
@@ -765,11 +897,44 @@ impl HevcDecoder {
         frames_received
     }
     
-        // Get the next available encoded frame
-        pub fn next_encoded_frame(&mut self) -> Option<Vec<u8>> {
-            self.frame_buffer.pop_front()
+    /// Extract and print VPS, SPS, and PPS from a packet
+    pub fn extract_parameter_sets(&mut self, packet: &[u8]) {
+        // Create a temporary parser just for this packet to avoid disturbing the main parser state
+        let mut temp_parser = HevcParser::new();
+        temp_parser.add_data(packet);
+        
+        // Process all possible NAL units in this packet
+        while let Some(nal) = temp_parser.next_nal_unit() {
+            match nal.nal_type {
+                32 => println!("{} 📋 Found VPS NAL unit (size: {})", self.decoder_string, nal.data.len()),
+                33 => println!("{} 📋 Found SPS NAL unit (size: {})", self.decoder_string, nal.data.len()),
+                34 => println!("{} 📋 Found PPS NAL unit (size: {})", self.decoder_string, nal.data.len()),
+                _ => {} // Ignore other NAL types
+            }
         }
-    
+        
+        // Check if we found any parameter sets
+        let (vps, sps, pps) = temp_parser.get_parameter_sets();
+        if vps.is_some() || sps.is_some() || pps.is_some() {
+            println!("{} 📊 Parameter sets found in packet:", self.decoder_string);
+            temp_parser.print_parameter_sets();
+        }
+    }
+
+
+
+    // Add a method to get the parameter sets for synchronization
+    pub fn get_parameter_sets(&self) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+        let (vps, sps, pps) = self.parser.get_parameter_sets();
+        
+        // Clone the data to return owned values
+        (
+            vps.map(|v| v.clone()),
+            sps.map(|s| s.clone()),
+            pps.map(|p| p.clone())
+        )
+    }
+        
         // Get the next available decoded RGB frame
         pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
             // First try to process any newly available frames
@@ -792,22 +957,7 @@ impl HevcDecoder {
             }
         }
         
-    pub fn try_next_frame(&self) -> Option<Vec<u8>> {
-        // println!("TRY READ FRAME"); // ADDED LOGGING
-        match self.frame_rx.try_recv() {
-            Ok(frame) => {
-                // println!("Frame received!"); // ADDED LOGGING
-                Some(frame)
-            },
-            Err(TryRecvError::Empty) => {
-                println!("{}  No frame available yet.", self.decoder_string); // ADDED LOGGING
-                None
-            },
-            Err(TryRecvError::Disconnected) => {println!("WARNING! {} frame channel disconnected", self.decoder_string);
-                                                 None
-                                                } ,
-        }
-    }
+
 }
 
 
@@ -1025,9 +1175,6 @@ impl BitrateManager {
         print_prettyy!(DebugColor::Purple , " Bitrate chosen -> {:.3} mbps  (last = {:.2})", bitrate_bps / 1e6, self.last_target_bitrate_bps / 1e6); 
         bitrate_bps
     }
-
-
-
 
     // pub fn report_timestamp_change_bitrate(&mut self, now: TaiTime<0>) {
     //     let dur = now.duration_since(TaiTime::EPOCH).as_secs_f64();
@@ -2021,33 +2168,9 @@ impl XRClient {
             self.streamsocket_clone = Some(stream_socket.clone());
 
             self.output_app_tracking_sender = Some(stream_socket.request_stream(TRACKING, self.t_0));
-            
-
-            // if self.decoder_arc.is_none(){
-            //     // self.has_decoder = Some(true); 
-            //     println!("INITIALIZING DECODER: FPS: {:.1}", self.framerate); 
-            //     self.decoder_arc = Some(Arc::new(tokMutex::new( HevcDecoder::new(self.framerate as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32))   ) ); 
-            // }
 
             XRClient::generate_tracking_data(self, (), context).await;
 
-            // {
-            //     // retrieve video packets in RX buffer
-            //     if let Some(rx_socket) = self.input_app_video.clone(){
-
-            //             let  buffer_tx: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
-            //             let  buffer_rx = buffer_tx.clone();
-
-            //             let arc_receiver = rx_socket.network_app_interface.clone();
-
-            //             XRClient::read_network_interface_to_app(self, (), context, buffer_rx, arc_receiver);
-
-            //             let mut buffer_app: Vec<u8> = vec![0;MAX_PACKET_SIZE_RECV];
-            //             let data_app = rx_socket.inner.lock().unwrap().recv(&mut buffer_app);
-
-            //             println!("DATA OF APP: {:?}", &buffer_app[0..100]);
-            //     }
-            // }
         }
     }
 
@@ -2504,7 +2627,7 @@ impl XRClient {
         rgb
     }
         // Generate decoder key from client IP and stream type
-    fn get_decoder_key(&mut self, client_ip: IpAddr, is_max_bitrate: bool) -> IpAddr {
+    fn get_decoder_key(&self, client_ip: IpAddr, is_max_bitrate: bool) -> IpAddr {
         if is_max_bitrate {
             // Use original IP for max bitrate streams
             return client_ip;
@@ -2524,16 +2647,17 @@ impl XRClient {
         }
     }
     pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr, is_max_bitrate: bool) -> (Vec<u8>, Vec<u32>) {
-        // Validate input
-        
+        // Validate input and determine decoder key (existing code)
         let decoder_key: IpAddr = self.get_decoder_key(client_ip, is_max_bitrate);
         
-        let rgb_path = if is_max_bitrate{
-            format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}.rgb",self.name_folder ,client_ip, frame_index)
-            }
-            else{
-                format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb",self.name_folder ,client_ip, frame_index)
-            }; 
+        // RGB path handling (existing code remains unchanged)
+        let rgb_path = if is_max_bitrate {
+            format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}.rgb", self.name_folder, client_ip, frame_index)
+        } else {
+            format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb", self.name_folder, client_ip, frame_index)
+        }; 
+        
+        // Check if RGB file already exists (existing code remains)
         if std::path::Path::new(&rgb_path).exists() {
             match fs::read(&rgb_path) {
                 Ok(rgb_data) if !rgb_data.is_empty() => {
@@ -2545,26 +2669,80 @@ impl XRClient {
             }
         }
         
+        // Empty buffer check (existing code)
         let encoded_length = encoded_buffer.len();
         if encoded_buffer.is_empty() {
-            println!("[XRClient DECODE REF {}] WARNING: Empty encoded buffer received!", decoder_key );
+            println!("[XRClient DECODE REF {}] WARNING: Empty encoded buffer received!", decoder_key);
             return (Vec::new(), Vec::new());
         }
+        
+        // Critical modification: synchronized decoder initialization
         {
+            let mut main_params: (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) = (None, None, None);
+            
+            // Extract parameter sets from main decoder if it exists
+            if let Some(decoder_arc) = &self.decoder_arc {
+                if let Ok(decoder_guard) = decoder_arc.try_lock() {
+                    main_params = decoder_guard.get_parameter_sets();
+                    
+                    // Debug parameter set availability for diagnostics
+                    print_pretty!(DebugColor::Cyan, 
+                        "Main decoder parameter sets for sync: VPS: {}, SPS: {}, PPS: {}", 
+                        main_params.0.as_ref().map_or(0, |v| v.len()),
+                        main_params.1.as_ref().map_or(0, |v| v.len()),
+                        main_params.2.as_ref().map_or(0, |v| v.len()),
+                    );
+                }
+            }
+            
             let mut decoders = REFERENCE_DECODERS.lock().unwrap();
             
-            
-            if !decoders.contains_key(&client_ip) {
+            // Create new decoder with synchronized parameters if needed
+            if !decoders.contains_key(&decoder_key) {
                 print_pretty!(DebugColor::Cyan, 
                     "Initializing reference decoder for client {}", decoder_key);
-                decoders.insert(
-                    decoder_key.clone(), 
-                    HevcDecoder::new(FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[REF_DECODER {}]", decoder_key))
+                
+                let mut new_decoder = HevcDecoder::new(
+                    FRAMERATE_WINDOWS as u32, 
+                    WIDTH_ENCODER as u32, 
+                    HEIGHT_ENCODER as u32, 
+                    &format!("[REF_DECODER {}]", decoder_key)
                 );
+                
+                // Apply parameter sets immediately if available
+                if main_params.0.is_some() || main_params.1.is_some() || main_params.2.is_some() {
+                    print_pretty!(DebugColor::Magenta, 
+                        "Synchronizing new reference decoder {} with main decoder parameter sets", 
+                        decoder_key);
+                    
+                    new_decoder.inject_parameter_sets(
+                        main_params.0.clone(),
+                        main_params.1.clone(),
+                        main_params.2.clone()
+                    );
+                }
+                
+                decoders.insert(decoder_key.clone(), new_decoder);
+            }
+            
+            // Check if keyframe in current buffer and needs synchronization
+            let is_keyframe = self.is_keyframe(&encoded_buffer);
+            if is_keyframe && (main_params.0.is_some() || main_params.1.is_some() || main_params.2.is_some()) {
+                if let Some(ref_decoder) = decoders.get_mut(&decoder_key) {
+                    print_pretty!(DebugColor::Magenta, 
+                        "Re-synchronizing reference decoder {} with main decoder on keyframe", 
+                        decoder_key);
+                    
+                    ref_decoder.inject_parameter_sets(
+                        main_params.0.clone(),
+                        main_params.1.clone(),
+                        main_params.2.clone()
+                    );
+                }
             }
         }
         
-        // Now use the decoder - second lock scope to minimize lock time
+        // Process with decoder - second lock scope (similar to existing code)
         let result = {
             let mut decoders = REFERENCE_DECODERS.lock().unwrap();
             if let Some(decoder) = decoders.get_mut(&decoder_key) {
@@ -2573,23 +2751,20 @@ impl XRClient {
                 let frame_display = if is_keyframe { "KEYFRAME" } else { "frame" };
                 print_pretty!(DebugColor::Cyan, 
                     "{} - Decoding reference HEVC {} #{} of size: {} bytes",
-                    decoder_key,frame_display, frame_index, encoded_length
+                    decoder_key, frame_display, frame_index, encoded_length,
                 );
                 
                 // Process the frame
                 decoder.process_packet(encoded_buffer);
                 
-                // Process any decoded frames and don't wait too long
-                // This is a non-blocking call
+                // Process any decoded frames
                 let frames_count = decoder.process_decoded_frames();
-                // print_pretty!(DebugColor::Cyan, "Processed {} reference frames", frames_count);
                 
                 // Try to get a decoded frame
                 if let Some(frame) = decoder.next_decoded_frame() {
                     // Convert to RGB
                     let sample = frame.clone();
                     if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                        // print_pretty!(DebugColor::Green, "Successfully decoded reference frame #{}", frame_index);
                         (sample, pixels)
                     } else {
                         print_pretty!(DebugColor::Red, "Failed to convert decoded frame to RGB", );
@@ -2600,7 +2775,7 @@ impl XRClient {
                     if !decoder.priming_complete {
                         print_pretty!(DebugColor::Yellow, 
                             "Reference decoder still priming (processed: {}, keyframes: {})",
-                            decoder.frames_processed, decoder.keyframes_seen
+                            decoder.frames_processed, decoder.keyframes_seen,
                         );
                     } else {
                         print_pretty!(DebugColor::Yellow, "No decoded reference frame available yet", );
@@ -3249,20 +3424,20 @@ impl XRClient {
                     
 
 
-                    if id_f % 10 == 0 {
+                    // if id_f % 10 == 0 {
 
-                        if USE_VMAF
-                        {
-                            if let Err(e) = self.cleanup_old_frames_vmaf(id_f, ip_client) {
-                                eprintln!("Error during frame cleanup: {}", e);
-                            }
-                        }
+                    //     if USE_VMAF
+                    //     {
+                    //         if let Err(e) = self.cleanup_old_frames_vmaf(id_f, ip_client) {
+                    //             eprintln!("Error during frame cleanup: {}", e);
+                    //         }
+                    //     }
                     
     
-                        if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client){
-                            eprintln!("Error during hevc ref frame cleanup: {}", e); 
-                        }
-                    }
+                    //     if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client){
+                    //         eprintln!("Error during hevc ref frame cleanup: {}", e); 
+                    //     }
+                    // }
 
                     if id_f > self.last_processed_frame_id + 1 {
                         is_frame_lost = true; 
@@ -3357,7 +3532,7 @@ impl XRClient {
 
                     // Try reading the file with a more robust retry loop
                     for attempt in 1..=retries {
-                        println!("trying to read {maxb_file_path}\n");
+                        // println!("trying to read {maxb_file_path}\n");
 
                         match fs::read(&maxb_file_path) {
                             Ok(data) if !data.is_empty() => {
@@ -3400,7 +3575,7 @@ impl XRClient {
                     }
 
                     for attempt_ref in 1..=retries {
-                        println!("trying to read {currentb_path}\n");
+                        // println!("trying to read {currentb_path}\n");
 
                         match fs::read(&currentb_path) {
                             Ok(data) if !data.is_empty() => {
@@ -3447,48 +3622,167 @@ impl XRClient {
                     if self.is_keyframe(&video_frame) {
                         self.dec_saw_keyframe = true;
                         println!("*** KEYFRAME DETECTED DEC *** Size: {}", video_frame.len());
-
                         self.dec_saw_keyframe_last_t = now;
                         
-             
-                        // self.flush_decoders_and_buffers();
+                        // Extract parameter sets from this keyframe
+                        if let Some(decoder_arc) = &self.decoder_arc {
+                            let mut decoder_guard = decoder_arc.lock().await;
+                            
+                            // Extract parameter sets from the keyframe
+                            let (vps, sps, pps) = decoder_guard.extract_complete_parameter_sets(&video_frame);
+                            
+                            if vps.is_some() || sps.is_some() || pps.is_some() {
+                                print_pretty!(DebugColor::Cyan, 
+                                    "{} - Extracted parameter sets from keyframe (VPS: {}, SPS: {}, PPS: {})",
+                                    self.server_ip,
+                                    vps.as_ref().map_or(0, |v| v.len()),
+                                    sps.as_ref().map_or(0, |v| v.len()),
+                                    pps.as_ref().map_or(0, |v| v.len())
+                                );
+                                
+                                // Synchronize all reference decoders with these parameter sets
+                                let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+                                
+                                for (ip, ref_decoder) in decoders.iter_mut() {
+                                    print_pretty!(DebugColor::Magenta, 
+                                        "{} - Synchronizing reference decoder for {} with main decoder parameter sets", 
+                                        self.server_ip, ip);
+                                    
+                                    ref_decoder.inject_parameter_sets(
+                                        vps.clone(), 
+                                        sps.clone(), 
+                                        pps.clone()
+                                    );
+                                }
+                            }
+                        }
                     }
 
-                               
+                    if self.is_keyframe(&ref_frame) {
+                        self.ref_saw_keyframe = true; 
+                        println!("*** KEYFRAME DETECTED REF *** Size: {}", ref_frame.len());
+                        self.ref_saw_keyframe_last_t = now;
+                        
+                        // Check if main decoder has parameter sets that should be injected
+                        if let Some(decoder_arc) = &self.decoder_arc {
+                            let decoder_guard = decoder_arc.lock().await;
+                            
+                            // Get parameter sets from main decoder
+                            let (vps, sps, pps) = decoder_guard.get_parameter_sets();
+                            
+                            // If main decoder has parameter sets, synchronize reference decoder
+                            if vps.is_some() || sps.is_some() || pps.is_some() {
+                                // Inject parameter sets into reference decoder for this IP
+                                let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+                                
+                                if let Some(ref_decoder) = decoders.get_mut(&ip_client) {
+                                    print_pretty!(DebugColor::Blue, 
+                                        "{} - Synchronizing reference decoder with main decoder parameter sets", 
+                                        ip_client);
+                                    
+                                    ref_decoder.inject_parameter_sets(
+                                        vps.clone(), 
+                                        sps.clone(), 
+                                        pps.clone()
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+
                     // Buffering phase logic (existing code)
                     if !self.is_decoder_ready {
                         // Add frame to initialization buffer
                         self.initialization_buffer.push(video_frame.clone());
                         self.initialization_buffer_ref.push(ref_frame.clone()); 
-                        self.initialization_buffer_max.push(max_frame).clone(); 
+                        self.initialization_buffer_max.push(max_frame.clone()); 
                         
                         // Check if we're ready to start decoding
                         let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
                         
                         if has_enough_frames && self.dec_saw_keyframe {
-                            print_pretty!(DebugColor::DarkBlue, "Decoder initialization complete! Buffered {} frames!!!",
+                            print_pretty!(DebugColor::DarkBlue, "Decoder initialization complete! Buffered {} frames!!!", 
                                     self.initialization_buffer.len());
-                                    print_pretty!(DebugColor::DarkBlue, "REFERENCE decoder initialization complete! Buffered {} frames!!!",
+                            print_pretty!(DebugColor::DarkBlue, "REFERENCE decoder initialization complete! Buffered {} frames!!!",
                                     self.initialization_buffer_ref.len());
                             
-                            // Process all buffered frames
+                            // Process all buffered frames with parameter set synchronization
                             if let Some(decoder_arc) = &self.decoder_arc {
                                 let mut decoder_guard = decoder_arc.lock().await;
                                 
+                                // First, extract parameter sets from the first keyframe in the buffer
+                                let mut params_extracted = false;
+                                let mut vps_data = None;
+                                let mut sps_data = None;
+                                let mut pps_data = None;
+                                
+                                for frame in &self.initialization_buffer {
+                                    if self.is_keyframe(frame) && !params_extracted {
+                                        // Extract parameter sets for synchronization
+                                        let (vps, sps, pps) = decoder_guard.extract_complete_parameter_sets(frame);
+                                        vps_data = vps;
+                                        sps_data = sps;
+                                        pps_data = pps;
+                                        params_extracted = true;
+                                        
+                                        print_pretty!(DebugColor::Cyan, 
+                                            "{} - Extracted parameter sets for synchronization from buffered keyframe", 
+                                            self.server_ip);
+                                        break;
+                                    }
+                                }
+                                
+                                // Now process all frames
                                 for frame in &self.initialization_buffer {
                                     decoder_guard.process_packet(frame.clone());
-                                    
-                                    
                                     decoder_guard.process_decoded_frames(); 
                                 }
-
-                                let mut decoders = REFERENCE_DECODERS.lock().unwrap();
-                                if let Some(decoder_guard_ref) = decoders.get_mut(&ip_client) {
-
-                                    for frame in &self.initialization_buffer_ref{
-                                        decoder_guard_ref.process_packet(frame.clone());
+                                
+                                // Synchronize reference decoders if we have parameter sets
+                                if params_extracted {
+                                    let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+                                    
+                                    if let Some(decoder_guard_ref) = decoders.get_mut(&ip_client) {
+                                        // Inject parameter sets for synchronization first
+                                        decoder_guard_ref.inject_parameter_sets(
+                                            vps_data.clone(), 
+                                            sps_data.clone(), 
+                                            pps_data.clone()
+                                        );
                                         
-                                        decoder_guard_ref.process_decoded_frames(); 
+                                        // Now process buffered reference frames
+                                        for frame in &self.initialization_buffer_ref {
+                                            decoder_guard_ref.process_packet(frame.clone());
+                                            decoder_guard_ref.process_decoded_frames(); 
+                                        }
+                                    }
+                                    
+                                    // Also synchronize max bitrate decoder if it exists
+                                    let max_ip = self.get_decoder_key(ip_client, true);
+                                    if let Some(decoder_guard_max) = decoders.get_mut(&max_ip) {
+                                        // Inject parameter sets for synchronization first
+                                        decoder_guard_max.inject_parameter_sets(
+                                            vps_data.clone(), 
+                                            sps_data.clone(), 
+                                            pps_data.clone()
+                                        );
+                                        
+                                        // Now process buffered max frames
+                                        for frame in &self.initialization_buffer_max {
+                                            decoder_guard_max.process_packet(frame.clone());
+                                            decoder_guard_max.process_decoded_frames(); 
+                                        }
+                                    }
+                                } else {
+                                    // Fallback to old behavior if we couldn't extract parameter sets
+                                    let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+                                    
+                                    if let Some(decoder_guard_ref) = decoders.get_mut(&ip_client) {
+                                        for frame in &self.initialization_buffer_ref {
+                                            decoder_guard_ref.process_packet(frame.clone());
+                                            decoder_guard_ref.process_decoded_frames(); 
+                                        }
                                     }
                                 }
                             }
@@ -3498,15 +3792,17 @@ impl XRClient {
                             self.is_ref_decoder_ready = true; 
                             self.initialization_buffer.clear();
                             self.initialization_buffer_ref.clear();
-
-
+                            self.initialization_buffer_max.clear();
                         } else {
                             println!("Buffering frame {} of {} (keyframe: {})", 
                                     self.initialization_buffer.len(), 
                                     self.min_buffered_frames,
                                     self.dec_saw_keyframe);
                         }
-                    } else {
+                    }   
+                    
+                    
+                    else {
                         // Normal decoding phase
                         if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);

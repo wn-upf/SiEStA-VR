@@ -396,13 +396,23 @@ pub struct NalUnit {
     pub data: Vec<u8>,
     pub is_keyframe: bool,
 }
+
 pub struct HevcParser {
     buffer: Vec<u8>,
+    // Store the most recent parameter sets
+    vps: Option<Vec<u8>>,
+    sps: Option<Vec<u8>>,
+    pps: Option<Vec<u8>>,
 }
 
 impl HevcParser {
     pub fn new() -> Self {
-        Self { buffer: Vec::new() }
+        Self { 
+            buffer: Vec::new(),
+            vps: None,
+            sps: None,
+            pps: None,
+        }
     }
 
     /// Add more encoded data to the parser buffer
@@ -412,20 +422,29 @@ impl HevcParser {
 
     /// Find the next NAL unit start code in the buffer
     fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
-        for i in start_pos..self.buffer.len() - 3 {
-            // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
-                return Some(i);
+
+        if !self.buffer.is_empty(){
+            for i in start_pos..self.buffer.len() - 3 {
+                // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
+                if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
+                   (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
+                    self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+                    return Some(i);
+                }
             }
+            None
         }
-        None
+        else{
+            println!("PARSER BUFFER EMPTTTTTTTTTTTY" ); 
+            None
+        }
     }
+    
     pub fn clear(&mut self) {
         println!("Clearing parser buffer: {} bytes", self.buffer.len());
         self.buffer.clear();
     }
+    
     /// Extract the next complete NAL unit from the buffer
     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
         // Find the first start code
@@ -463,6 +482,23 @@ impl HevcParser {
         // Extract the complete NAL unit data (including header)
         let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
         
+        // Store parameter sets based on NAL type
+        match nal_type {
+            32 => { // VPS
+                let full_nal = self.create_full_nal(&self.buffer[start_pos..nal_end]);
+                self.vps = Some(full_nal);
+            },
+            33 => { // SPS
+                let full_nal = self.create_full_nal(&self.buffer[start_pos..nal_end]);
+                self.sps = Some(full_nal);
+            },
+            34 => { // PPS
+                let full_nal = self.create_full_nal(&self.buffer[start_pos..nal_end]);
+                self.pps = Some(full_nal);
+            },
+            _ => {}
+        }
+        
         // Remove the processed NAL unit from the buffer
         self.buffer.drain(0..nal_end);
         
@@ -475,6 +511,13 @@ impl HevcParser {
             data: nal_data,
             is_keyframe,
         })
+    }
+
+    // Helper to create a full NAL unit with start code
+    fn create_full_nal(&self, data: &[u8]) -> Vec<u8> {
+        let mut nal = Vec::with_capacity(data.len());
+        nal.extend_from_slice(data);
+        nal
     }
 
     /// Get all complete frames currently in the buffer
@@ -509,15 +552,72 @@ impl HevcParser {
         if !current_frame.is_empty() {
             frames.push(current_frame);
         }
-        // if self.buffer.len() > 100000 {
-        //     println!("Auto-clearing oversized parser buffer: {} bytes", self.buffer.len());
-        //     self.buffer.clear();
-        // }
+        
         frames
     }
+
+    // New methods to access parameter sets
+    
+    /// Get the current VPS (Video Parameter Set)
+    pub fn get_vps(&self) -> Option<&Vec<u8>> {
+        self.vps.as_ref()
+    }
+    
+    /// Get the current SPS (Sequence Parameter Set)
+    pub fn get_sps(&self) -> Option<&Vec<u8>> {
+        self.sps.as_ref()
+    }
+    
+    /// Get the current PPS (Picture Parameter Set)
+    pub fn get_pps(&self) -> Option<&Vec<u8>> {
+        self.pps.as_ref()
+    }
+    
+    /// Get all parameter sets as a tuple
+    pub fn get_parameter_sets(&self) -> (Option<&Vec<u8>>, Option<&Vec<u8>>, Option<&Vec<u8>>) {
+        (self.vps.as_ref(), self.sps.as_ref(), self.pps.as_ref())
+    }
+    
+    /// Print parameter sets as hex strings
+    pub fn print_parameter_sets(&self) {
+        if let Some(vps) = &self.vps {
+            println!("VPS ({}): {}", vps.len(), self.format_hex(vps));
+        } else {
+            println!("VPS: Not found");
+        }
+        
+        if let Some(sps) = &self.sps {
+            println!("SPS ({}): {}", sps.len(), self.format_hex(sps));
+        } else {
+            println!("SPS: Not found");
+        }
+        
+        if let Some(pps) = &self.pps {
+            println!("PPS ({}): {}", pps.len(), self.format_hex(pps));
+        } else {
+            println!("PPS: Not found");
+        }
+    }
+    
+    /// Format bytes as hex string with limited length
+    fn format_hex(&self, data: &[u8]) -> String {
+        let max_display = 48; // Show at most 48 bytes
+        let mut result = String::new();
+        
+        for (i, byte) in data.iter().enumerate() {
+            if i >= max_display {
+                result.push_str("...");
+                break;
+            }
+            result.push_str(&format!("{:02x}", byte));
+            if i % 4 == 3 && i + 1 < std::cmp::min(data.len(), max_display) {
+                result.push(' ');
+            }
+        }
+        
+        result
+    }
 }
-
-
 
 #[derive(Clone)]
 pub struct SlidingWindowAverage<T> {
