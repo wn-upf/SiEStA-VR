@@ -12,6 +12,9 @@ use std::{
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
+
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+
 use anyhow::Result;
 use async_std::stream::StreamExt; // Add this import to fix the .next() error
 use std::net::Ipv4Addr;
@@ -27,13 +30,11 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread_local;
 
-use futures::io::{AsyncReadExt, AsyncWriteExt};
-use minifb::Key;
 
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread, write};
 
-use crate::{debug_bgprint, print_prettyy};
+use crate::{debug_bgprint, print_prettyy, print_prettyyy};
 use crate::debug_print;
 use crate::format_elapsed;
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
@@ -63,7 +64,6 @@ use tai_time::TaiTime;
 use crate::lib::alvr_stream_socket::{ AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO};
 use crate::lib::DEBUG_PRINT_ENABLED;
 use dashmap::DashMap;
-use minifb::Scale;
 
 use std::cmp::{self, max};
 use std::collections::VecDeque;
@@ -73,7 +73,6 @@ use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
 
 
 use crate::lib::{exponential, AmpduPacket, Coords, DebugColor, MpduPacket, SlidingWindowAverage};
@@ -85,10 +84,9 @@ use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::{SlidingWindowTimely, _INITIAL_BITRATE_MBPS_SIM};
 // use async_process::Child;
 use lazy_static::lazy_static;
-use crate::lib::alvr_control_socket::{ControlPacketType};
-use tokio::task;
 
-use serde::Deserialize;
+
+use std::collections::BTreeMap;
 
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
@@ -417,6 +415,219 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
     Some(pixels)
 }
 
+/// A synchronized frame with timestamp information
+#[derive(Clone, Debug)]
+pub struct TimestampedFrame {
+    pub data: Vec<u8>,
+    pub capture_timestamp: Instant,  // When the frame was captured/encoded
+    pub decode_timestamp: Instant,   // When the frame was decoded
+    pub presentation_timestamp: u64, // Logical PTS (in frame count units)
+    pub frame_index: usize,          // Frame sequence number
+    pub is_keyframe: bool,           // Whether this is a keyframe
+}
+
+impl TimestampedFrame {
+    pub fn new(data: Vec<u8>, frame_index: usize, is_keyframe: bool) -> Self {
+        Self {
+            data,
+            capture_timestamp: Instant::now(),
+            decode_timestamp: Instant::now(),
+            presentation_timestamp: frame_index as u64,
+            frame_index,
+            is_keyframe,
+        }
+    }
+}
+
+/// A synchronized frame queue for managing temporal alignment
+pub struct SyncFrameQueue {
+    frames: BTreeMap<u64, TimestampedFrame>,
+    max_buffer_size: usize,
+    sync_threshold_ms: u64,
+    decoder_id: String,
+}
+
+impl SyncFrameQueue {
+    pub fn new(decoder_id: &str, max_buffer_size: usize, sync_threshold_ms: u64) -> Self {
+        Self {
+            frames: BTreeMap::new(),
+            max_buffer_size,
+            sync_threshold_ms,
+            decoder_id: decoder_id.to_string(),
+        }
+    }
+    
+    pub fn add_frame(&mut self, frame: TimestampedFrame) {
+        // Insert frame using its PTS as key for temporal ordering
+        self.frames.insert(frame.presentation_timestamp, frame);
+        
+        // Enforce buffer size limit by removing oldest frames when needed
+        if self.frames.len() > self.max_buffer_size {
+            if let Some(oldest_key) = self.frames.keys().next().cloned() {
+                self.frames.remove(&oldest_key);
+                println!("{} 🔄 Removed oldest frame from buffer (PTS: {})", 
+                         self.decoder_id, oldest_key);
+            }
+        }
+    }
+    
+    pub fn get_frame_at_pts(&mut self, target_pts: u64, tolerance_ms: u64) -> Option<TimestampedFrame> {
+        // First try to get exact PTS match
+        if let Some(frame) = self.frames.remove(&target_pts) {
+            return Some(frame);
+        }
+        
+        // If no exact match, find closest frame within tolerance
+        let mut closest_pts = None;
+        let mut min_distance = tolerance_ms;
+        
+        for &pts in self.frames.keys() {
+            let distance = if pts > target_pts {
+                pts - target_pts
+            } else {
+                target_pts - pts
+            };
+            
+            if distance < min_distance {
+                min_distance = distance;
+                closest_pts = Some(pts);
+            }
+        }
+        
+        if let Some(pts) = closest_pts {
+            println!("{} ⌛ Found approximate PTS match: requested={}, actual={} (diff={}ms)",
+                     self.decoder_id, target_pts, pts, min_distance);
+            return self.frames.remove(&pts);
+        }
+        
+        None
+    }
+    
+    pub fn get_ready_frames(&self) -> Vec<u64> {
+        self.frames.keys().cloned().collect()
+    }
+    
+    pub fn buffer_size(&self) -> usize {
+        self.frames.len()
+    }
+    
+    pub fn clear(&mut self) {
+        self.frames.clear();
+    }
+}
+
+/// Shared synchronization state between decoders
+pub struct DecoderSyncManager {
+    frame_queues: BTreeMap<String, SyncFrameQueue>,
+    next_pts_to_display: u64,
+    sync_threshold_ms: u64,
+    last_sync_time: Instant,
+    primary_decoder_id: String,
+}
+
+impl DecoderSyncManager {
+    pub fn new(primary_decoder_id: &str, sync_threshold_ms: u64) -> Self {
+        Self {
+            frame_queues: BTreeMap::new(),
+            next_pts_to_display: 0,
+            sync_threshold_ms,
+            last_sync_time: Instant::now(),
+            primary_decoder_id: primary_decoder_id.to_string(),
+        }
+    }
+    
+    pub fn register_decoder(&mut self, decoder_id: &str, max_buffer_size: usize) {
+        if !self.frame_queues.contains_key(decoder_id) {
+            self.frame_queues.insert(
+                decoder_id.to_string(),
+                SyncFrameQueue::new(decoder_id, max_buffer_size, self.sync_threshold_ms)
+            );
+            println!("🔄 Registered decoder {} with sync manager", decoder_id);
+        }
+    }
+    
+    pub fn add_frame(&mut self, decoder_id: &str, frame: TimestampedFrame) {
+        if let Some(queue) = self.frame_queues.get_mut(decoder_id) {
+            queue.add_frame(frame);
+        } else {
+            println!("⚠️ Attempted to add frame to unregistered decoder: {}", decoder_id);
+        }
+    }
+    
+    /// Check if all decoders have frames ready at the current sync point
+    pub fn are_frames_ready(&self) -> bool {
+        let target_pts = self.next_pts_to_display;
+        
+        // All registered decoders must have at least one frame
+        for (id, queue) in &self.frame_queues {
+            if queue.buffer_size() == 0 {
+                return false;
+            }
+            
+            // Check if at least one decoder has the exact PTS we're looking for
+            if id == &self.primary_decoder_id {
+                if !queue.frames.contains_key(&target_pts) {
+                    return false;
+                }
+            }
+        }
+        
+        true
+    }
+    
+    /// Retrieve synchronized frames from all decoders at the current PTS
+    pub fn get_synchronized_frames(&mut self) -> Option<BTreeMap<String, TimestampedFrame>> {
+        if !self.are_frames_ready() {
+            return None;
+        }
+        
+        let target_pts = self.next_pts_to_display;
+        let mut result = BTreeMap::new();
+        
+        // First ensure the primary decoder has this frame
+        if let Some(queue) = self.frame_queues.get_mut(&self.primary_decoder_id) {
+            if let Some(primary_frame) = queue.get_frame_at_pts(target_pts, self.sync_threshold_ms) {
+                result.insert(self.primary_decoder_id.clone(), primary_frame);
+            } else {
+                // If primary doesn't have the target frame, we can't sync yet
+                return None;
+            }
+        } else {
+            // Primary decoder not registered
+            return None;
+        }
+        
+        // Then get matching frames from other decoders
+        for (id, queue) in self.frame_queues.iter_mut() {
+            if id != &self.primary_decoder_id {
+                if let Some(frame) = queue.get_frame_at_pts(target_pts, self.sync_threshold_ms) {
+                    result.insert(id.clone(), frame);
+                }
+            }
+        }
+        
+        // Increment for next time if we succeeded
+        if result.len() == self.frame_queues.len() {
+            self.next_pts_to_display += 1;
+            self.last_sync_time = Instant::now();
+            
+            return Some(result);
+        }
+        
+        None
+    }
+    
+    pub fn reset(&mut self) {
+        for queue in self.frame_queues.values_mut() {
+            queue.clear();
+        }
+        self.next_pts_to_display = 0;
+        self.last_sync_time = Instant::now();
+        println!("🔄 Decoder sync manager reset");
+    }
+}
+
+
 pub struct HevcDecoder {
     frame_rx: Receiver<Vec<u8>>,
     packet_tx: Sender<Vec<u8>>,
@@ -442,6 +653,14 @@ pub struct HevcDecoder {
 
     decoder_string: String, 
 
+     // New fields for synchronization
+    shared_params: Option<Arc<SharedParameterSetManager>>,
+    last_sync_generation: u64,
+    force_keyframe_sync: bool,
+
+    recovery_frames: usize, // Counter for frames to skip during recovery
+    pending_clear: bool,    // Flag to indicate decoder state should be reset
+    initialization_phase: bool, // Flag for the decoder's initialization phase
 
 }
 
@@ -459,67 +678,9 @@ pub fn find_next_start_code(buffer: &[u8], start_pos: usize) -> Option<usize> {
     None
 }
 
-/// Function to initialize and synchronize reference decoders with main decoder
-pub async fn ensure_synchronized_decoders(
-    main_decoder: &mut HevcDecoder,
-    ref_decoders: &mut HashMap<IpAddr, HevcDecoder>,
-    client_ips: &[IpAddr],
-    framerate: u32, 
-    width: u32, 
-    height: u32
-) -> bool {
-    // First ensure all needed decoders exist
-    let mut new_decoders_created = false;
-    
-    for &ip in client_ips {
-        if !ref_decoders.contains_key(&ip) {
-            print_pretty!(DebugColor::Cyan, 
-                "Creating new reference decoder for client {}", ip);
-            
-            let decoder = HevcDecoder::new(
-                framerate, 
-                width, 
-                height, 
-                &format!("[REF_DECODER {}]", ip)
-            );
-            
-            ref_decoders.insert(ip, decoder);
-            new_decoders_created = true;
-        }
-    }
-    
-    // If the main decoder has valid parameter sets, synchronize with all reference decoders
-    if main_decoder.is_ready() {
-        let (vps, sps, pps) = main_decoder.get_parameter_sets();
-        
-        if vps.is_some() || sps.is_some() || pps.is_some() {
-            print_pretty!(DebugColor::Magenta, 
-                "Synchronizing all reference decoders with main decoder parameter sets", );
-            
-            for (ip, ref_decoder) in ref_decoders.iter_mut() {
-                // Only sync decoders that aren't ready yet
-                if !ref_decoder.is_ready() {
-                    ref_decoder.inject_parameter_sets(
-                        vps.clone(), 
-                        sps.clone(), 
-                        pps.clone()
-                    );
-                    
-                    print_pretty!(DebugColor::Green, 
-                        "Synchronized decoder for {} with main decoder", ip);
-                }
-            }
-        }
-    }
-    
-    // Return whether we created new decoders
-    new_decoders_created
-}
-
-
 
 impl HevcDecoder {
-    pub fn new(framerate: u32, width: u32, height: u32, decoder_str: &str) -> Self  {
+    pub fn new(framerate: u32, width: u32, height: u32, decoder_str: &str, shared_params: Option<Arc<SharedParameterSetManager>>) -> Self  {
         let frame_size = (width as usize) * (height as usize) * 3;
 
         let decoder_string = decoder_str.to_string();
@@ -529,9 +690,10 @@ impl HevcDecoder {
             .args(&["-f", "hevc", "-i", "-"])
             .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
+            .args(&["-tune", "zerolatency"])
+            // .args(&["-preset", "ultrafast"])
+            // .args(&["-vsync", "passthrough"])
 
-            // .args(&["-flags", "+low_delay"])
-            // .args(&["-fflags", "+nobuffer+flush_packets"])
             .args(&["-f", "rawvideo", "-"])
             .spawn().unwrap();
 
@@ -542,13 +704,20 @@ impl HevcDecoder {
 
         let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
         let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
-
-
+        
+        let mut initialization_complete = false;
+        if let Some(shared) = &shared_params {
+            let (vps, sps, pps) = shared.get_parameter_sets();
+            if vps.is_some() && sps.is_some() && pps.is_some() {
+                initialization_complete = true;
+                print_prettyy!(DebugColor::Navy, "INITIALIZEED HEVC DECODER!", ); 
+            }
+        }
 
         // Start stdout reader thread with more explicit error handling
         std::thread::spawn({
             let frame_size = frame_size;
-            let frame_tx = frame_tx.clone(); // Clone for the thread
+            let frame_tx: Sender<Vec<u8>> = frame_tx.clone(); // Clone for the thread
             let decoder_str_clone = decoder_string.clone(); 
 
             move || {
@@ -652,52 +821,175 @@ impl HevcDecoder {
             total_bytes_processed: 0.0,
             priming_complete: false,
             expected_frame_size: frame_size,
-            max_buffered_frames: 10, 
+            max_buffered_frames: 2, 
 
             decoder_string: decoder_str.to_string(), 
+
+            shared_params,
+            last_sync_generation: 0,
+            force_keyframe_sync: false,
+
+            recovery_frames: 0, // Counter for frames to skip during recovery
+            pending_clear: false,    // Flag to indicate decoder state should be reset
+            initialization_phase: false, // Flag for the decoder's initialization phase  
         }
     }
 
+    fn check_parameter_set_sync(&mut self) -> bool {
+        if let Some(shared) = &self.shared_params {
+            let current_gen = shared.get_generation();
+            
+            // If our last sync generation is behind, we need to sync
+            if self.last_sync_generation < current_gen {
+                print_pretty!(DebugColor::Magenta, 
+                    "{} - Parameter set sync needed (gen {} -> {})", 
+                    self.decoder_string, self.last_sync_generation, current_gen,);
+                
+                // Get the latest parameter sets
+                let (vps, sps, pps) = shared.get_parameter_sets();
+                
+                // Apply them to our decoder
+                self.inject_parameter_sets(vps, sps, pps);
+                
+                // Update our generation number
+                self.last_sync_generation = current_gen;
+                
+                return true;
+            }
+        }
+        
+        false
+    }
+
+    // Basic NAL-based keyframe detection
+    fn detect_keyframe_nal(&self, buffer: &[u8]) -> bool {
+        for i in 0..buffer.len().saturating_sub(5) {
+            if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1) || 
+               (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 0 && buffer[i + 3] == 1) {
+                
+                let start_code_len = if buffer[i + 2] == 0 { 4 } else { 3 };
+                let nal_header_pos = i + start_code_len;
+                
+                if nal_header_pos < buffer.len() {
+                    let nal_header = buffer[nal_header_pos];
+                    let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+                    
+                    // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+                    if (16..=21).contains(&nal_type) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+      // Enhanced keyframe detection with validation
+    pub fn contains_keyframe(&self, buffer: &[u8]) -> bool {
+    // Basic HEVC keyframe detection first
+        let is_keyframe_nal = self.detect_keyframe_nal(buffer);
+        
+        if is_keyframe_nal {
+            // If we have shared params, validate this keyframe
+            if let Some(shared) = &self.shared_params {
+                if !shared.validate_keyframe(buffer.len()) {
+                    print_pretty!(DebugColor::Yellow, 
+                        "{} - Rejecting suspicious keyframe of size {} bytes", 
+                        self.decoder_string, buffer.len(),);
+                    return false;
+                }
+                
+                // Record this valid keyframe
+                shared.record_keyframe(&self.decoder_string, buffer.len());
+            }
+            
+            return true;
+        }
+        
+        false
+    }
+
+    
 
     pub fn inject_parameter_sets(&mut self, vps: Option<Vec<u8>>, sps: Option<Vec<u8>>, pps: Option<Vec<u8>>) {
+        // Prevent recursive parameter set injection
+        static INJECTION_DEPTH: AtomicUsize = AtomicUsize::new(0);
+        
+        // Increment depth counter and get current value
+        let depth = INJECTION_DEPTH.fetch_add(1, Ordering::SeqCst);
+        
+        // Guard against excessive recursion (more than 2 levels deep)
+        if depth > 2 {
+            println!("{} ⚠️ Preventing recursive parameter set injection (depth: {})", 
+                     self.decoder_string, depth);
+            INJECTION_DEPTH.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+        
+        // Print injection information only for the first level
+        if depth == 0 {
+            if let Some(vps_data) = &vps {
+                println!("{} Injecting VPS ({} bytes)", self.decoder_string, vps_data.len());
+            }
+            
+            if let Some(sps_data) = &sps {
+                println!("{} Injecting SPS ({} bytes)", self.decoder_string, sps_data.len());
+            }
+            
+            if let Some(pps_data) = &pps {
+                println!("{} Injecting PPS ({} bytes)", self.decoder_string, pps_data.len());
+            }
+        }
+        
+        // Temporarily mark parameter sets as injected
+        let mut was_processed = false;
+        
+        // Directly update parser state rather than sending through packet processing
         if let Some(vps_data) = vps {
-            println!("{} Injecting VPS ({} bytes)", self.decoder_string, vps_data.len());
-            self.process_packet(vps_data);
+            was_processed = true;
+            self.parser.update_vps(&vps_data);
+            
+            // Only send to ffmpeg decoder if not in a recursive call
+            if depth == 0 {
+                if let Err(e) = self.packet_tx.send(vps_data) {
+                    println!("{} ERROR: Failed to send VPS to decoder: {}", self.decoder_string, e);
+                }
+            }
         }
         
         if let Some(sps_data) = sps {
-            println!("{} Injecting SPS ({} bytes)", self.decoder_string, sps_data.len());
-            self.process_packet(sps_data);
+            was_processed = true;
+            self.parser.update_sps(&sps_data);
+            
+            if depth == 0 {
+                if let Err(e) = self.packet_tx.send(sps_data) {
+                    println!("{} ERROR: Failed to send SPS to decoder: {}", self.decoder_string, e);
+                }
+            }
         }
         
         if let Some(pps_data) = pps {
-            println!("{} Injecting PPS ({} bytes)", self.decoder_string, pps_data.len());
-            self.process_packet(pps_data);
+            was_processed = true;
+            self.parser.update_pps(&pps_data);
+            
+            if depth == 0 {
+                if let Err(e) = self.packet_tx.send(pps_data) {
+                    println!("{} ERROR: Failed to send PPS to decoder: {}", self.decoder_string, e);
+                }
+            }
         }
         
         // After injecting parameter sets, process any frames in buffer
-        self.process_decoded_frames();
+        if was_processed && depth == 0 {
+            self.process_decoded_frames();
+        }
+        
+        // Decrement depth counter
+        INJECTION_DEPTH.fetch_sub(1, Ordering::SeqCst);
     }
     
     /// Synchronize this decoder with another decoder's parameter sets
-    pub fn sync_with_decoder(&mut self, source_decoder: &HevcDecoder) {
-        println!("{} Synchronizing with {} decoder", 
-                self.decoder_string, source_decoder.decoder_string);
-        
-        let (vps, sps, pps) = source_decoder.get_parameter_sets();
-        self.inject_parameter_sets(vps, sps, pps);
-        
-        // Reset internal state to match the source decoder
-        self.keyframes_seen = source_decoder.keyframes_seen;
-        
-        // Set the priming complete flag if the source decoder is primed
-        if source_decoder.priming_complete && !self.priming_complete {
-            self.priming_complete = true;
-            println!("{} 🔄 Synchronized with {} decoder (keyframes: {})", 
-                    self.decoder_string, source_decoder.decoder_string, self.keyframes_seen);
-        }
-    }
-    
+
     /// Extract complete parameter set packets from a buffer
     /// This is useful when you want to extract the parameter sets as complete NAL units
     /// including the start code, which is necessary for feeding to another decoder
@@ -762,42 +1054,56 @@ impl HevcDecoder {
         self.keyframes_seen >= 1
     }
 
-     // Check if a buffer contains a keyframe
-     pub fn contains_keyframe(&self, buffer: &[u8]) -> bool {
-        // For HEVC, keyframes are signaled by NAL types 16-21 (IRAP pictures)
-        for i in 0..buffer.len().saturating_sub(5) {
-            if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1) || 
-               (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 0 && buffer[i + 3] == 1) {
+
+
+    pub fn process_packet(&mut self, packet: Vec<u8>) {
+        // Track if this packet contains a parameter set
+        let mut has_parameter_update = false;
+        
+        // Check for parameter set synchronization
+        let synced = self.check_parameter_set_sync();
+        if synced {
+            has_parameter_update = true;
+            // Allow time for the parameter changes to take effect
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        
+        // Extract parameter sets from this packet
+        let (vps, sps, pps) = self.extract_complete_parameter_sets(&packet);
+        let has_param_sets = vps.is_some() || sps.is_some() || pps.is_some();
+        
+        if has_param_sets {
+            has_parameter_update = true;
+            
+            print_pretty!(DebugColor::Cyan, 
+                "{} - Parameter sets found in packet: VPS: {}, SPS: {}, PPS: {}", 
+                self.decoder_string, 
+                vps.as_ref().map_or(0, |v| v.len()),
+                sps.as_ref().map_or(0, |v| v.len()),
+                pps.as_ref().map_or(0, |v| v.len()),);
+            
+            // Update shared parameter manager if available
+            if let Some(shared) = &self.shared_params {
+                let updated = shared.update_from_decoder(
+                    &self.decoder_string, vps.clone(), sps.clone(), pps.clone());
                 
-                let start_code_len = if buffer[i + 2] == 0 { 4 } else { 3 };
-                let nal_header_pos = i + start_code_len;
-                
-                if nal_header_pos < buffer.len() {
-                    let nal_header = buffer[nal_header_pos];
-                    let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+                if updated {
+                    // Immediately reset the decoder state when parameter sets change
+                    self.pending_clear = true;
                     
-                    // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-                    if (16..=21).contains(&nal_type) {
-                        return true;
-                    }
+                    print_pretty!(DebugColor::Green, 
+                        "{} - Updated shared parameter sets (generation: {})", 
+                        self.decoder_string, shared.get_generation(),);
                 }
             }
         }
-        false
-    }
-
-    // Process incoming encoded packets with improved error handling
-      // Modify the process_packet method to call extract_parameter_sets
-      pub fn process_packet(&mut self, packet: Vec<u8>) {
-        // First, check for parameter sets in this packet
-        self.extract_parameter_sets(&packet);
         
-        // The rest of your existing process_packet code remains unchanged
+        // Record frame metrics
         let frame_size = packet.len() as f64;
         let now = Instant::now();
         let delta_t = now.duration_since(self.last_update).as_secs_f64();
         self.last_update = now;
-
+        
         self.total_bytes_processed += frame_size;
         self.frames_processed += 1;
         
@@ -805,19 +1111,29 @@ impl HevcDecoder {
         let is_keyframe = self.contains_keyframe(&packet);
         if is_keyframe {
             self.keyframes_seen += 1;
-            // Check for parameter sets on keyframes specifically
-            println!("{} 🔑 KEYFRAME detected, checking for parameter sets", self.decoder_string);
+            
+            // Reset recovery status on keyframe
+            self.recovery_frames = 0;
+            self.pending_clear = false;
+            
+            print_pretty!(DebugColor::Magenta, 
+                "{} 🔑 KEYFRAME detected (size: {} bytes)", 
+                self.decoder_string, packet.len(),);
+            
+            // For stability, if we're in early stages add extra recovery time
+            if self.frames_processed < 200 {
+                // Tell the decoder we're starting anew after this keyframe
+                if let Some(shared) = &self.shared_params {
+                    self.last_sync_generation = shared.get_generation();
+                }
+            }
         }
-
-        // Calculate smoothing factor α
-        let now = Instant::now();
-        let delta_t = now.duration_since(self.last_update).as_secs_f64();
-        self.last_update = now;
-        let temporal_constant :f64 = 1.0;  // 1 second EWMA
-
-        let alpha = temporal_constant - (-delta_t / temporal_constant).exp();
+        
+        // Calculate smoothing factor for EWMA
+        let alpha = 0.1; // Use a fixed alpha for simplicity
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
-
+        
+        // Add data to the parser
         self.parser.add_data(&packet);
         
         // Extract frames from the parser and buffer them
@@ -826,24 +1142,55 @@ impl HevcDecoder {
             self.frame_buffer.push_back(frame);
         }
         
-        // Forward packet to ffmpeg decoder
-        if let Err(e) = self.packet_tx.send(packet) {
-            println!("{} ERROR: Failed to send packet to decoder: {}", self.decoder_string, e);
-            return;
+        // If we're in recovery mode, handle differently
+        if self.recovery_frames > 0 {
+            self.recovery_frames -= 1;
+            
+            if is_keyframe {
+                // We have a keyframe - go ahead and send to decoder
+                if let Err(e) = self.packet_tx.send(packet) {
+                    print_pretty!(DebugColor::Red, 
+                        "{} ERROR: Failed to send packet to decoder: {}", 
+                        self.decoder_string, e,);
+                }
+            } else if self.recovery_frames == 0 {
+                // End of recovery period, start sending frames again
+                if let Err(e) = self.packet_tx.send(packet) {
+                    print_pretty!(DebugColor::Red, 
+                        "{} ERROR: Failed to send packet to decoder: {}", 
+                        self.decoder_string, e,);
+                }
+                
+                print_pretty!(DebugColor::Green, 
+                    "{} - Recovery complete, resuming normal operation", 
+                    self.decoder_string,);
+            }
+            // Otherwise silently drop frames during recovery
+        } else {
+            // Forward packet to ffmpeg decoder in normal mode
+            if let Err(e) = self.packet_tx.send(packet) {
+                print_pretty!(DebugColor::Red, 
+                    "{} ERROR: Failed to send packet to decoder: {}", 
+                    self.decoder_string, e,);
+            }
         }
         
-        // If we've processed enough frames, consider the decoder primed
-        if !self.priming_complete && self.keyframes_seen >= 20 && self.frames_processed >= 200 {
-            println!("{} 🚀 Decoder priming complete! Processed {} frames including {} keyframes",
-                    self.decoder_string, self.frames_processed, self.keyframes_seen);
+        // After parameter update, enter recovery mode if not already there
+        if has_parameter_update && self.recovery_frames == 0 && !is_keyframe {
+            self.recovery_frames = 30; // Skip ~30 frames or until next keyframe
+            print_pretty!(DebugColor::Yellow, 
+                "{} - Parameter update detected, entering recovery mode for {} frames", 
+                self.decoder_string, self.recovery_frames,);
+        }
+        
+        // Check for decoder priming completion
+        if !self.priming_complete && self.keyframes_seen >= 2 && self.frames_processed >= 60 {
+            print_pretty!(DebugColor::Blue, 
+                "{} 🚀 Decoder priming complete! Processed {} frames including {} keyframes", 
+                self.decoder_string, self.frames_processed, self.keyframes_seen,);
             self.priming_complete = true;
-            
-            // After priming, print all parameter sets we've found
-            println!("{} 📊 Final parameter sets after priming:", self.decoder_string);
-            self.parser.print_parameter_sets();
         }
     }
-
 
         // Better implementation of process_decoded_frames
     pub fn process_decoded_frames(&mut self) -> usize {
@@ -934,31 +1281,293 @@ impl HevcDecoder {
             pps.map(|p| p.clone())
         )
     }
-        
-        // Get the next available decoded RGB frame
-        pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
-            // First try to process any newly available frames
-            let frames_added = self.process_decoded_frames();
-            
-            // Then try to get a frame from the buffer
-            if let Some(frame) = self.decoded_frames.pop_front() {
-                // println!("🖼️ Returning decoded frame of size: {} bytes", frame.len());
-                Some(frame)
-            } else {
-                if frames_added > 0 {
-                    println!("{} Strange: Added frames but buffer is now empty?", self.decoder_string);
-                } else if self.priming_complete {
-                    println!("\n\n******************************No decoded frames available (buffer empty)");
-                } else {
-                    println!("{} Decoder still priming ({}/{} frames processed)", self.decoder_string, 
-                            self.frames_processed, 5);
-                }
-                None
-            }
+
+    fn is_frame_corrupt(&self, frame: &[u8]) -> bool {
+        // Early return if frame is empty or clearly too small
+        if frame.len() < 1000 {
+            return true;
         }
+    
+        // During initialization phase, use more sophisticated validation
+        if !self.priming_complete || self.frames_processed < 200 {
+            // Check RGB distribution - this is the key insight
+            // Sample at multiple locations rather than judging the entire frame
+            let mut green_dominant_regions = 0;
+            let mut total_regions = 0;
+            
+            // Sample 9 regions (3x3 grid)
+            let width = self.width as usize;
+            let height = self.height as usize;
+            let stride = width * 3;
+            
+            // Define sampling regions and thresholds
+            for y_region in 0..3 {
+                for x_region in 0..3 {
+                    let region_x = width * x_region / 3;
+                    let region_y = height * y_region / 3;
+                    let region_size = 32; // Sample a 32x32 block
+                    
+                    let mut green_pixels = 0;
+                    let mut total_pixels = 0;
+                    
+                    // Sample pixels in this region
+                    for y_offset in 0..region_size {
+                        for x_offset in 0..region_size {
+                            let x = region_x + x_offset;
+                            let y = region_y + y_offset;
+                            
+                            if x < width && y < height {
+                                let idx = y * stride + x * 3;
+                                if idx + 2 < frame.len() {
+                                    let r = frame[idx] as u32;
+                                    let g = frame[idx + 1] as u32;
+                                    let b = frame[idx + 2] as u32;
+                                    
+                                    total_pixels += 1;
+                                    
+                                    // Check for extreme green dominance
+                                    if g > r * 3 && g > b * 3 && g > 200 {
+                                        green_pixels += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // If more than 70% of pixels in this region are extremely green-dominant,
+                    // count it as a suspicious region
+                    if total_pixels > 0 && (green_pixels * 100 / total_pixels) > 70 {
+                        green_dominant_regions += 1;
+                    }
+                    
+                    total_regions += 1;
+                }
+            }
+            
+            // If at least 4 of the 9 regions are green-dominant, consider it corrupt
+            return green_dominant_regions >= 4;
+        }
+        
+        // For non-initialization frames, use a simpler check
+        return false;
+    }
+
+
+    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, Instant)> {
+        let inst = Instant::now(); 
+        
+        // Process any newly available frames
+        let frames_added = self.process_decoded_frames();
+        
+        // Try to get a frame from the buffer
+        if let Some(frame) = self.decoded_frames.pop_front() {
+            // During initialization, apply stricter validation
+            if !self.priming_complete || self.frames_processed < 200 {
+                if self.is_frame_corrupt(&frame) {
+                    print_pretty!(DebugColor::Red, 
+                        "{} - Discarding corrupt frame detected during initialization", 
+                        self.decoder_string,);
+                        
+                    // Force entry into recovery mode if we detect corruption
+                    if self.recovery_frames == 0 {
+                        self.recovery_frames = 5;
+                        
+                        if let Some(shared) = &self.shared_params {
+                            // Reapply parameter sets immediately
+                            let (vps, sps, pps) = shared.get_parameter_sets();
+                            if vps.is_some() || sps.is_some() || pps.is_some() {
+                                // Create a special type of packet to force parameter refresh
+                                let mut refresh_packet = Vec::new();
+                                
+                                // Add parameter sets if available
+                                if let Some(vps_data) = vps {
+                                    refresh_packet.extend_from_slice(&vps_data);
+                                }
+                                if let Some(sps_data) = sps {
+                                    refresh_packet.extend_from_slice(&sps_data);
+                                }
+                                if let Some(pps_data) = pps {
+                                    refresh_packet.extend_from_slice(&pps_data);
+                                }
+                                
+                                // Only send if we have something to send
+                                if !refresh_packet.is_empty() {
+                                    if let Err(e) = self.packet_tx.send(refresh_packet) {
+                                        print_pretty!(DebugColor::Red, 
+                                            "{} ERROR: Failed to send refresh packet: {}", 
+                                            self.decoder_string, e,);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    return None;
+                }
+            }
+            
+            // Frame is good
+            Some((frame, inst))
+        } else {
+            if frames_added > 0 && !self.decoded_frames.is_empty() {
+                // Strange case: we added frames but now buffer is empty?
+                print_pretty!(DebugColor::Yellow, 
+                    "{} Strange: Added frames but buffer is now empty?", 
+                    self.decoder_string,);
+            }
+            
+            // No frames available
+            None
+        }
+    }
         
 
 }
+
+
+pub struct SharedParameterSetManager {
+    // Core parameter sets
+    vps: RwLock<Option<Vec<u8>>>,
+    sps: RwLock<Option<Vec<u8>>>,
+    pps: RwLock<Option<Vec<u8>>>,
+    
+    // Metadata for synchronization
+    generation: AtomicU64,
+    primary_decoder: String,
+    
+    // Keyframe tracking
+    last_keyframe_size: AtomicUsize,
+    last_keyframe_timestamp: RwLock<Instant>,
+    keyframe_count: AtomicUsize,
+}
+
+impl SharedParameterSetManager {
+    pub fn new(primary_decoder: &str) -> Self {
+        Self {
+            vps: RwLock::new(None),
+            sps: RwLock::new(None),
+            pps: RwLock::new(None),
+            generation: AtomicU64::new(0),
+            primary_decoder: primary_decoder.to_string(),
+            last_keyframe_size: AtomicUsize::new(0),
+            last_keyframe_timestamp: RwLock::new(Instant::now()),
+            keyframe_count: AtomicUsize::new(0),
+        }
+    }
+    
+    // Update parameter sets from a specific decoder
+    pub fn update_from_decoder(&self, decoder_id: &str, vps: Option<Vec<u8>>, 
+                              sps: Option<Vec<u8>>, pps: Option<Vec<u8>>) -> bool {
+        // Only accept updates from primary decoder or if we have no sets yet
+        let is_primary = decoder_id == self.primary_decoder;
+        let should_update = is_primary || 
+                           (self.vps.read().unwrap().is_none() && 
+                            self.sps.read().unwrap().is_none() && 
+                            self.pps.read().unwrap().is_none());
+                            
+        if should_update {
+            let mut updated = false;
+            
+            if let Some(vps_data) = vps {
+                if vps_data.len() > 8 { // Reasonable minimum size
+                    *self.vps.write().unwrap() = Some(vps_data);
+                    updated = true;
+                }
+            }
+            
+            if let Some(sps_data) = sps {
+                if sps_data.len() > 8 {
+                    *self.sps.write().unwrap() = Some(sps_data);
+                    updated = true;
+                }
+            }
+            
+            if let Some(pps_data) = pps {
+                if pps_data.len() > 4 {
+                    *self.pps.write().unwrap() = Some(pps_data);
+                    updated = true;
+                }
+            }
+            
+            if updated {
+                // Increment generation to notify all decoders
+                self.generation.fetch_add(1, Ordering::SeqCst);
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    // Record a keyframe observation
+    pub fn record_keyframe(&self, decoder_id: &str, keyframe_size: usize) {
+        // Only primary decoder or first keyframe seen updates the size
+        let current_size = self.last_keyframe_size.load(Ordering::SeqCst);
+        let should_update = decoder_id == self.primary_decoder || current_size == 0;
+        
+        if should_update {
+            self.last_keyframe_size.store(keyframe_size, Ordering::SeqCst);
+            *self.last_keyframe_timestamp.write().unwrap() = Instant::now();
+            self.keyframe_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    
+    // Get current parameter sets for a decoder to synchronize with
+    pub fn get_parameter_sets(&self) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+        let vps = self.vps.read().unwrap().clone();
+        let sps = self.sps.read().unwrap().clone();
+        let pps = self.pps.read().unwrap().clone();
+        
+        (vps, sps, pps)
+    }
+    
+    // Get current generation number (increments with each update)
+    pub fn get_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    
+    // Validate a keyframe observation
+    pub fn validate_keyframe(&self, keyframe_size: usize) -> bool {
+        let reference_size = self.last_keyframe_size.load(Ordering::SeqCst);
+        
+        // If we have no reference yet, accept anything
+        if reference_size == 0 {
+            return true;
+        }
+        
+        // Check if size is within reasonable bounds
+        let size_ratio = keyframe_size as f64 / reference_size as f64;
+        if size_ratio < 0.5 || size_ratio > 2.0 {
+            return false;
+        }
+        
+        true
+    }
+}
+
+
+// // New function to create a synchronized pair of decoders
+// pub fn create_synchronized_decoders(
+//     framerate: u32, 
+//     width: u32, 
+//     height: u32, 
+//     sync_threshold_ms: u64
+// ) -> (HevcDecoder, HevcDecoder, Arc<Mutex<DecoderSyncManager>>) {
+//     // Create sync manager
+//     let sync_manager = Arc::new(Mutex::new(
+//         DecoderSyncManager::new("primary_decoder", sync_threshold_ms)
+//     ));
+    
+//     // Create decoders
+//     let mut primary_decoder = HevcDecoder::new(framerate, width, height, "primary_decoder");
+//     let mut secondary_decoder = HevcDecoder::new(framerate, width, height, "secondary_decoder");
+    
+//     // Connect decoders to sync manager
+//     primary_decoder.connect_to_sync_manager(Arc::clone(&sync_manager), true);
+//     secondary_decoder.connect_to_sync_manager(Arc::clone(&sync_manager), false);
+    
+//     (primary_decoder, secondary_decoder, sync_manager)
+// }
 
 
 #[derive(Clone)]
@@ -973,7 +1582,7 @@ pub struct DecoderLatencyLimiter{
 }
 #[derive(Clone)]
 pub enum BitrateMode {
-    ConstantMbps(u64),
+    ConstantMbps(f32),
     // Adaptive {
     //     saturation_multiplier: f32,
     //     max_bitrate_mbps: u64,
@@ -1052,7 +1661,15 @@ impl BitrateManager {
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ) -> f32 {
         let bitrate_bps = match self.bitrate_mode{
-            BitrateMode::ConstantMbps(bitrate_mbps) => bitrate_mbps as f32 * 1e6,
+            BitrateMode::ConstantMbps(bitrate_mbps) => {
+                
+                
+                self.last_target_bitrate_bps = bitrate_mbps as f32 * 1E6; 
+                self.last_target_bitrate_mbps = bitrate_mbps as f32 ;  
+
+                print_prettyy!(DebugColor::Navy, "CBR -> Bitrate = {} Mbps", bitrate_mbps); 
+                
+                bitrate_mbps as f32 * 1e6},
 
             BitrateMode::NestVr {
                 max_bitrate_mbps,
@@ -1248,18 +1865,20 @@ impl BitrateManager {
                 max_history_size,
             ),
 
-            // bitrate_mode: BitrateMode::ConstantMbps( initial_bitrate_mbps as u64),   // ONLY CBR FOR NOW!!!
-            bitrate_mode: BitrateMode::NestVr { 
-                update_interval_nestvr_s: 1.0, 
-                max_bitrate_mbps: 100.2,
-                min_bitrate_mbps: 0.2,
-                initial_bitrate_mbps: 100.2 , 
-                step_size_mbps: 5.0 ,
-                capacity_scaling_factor: 0.9, 
-                rtt_explor_prob: 0.25,
-                nfr_thresh: 0.99,
-                rtt_thresh_scaling_factor: 22.0,  
-            }, 
+            bitrate_mode: BitrateMode::ConstantMbps( 22.39 ),   // ONLY CBR FOR NOW!!!
+            
+            
+            // BitrateMode::NestVr { 
+            //     update_interval_nestvr_s: 1.0, 
+            //     max_bitrate_mbps: 100.2,
+            //     min_bitrate_mbps: 40.2,
+            //     initial_bitrate_mbps: 100.2 , 
+            //     step_size_mbps: 5.0 ,
+            //     capacity_scaling_factor: 0.9, 
+            //     rtt_explor_prob: 0.25,
+            //     nfr_thresh: 0.99,
+            //     rtt_thresh_scaling_factor: 22.0,  
+            // }, 
 
             last_target_bitrate_bps: 0.0, 
         }
@@ -2067,6 +2686,9 @@ pub struct XRClient {
     last_batch_process_time: TaiTime<0>,
 
 
+    shared_params: Option<Arc<SharedParameterSetManager>>, 
+
+
 
     // pub visualize_decoder_window: Option<Window>,
 }
@@ -2135,6 +2757,7 @@ impl XRClient {
 
             frame_batch: Vec::new(),
             last_batch_process_time: TaiTime::EPOCH, 
+            shared_params: None, 
             // visualize_decoder_window: None,
         }
     }
@@ -2646,145 +3269,221 @@ impl XRClient {
                  }
         }
     }
-    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, client_ip: IpAddr, is_max_bitrate: bool) -> (Vec<u8>, Vec<u32>) {
-        // Validate input and determine decoder key (existing code)
-        let decoder_key: IpAddr = self.get_decoder_key(client_ip, is_max_bitrate);
+
+
+    pub async fn decode_hevc_to_rgb2(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, 
+                                 client_ip: IpAddr, is_max_bitrate: bool) 
+                                    -> (Vec<u8>, Vec<u32>, Option<Instant>) {
+        // Validate input and determine decoder key
+        let decoder_key = self.get_decoder_key(client_ip, is_max_bitrate);
         
-        // RGB path handling (existing code remains unchanged)
-        let rgb_path = if is_max_bitrate {
-            format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}.rgb", self.name_folder, client_ip, frame_index)
+        // Create decoder ID string
+        let decoder_id = if is_max_bitrate {
+            format!("[MAXB_DECODER {}]", decoder_key)
         } else {
-            format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb", self.name_folder, client_ip, frame_index)
-        }; 
+            format!("[REFB_DECODER {}]", decoder_key)
+        };
         
-        // Check if RGB file already exists (existing code remains)
-        if std::path::Path::new(&rgb_path).exists() {
-            match fs::read(&rgb_path) {
-                Ok(rgb_data) if !rgb_data.is_empty() => {
-                    if let Some(pixels) = convert_rgb_to_u32(&rgb_data, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                        return (rgb_data, pixels);
-                    }
-                }
-                _ => {}
-            }
-        }
-        
-        // Empty buffer check (existing code)
+        // Empty buffer check
         let encoded_length = encoded_buffer.len();
         if encoded_buffer.is_empty() {
-            println!("[XRClient DECODE REF {}] WARNING: Empty encoded buffer received!", decoder_key);
-            return (Vec::new(), Vec::new());
+            print_pretty!(DebugColor::Yellow, 
+                "{} - WARNING: Empty encoded buffer received!", decoder_id,);
+            return (Vec::new(), Vec::new(), None);
         }
         
-        // Critical modification: synchronized decoder initialization
-        {
-            let mut main_params: (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) = (None, None, None);
+        // Initialize shared parameter set manager if it doesn't exist yet
+        if self.shared_params.is_none() {
+            let primary_decoder = format!("[CLIENT_DECODER {}]", client_ip); // Use main decoder as primary
+            let shared = Arc::new(SharedParameterSetManager::new(&primary_decoder));
+            self.shared_params = Some(shared.clone());
             
-            // Extract parameter sets from main decoder if it exists
+            print_pretty!(DebugColor::Green, 
+                "Initialized shared parameter set manager with primary decoder: {}", 
+                primary_decoder,);
+                
+            // If we have a main decoder, share its parameter sets immediately
             if let Some(decoder_arc) = &self.decoder_arc {
                 if let Ok(decoder_guard) = decoder_arc.try_lock() {
-                    main_params = decoder_guard.get_parameter_sets();
-                    
-                    // Debug parameter set availability for diagnostics
-                    print_pretty!(DebugColor::Cyan, 
-                        "Main decoder parameter sets for sync: VPS: {}, SPS: {}, PPS: {}", 
-                        main_params.0.as_ref().map_or(0, |v| v.len()),
-                        main_params.1.as_ref().map_or(0, |v| v.len()),
-                        main_params.2.as_ref().map_or(0, |v| v.len()),
-                    );
+                    let (vps, sps, pps) = decoder_guard.get_parameter_sets();
+                    if vps.is_some() || sps.is_some() || pps.is_some() {
+                        shared.update_from_decoder(&primary_decoder, vps, sps, pps);
+                        
+                        print_pretty!(DebugColor::Magenta, 
+                            "Populated shared parameter sets from main decoder",);
+                    }
                 }
             }
-            
+        }
+
+        // Get shared parameter manager
+        let shared_params = self.shared_params.clone();
+        
+        // Initialize or get the decoder
+        let result = {
             let mut decoders = REFERENCE_DECODERS.lock().unwrap();
             
-            // Create new decoder with synchronized parameters if needed
+            // Create new decoder if needed
             if !decoders.contains_key(&decoder_key) {
                 print_pretty!(DebugColor::Cyan, 
-                    "Initializing reference decoder for client {}", decoder_key);
+                    "Initializing {} decoder for client {}", 
+                    if is_max_bitrate { "max bitrate" } else { "reference" }, 
+                    decoder_key,);
                 
                 let mut new_decoder = HevcDecoder::new(
                     FRAMERATE_WINDOWS as u32, 
                     WIDTH_ENCODER as u32, 
                     HEIGHT_ENCODER as u32, 
-                    &format!("[REF_DECODER {}]", decoder_key)
+                    &decoder_id,
+                    shared_params.clone(),
                 );
                 
-                // Apply parameter sets immediately if available
-                if main_params.0.is_some() || main_params.1.is_some() || main_params.2.is_some() {
-                    print_pretty!(DebugColor::Magenta, 
-                        "Synchronizing new reference decoder {} with main decoder parameter sets", 
-                        decoder_key);
+                // Apply initial parameter sets immediately if available
+                if let Some(shared) = &shared_params {
+                    let (vps, sps, pps) = shared.get_parameter_sets();
                     
-                    new_decoder.inject_parameter_sets(
-                        main_params.0.clone(),
-                        main_params.1.clone(),
-                        main_params.2.clone()
-                    );
+                    // For lower bitrate, use progressive parameter set application
+                    // First inject VPS, then SPS, then PPS with small delays in between
+                    if vps.is_some() {
+                        print_pretty!(DebugColor::Magenta, 
+                            "{} - Initializing with VPS ({} bytes)", 
+                            decoder_id, vps.as_ref().unwrap().len(),);
+                            
+                        new_decoder.inject_parameter_sets(vps.clone(), None, None);
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    
+                    if sps.is_some() {
+                        print_pretty!(DebugColor::Magenta, 
+                            "{} - Initializing with SPS ({} bytes)", 
+                            decoder_id, sps.as_ref().unwrap().len(),);
+                            
+                        new_decoder.inject_parameter_sets(None, sps.clone(), None);
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    
+                    if pps.is_some() {
+                        print_pretty!(DebugColor::Magenta, 
+                            "{} - Initializing with PPS ({} bytes)", 
+                            decoder_id, pps.as_ref().unwrap().len(),);
+                            
+                        new_decoder.inject_parameter_sets(None, None, pps.clone());
+                    }
+                    
+                    // Now apply all together
+                    if vps.is_some() || sps.is_some() || pps.is_some() {
+                        new_decoder.inject_parameter_sets(vps, sps, pps);
+                        
+                        print_pretty!(DebugColor::Magenta, 
+                            "{} - Initialized with all parameter sets", decoder_id,);
+                    } else {
+                        print_pretty!(DebugColor::Yellow, 
+                            "{} - No shared parameter sets available yet", decoder_id,);
+                    }
                 }
                 
+                new_decoder.initialization_phase = true;        
                 decoders.insert(decoder_key.clone(), new_decoder);
             }
             
-            // Check if keyframe in current buffer and needs synchronization
+            // Check for keyframe and force parameter set update if needed
             let is_keyframe = self.is_keyframe(&encoded_buffer);
-            if is_keyframe && (main_params.0.is_some() || main_params.1.is_some() || main_params.2.is_some()) {
-                if let Some(ref_decoder) = decoders.get_mut(&decoder_key) {
-                    print_pretty!(DebugColor::Magenta, 
-                        "Re-synchronizing reference decoder {} with main decoder on keyframe", 
-                        decoder_key);
-                    
-                    ref_decoder.inject_parameter_sets(
-                        main_params.0.clone(),
-                        main_params.1.clone(),
-                        main_params.2.clone()
-                    );
+            if is_keyframe {
+                print_pretty!(DebugColor::Magenta, 
+                    "{} - Processing keyframe (size: {} bytes)", decoder_id, encoded_buffer.len(),);
+                
+                // If we have shared params and this is a keyframe,
+                // ensure the decoder is synchronized
+                if let Some(shared) = &shared_params {
+                    if let Some(decoder) = decoders.get_mut(&decoder_key) {
+                        // During initialization, force parameter set sync on every keyframe
+                        let force_sync = decoder.initialization_phase || 
+                                       decoder.frames_processed < 200 || 
+                                       decoder.last_sync_generation < shared.get_generation();
+                        
+                        if force_sync {
+                            // Reset recovery counters
+                            decoder.recovery_frames = 0;
+                            decoder.pending_clear = false;
+                            
+                            // Get the latest parameter sets
+                            let (vps, sps, pps) = shared.get_parameter_sets();
+                            
+                            // Apply with progressive strategy during initialization
+                            if decoder.initialization_phase && decoder.frames_processed < 100 {
+                                // Apply parameter sets one by one with short delays
+                                if vps.is_some() {
+                                    print_pretty!(DebugColor::Cyan, 
+                                        "{} - Progressive sync: Injecting VPS", decoder_id,);
+                                    decoder.inject_parameter_sets(vps.clone(), None, None);
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                
+                                if sps.is_some() {
+                                    print_pretty!(DebugColor::Cyan, 
+                                        "{} - Progressive sync: Injecting SPS", decoder_id,);
+                                    decoder.inject_parameter_sets(None, sps.clone(), None);
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                
+                                if pps.is_some() {
+                                    print_pretty!(DebugColor::Cyan, 
+                                        "{} - Progressive sync: Injecting PPS", decoder_id,);
+                                    decoder.inject_parameter_sets(None, None, pps.clone());
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                            }
+                            
+                            // Now apply all together
+                            decoder.inject_parameter_sets(vps, sps, pps);
+                            decoder.last_sync_generation = shared.get_generation();
+                            
+                            print_pretty!(DebugColor::Green, 
+                                "{} - Synchronized with shared parameter sets on keyframe (gen: {})", 
+                                decoder_id, shared.get_generation(),);
+                                
+                            // Mark as not in initialization phase after first successful sync
+                            if decoder.keyframes_seen >= 2 {
+                                decoder.initialization_phase = false;
+                            }
+                        }
+                    }
                 }
             }
-        }
-        
-        // Process with decoder - second lock scope (similar to existing code)
-        let result = {
-            let mut decoders = REFERENCE_DECODERS.lock().unwrap();
+                        // Process the frame
             if let Some(decoder) = decoders.get_mut(&decoder_key) {
-                // Check if this is a keyframe for logging
-                let is_keyframe = decoder.contains_keyframe(&encoded_buffer);
-                let frame_display = if is_keyframe { "KEYFRAME" } else { "frame" };
-                print_pretty!(DebugColor::Cyan, 
-                    "{} - Decoding reference HEVC {} #{} of size: {} bytes",
-                    decoder_key, frame_display, frame_index, encoded_length,
-                );
-                
-                // Process the frame
                 decoder.process_packet(encoded_buffer);
                 
                 // Process any decoded frames
                 let frames_count = decoder.process_decoded_frames();
                 
                 // Try to get a decoded frame
-                if let Some(frame) = decoder.next_decoded_frame() {
-                    // Convert to RGB
-                    let sample = frame.clone();
-                    if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                        (sample, pixels)
+                if let Some((frame, inst)) = decoder.next_decoded_frame() {
+                    if let Some(pixels) = convert_rgb_to_u32(&frame, 
+                                                            WIDTH_ENCODER, 
+                                                            HEIGHT_ENCODER) {
+                        (frame, pixels, Some(inst))
                     } else {
-                        print_pretty!(DebugColor::Red, "Failed to convert decoded frame to RGB", );
-                        (Vec::new(), Vec::new())
+                        print_pretty!(DebugColor::Red, 
+                            "{} - Failed to convert frame to RGB", decoder_id,);
+                        (Vec::new(), Vec::new(), None)
                     }
                 } else {
                     // Don't consider this an error during the priming phase
                     if !decoder.priming_complete {
                         print_pretty!(DebugColor::Yellow, 
-                            "Reference decoder still priming (processed: {}, keyframes: {})",
-                            decoder.frames_processed, decoder.keyframes_seen,
-                        );
+                            "{} - Decoder still priming ({}/{} frames processed)", 
+                            decoder_id, decoder.frames_processed, decoder.keyframes_seen,);
                     } else {
-                        print_pretty!(DebugColor::Yellow, "No decoded reference frame available yet", );
+                        print_pretty!(DebugColor::Yellow, 
+                            "{} - No decoded frame available yet", decoder_id,);
                     }
-                    (Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), None)
                 }
             } else {
-                print_pretty!(DebugColor::Red, "ERROR: Reference decoder initialization failed", );
-                (Vec::new(), Vec::new())
+                print_pretty!(DebugColor::Red, 
+                    "{} - ERROR: Decoder initialization failed", decoder_id,);
+                (Vec::new(), Vec::new(), None)
             }
         };
         
@@ -2793,20 +3492,19 @@ impl XRClient {
     }
 
 
-
-    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, ip: IpAddr) -> (Vec<u8>, Vec<u32>)  {
+    pub async fn decode_hevc_to_rgb(&mut self, encoded_buffer: Vec<u8>, frame_index: usize, ip: IpAddr) -> (Vec<u8>, Vec<u32>, Option<Instant> )  {
         // Validate input
         let encoded_length = encoded_buffer.len();
         
         if encoded_buffer.is_empty() {
             println!("[XRClient DECODE {}] WARNING: Empty encoded buffer received!", ip);
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), None);
         }
         
         // Ensure decoder is initialized
         if self.decoder_arc.is_none() {
             println!("[XRClient DECODE {}] Initializing decoder on first frame", ip);
-            let decoder = HevcDecoder::new( FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[MAIN_DECODER {}]", ip)); 
+            let decoder = HevcDecoder::new( FRAMERATE_WINDOWS as u32, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, &format!("[CLIENT_DECODER {}]", ip), self.shared_params.clone()); 
             self.decoder_arc = Some(Arc::new(tokMutex::new(decoder)));
         }
         
@@ -2831,30 +3529,30 @@ impl XRClient {
             decoder.process_decoded_frames();
 
             // Try to get a decoded frame
-            if let Some(frame) = decoder.next_decoded_frame() {
+            if let Some((frame, inst)) = decoder.next_decoded_frame() {
                 // Convert to RGB
                 let sample = frame.clone(); 
                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     // println!("✅ Successfully decoded and converted frame #{}", frame_index);
                     self.is_decoder_ready = true; 
-                    return (sample, pixels);
+                    return (sample, pixels, Some(inst));
                 } else {
                     println!("[XRClient DECODE {}] ERROR: Failed to convert decoded frame to RGB", ip);
-                    return (Vec::new(), Vec::new());
+                    return (Vec::new(), Vec::new(), None);
                 }
             } else {
                 // Don't consider this an error during the priming phase
                 if !decoder.priming_complete {
-                    println!("[XRClient DECODE {}] Decoder still priming, frame buffered (processed: {}, keyframes: {})",
+                    println!("[XRClient DECODER {}] Decoder still priming, frame buffered (processed: {}, keyframes: {})",
                             ip,  decoder.frames_processed, decoder.keyframes_seen);
                 } else {
                     println!("No decoded frame available yet");
                 }
-                return (Vec::new(), Vec::new());
+                return (Vec::new(), Vec::new(), None);
             }
         } else {
             println!("[XRClient DECODE {}] ERROR: Decoder not initialized properly", ip);
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), None);
         }
     }
 
@@ -3482,8 +4180,12 @@ impl XRClient {
                                 if let Ok(hevc_data) =  fs::read(&hevc_path) {
                                     if !hevc_data.is_empty(){
                                         print_pretty!(DebugColor::Lime, "DECODING MAX BITRATE REFERENCE FRAME {}", next_frame_id, ); 
-                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client, true).await;         
+                                        let (rgb_ref_frame, _, instant_decode_max) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client, true).await;         
                                         if !rgb_ref_frame.is_empty() {
+
+
+                                            print_prettyy!(DebugColor::Orange, "[DEBOOG] MAX BITRATE FRAME {} at T = {}", next_frame_id, instant_decode_max.unwrap().elapsed().as_secs_f32()); 
+
                                             if let Err(e) = std::fs::write(&max_rgb_write_path, &rgb_ref_frame) {
                                                 print_pretty!(DebugColor::Red, 
                                                     "Failed to save MAXB RGB for frame #{}: {}", next_frame_id, e);
@@ -3502,13 +4204,16 @@ impl XRClient {
                                 if let Ok(hevc_data) =  fs::read(&current_bitrate_path) {
                                     if !hevc_data.is_empty(){
                                         print_pretty!(DebugColor::Lime, "DECODING REFERENCE FRAME {}", next_frame_id, ); 
-                                        let (rgb_ref_frame, _) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client, false).await;         
+                                        let (rgb_ref_frame, _, instant_decode_ref) = self.decode_hevc_to_rgb2(hevc_data, next_frame_id, ip_client, false).await;         
                                         if !rgb_ref_frame.is_empty() {                                            
+                                            
+                                            print_prettyy!(DebugColor::Orange, "[DEBOOG] REF BIT FRAME {} at T = {}", next_frame_id, instant_decode_ref.unwrap().elapsed().as_secs_f32()); 
+                                            
                                                                                                                           // Save the decoded RGB file
                                             if let Err(e) = std::fs::write(&ref_rgb_write_path, &rgb_ref_frame) {
                                                 print_pretty!(DebugColor::Red, 
                                                     "Failed to save RGB for frame #{}: {}", next_frame_id, e);
-                                            } else {
+                                            } else { 
                                                 // Mark as processed
                                                 self.missing_frames_buffer.insert(next_frame_id, true);
                                                 print_pretty!(DebugColor::Green, 
@@ -3518,7 +4223,7 @@ impl XRClient {
                                     }
                                 }
                             }     
-                            // println!("[DBG2] Finished processing {}", next_frame_id); 
+
                             next_frame_id +=1;                    
                         } //end while
                     }
@@ -3821,11 +4526,21 @@ impl XRClient {
                             );
 
                             if USE_FFMPEG == true {
-                                let (rgb_ref_currentb, ref_pixels_currentb) = self.decode_hevc_to_rgb2(ref_frame.clone(), id_f, ip_client, false).await; 
+                                let t_start1 = Instant::now(); 
+                      
+                                let (rgb_ref_currentb, ref_pixels_currentb, instant_ref_b) = self.decode_hevc_to_rgb2(ref_frame.clone(), id_f, ip_client, false).await; 
+                                let t_start2 = Instant::now(); 
+                                let (rgb_max_frame, ref_pixels_maxb, instant_ref_max) = self.decode_hevc_to_rgb2(max_frame.clone(), id_f, ip_client, true).await; 
+                                let t_start3 = Instant::now(); 
+                                let (rgb, frame, instant_dec_b) =    self.decode_hevc_to_rgb(video_frame.clone(), id_f, ip_client).await;
 
-                                let (rgb_max_frame, ref_pixels_maxb) = self.decode_hevc_to_rgb2(max_frame.clone(), id_f, ip_client, true).await; 
-                                
-                                let (rgb, frame) =                self.decode_hevc_to_rgb(video_frame.clone(), id_f, ip_client).await;
+
+                                if !instant_dec_b.is_none() && !instant_ref_max.is_none() && !instant_ref_b.is_none() {
+                                    print_prettyyy!(DebugColor::Yellow, "[DEBOOG1] REF BIT. FRAME {} at T = {}, (DURATION more/less) = {}", id_f, instant_ref_b.unwrap().elapsed().as_secs_f32(), instant_ref_b.unwrap().duration_since(t_start1).as_secs_f32()); 
+                                    print_prettyyy!(DebugColor::Red,    "[DEBOOG2] MAX BIT. FRAME {} at T = {}, (DURATION more/less) = {}", id_f, instant_ref_max.unwrap().elapsed().as_secs_f32(), instant_ref_max.unwrap().duration_since(t_start2).as_secs_f32() ); 
+                                    print_prettyyy!(DebugColor::Yellow, "[DEBOOG3] DEC BIT. FRAME {} at T = {}, (DURATION more/less) = {}", id_f, instant_dec_b.unwrap().elapsed().as_secs_f32(), instant_dec_b.unwrap().duration_since(t_start3).as_secs_f32()); 
+        
+                                }
 
 
                                 if !rgb_max_frame.is_empty(){

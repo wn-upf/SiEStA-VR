@@ -76,12 +76,21 @@ macro_rules! print_pretty {
         // if DEBUG_PRINT_ENABLED == true {
             let msg = format!($fmt, $($arg)*);
             println!("{}", $color.to_color_fn()(msg));
-        }
-    // };
+        // }
+    }
 }
 
 #[macro_export]
 macro_rules! print_prettyy {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        // }
+    };
+}
+#[macro_export]
+macro_rules! print_prettyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
             let msg = format!($fmt, $($arg)*);
@@ -571,6 +580,16 @@ impl HevcParser {
     /// Get the current PPS (Picture Parameter Set)
     pub fn get_pps(&self) -> Option<&Vec<u8>> {
         self.pps.as_ref()
+    }
+
+    pub fn update_vps(&mut self, vps: &Vec<u8>){
+        self.vps = Some(vps.clone()); 
+    }
+    pub fn update_sps(&mut self, sps: &Vec<u8>){
+        self.sps = Some(sps.clone()); 
+    }
+    pub fn update_pps(&mut self, pps: &Vec<u8>){
+        self.pps = Some(pps.clone()); 
     }
     
     /// Get all parameter sets as a tuple

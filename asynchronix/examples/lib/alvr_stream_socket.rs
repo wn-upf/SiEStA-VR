@@ -1899,7 +1899,9 @@ impl<H: Serialize> StreamSender<H> {
                     id_frame_files_ref, self.ffmpeg_maxbitrate_encoder.is_some());
 
                         
-                let random_offset =  rand::thread_rng().gen_range(0.0..OFFSET_VIDEO); 
+                // let random_offset =  rand::thread_rng().gen_range(50.0..OFFSET_VIDEO); 
+                let random_offset = OFFSET_VIDEO; 
+
                 let encoder = ChunkedHevcEncoder::new(
                     input_path,
                     WIDTH_ENCODER as u32,
@@ -1998,7 +2000,6 @@ impl<H: Serialize> StreamSender<H> {
             }; 
             if let Some(maxb_encoder_arc) = self.ffmpeg_maxbitrate_encoder.as_ref() {
                 
-                print_prettyy!(DebugColor::Coral, "[DBBBBBBBBBBBBBBBG MAXbitrate = {}]", max_bitrate_ladder_mbps );
                 let mut maxencoder = maxb_encoder_arc.lock().await; 
                 
                 // print_pretty!(DebugColor::SaddleBrown, "\n\n******** MAX ENCODER FOUND!! ******* | parser buffer size: {}", maxencoder.parser.buffer.len());
