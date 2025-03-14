@@ -11,6 +11,7 @@ use std::{
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
+use tokio::sync::Semaphore;
 // First, let's define the missing utility functions and structures
 
 use std::sync::atomic::{AtomicBool};
@@ -126,6 +127,285 @@ macro_rules! print_prettyy {
             println!("{}", $color.to_background_fn()(msg));
         }
     };
+}
+// 1. Replace the separate encoder state with a single coordinator
+
+pub struct SynchronizedDecoder {
+    regular_decoder: HevcDecoder,
+    max_decoder: HevcDecoder,
+    frame_queue: VecDeque<FramePair>,
+    throttle_semaphore: Arc<Semaphore>,
+    next_frame_id: Arc<AtomicUsize>,
+}
+fn find_best_frame_match(
+    regular_frames: &[(Vec<u8>, Vec<u32>)],
+    max_frames: &[(Vec<u8>, Vec<u32>)]
+) -> (usize, usize, f64) {
+    let mut best_regular_idx = 0;
+    let mut best_max_idx = 0;
+    let mut best_similarity = 1.0; // Start with worst similarity (1.0 = completely different)
+    
+    // Compute similarity for all possible frame pairs
+    for (reg_idx, (reg_raw, _)) in regular_frames.iter().enumerate() {
+        for (max_idx, (max_raw, _)) in max_frames.iter().enumerate() {
+            // Use an enhanced frame similarity metric
+            let similarity = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+            
+            // Update if we found a better match
+            if similarity < best_similarity {
+                best_similarity = similarity;
+                best_regular_idx = reg_idx;
+                best_max_idx = max_idx;
+            }
+        }
+    }
+    
+    (best_regular_idx, best_max_idx, best_similarity)
+}
+
+impl SynchronizedDecoder {
+    pub fn new(client_ip: IpAddr, throttle_semaphore: Arc<Semaphore>) -> Self {
+        Self {
+            regular_decoder: HevcDecoder::new(
+                FRAMERATE_WINDOWS as u32,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("[CLIENT_DECODER_REGULAR {}]", client_ip),
+            ),
+            max_decoder: HevcDecoder::new(
+                FRAMERATE_WINDOWS as u32,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("[CLIENT_DECODER_MAX {}]", client_ip),
+            ),
+            frame_queue: VecDeque::with_capacity(8),
+            throttle_semaphore,
+            next_frame_id: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+    fn synchronize_frame_buffers(&mut self) {
+        if self.frame_queue.len() > 1 {
+            return; // Already have synchronized pairs
+        }
+        
+        // Get pending decoded frames from both decoders
+        let regular_frames = self.regular_decoder.process_decoded_frames();
+        let max_frames = self.max_decoder.process_decoded_frames();
+        
+        if regular_frames == 0 || max_frames == 0 {
+            return; // Need frames from both decoders
+        }
+        
+        // Collect all available decoded frames with their raw data
+        let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
+        let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
+        
+        // Extract up to 5 frames from each decoder to analyze
+        for _ in 0..5 {
+            if let Some((raw, timestamp)) = self.regular_decoder.next_decoded_frame() {
+                if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                    regular_decoded.push((raw, pixels));
+                }
+            }
+            
+            if let Some((raw, timestamp)) = self.max_decoder.next_decoded_frame() {
+                if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                    max_decoded.push((raw, pixels));
+                }
+            }
+        }
+        
+        // If we have frames from both decoders, find the best matching pair
+        if !regular_decoded.is_empty() && !max_decoded.is_empty() {
+            // This is the critical part - find the best matching frames using content similarity
+            let (best_regular_idx, best_max_idx, similarity) = find_best_frame_match(
+                &regular_decoded,
+                &max_decoded
+            );
+            
+            // Only create a pair if similarity is good enough (below threshold)
+            if similarity < 0.15 { // 15% difference threshold for good matches
+                let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
+                
+                // Create the perfectly synchronized frame pair
+                let pair = FramePair {
+                    decoded: Some(regular_decoded[best_regular_idx].1.clone()),
+                    reference: Some(max_decoded[best_max_idx].1.clone()),
+                    decoded_raw: Some(regular_decoded[best_regular_idx].0.clone()),
+                    reference_raw: Some(max_decoded[best_max_idx].0.clone()),
+                    frame_id,
+                };
+                
+                self.frame_queue.push_back(pair);
+                println!("✓ Created perfectly synchronized frame pair #{} (similarity: {:.2}%)",
+                    frame_id, similarity * 100.0);
+            }
+            
+            // Remove the matched frames and any earlier frames to maintain sync
+            for i in 0..=best_regular_idx {
+                if i < regular_decoded.len() {
+                    self.regular_decoder.skip_frame();
+                }
+            }
+            
+            for i in 0..=best_max_idx {
+                if i < max_decoded.len() {
+                    self.max_decoder.skip_frame();
+                }
+            }
+        }
+    }
+    
+    // Modify process_frame_pair to use the new synchronization logic
+    pub fn process_frame_pair(&mut self, regular_frame: Vec<u8>, max_frame: Vec<u8>, frame_id: usize) {
+        // Process both packets, but don't try to force immediate pairing
+        self.regular_decoder.process_packet(regular_frame);
+        self.max_decoder.process_packet(max_frame);
+        
+        // Run the content-aware synchronization
+        self.synchronize_frame_buffers();
+    }
+    
+    // Try to extract decoded frames and pair them
+    fn process_decoded_frames(&mut self, frame_id: usize) {
+        // Process any available frames in both decoders
+        self.regular_decoder.process_decoded_frames();
+        self.max_decoder.process_decoded_frames();
+        
+        // Try to get a frame from each decoder
+        let regular_result = self.regular_decoder.next_decoded_frame();
+        let max_result = self.max_decoder.next_decoded_frame();
+        
+        // Only create a pair if we got frames from both decoders
+        if let (Some((regular_raw, regular_timestamp)), Some((max_raw, max_timestamp))) = (&regular_result, &max_result) {
+            // Convert raw RGB frames to u32 pixels for display
+            if let (Some(regular_pixels), Some(max_pixels)) = (
+                convert_rgb_to_u32(regular_raw, WIDTH_ENCODER, HEIGHT_ENCODER),
+                convert_rgb_to_u32(max_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
+            ) {
+                // Create and store the frame pair
+                let pair = FramePair {
+                    decoded: Some(regular_pixels),
+                    reference: Some(max_pixels),
+                    decoded_raw: Some(regular_raw.clone()),
+                    reference_raw: Some(max_raw.clone()),
+                    frame_id,
+                };
+                
+                self.frame_queue.push_back(pair);
+                println!("Created synchronized frame pair #{}", frame_id);
+            }
+        } else {
+            println!("Couldn't get frames from both decoders for frame #{}", frame_id);
+            
+            // If one decoder produced a frame but not the other, we have a problem
+            // This should be rare with lockstep processing, but let's log it
+            if regular_result.is_some() && max_result.is_none() {
+                println!("Warning: Only regular decoder produced a frame");
+            } else if regular_result.is_none() && max_result.is_some() {
+                println!("Warning: Only max decoder produced a frame");
+            }
+        }
+    }
+    
+    // Get the next available frame pair
+    pub fn next_frame_pair(&mut self) -> Option<FramePair> {
+        if let Some(pair) = self.frame_queue.pop_front() {
+            // Release one throttle permit when we consume a frame
+            self.throttle_semaphore.add_permits(1);
+            Some(pair)
+        } else {
+            None
+        }
+    }
+}
+pub struct EncodingCoordinator {
+    frame_id: Arc<AtomicUsize>,
+    regular_encoder: ChunkedHevcEncoder,
+    max_encoder: ChunkedHevcEncoder,
+    throttle_semaphore: Arc<Semaphore>,
+
+    encoder_bitrate_mbps:    f32,
+    maxencoder_bitrate_mbps: f32,
+
+
+}
+
+impl EncodingCoordinator {
+    pub fn new(input_path: &str, regular_bitrate: f32, max_bitrate: f32) -> Self {
+        // Both encoders use the exact same offset to ensure frame alignment
+        let offset = OFFSET_VIDEO;
+        
+        Self {
+            frame_id: Arc::new(AtomicUsize::new(0)),
+            regular_encoder: ChunkedHevcEncoder::new(
+                input_path,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("{:.1}M", regular_bitrate),
+                CHUNK_DURATION_F64_s,
+                "[REGULAR_ENCODER]".to_string(),
+                offset,
+            ),
+            max_encoder: ChunkedHevcEncoder::new(
+                input_path,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("{:.1}M", max_bitrate),
+                CHUNK_DURATION_F64_s,
+                "[MAX_ENCODER]".to_string(),
+                offset,
+            ),
+            // Limit to 4 frames in-flight to prevent buffer explosion
+            throttle_semaphore: Arc::new(Semaphore::new(4)),
+            encoder_bitrate_mbps: regular_bitrate,
+            maxencoder_bitrate_mbps: max_bitrate, 
+        }
+    }
+    
+    // Process frames in perfect lockstep
+    pub async fn next_frame_pair(&mut self) -> Option<(Vec<u8>, Vec<u8>, usize)> {
+        // Wait for throttle semaphore to have permits
+        let _permit = self.throttle_semaphore.acquire().await.ok()?;
+        
+        // Get next frame from both encoders, retrying if necessary
+        let regular_frame = loop {
+            match self.regular_encoder.next_frame().await {
+                Some(frame) => break frame,
+                None => {
+                    println!("Regular encoder: No frame available, restarting chunk");
+                    self.regular_encoder.parser.clear();
+                    self.regular_encoder.frame_queue.clear();
+                    self.regular_encoder.start_chunking(self.encoder_bitrate_mbps).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        
+        let max_frame = loop {
+            match self.max_encoder.next_frame().await {
+                Some(frame) => break frame,
+                None => {
+                    println!("Max encoder: No frame available, restarting chunk");
+                    self.max_encoder.parser.clear();
+                    self.max_encoder.frame_queue.clear();
+                    self.max_encoder.start_chunking(self.maxencoder_bitrate_mbps).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        
+        // Get and increment the frame ID atomically
+        let frame_id = self.frame_id.fetch_add(1, Ordering::SeqCst);
+        
+        Some((regular_frame, max_frame, frame_id))
+    }
+    
+    // Release throttle permit - called after frame has been displayed
+    pub fn release_permit(&self) {
+        self.throttle_semaphore.add_permits(1);
+    }
 }
 
 
@@ -2153,6 +2433,12 @@ impl HevcDecoder {
         }
     }
 
+
+
+    pub fn skip_frame(&mut self) {
+        self.decoded_frames.pop_front();
+    }
+
     // Basic NAL-based keyframe detection
     fn detect_keyframe_nal(&self, buffer: &[u8]) -> bool {
         for i in 0..buffer.len().saturating_sub(5) {
@@ -2444,52 +2730,42 @@ impl HevcDecoder {
     }
 
         // Better implementation of process_decoded_frames
+   // Enhance process_decoded_frames to return number of frames processed
     pub fn process_decoded_frames(&mut self) -> usize {
         let mut frames_received = 0;
         let start_time = Instant::now();
-        let max_processing_time = Duration::from_millis(50);  // Prevent blocking too long
+        let max_processing_time = Duration::from_millis(50);
         
-        // Process frames with a time limit
         while start_time.elapsed() < max_processing_time {
             match self.frame_rx.try_recv() {
                 Ok(frame) => {
                     frames_received += 1;
                     self.last_decoded_frame_time = Instant::now();
                     
-                    // Check frame is the expected size
                     if frame.len() == self.expected_frame_size {
                         self.decoded_frames.push_back(frame);
                     } else {
                         println!("{} ⚠️ Received malformed frame (size={}), expected {}", 
-                            self.decoder_string,frame.len(), self.expected_frame_size);
-                        // Only add if it's close - this helps avoid complete corruption
+                            self.decoder_string, frame.len(), self.expected_frame_size);
+                        
                         if frame.len() >= self.expected_frame_size * 9 / 10 && 
-                        frame.len() <= self.expected_frame_size * 11 / 10 {
+                           frame.len() <= self.expected_frame_size * 11 / 10 {
                             self.decoded_frames.push_back(frame);
                         }
                     }
                     
-                    // Don't buffer too many frames - it causes delay
-                    if self.decoded_frames.len() >= self.max_buffered_frames/2 {
+                    if self.decoded_frames.len() >= self.max_buffered_frames {
                         break;
                     }
                 },
                 Err(TryRecvError::Empty) => {
-                    // No more frames available now
                     break;
                 },
                 Err(TryRecvError::Disconnected) => {
                     println!("{} 🛑 Decoder output channel disconnected!", self.decoder_string);
-                    // Trigger restart at next opportunity
-                    // self.needs_restart = true;
                     break;
                 }
             }
-        }
-        
-        if frames_received > 0 {
-            // println!("✅ Added {} frames to decoded buffer, now has {} frames (in {}ms)",
-                    // frames_received, self.decoded_frames.len(), start_time.elapsed().as_millis());
         }
         
         frames_received
@@ -3100,8 +3376,480 @@ fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: us
     });
 }
 
-// Enhanced main function with frame synchronization workflow
+
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Define configuration parameters
+    let regular_bitrate_mbps = 5.0;
+    let max_bitrate_mbps = 100.0;
+    let max_frames = 2000;
+    
+    // Define path to the input video
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
+    
+    // Define network endpoints
+    let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    
+    // Signal for stopping threads
+    let running = Arc::new(AtomicBool::new(true));
+    
+    // Create a throttle semaphore to prevent buffer explosion
+    let throttle_semaphore = Arc::new(Semaphore::new(4));
+    
+    // Channels for frame communication
+    let (mut tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>, usize)>(16);
+    let (pair_tx, pair_rx) = crossbeam::channel::bounded::<FramePair>(8);
+    
+    println!("Starting synchronized HEVC encoding-decoding pipeline with precise frame alignment");
+    
+    // Start the encoding coordinator in its own thread
+    let encoder_throttle = throttle_semaphore.clone();
+    let running_encoder = running.clone();
+    let encoder_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        
+        rt.block_on(async {
+            // Initialize our encoding coordinator
+            let mut coordinator = EncodingCoordinator::new(
+                input_path, 
+                regular_bitrate_mbps, 
+                max_bitrate_mbps
+            );
+            
+            // Start initial chunking
+            println!("Starting initial encoding chunks");
+            coordinator.max_encoder.start_chunking(max_bitrate_mbps).await;
+            coordinator.regular_encoder.start_chunking(regular_bitrate_mbps).await;
+            
+            // Frame processing loop
+            let mut frames_sent = 0;
+            while running_encoder.load(Ordering::SeqCst) && frames_sent < max_frames {
+                // Get the next frame pair from both encoders
+                match coordinator.next_frame_pair().await {
+                    Some((regular_frame, max_frame, frame_id)) => {
+                        // Send both frames to the decoder
+                        if let Err(e) = tx.send((regular_frame, max_frame, frame_id)).await {
+                            eprintln!("Failed to send frame pair to decoder: {}", e);
+                            break;
+                        }
+                        
+                        frames_sent += 1;
+                        println!("Sent frame pair #{} to decoder", frame_id);
+                    },
+                    None => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                
+                // Brief delay to maintain reasonable frame rate and allow the decoder to catch up
+                tokio::time::sleep(Duration::from_millis(16)).await;
+            }
+            
+            println!("Encoder thread completed after {} frames", frames_sent);
+        });
+    });
+    
+    // Start the decoder in its own thread with enhanced synchronization
+    let decoder_throttle = throttle_semaphore.clone();
+    let running_decoder = running.clone();
+    let decoder_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        
+        rt.block_on(async {
+            // Initialize our synchronized decoder with content-aware matching
+            let mut decoder = SynchronizedDecoder::new(client_ip, decoder_throttle);
+            
+            while running_decoder.load(Ordering::SeqCst) {
+                // Try to receive a frame pair from the encoder
+                match rx.recv().await {
+                    Some((regular_frame, max_frame, frame_id)) => {
+                        // Process both frames with content-aware synchronization
+                        decoder.process_frame_pair(regular_frame, max_frame, frame_id);
+                        
+                        // Check if we have any frame pairs ready for display
+                        while let Some(pair) = decoder.next_frame_pair() {
+                            // Send to display thread
+                            if let Err(e) = pair_tx.send(pair) {
+                                eprintln!("Failed to send frame pair to display: {}", e);
+                                break;
+                            }
+                        }
+                    },
+                    None => {
+                        // Run the synchronization logic even if no new frames arrived
+                        decoder.synchronize_frame_buffers();
+                        
+                        // Check for already decoded pairs
+                        while let Some(pair) = decoder.next_frame_pair() {
+                            if let Err(e) = pair_tx.send(pair) {
+                                eprintln!("Failed to send frame pair to display: {}", e);
+                                break;
+                            }
+                        }
+                        
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    },
+                }
+            }
+            
+            println!("Decoder thread completed");
+        });
+    });
+    
+    // Display logic with verification of synchronization
+    let running_display = running.clone();
+    
+    // Create window dimensions
+    let scale_factor = SCALE_FACTOR_WINDOW;
+    let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+    let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+    let window_width = scaled_width * 2 + 10; 
+    
+    // Create window with explicit options
+    println!("Creating display window ({} x {})", window_width, scaled_height);
+    let mut window = Window::new(
+        "HEVC Comparison",
+        window_width,
+        scaled_height,
+        WindowOptions {
+            resize: true,
+            scale: minifb::Scale::X1,
+            topmost: false,
+            ..WindowOptions::default()
+        },
+    ).unwrap_or_else(|e| {
+        eprintln!("Failed to create window: {}", e);
+        std::process::exit(1);
+    });
+    
+    // Main display loop with synchronization verification
+    let mut frames_displayed = 0;
+    let mut last_frame_time = Instant::now();
+    let mut last_sync_quality_check = Instant::now();
+    let start_time = Instant::now();
+    let mut sync_quality_history = VecDeque::with_capacity(30);
+    
+    while running_display.load(Ordering::SeqCst) && window.is_open() {
+        // Target frame rate control
+        let target_frame_time = Duration::from_millis(33); // ~30 FPS
+        let elapsed = last_frame_time.elapsed();
+        if elapsed < target_frame_time {
+            std::thread::sleep(target_frame_time - elapsed);
+        }
+        last_frame_time = Instant::now();
+        
+        // Try to receive frame pair with timeout
+        match pair_rx.recv_timeout(Duration::from_millis(16)) {
+            Ok(pair) => {
+                // Verify synchronization quality by comparing frame content
+                let sync_quality = if let (Some(decoded_raw), Some(reference_raw)) = 
+                                       (&pair.decoded_raw, &pair.reference_raw) {
+                    let quality = compute_enhanced_frame_similarity(
+                        decoded_raw, reference_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                    
+                    // Add to history for trending analysis
+                    sync_quality_history.push_back(quality);
+                    if sync_quality_history.len() > 30 {
+                        sync_quality_history.pop_front();
+                    }
+                    
+                    Some(quality)
+                } else {
+                    None
+                };
+                
+                // Display the frame pair with synchronization quality indicator
+                if display_frame_pair_enhanced(&pair, &server_ip, pair.frame_id, &mut window, sync_quality) {
+                    frames_displayed += 1;
+                    
+                    // Calculate and display FPS and sync quality
+                    let fps = frames_displayed as f64 / start_time.elapsed().as_secs_f64();
+                    let avg_quality = if !sync_quality_history.is_empty() {
+                        sync_quality_history.iter().sum::<f64>() / sync_quality_history.len() as f64
+                    } else {
+                        0.0
+                    };
+                    
+                    println!("Frame #{}: FPS={:.1}, Sync={:.2}% (Avg: {:.2}%)", 
+                             pair.frame_id, fps, 
+                             sync_quality.unwrap_or(0.0) * 100.0,
+                             avg_quality * 100.0);
+                }
+            },
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                // No new frames, just update window to keep it responsive
+                window.update();
+            },
+            Err(e) => {
+                eprintln!("Error receiving frame pair: {}", e);
+                break;
+            }
+        }
+        
+        // Periodically check sync quality trend
+        if last_sync_quality_check.elapsed() > Duration::from_secs(5) {
+            if !sync_quality_history.is_empty() {
+                let avg_quality = sync_quality_history.iter().sum::<f64>() / 
+                                 sync_quality_history.len() as f64;
+                
+                println!("Synchronization quality analysis:");
+                println!("  Average similarity: {:.2}%", (1.0 - avg_quality) * 100.0);
+                println!("  Frame count: {}", frames_displayed);
+                
+                // Check if sync is deteriorating
+                if avg_quality > 0.2 { // More than 20% difference is concerning
+                    println!("⚠️ Synchronization quality is suboptimal, may need adjustment");
+                } else {
+                    println!("✓ Synchronization quality is good");
+                }
+            }
+            
+            last_sync_quality_check = Instant::now();
+        }
+        
+        // Check for window close or escape key
+        if !window.is_open() || window.is_key_down(minifb::Key::Escape) {
+            println!("Window closed or Escape pressed, shutting down");
+            running_display.store(false, Ordering::SeqCst);
+            running.store(false, Ordering::SeqCst);
+            break;
+        }
+    }
+    
+    println!("Display loop completed - displayed {} frames", frames_displayed);
+    
+    // Signal all threads to stop and wait for them
+    running.store(false, Ordering::SeqCst);
+    encoder_thread.join().unwrap();
+    decoder_thread.join().unwrap();
+    
+    println!("All processing completed");
+    Ok(())
+}
+
+
+fn old_main() -> Result<(), Box<dyn std::error::Error>> {
+    // Define configuration parameters
+    let regular_bitrate_mbps = 5.0;
+    let max_bitrate_mbps = 100.0;
+    let max_frames = 2000;
+    
+    // Define path to the input video
+    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
+    
+    // Define network endpoints
+    let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    
+    // Signal for stopping threads
+    let running = Arc::new(AtomicBool::new(true));
+    
+    // Create a throttle semaphore to prevent buffer explosion
+    let throttle_semaphore = Arc::new(Semaphore::new(4));
+    
+    // Channel for frame pairs to be displayed
+
+    let (mut tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>, usize)>(16);
+
+    let (pair_tx, pair_rx) = crossbeam::channel::bounded::<FramePair>(8);
+    
+    println!("Starting synchronized HEVC encoding-decoding pipeline");
+    
+    // Start the encoding coordinator in its own thread
+    let encoder_throttle = throttle_semaphore.clone();
+    let running_encoder = running.clone();
+    let encoder_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        
+        rt.block_on(async {
+            // Initialize our encoding coordinator
+            let mut coordinator = EncodingCoordinator::new(
+                input_path, 
+                regular_bitrate_mbps, 
+                max_bitrate_mbps
+            );
+            
+            // Start initial chunking
+            println!("Starting initial encoding chunks");
+            coordinator.max_encoder.start_chunking(max_bitrate_mbps).await;
+            coordinator.regular_encoder.start_chunking(regular_bitrate_mbps).await;
+            
+            // Frame processing loop
+            let mut frames_sent = 0;
+            while running_encoder.load(Ordering::SeqCst) && frames_sent < max_frames {
+                // Get the next frame pair from both encoders
+                match coordinator.next_frame_pair().await {
+                    Some((regular_frame, max_frame, frame_id)) => {
+                        // Send both frames to the decoder
+                        if let Err(e) = tx.send((regular_frame, max_frame, frame_id)).await {
+                            eprintln!("Failed to send frame pair to decoder: {}", e);
+                            break;
+                        }
+                        
+                        frames_sent += 1;
+                        println!("Sent frame pair #{} to decoder", frame_id);
+                    },
+                    None => {
+                        // This shouldn't happen with our retry loop, but just in case
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                
+                // Brief delay to maintain reasonable frame rate
+                tokio::time::sleep(Duration::from_millis(16)).await;
+            }
+            
+            println!("Encoder thread completed after {} frames", frames_sent);
+        });
+    });
+    
+    // Start the decoder in its own thread
+    let decoder_throttle = throttle_semaphore.clone();
+    let running_decoder = running.clone();
+    let decoder_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        
+        rt.block_on(async {
+            // Initialize our synchronized decoder
+            let mut decoder = SynchronizedDecoder::new(client_ip, decoder_throttle);
+            
+            while running_decoder.load(Ordering::SeqCst) {
+                // Try to receive a frame pair from the encoder
+                match rx.recv().await {
+                    Some((regular_frame, max_frame, frame_id)) => {
+                        // Process both frames in lockstep
+                        decoder.process_frame_pair(regular_frame, max_frame, frame_id);
+                        
+                        // Check if we have any frame pairs ready for display
+                        while let Some(pair) = decoder.next_frame_pair() {
+                            // Send to display thread
+                            if let Err(e) = pair_tx.send(pair) {
+                                eprintln!("Failed to send frame pair to display: {}", e);
+                                break;
+                            }
+                        }
+                    },
+                    None => {
+                        // No frames available, check for already decoded pairs
+                        while let Some(pair) = decoder.next_frame_pair() {
+                            // Send to display thread
+                            if let Err(e) = pair_tx.send(pair) {
+                                eprintln!("Failed to send frame pair to display: {}", e);
+                                break;
+                            }
+                        }
+                        
+                        // Brief sleep to prevent CPU spinning
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    },
+                }
+            }
+            
+            println!("Decoder thread completed");
+        });
+    });
+    
+    // Display thread (main thread) - largely unchanged from your version
+    let running_display = running.clone();
+    
+    // Create window dimensions based on scaled frame size
+    let scale_factor = SCALE_FACTOR_WINDOW;
+    let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+    let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+    let window_width = scaled_width * 2 + 10; // Two frames + separator
+    
+    // Create window with explicit options
+    println!("Creating display window ({} x {})", window_width, scaled_height);
+    let mut window = Window::new(
+        "HEVC Comparison",
+        window_width,
+        scaled_height,
+        WindowOptions {
+            resize: true,
+            scale: minifb::Scale::X1,
+            topmost: false,
+            ..WindowOptions::default()
+        },
+    ).unwrap_or_else(|e| {
+        eprintln!("Failed to create window: {}", e);
+        std::process::exit(1);
+    });
+    
+    // Main display loop - note this is NOT async
+    let mut frames_displayed = 0;
+    let mut last_frame_time = Instant::now();
+    let start_time = Instant::now();
+    
+    while running_display.load(Ordering::SeqCst) && window.is_open() {
+        // Target frame rate control
+        let target_frame_time = Duration::from_millis(33); // ~30 FPS
+        let elapsed = last_frame_time.elapsed();
+        if elapsed < target_frame_time {
+            std::thread::sleep(target_frame_time - elapsed);
+        }
+        last_frame_time = Instant::now();
+        
+        // Try to receive frame pair with timeout
+        match pair_rx.recv_timeout(Duration::from_millis(16)) {
+            Ok(pair) => {
+                // Display the frame pair with the simplified function
+                if display_frame_pair_to_window(&pair, &server_ip, pair.frame_id, &mut window) {
+                    frames_displayed += 1;
+                    
+                    // Calculate and display FPS
+                    let fps = frames_displayed as f64 / start_time.elapsed().as_secs_f64();
+                    println!("Displaying frame pair #{} (elapsed: {:?}, FPS: {:.2})", 
+                            pair.frame_id, start_time.elapsed(), fps);
+                }
+            },
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                // No new frames, just update window to keep it responsive
+                window.update();
+            },
+            Err(e) => {
+                eprintln!("Error receiving frame pair: {}", e);
+                break;
+            }
+        }
+        
+        // Check for window close or escape key
+        if !window.is_open() || window.is_key_down(minifb::Key::Escape) {
+            println!("Window closed or Escape pressed, shutting down");
+            running_display.store(false, Ordering::SeqCst);
+            running.store(false, Ordering::SeqCst);
+            break;
+        }
+    }
+    
+    println!("Display loop completed - displayed {} frames", frames_displayed);
+    
+    // Signal all threads to stop and wait for them
+    running.store(false, Ordering::SeqCst);
+    encoder_thread.join().unwrap();
+    decoder_thread.join().unwrap();
+    
+    println!("All processing completed, shutting down");
+    Ok(())
+}
+
+
+
+// Enhanced main function with frame synchronization workflow
+fn fancy_main() -> Result<(), Box<dyn std::error::Error>> {
     // Define configuration parameters
     let max_bitrate_ladder_mbps = 100.0; 
     let current_bitrate_mbps = 5.0; 
