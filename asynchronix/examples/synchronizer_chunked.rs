@@ -188,81 +188,6 @@ impl SynchronizedDecoder {
         }
     }
     
-
-
-
-    // fn synchronize_frame_buffers(&mut self) {
-    //     if self.frame_queue.len() > 1 {
-    //         return; // Already have synchronized pairs
-    //     }
-        
-    //     // Get pending decoded frames from both decoders
-    //     let regular_frames = self.regular_decoder.process_decoded_frames();
-    //     let max_frames = self.max_decoder.process_decoded_frames();
-        
-    //     if regular_frames == 0 || max_frames == 0 {
-    //         return; // Need frames from both decoders
-    //     }
-        
-    //     // Collect all available decoded frames with their raw data
-    //     let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
-    //     let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
-        
-    //     // Extract up to 5 frames from each decoder to analyze
-    //     for _ in 0..5 {
-    //         if let Some((raw, timestamp)) = self.regular_decoder.next_decoded_frame() {
-    //             if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
-    //                 regular_decoded.push((raw, pixels));
-    //             }
-    //         }
-            
-    //         if let Some((raw, timestamp)) = self.max_decoder.next_decoded_frame() {
-    //             if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
-    //                 max_decoded.push((raw, pixels));
-    //             }
-    //         }
-    //     }
-        
-    //     // If we have frames from both decoders, find the best matching pair
-    //     if !regular_decoded.is_empty() && !max_decoded.is_empty() {
-    //         // This is the critical part - find the best matching frames using content similarity
-    //         let (best_regular_idx, best_max_idx, similarity) = find_best_frame_match(
-    //             &regular_decoded,
-    //             &max_decoded
-    //         );
-            
-    //         // Only create a pair if similarity is good enough (below threshold)
-    //         if similarity < 0.15 { // 
-    //             let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
-                
-    //             // Create the perfectly synchronized frame pair
-    //             let pair = FramePair {
-    //                 decoded: Some(regular_decoded[best_regular_idx].1.clone()),
-    //                 reference: Some(max_decoded[best_max_idx].1.clone()),
-    //                 decoded_raw: Some(regular_decoded[best_regular_idx].0.clone()),
-    //                 reference_raw: Some(max_decoded[best_max_idx].0.clone()),
-    //                 frame_id,
-    //             };
-                
-    //             self.frame_queue.push_back(pair);
-    //             println!("✓ Created perfectly synchronized frame pair #{} (similarity: {:.2}%)",
-    //                 frame_id, similarity * 100.0);
-    //         }
-            
-    //         // Remove the matched frames and any earlier frames to maintain sync
-    //         if best_regular_idx > best_max_idx {
-    //             // Regular stream is behind; skip only the extra frames from regular
-    //             for _ in 0..(best_regular_idx - best_max_idx) {
-    //                  self.regular_decoder.skip_frame();
-    //             }
-    //         } else if best_max_idx > best_regular_idx {
-    //             // Max stream is behind; skip only the extra frames from max
-    //             for _ in 0..(best_max_idx - best_regular_idx) {
-    //                  self.max_decoder.skip_frame();
-    //             }
-    //         }
-    //     }
-    // }
     fn synchronize_frame_buffers(&mut self) {
         // Only proceed if the output queue is almost empty.
         if self.output_queue.len() > 1 {
@@ -3069,16 +2994,6 @@ impl HevcDecoder {
         
 
 }
-
-
-
-
-
-
-
-
-
-
 
 
 // Thread-local storage for display windows

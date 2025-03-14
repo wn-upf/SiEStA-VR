@@ -78,7 +78,8 @@ use std::result::Result::Ok;
 use tai_time::TaiTime;
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
-
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering as atomOrdering};
+use tokio::sync::Semaphore;
 
 // use super::alvr_packets::NetworkStatisticsPacket;
 
@@ -107,6 +108,92 @@ pub const CONTROL_STREAM: u16 = 5;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
+
+pub struct EncodingCoordinator {
+    frame_id: Arc<AtomicUsize>,
+    regular_encoder: ChunkedHevcEncoder,
+    max_encoder: ChunkedHevcEncoder,
+    throttle_semaphore: Arc<Semaphore>,
+
+    encoder_bitrate_mbps:    f32,
+    maxencoder_bitrate_mbps: f32,
+}
+
+impl EncodingCoordinator {
+    pub fn new(input_path: &str, regular_bitrate: f32, max_bitrate: f32) -> Self {
+        // Both encoders use the exact same offset to ensure frame alignment
+        let offset = OFFSET_VIDEO;
+        
+        Self {
+            frame_id: Arc::new(AtomicUsize::new(0)),
+            regular_encoder: ChunkedHevcEncoder::new(
+                input_path,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("{:.1}M", regular_bitrate),
+                CHUNK_DURATION_F64_s,
+                "[REGULAR_ENCODER]".to_string(),
+                offset,
+            ),
+            max_encoder: ChunkedHevcEncoder::new(
+                input_path,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("{:.1}M", max_bitrate),
+                CHUNK_DURATION_F64_s,
+                "[MAX_ENCODER]".to_string(),
+                offset,
+            ),
+            // Limit to 4 frames in-flight to prevent buffer explosion
+            throttle_semaphore: Arc::new(Semaphore::new(4)),
+            encoder_bitrate_mbps: regular_bitrate,
+            maxencoder_bitrate_mbps: max_bitrate, 
+        }
+    }
+    
+    // Process frames in perfect lockstep
+    pub async fn next_frame_pair(&mut self) -> Option<(Vec<u8>, Vec<u8>, usize)> {
+        // Wait for throttle semaphore to have permits
+        let _permit = self.throttle_semaphore.acquire().await.ok()?;
+        
+        // Get next frame from both encoders, retrying if necessary
+        let regular_frame = loop {
+            match self.regular_encoder.next_frame().await {
+                Some(frame) => break frame,
+                None => {
+                    println!("Regular encoder: No frame available, restarting chunk");
+                    self.regular_encoder.parser.clear();
+                    self.regular_encoder.frame_queue.clear();
+                    self.regular_encoder.start_chunking(self.encoder_bitrate_mbps).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        
+        let max_frame = loop {
+            match self.max_encoder.next_frame().await {
+                Some(frame) => break frame,
+                None => {
+                    println!("Max encoder: No frame available, restarting chunk");
+                    self.max_encoder.parser.clear();
+                    self.max_encoder.frame_queue.clear();
+                    self.max_encoder.start_chunking(self.maxencoder_bitrate_mbps).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        
+        // Get and increment the frame ID atomically
+        let frame_id = self.frame_id.fetch_add(1, atomOrdering::SeqCst);
+        
+        Some((regular_frame, max_frame, frame_id))
+    }
+    
+    // Release throttle permit - called after frame has been displayed
+    pub fn release_permit(&self) {
+        self.throttle_semaphore.add_permits(1);
+    }
+}
 
 pub struct ChunkedHevcEncoder {
     input: String,
