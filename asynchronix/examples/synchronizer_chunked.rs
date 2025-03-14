@@ -172,6 +172,589 @@ pub enum DebugColor {
     SaddleBrown,
     Tan, 
 }
+fn display_frame_pair_enhanced(
+    pair: &FramePair, 
+    server_ip: &IpAddr, 
+    display_frame_id: usize, 
+    window: &mut Window, 
+    sync_quality: Option<f64>
+) -> bool {
+    let decoded = match &pair.decoded {
+        Some(frame) => frame,
+        None => {
+            eprintln!("ERROR: Decoded frame missing, cannot display");
+            return false;
+        }
+    };
+    
+    let reference = match &pair.reference {
+        Some(frame) => frame,
+        None => {
+            eprintln!("ERROR: Reference frame missing, cannot display");
+            return false;
+        }
+    };
+
+    // Log frame dimensions for diagnostic purposes
+    println!("Processing frame #{} for display: decoded={} pixels, reference={} pixels", 
+             display_frame_id, decoded.len(), reference.len());
+    
+    // Calculate dimensions with careful attention to scaling and alignment
+    let scale_factor = SCALE_FACTOR_WINDOW;
+    let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+    let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+    let window_width = scaled_width * 2 + 10; // Two frames plus separator
+    
+    // Pre-allocate buffer with exact capacity to avoid reallocation
+    let mut combined_buffer = vec![0u32; window_width * scaled_height];
+    
+    // Create scaled versions of each frame
+    let scaled_current = resize_buffer(decoded, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+    let scaled_reference = resize_buffer(reference, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+    
+    // Assemble composite frame with careful bounds checking
+    for y in 0..scaled_height {
+        // Left frame (low bitrate)
+        for x in 0..scaled_width {
+            let src_idx = y * scaled_width + x;
+            let dst_idx = y * window_width + x;
+            if src_idx < scaled_current.len() && dst_idx < combined_buffer.len() {
+                combined_buffer[dst_idx] = scaled_current[src_idx];
+            }
+        }
+        
+        // Separator between frames
+        for x in 0..10 {
+            let idx = y * window_width + scaled_width + x;
+            if idx < combined_buffer.len() {
+                // Change separator color based on sync quality
+                let separator_color = match sync_quality {
+                    Some(q) if q < 0.05 => 0x00FF00, // Green for excellent sync
+                    Some(q) if q < 0.15 => 0xFFFF00, // Yellow for good sync
+                    Some(q) if q < 0.30 => 0xFF8000, // Orange for marginal sync
+                    Some(_) => 0xFF0000,             // Red for poor sync
+                    None => 0x404040,                // Gray if no sync info
+                };
+                combined_buffer[idx] = separator_color;
+            }
+        }
+        
+        // Right frame (high bitrate reference)
+        for x in 0..scaled_width {
+            let src_idx = y * scaled_width + x;
+            let dst_idx = y * window_width + scaled_width + 10 + x;
+            if src_idx < scaled_reference.len() && dst_idx < combined_buffer.len() {
+                combined_buffer[dst_idx] = scaled_reference[src_idx];
+            }
+        }
+    }
+    
+    // Add text overlays for clear frame identification
+    let text_color = 0x00FF00;  // bright green for high visibility
+    let highlight_color = 0xFF0033;  // bright red for emphasis
+    
+    render_text(&mut combined_buffer, "LOW BITRATE (5 Mbps)", 10, 10, window_width, text_color, 2);
+    render_text(&mut combined_buffer, "HIGH BITRATE (100 Mbps)", scaled_width + 20, 10, window_width, text_color, 2);
+    
+    // Display frame ID with proper centering
+    let frame_info = format!("FRAME #{}", display_frame_id);
+    let text_x = (window_width - frame_info.len() * 6 * 2) / 2;
+    render_text(&mut combined_buffer, &frame_info, text_x, scaled_height - 20, window_width, highlight_color, 2);
+    
+    // Add sync quality indicator if available
+    if let Some(quality) = sync_quality {
+        let sync_text = format!("SYNC QUALITY: {:.2}%", (1.0 - quality) * 100.0);
+        let text_x = (window_width - sync_text.len() * 6 * 2) / 2;
+        
+        // Color based on quality
+        let quality_color = if quality < 0.05 {
+            0x00FF00 // Green for excellent
+        } else if quality < 0.15 {
+            0xFFFF00 // Yellow for good
+        } else if quality < 0.30 {
+            0xFF8000 // Orange for marginal
+        } else {
+            0xFF0000 // Red for poor
+        };
+        
+        render_text(&mut combined_buffer, &sync_text, text_x, scaled_height - 40, window_width, quality_color, 2);
+    }
+    
+    // Add difference visualization in bottom corner
+    if let (Some(raw_decoded), Some(raw_reference)) = (&pair.decoded_raw, &pair.reference_raw) {
+        // Create a small difference visualization
+        let diff_size = 256;
+        let diff_x = window_width - diff_size - 10;
+        let diff_y = scaled_height - diff_size - 10;
+        
+        if raw_decoded.len() == raw_reference.len() && raw_decoded.len() >= WIDTH_ENCODER * HEIGHT_ENCODER * 3 {
+            // Draw difference visualization
+            render_enhanced_difference_visualization(
+                &mut combined_buffer,
+                raw_decoded,
+                raw_reference,
+                WIDTH_ENCODER,
+                HEIGHT_ENCODER,
+                diff_x,
+                diff_y,
+                diff_size,
+                window_width,
+            );
+            
+            // Label the visualization
+            render_text(&mut combined_buffer, "DIFF", diff_x, diff_y - 15, window_width, 0xFFFFFF, 1);
+        }
+    }
+    
+    // Update window title with precise frame information and sync quality
+    let title = if let Some(quality) = sync_quality {
+        format!("HEVC Comparison - Frame #{} - Sync: {:.1}%", 
+                display_frame_id, (1.0 - quality) * 100.0)
+    } else {
+        format!("HEVC Comparison - Frame #{}", display_frame_id)
+    };
+    window.set_title(&title);
+    
+    // Critical operation: Update the window buffer with our composite frame
+    match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
+        Ok(_) => {
+            println!("✅ Successfully rendered frame #{} to window", display_frame_id);
+            true
+        },
+        Err(e) => {
+            eprintln!("❌ Buffer update failed for frame #{}: {}", display_frame_id, e);
+            false
+        }
+    }
+}
+
+
+// Advanced frame similarity computation with configurable thresholds
+// Implements perceptual frame comparison techniques with multi-scale analysis
+fn compute_enhanced_frame_similarity(frame1: &[u8], frame2: &[u8], width: usize, height: usize) -> f64 {
+    // Return maximum difference if frames are incompatible
+    if frame1.len() != frame2.len() || frame1.len() != width * height * 3 {
+        return 1.0;
+    }
+    
+    // Configuration parameters for multi-scale analysis
+    const BLOCK_SIZES: [usize; 3] = [4, 16, 64]; // Multi-scale block sizes
+    const WEIGHTS: [f64; 3] = [0.5, 0.3, 0.2];   // Relative importance of each scale
+    const PERCEPTUAL_WEIGHTS: [f64; 3] = [0.3, 0.6, 0.1]; // R,G,B perceptual importance
+    
+    // Initialize accumulators for each scale
+    let mut scale_diffs = [0.0; 3];
+    let mut scale_samples = [0; 3];
+    
+    // Multi-scale analysis
+    for (scale_idx, &block_size) in BLOCK_SIZES.iter().enumerate() {
+        // Calculate sampling positions - sparse sampling for efficiency
+        let step_x = (width / block_size).max(1);
+        let step_y = (height / block_size).max(1);
+        
+        // Process each block
+        for by in (0..height).step_by(step_y) {
+            for bx in (0..width).step_by(step_x) {
+                // Calculate block boundaries
+                let block_end_x = (bx + block_size).min(width);
+                let block_end_y = (by + block_size).min(height);
+                
+                // Initialize block statistics
+                let mut block_diff_r = 0.0;
+                let mut block_diff_g = 0.0;
+                let mut block_diff_b = 0.0;
+                let mut block_samples = 0;
+                
+                // Sample pixels within the block (sparse)
+                for y in (by..block_end_y).step_by(2) {
+                    for x in (bx..block_end_x).step_by(2) {
+                        let idx = (y * width + x) * 3;
+                        
+                        if idx + 2 < frame1.len() && idx + 2 < frame2.len() {
+                            // Calculate color channel differences
+                            let r_diff = (frame1[idx] as i32 - frame2[idx] as i32).abs() as f64;
+                            let g_diff = (frame1[idx+1] as i32 - frame2[idx+1] as i32).abs() as f64;
+                            let b_diff = (frame1[idx+2] as i32 - frame2[idx+2] as i32).abs() as f64;
+                            
+                            // Accumulate weighted differences
+                            block_diff_r += r_diff;
+                            block_diff_g += g_diff;
+                            block_diff_b += b_diff;
+                            block_samples += 1;
+                        }
+                    }
+                }
+                
+                // Only process blocks with valid samples
+                if block_samples > 0 {
+                    // Calculate perceptually weighted block difference
+                    let avg_diff = (
+                        block_diff_r * PERCEPTUAL_WEIGHTS[0] +
+                        block_diff_g * PERCEPTUAL_WEIGHTS[1] +
+                        block_diff_b * PERCEPTUAL_WEIGHTS[2]
+                    ) / (block_samples as f64 * 255.0); // Normalize to [0-1]
+                    
+                    // Add to scale accumulator
+                    scale_diffs[scale_idx] += avg_diff;
+                    scale_samples[scale_idx] += 1;
+                }
+            }
+        }
+    }
+    
+    // Calculate weighted average across scales
+    let mut final_diff = 0.0;
+    let mut weight_sum = 0.0;
+    
+    for i in 0..BLOCK_SIZES.len() {
+        if scale_samples[i] > 0 {
+            let scale_avg = scale_diffs[i] / scale_samples[i] as f64;
+            final_diff += scale_avg * WEIGHTS[i];
+            weight_sum += WEIGHTS[i];
+        }
+    }
+    
+    // Normalize result
+    if weight_sum > 0.0 {
+        final_diff /= weight_sum;
+    }
+    
+    // Apply non-linear transformation to enhance sensitivity
+    // This emphasizes small differences, which is crucial for detecting
+    // subtle temporal misalignments in nearly-identical frames
+    let enhanced_diff = 1.0 - ((1.0 - final_diff).powf(0.5));
+    
+    // Scale final similarity measure to emphasize high similarity
+    // This creates a more sensitive metric where 99% similar frames
+    // are distinguished from 99.9% similar frames
+    enhanced_diff
+}
+
+// Advanced heatmap color generation with perceptual enhancements
+fn enhanced_diff_to_heatmap_color(diff: f64) -> u32 {
+    // Apply logarithmic scaling to enhance small differences
+    // Using base-10 log scale with adjustment factor
+    let log_factor = 10.0;
+    let enhanced_diff = if diff > 0.0 {
+        let log_val = 1.0 + (-diff.ln() / log_factor).max(-10.0);
+        (log_val / 11.0).min(1.0)
+    } else {
+        0.0
+    };
+    
+    // Define color ranges for enhanced perceptual distinction
+    // Uses a more sophisticated gradient with multiple color points
+    let color = if enhanced_diff < 0.2 {
+        // Dark blue to blue - lowest differences (most similar)
+        let t = enhanced_diff / 0.2;
+        let r = 0;
+        let g = (t * 128.0) as u32;
+        let b = 128 + (t * 127.0) as u32;
+        (r << 16) | (g << 8) | b
+    } else if enhanced_diff < 0.4 {
+        // Blue to cyan - low differences
+        let t = (enhanced_diff - 0.2) / 0.2;
+        let r = 0;
+        let g = 128 + (t * 127.0) as u32;
+        let b = 255;
+        (r << 16) | (g << 8) | b
+    } else if enhanced_diff < 0.6 {
+        // Cyan to green - moderate differences
+        let t = (enhanced_diff - 0.4) / 0.2;
+        let r = (t * 128.0) as u32;
+        let g = 255;
+        let b = 255 - (t * 255.0) as u32;
+        (r << 16) | (g << 8) | b
+    } else if enhanced_diff < 0.8 {
+        // Green to yellow - significant differences
+        let t = (enhanced_diff - 0.6) / 0.2;
+        let r = 128 + (t * 127.0) as u32;
+        let g = 255;
+        let b = 0;
+        (r << 16) | (g << 8) | b
+    } else {
+        // Yellow to red - extreme differences
+        let t = (enhanced_diff - 0.8) / 0.2;
+        let r = 255;
+        let g = 255 - (t * 255.0) as u32;
+        let b = 0;
+        (r << 16) | (g << 8) | b
+    }; 
+    
+    color
+}
+
+// Render an enhanced difference visualization with improved perceptual scaling
+fn render_enhanced_difference_visualization(
+    buffer: &mut [u32],
+    frame1: &[u8],
+    frame2: &[u8],
+    width: usize,
+    height: usize,
+    x_pos: usize,
+    y_pos: usize,
+    size: usize,
+    stride: usize,
+) {
+    // Calculate block size for visualization with appropriate bounds checking
+    let block_width = width.checked_div(size).unwrap_or(1);
+    let block_height = height.checked_div(size).unwrap_or(1);
+    
+    // Draw enhanced border with 3D effect
+    for y in 0..size+2 {
+        for x in 0..size+2 {
+            // Calculate pixel coordinates with safety bounds checking
+            let buffer_y = y_pos.saturating_add(y).saturating_sub(1);
+            let buffer_x = x_pos.saturating_add(x).saturating_sub(1);
+            let buffer_idx = buffer_y.saturating_mul(stride).saturating_add(buffer_x);
+            
+            if buffer_idx < buffer.len() {
+                if x == 0 || y == 0 || x == size+1 || y == size+1 {
+                    // Enhanced border with depth effect
+                    let is_top_left = x == 0 || y == 0;
+                    buffer[buffer_idx] = if is_top_left { 0xA0A0A0 } else { 0x606060 };
+                }
+            }
+        }
+    }
+    
+    // Track statistics for auto-scaling
+    let mut min_diff: f64 = 1.0;
+    let mut max_diff: f64 = 0.0;
+    let mut diffs = vec![0.0; size * size];
+    
+    // First pass: Calculate differences and gather statistics
+    for y in 0..size {
+        for x in 0..size {
+            // Calculate source region with bounds validation
+            let src_x = x.saturating_mul(block_width);
+            let src_y = y.saturating_mul(block_height);
+            
+            // Use advanced block comparison
+            let mut total_diff = 0.0;
+            let mut samples = 0;
+            
+            // Enhanced adaptive sampling based on block size
+            let sample_step = block_width.max(block_height).max(4).min(16) / 4;
+            
+            for dy in (0..block_height.min(16)).step_by(sample_step.max(1)) {
+                for dx in (0..block_width.min(16)).step_by(sample_step.max(1)) {
+                    let pixel_x = src_x.saturating_add(dx);
+                    let pixel_y = src_y.saturating_add(dy);
+                    
+                    // Calculate pixel index with bounds validation
+                    let pixel_idx = pixel_y.saturating_mul(width).saturating_add(pixel_x).saturating_mul(3);
+                    
+                    // Ensure we don't go out of bounds
+                    if pixel_idx + 2 < frame1.len() && pixel_idx + 2 < frame2.len() {
+                        // Calculate perceptually weighted RGB differences
+                        let r_diff = (frame1[pixel_idx] as i32 - frame2[pixel_idx] as i32).abs() as f64;
+                        let g_diff = (frame1[pixel_idx+1] as i32 - frame2[pixel_idx+1] as i32).abs() as f64;
+                        let b_diff = (frame1[pixel_idx+2] as i32 - frame2[pixel_idx+2] as i32).abs() as f64;
+                        
+                        // Perceptual weighting (human eye is more sensitive to green)
+                        total_diff += r_diff * 0.2126 + g_diff * 0.7152 + b_diff * 0.0722;
+                        samples += 1;
+                    }
+                }
+            }
+            
+            // Calculate normalized difference with enhanced sensitivity
+            let avg_diff = if samples > 0 {
+                // Normalize and apply non-linear scaling to emphasize subtle differences
+                let normalized = total_diff / (samples as f64 * 255.0);
+                // Use a power function to enhance sensitivity to small differences
+                1.0 - (1.0 - normalized).powf(0.4)
+            } else {
+                0.0
+            };
+            
+            // Store diff for auto-scaling
+            let idx = y * size + x;
+            if idx < diffs.len() {
+                diffs[idx] = avg_diff;
+                min_diff = min_diff.min(avg_diff);
+                max_diff = max_diff.max(avg_diff);
+            }
+        }
+    }
+    
+    // Calculate dynamic range for auto-scaling
+    let diff_range = max_diff - min_diff;
+    
+    // Second pass: Render with auto-scaled intensity
+    for y in 0..size {
+        for x in 0..size {
+            let idx = y * size + x;
+            if idx < diffs.len() {
+                // Apply auto-scaling to maximize visualization contrast
+                let norm_diff = if diff_range > 0.001 {
+                    (diffs[idx] - min_diff) / diff_range
+                } else {
+                    // If range is too small, normalize around midpoint
+                    let center = (min_diff + max_diff) / 2.0;
+                    let scaled = (diffs[idx] - center) * 100.0 + 0.5;
+                    scaled.max(0.0).min(1.0)
+                };
+                
+                // Convert to heatmap color with enhanced perceptual mapping
+                let heatmap_color = enhanced_diff_to_heatmap_color(norm_diff);
+                
+                // Plot the pixel with bounds validation
+                let buffer_idx = (y_pos + y).saturating_mul(stride).saturating_add(x_pos + x);
+                if buffer_idx < buffer.len() {
+                    buffer[buffer_idx] = heatmap_color;
+                }
+            }
+        }
+    }
+    
+    // Add enhancement markers (grid lines) for better visualization interpretation
+    for i in 1..4 {
+        let line_pos = (size * i) / 4;
+        
+        // Horizontal grid line
+        for x in 0..size {
+            let buffer_idx = (y_pos + line_pos).saturating_mul(stride).saturating_add(x_pos + x);
+            if buffer_idx < buffer.len() {
+                // Semi-transparent grid line
+                let existing = buffer[buffer_idx];
+                let r = (existing >> 16) & 0xFF;
+                let g = (existing >> 8) & 0xFF;
+                let b = existing & 0xFF;
+                
+                // Blend with grid color (dark semi-transparent)
+                let blend_factor = 0.8;
+                let new_r = (r as f64 * blend_factor) as u32;
+                let new_g = (g as f64 * blend_factor) as u32;
+                let new_b = (b as f64 * blend_factor) as u32;
+                
+                buffer[buffer_idx] = (new_r << 16) | (new_g << 8) | new_b;
+            }
+        }
+        
+        // Vertical grid line
+        for y in 0..size {
+            let buffer_idx = (y_pos + y).saturating_mul(stride).saturating_add(x_pos + line_pos);
+            if buffer_idx < buffer.len() {
+                // Semi-transparent grid line
+                let existing = buffer[buffer_idx];
+                let r = (existing >> 16) & 0xFF;
+                let g = (existing >> 8) & 0xFF;
+                let b = existing & 0xFF;
+                
+                // Blend with grid color (dark semi-transparent)
+                let blend_factor = 0.8;
+                let new_r = (r as f64 * blend_factor) as u32;
+                let new_g = (g as f64 * blend_factor) as u32;
+                let new_b = (b as f64 * blend_factor) as u32;
+                
+                buffer[buffer_idx] = (new_r << 16) | (new_g << 8) | new_b;
+            }
+        }
+    }
+}
+
+
+
+// Function to render a difference visualization between two frames
+fn render_difference_visualization(
+    buffer: &mut [u32],
+    frame1: &[u8],
+    frame2: &[u8],
+    width: usize,
+    height: usize,
+    x_pos: usize,
+    y_pos: usize,
+    size: usize,
+    stride: usize,
+) {
+    // Calculate block size for visualization (how many source pixels per vis pixel)
+    let block_width = width / size;
+    let block_height = height / size;
+    
+    // Draw a border
+    for y in 0..size+2 {
+        for x in 0..size+2 {
+            if x == 0 || y == 0 || x == size+1 || y == size+1 {
+                let buffer_idx = (y_pos + y - 1) * stride + (x_pos + x - 1);
+                if buffer_idx < buffer.len() {
+                    buffer[buffer_idx] = 0x808080; // Gray border
+                }
+            }
+        }
+    }
+    
+    // Calculate and visualize differences
+    for y in 0..size {
+        for x in 0..size {
+            // Calculate source region
+            let src_x = x * block_width;
+            let src_y = y * block_height;
+            
+            // Average difference over the block
+            let mut total_diff = 0.0;
+            let mut samples = 0;
+            
+            // Sample a few pixels in the block
+            for dy in 0..block_height.min(4) {
+                for dx in 0..block_width.min(4) {
+                    let pixel_x = src_x + dx;
+                    let pixel_y = src_y + dy;
+                    
+                    // Calculate index in the RGB buffer
+                    let pixel_idx = (pixel_y * width + pixel_x) * 3;
+                    
+                    // Ensure we don't go out of bounds
+                    if pixel_idx + 2 < frame1.len() && pixel_idx + 2 < frame2.len() {
+                        // Calculate RGB differences
+                        let r_diff = (frame1[pixel_idx] as i32 - frame2[pixel_idx] as i32).abs() as f64;
+                        let g_diff = (frame1[pixel_idx+1] as i32 - frame2[pixel_idx+1] as i32).abs() as f64;
+                        let b_diff = (frame1[pixel_idx+2] as i32 - frame2[pixel_idx+2] as i32).abs() as f64;
+                        
+                        // Add to running total
+                        total_diff += r_diff + g_diff + b_diff;
+                        samples += 3;
+                    }
+                }
+            }
+            
+            // Calculate average difference (normalized 0-1)
+            let avg_diff = if samples > 0 {
+                total_diff / (samples as f64 * 255.0)
+            } else {
+                0.0
+            };
+            
+            // Convert difference to a heatmap color
+            let heatmap_color = diff_to_heatmap_color(avg_diff);
+            
+            // Plot the pixel in our visualization
+            let buffer_idx = (y_pos + y) * stride + (x_pos + x);
+            if buffer_idx < buffer.len() {
+                buffer[buffer_idx] = heatmap_color;
+            }
+        }
+    }
+}
+
+// Convert a difference value (0-1) to a heatmap color
+fn diff_to_heatmap_color(diff: f64) -> u32 {
+    // Clamp the difference value to 0-1 range
+    let clamped_diff = diff.min(1.0).max(0.0);
+    
+    // Apply a non-linear scaling to enhance visibility of small differences
+    // Use a cube root transformation for more distinguishable colors at lower differences
+    let enhanced_diff = clamped_diff.powf(1.0/3.0);
+    
+    // Map to a color from blue (cold, low diff) to red (hot, high diff)
+    let r = (enhanced_diff * 255.0) as u32;
+    let g = ((1.0 - enhanced_diff) * 255.0) as u32;
+    let b = (255.0 - enhanced_diff * 255.0) as u32;
+    
+    // Combine into a single u32 color value
+    (r << 16) | (g << 8) | b
+}
 
 
 // Define a specialized function for updating the main window directly
@@ -269,6 +852,482 @@ fn display_frame_pair_to_window(pair: &FramePair, server_ip: &IpAddr, display_fr
 
 
 
+// New structure to manage frame synchronization
+pub struct FrameSynchronizer {
+    // Pending frames waiting to be paired
+    pending_regular: HashMap<usize, FramePair>,
+    pending_reference: HashMap<usize, FramePair>,
+    
+    // Historical buffer of successfully paired frames for analysis
+    paired_history: VecDeque<(usize, usize)>, // (regular_id, reference_id)
+    
+    // State tracking
+    next_display_id: usize,
+    last_sync_time: Instant,
+    sync_interval: Duration,
+    
+    // Configuration
+    max_drift_frames: usize,
+    history_size: usize,
+    sync_strategy: SyncStrategy,
+    
+    // Diagnostics
+    frames_dropped: usize,
+    sync_attempts: usize,
+    sync_successes: usize,
+}
+
+// Synchronization strategies
+#[derive(Clone, Debug)]
+pub enum SyncStrategy {
+    // Basic strategy - uses only frame IDs
+    BasicId,
+    // Fingerprint strategy - uses content fingerprinting
+    ContentFingerprint,
+    // Hybrid strategy - combines ID and fingerprint approaches
+    Hybrid,
+}
+
+impl FrameSynchronizer {
+    pub fn new(sync_strategy: SyncStrategy) -> Self {
+        Self {
+            pending_regular: HashMap::new(),
+            pending_reference: HashMap::new(),
+            paired_history: VecDeque::with_capacity(30),
+            next_display_id: 0,
+            last_sync_time: Instant::now(),
+            sync_interval: Duration::from_secs(5),
+            max_drift_frames: 10,
+            history_size: 30,
+            sync_strategy,
+            frames_dropped: 0,
+            sync_attempts: 0,
+            sync_successes: 0,
+        }
+    }
+    
+    // Add a regular (low bitrate) frame to the synchronizer
+    pub fn add_regular_frame(&mut self, frame_id: usize, pair: FramePair) {
+        self.pending_regular.insert(frame_id, pair);
+        self.try_cleanup_old_frames();
+    }
+    
+    // Add a reference (high bitrate) frame to the synchronizer
+    pub fn add_reference_frame(&mut self, frame_id: usize, pair: FramePair) {
+        self.pending_reference.insert(frame_id, pair);
+        self.try_cleanup_old_frames();
+    }
+    
+    // Get the next synchronized frame pair, if available
+    pub fn next_frame_pair(&mut self) -> Option<FramePair> {
+        // Check if we need to re-synchronize
+        self.check_sync_status();
+        
+        // Try to find a match using the current next_display_id
+        if let Some(pair) = self.get_exact_pair(self.next_display_id) {
+            // Successfully matched a pair at the current ID
+            self.paired_history.push_back((self.next_display_id, self.next_display_id));
+            if self.paired_history.len() > self.history_size {
+                self.paired_history.pop_front();
+            }
+            
+            self.next_display_id += 1;
+            return Some(pair);
+        }
+        
+        // If we couldn't find an exact match, try alternative strategies
+        match self.sync_strategy {
+            SyncStrategy::BasicId => self.try_basic_id_sync(),
+            SyncStrategy::ContentFingerprint => self.try_fingerprint_sync(),
+            SyncStrategy::Hybrid => self.try_hybrid_sync(),
+        }
+    }
+    
+    // Try to get an exact pair matching at the given ID
+    fn get_exact_pair(&mut self, id: usize) -> Option<FramePair> {
+        if self.pending_regular.contains_key(&id) && self.pending_reference.contains_key(&id) {
+            // We have both frames with matching IDs
+            let reg_pair = self.pending_regular.remove(&id)?;
+            let ref_pair = self.pending_reference.remove(&id)?;
+            
+            // Combine them into a single pair
+            Some(FramePair {
+                decoded: reg_pair.decoded,
+                reference: ref_pair.reference,
+                decoded_raw: reg_pair.decoded_raw,
+                reference_raw: ref_pair.reference_raw,
+                frame_id: id,
+            })
+        } else {
+            None
+        }
+    }
+    
+    // Basic ID-based synchronization strategy
+    fn try_basic_id_sync(&mut self) -> Option<FramePair> {
+        // Find all common frame IDs between both maps
+        let common_ids: Vec<usize> = self.pending_regular.keys()
+            .filter(|&k| self.pending_reference.contains_key(k))
+            .cloned()
+            .collect();
+        
+        if !common_ids.is_empty() {
+            // Sort to find the lowest common ID
+            let mut sorted_ids = common_ids.clone();
+            sorted_ids.sort();
+            
+            // Update next_display_id to this common ID
+            self.next_display_id = sorted_ids[0];
+            self.sync_successes += 1;
+            
+            // Now try again with the new ID
+            return self.get_exact_pair(self.next_display_id);
+        }
+        
+        // No common IDs found
+        None
+    }
+    
+    // Content fingerprint-based synchronization
+    fn try_fingerprint_sync(&mut self) -> Option<FramePair> {
+        // Collect frames with raw data for fingerprinting
+        let regular_frames: Vec<(usize, &FramePair)> = self.pending_regular.iter()
+            .filter(|(_, pair)| pair.decoded_raw.is_some())
+            .map(|(&id, pair)| (id, pair))
+            .collect();
+            
+        let reference_frames: Vec<(usize, &FramePair)> = self.pending_reference.iter()
+            .filter(|(_, pair)| pair.reference_raw.is_some())
+            .map(|(&id, pair)| (id, pair))
+            .collect();
+        
+        // Find best matching pair using frame fingerprints
+        let mut best_match = None;
+        let mut best_score = f64::MAX;
+        
+        for &(reg_id, reg_pair) in &regular_frames {
+            for &(ref_id, ref_pair) in &reference_frames {
+                if let (Some(reg_raw), Some(ref_raw)) = (&reg_pair.decoded_raw, &ref_pair.reference_raw) {
+                    let score = self.compute_frame_difference(reg_raw, ref_raw);
+                    
+                    if score < best_score {
+                        best_score = score;
+                        best_match = Some((reg_id, ref_id));
+                    }
+                }
+            }
+        }
+        
+        // If we found a good match, create a pair
+        if let Some((reg_id, ref_id)) = best_match {
+            if best_score < 0.3 {  // Threshold for a good match
+                let reg_pair = self.pending_regular.remove(&reg_id)?;
+                let ref_pair = self.pending_reference.remove(&ref_id)?;
+                
+                // Update synchronization state
+                self.paired_history.push_back((reg_id, ref_id));
+                if self.paired_history.len() > self.history_size {
+                    self.paired_history.pop_front();
+                }
+                
+                // Set next display ID to be after the matched regular frame
+                self.next_display_id = reg_id + 1;
+                self.sync_successes += 1;
+                
+                // Combine into a single pair
+                return Some(FramePair {
+                    decoded: reg_pair.decoded,
+                    reference: ref_pair.reference,
+                    decoded_raw: reg_pair.decoded_raw,
+                    reference_raw: ref_pair.reference_raw,
+                    frame_id: reg_id, // Use regular frame ID for display
+                });
+            }
+        }
+        
+        None
+    }
+    
+    // Hybrid synchronization strategy
+    fn try_hybrid_sync(&mut self) -> Option<FramePair> {
+        // First try basic ID matching
+        if let Some(pair) = self.try_basic_id_sync() {
+            return Some(pair);
+        }
+        
+        // If that fails, try content fingerprinting
+        self.try_fingerprint_sync()
+    }
+    
+    // Compute a similarity score between two frames
+    fn compute_frame_difference(&self, frame1: &[u8], frame2: &[u8]) -> f64 {
+        // Ensure frames are of comparable size
+        if frame1.len() != frame2.len() {
+            return f64::MAX;
+        }
+        
+        // Sample the frames at regular intervals for efficiency
+        let sample_count = 1000;
+        let sample_interval = frame1.len() / sample_count;
+        
+        let mut total_diff = 0.0;
+        let mut samples = 0;
+        
+        for i in (0..frame1.len()).step_by(sample_interval.max(1)) {
+            if i + 2 < frame1.len() && i + 2 < frame2.len() {
+                // Compare RGB values
+                let diff_r = (frame1[i] as i32 - frame2[i] as i32).abs() as f64;
+                let diff_g = (frame1[i+1] as i32 - frame2[i+1] as i32).abs() as f64;
+                let diff_b = (frame1[i+2] as i32 - frame2[i+2] as i32).abs() as f64;
+                
+                total_diff += diff_r + diff_g + diff_b;
+                samples += 3;
+            }
+        }
+        
+        // Normalize by sample count and color range
+        if samples > 0 {
+            total_diff / (samples as f64 * 255.0)
+        } else {
+            f64::MAX
+        }
+    }
+    
+    // Check if we need to re-sync and perform cleanup
+    fn check_sync_status(&mut self) {
+        let now = Instant::now();
+        
+        // Periodic re-sync check
+        if now.duration_since(self.last_sync_time) > self.sync_interval {
+            self.sync_attempts += 1;
+            self.last_sync_time = now;
+            
+            // Analyze history to detect drift
+            self.analyze_sync_history();
+            
+            // Log synchronization status
+            println!(
+                "🔄 Sync status: {} successful syncs out of {} attempts, {} frames dropped",
+                self.sync_successes,
+                self.sync_attempts,
+                self.frames_dropped,
+            );
+            
+            // Print pending frame counts
+            println!(
+                "   Pending frames: {} regular, {} reference",
+                self.pending_regular.len(),
+                self.pending_reference.len(),
+            );
+        }
+    }
+    
+    // Analyze sync history to detect and correct drift
+    fn analyze_sync_history(&mut self) {
+        if self.paired_history.len() < 3 {
+            return;
+        }
+        
+        // Calculate average drift between regular and reference frame IDs
+        let mut total_drift = 0;
+        for &(reg_id, ref_id) in &self.paired_history {
+            total_drift += reg_id as i64 - ref_id as i64;
+        }
+        let avg_drift = total_drift as f64 / self.paired_history.len() as f64;
+        
+        // If consistent drift is detected, adjust next_display_id
+        if avg_drift.abs() > 0.5 {
+            println!("🔍 Detected consistent frame drift of {:.2} frames", avg_drift);
+            
+            // Adjust strategy based on drift
+            if avg_drift.abs() > self.max_drift_frames as f64 {
+                println!("⚠️ Large drift detected, forcing resync");
+                
+                // Find the newest common ID to resync
+                let common_ids: Vec<usize> = self.pending_regular.keys()
+                    .filter(|&k| self.pending_reference.contains_key(k))
+                    .cloned()
+                    .collect();
+                
+                if !common_ids.is_empty() {
+                    let mut sorted_ids = common_ids.clone();
+                    sorted_ids.sort();
+                    self.next_display_id = sorted_ids[0];
+                    println!("🔄 Resynchronized to frame ID {}", self.next_display_id);
+                }
+            }
+        }
+    }
+    
+    // Cleanup old frames to prevent memory buildup
+    fn try_cleanup_old_frames(&mut self) {
+        let stale_threshold = self.next_display_id.saturating_sub(50);
+        
+        // Count items to be removed for logging
+        let reg_before = self.pending_regular.len();
+        let ref_before = self.pending_reference.len();
+        
+        // Remove stale frames
+        self.pending_regular.retain(|&k, _| k >= stale_threshold);
+        self.pending_reference.retain(|&k, _| k >= stale_threshold);
+        
+        // Count dropped frames
+        let newly_dropped = (reg_before - self.pending_regular.len()) + 
+                           (ref_before - self.pending_reference.len());
+        self.frames_dropped += newly_dropped;
+        
+        if newly_dropped > 0 {
+            println!("🧹 Cleaned up {} stale frames", newly_dropped);
+        }
+    }
+    
+    // Get diagnostic information
+    pub fn get_diagnostics(&self) -> String {
+        format!(
+            "Frame Synchronizer Status:\n\
+             - Strategy: {:?}\n\
+             - Next display ID: {}\n\
+             - Pending frames: {} regular, {} reference\n\
+             - History buffer: {} paired frames\n\
+             - Frames dropped: {}\n\
+             - Sync attempts: {}, successes: {}",
+            self.sync_strategy,
+            self.next_display_id,
+            self.pending_regular.len(),
+            self.pending_reference.len(),
+            self.paired_history.len(),
+            self.frames_dropped,
+            self.sync_attempts,
+            self.sync_successes,
+        )
+    }
+}
+
+// Decoder thread with enhanced synchronization
+fn run_decoder_thread(
+    running: Arc<AtomicBool>,
+    regular_rx: crossbeam::channel::Receiver<(Vec<u8>, usize)>,
+    max_rx: crossbeam::channel::Receiver<(Vec<u8>, usize)>,
+    pair_tx: crossbeam::channel::Sender<FramePair>,
+    client_ip: IpAddr,
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    
+    rt.block_on(async {
+        // Initialize decoders
+        let mut decoder = HevcDecoder::new(
+            FRAMERATE_WINDOWS as u32, 
+            WIDTH_ENCODER as u32, 
+            HEIGHT_ENCODER as u32, 
+            &format!("[CLIENT_DECODER_REGULAR {}]", client_ip),
+        );
+        
+        let mut max_decoder = HevcDecoder::new(
+            FRAMERATE_WINDOWS as u32, 
+            WIDTH_ENCODER as u32, 
+            HEIGHT_ENCODER as u32, 
+            &format!("[CLIENT_DECODER_MAX {}]", client_ip),
+        );
+        
+        // Initialize the frame synchronizer with hybrid strategy
+        let mut synchronizer = FrameSynchronizer::new(SyncStrategy::Hybrid);
+        
+        // Diagnostic timer
+        let mut diagnostic_timer = Instant::now();
+        let diagnostic_interval = Duration::from_secs(5);
+        
+        // Main processing loop
+        while running.load(Ordering::SeqCst) {
+            // Process incoming frames
+            let mut processed_frames = false;
+            
+            // Process regular frames
+            match regular_rx.try_recv() {
+                Ok((frame, frame_id)) => {
+                    println!("Received regular frame #{} (size: {})", frame_id, frame.len());
+                    let (raw, pixels, timestamp) = decode_frame(&mut decoder, frame, frame_id, &client_ip);
+                    
+                    if !pixels.is_empty() && timestamp.is_some() {
+                        // Create frame pair and add to synchronizer
+                        let pair = FramePair {
+                            decoded: Some(pixels),
+                            decoded_raw: Some(raw),
+                            reference: None,
+                            reference_raw: None,
+                            frame_id,
+                        };
+                        
+                        synchronizer.add_regular_frame(frame_id, pair);
+                        processed_frames = true;
+                        println!("Added decoded regular frame #{} to synchronizer", frame_id);
+                    }
+                },
+                Err(crossbeam::channel::TryRecvError::Empty) => {},
+                Err(e) => {
+                    eprintln!("Error receiving regular frame: {}", e);
+                    break;
+                }
+            }
+            
+            // Process max bitrate frames
+            match max_rx.try_recv() {
+                Ok((frame, frame_id)) => {
+                    println!("Received max frame #{} (size: {})", frame_id, frame.len());
+                    let (raw, pixels, timestamp) = decode_frame(&mut max_decoder, frame, frame_id, &client_ip);
+                    
+                    if !pixels.is_empty() && timestamp.is_some() {
+                        // Create frame pair and add to synchronizer
+                        let pair = FramePair {
+                            decoded: None,
+                            decoded_raw: None,
+                            reference: Some(pixels),
+                            reference_raw: Some(raw),
+                            frame_id,
+                        };
+                        
+                        synchronizer.add_reference_frame(frame_id, pair);
+                        processed_frames = true;
+                        println!("Added reference max frame #{} to synchronizer", frame_id);
+                    }
+                },
+                Err(crossbeam::channel::TryRecvError::Empty) => {},
+                Err(e) => {
+                    eprintln!("Error receiving max frame: {}", e);
+                    break;
+                }
+            }
+            
+            // Try to get synchronized frame pairs
+            while let Some(complete_pair) = synchronizer.next_frame_pair() {
+                // Send to display thread
+                if let Err(e) = pair_tx.send(complete_pair.clone()) {
+                    eprintln!("Failed to send frame pair to display: {}", e);
+                    break;
+                } else {
+                    println!("Sent synchronized frame pair #{} to display", complete_pair.frame_id);
+                    processed_frames = true;
+                }
+            }
+            
+            // Print diagnostics periodically
+            if diagnostic_timer.elapsed() >= diagnostic_interval {
+                diagnostic_timer = Instant::now();
+                println!("DIAGNOSTIC: Frame synchronizer state:");
+                println!("{}", synchronizer.get_diagnostics());
+            }
+            
+            // Brief delay if nothing was processed to prevent CPU thrashing
+            if !processed_frames {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        
+        println!("Decoder thread completed");
+    });
+}
 
 #[allow(unused)]
 impl DebugColor {
@@ -2040,11 +3099,13 @@ fn display_frame_pair(pair: &FramePair, server_ip: &IpAddr, display_frame_id: us
         }
     });
 }
+
+// Enhanced main function with frame synchronization workflow
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Define configuration parameters
     let max_bitrate_ladder_mbps = 100.0; 
     let current_bitrate_mbps = 5.0; 
-    let max_frames = 300;
+    let max_frames = 2000;
     
     let maxbitrate_cmd = format!("{:.1}M", max_bitrate_ladder_mbps);
     let bitrate_cmd = format!("{:.1}M", current_bitrate_mbps);
@@ -2064,13 +3125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (regular_tx, regular_rx) = crossbeam::channel::bounded::<(Vec<u8>, usize)>(30);
     let (max_tx, max_rx) = crossbeam::channel::bounded::<(Vec<u8>, usize)>(30);
     
-    // Create frame pair channel for window display
-    // This is the key channel that bridges the async processing world with the UI world
-    let (pair_tx, pair_rx) = crossbeam::channel::bounded::<FramePair>(10);
+    // Create frame pair channel for window display with sync quality metric
+    let (pair_tx, pair_rx) = crossbeam::channel::bounded::<(FramePair, Option<f64>)>(10);
     
-    println!("Starting HEVC encoding-decoding pipeline");
-    let mut diagnostic_timer = Instant::now();
-    let diagnostic_interval = Duration::from_secs(1);
+    println!("Starting HEVC encoding-decoding pipeline with enhanced synchronization");
+    let start_time = Instant::now();
 
     // Initialize encoders
     let mut encoder = ChunkedHevcEncoder::new(
@@ -2093,9 +3152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         random_offset,
     );
     
-    // Start async components in separate threads
-    
-    // Encoder thread
+    // Encoder thread - largely unchanged
     let running_encoder = running.clone();
     let encoder_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2115,19 +3172,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // First try to get a frame from the regular encoder
                 match encoder.next_frame().await {
                     Some(frame) => {
-                        // Save frame to disk if needed (debug only)
-                        // ...
-                        
                         // Send frame to decoder
                         if let Err(e) = regular_tx.send((frame, frame_id)) {
                             eprintln!("Failed to send regular frame to channel: {}", e);
                             break;
                         }
-                        tokio::time::sleep(Duration::from_millis(16)).await;
-
                     },
                     None => {
-                        println!("No regular frame available, restarting encoder");
+                        println!("No regular frame available, restarting encoder chunk");
                         encoder.parser.buffer.clear();
                         encoder.frame_queue.clear();
                         encoder.start_chunking(current_bitrate_mbps).await;
@@ -2141,9 +3193,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Then try to get a frame from the max bitrate encoder
                 match max_encoder.next_frame().await {
                     Some(frame) => {
-                        // Save frame to disk if needed (debug only)
-                        // ...
-                        
                         // Send frame to decoder
                         if let Err(e) = max_tx.send((frame, frame_id)) {
                             eprintln!("Failed to send max frame to channel: {}", e);
@@ -2151,7 +3200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     },
                     None => {
-                        println!("No max frame available, restarting max encoder");
+                        println!("No max frame available, restarting max encoder chunk");
                         max_encoder.parser.buffer.clear();
                         max_encoder.frame_queue.clear();
                         max_encoder.start_chunking(max_bitrate_ladder_mbps).await;
@@ -2173,8 +3222,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
     
-    // Decoder thread
+    // Enhanced decoder thread with frame synchronization
     let running_decoder = running.clone();
+   // Corrected decoder thread implementation with sequential processing
     let decoder_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2187,138 +3237,186 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 FRAMERATE_WINDOWS as u32, 
                 WIDTH_ENCODER as u32, 
                 HEIGHT_ENCODER as u32, 
-                &format!("[CLIENT_DECODER_REGULAR {}]", client_ip)
+                &format!("[CLIENT_DECODER_REGULAR {}]", client_ip),
             );
             
             let mut max_decoder = HevcDecoder::new(
                 FRAMERATE_WINDOWS as u32, 
                 WIDTH_ENCODER as u32, 
                 HEIGHT_ENCODER as u32, 
-                &format!("[CLIENT_DECODER_MAX {}]", client_ip)
+                &format!("[CLIENT_DECODER_MAX {}]", client_ip),
             );
             
-            // Maps to track frame ordering
-            let mut regular_frames = HashMap::new();
-            let mut max_frames = HashMap::new();
-            let mut next_display_id = 0;
+            // Initialize the frame synchronizer with hybrid strategy
+            let mut synchronizer = FrameSynchronizer::new(SyncStrategy::Hybrid);
             
+            // Diagnostic timer
+            let mut diagnostic_timer = Instant::now();
+            let diagnostic_interval = Duration::from_secs(5);
+            
+            // Main processing loop
             while running_decoder.load(Ordering::SeqCst) {
-                // Process incoming frames without blocking the async runtime
-                let process_frames = async {
-                    // Process regular frames
-                    match regular_rx.try_recv() {
-                        Ok((frame, frame_id)) => {
-                            println!("Received regular frame #{} (size: {})", frame_id, frame.len());
-                            let (raw, pixels, timestamp) = decode_frame(&mut decoder, frame, frame_id, &client_ip);
-                            
-                            if !pixels.is_empty() && timestamp.is_some() {
-                                // Store decoded frame
-                                let mut pair = regular_frames.entry(frame_id)
-                                    .or_insert_with(FramePair::default);
-                                pair.decoded = Some(pixels);
-                                pair.decoded_raw = Some(raw);
-                                pair.frame_id = frame_id;
-                                
-                                println!("Stored decoded regular frame #{}", frame_id);
-                            }
-                        },
-                        Err(crossbeam::channel::TryRecvError::Empty) => {},
-                        Err(e) => {
-                            eprintln!("Error receiving regular frame: {}", e);
-                            return false;
-                        }
-                    }
-                    
-                    // Process max bitrate frames
-                    match max_rx.try_recv() {
-                        Ok((frame, frame_id)) => {
-                            println!("Received max frame #{} (size: {})", frame_id, frame.len());
-                            let (raw, pixels, timestamp) = decode_frame(&mut max_decoder, frame, frame_id, &client_ip);
-                            
-                            if !pixels.is_empty() && timestamp.is_some() {
-                                // Store reference frame
-                                let mut pair = max_frames.entry(frame_id)
-                                    .or_insert_with(FramePair::default);
-                                pair.reference = Some(pixels);
-                                pair.reference_raw = Some(raw);
-                                pair.frame_id = frame_id;
-                                
-                                println!("Stored reference max frame #{}", frame_id);
-                            }
-                        },
-                        Err(crossbeam::channel::TryRecvError::Empty) => {},
-                        Err(e) => {
-                            eprintln!("Error receiving max frame: {}", e);
-                            return false;
-                        }
-                    }
-                    
-                    true
-                };
+                // Process incoming frames from both streams
+                let reg_processed = process_regular_stream(&mut decoder, &regular_rx, &mut synchronizer).await;
+                let max_processed = process_max_stream(&mut max_decoder, &max_rx, &mut synchronizer).await;
                 
-                // If processing fails, exit the loop
-                if !process_frames.await {
-                    break;
-                }
-                // Add this code block right before frame pairing logic
-                if next_display_id == 0 && !regular_frames.is_empty() && !max_frames.is_empty() {
-                    // First attempt at frame pairing - synchronize the IDs
-                    next_display_id = synchronize_frame_ids(&regular_frames, &max_frames, next_display_id);
-                    println!("Initial frame synchronization: next_display_id now set to {}", next_display_id);
-                }
-                // Check if we can create complete pairs
-                while let Some(reg_pair) = regular_frames.remove(&next_display_id) {
-                    if let Some(max_pair) = max_frames.remove(&next_display_id) {
-                        // Combine the pairs
-                        let complete_pair = FramePair {
-                            decoded: reg_pair.decoded,
-                            reference: max_pair.reference,
-                            decoded_raw: reg_pair.decoded_raw,
-                            reference_raw: max_pair.reference_raw,
-                            frame_id: next_display_id,
+                // Track whether we processed frames in this iteration
+                let processed_frames = reg_processed || max_processed;
+                
+                // Try to extract synchronized frame pairs
+                let mut pairs_sent = 0;
+                while pairs_sent < 3 { // Process up to 3 pairs at once to avoid backing up
+                    // Get next pair with similarity measurement
+                    if let Some(pair) = synchronizer.next_frame_pair() {
+                        // Calculate frame similarity for visualization
+                        let sync_quality = if let (Some(reg_raw), Some(max_raw)) = (&pair.decoded_raw, &pair.reference_raw) {
+                            Some(compute_frame_similarity(reg_raw, max_raw))
+                        } else {
+                            None
                         };
                         
                         // Send to display thread
-                        if let Err(e) = pair_tx.send(complete_pair) {
+                        if let Err(e) = pair_tx.send((pair.clone(), sync_quality)) {
                             eprintln!("Failed to send frame pair to display: {}", e);
+                            break;
                         } else {
-                            println!("Sent complete frame pair #{} to display", next_display_id);
+                            println!("Sent synchronized frame pair #{} to display (sync quality: {:?})", 
+                                pair.frame_id, sync_quality);
+                            pairs_sent += 1;
                         }
-                        
-                        next_display_id += 1;
                     } else {
-                        // Put back the regular frame and wait for the max frame
-                        regular_frames.insert(next_display_id, reg_pair);
+                        // No more pairs available
                         break;
                     }
                 }
                 
-                // Cleanup old frames to prevent memory buildup
-                let stale_threshold = next_display_id.saturating_sub(500);
-                regular_frames.retain(|&k, _| k >= stale_threshold);
-                max_frames.retain(|&k, _| k >= stale_threshold);
-
+                // Print diagnostics periodically
                 if diagnostic_timer.elapsed() >= diagnostic_interval {
                     diagnostic_timer = Instant::now();
-                    println!("DIAGNOSTIC: HashMap state before pairing:");
-                    println!("  next_display_id: {}", next_display_id);
-                    println!("  regular_frames: {} entries, keys: {:?}", 
-                            regular_frames.len(), 
-                            regular_frames.keys().take(5).collect::<Vec<_>>());
-                    println!("  max_frames: {} entries, keys: {:?}", 
-                            max_frames.len(), 
-                            max_frames.keys().take(5).collect::<Vec<_>>());
+                    println!("DIAGNOSTIC: Frame synchronizer state:");
+                    println!("{}", synchronizer.get_diagnostics());
+                    
+                    // Also print decoder states
+                    println!("Decoder states:");
+                    println!("  Regular: {} frames processed, {} keyframes", 
+                            decoder.frames_processed, decoder.keyframes_seen);
+                    println!("  Max: {} frames processed, {} keyframes",
+                            max_decoder.frames_processed, max_decoder.keyframes_seen);
                 }
                 
-                // Brief delay to prevent CPU thrashing
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                // Brief delay if nothing was processed to prevent CPU thrashing
+                if !processed_frames && pairs_sent == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             }
             
             println!("Decoder thread completed");
         });
     });
+    // Process frames from the regular stream
+    async fn process_regular_stream(
+        decoder: &mut HevcDecoder, 
+        rx: &crossbeam::channel::Receiver<(Vec<u8>, usize)>,
+        synchronizer: &mut FrameSynchronizer,
+    ) -> bool {
+        match rx.try_recv() {
+            Ok((frame, frame_id)) => {
+                println!("Received regular frame #{} (size: {})", frame_id, frame.len());
+                let (raw, pixels, timestamp) = decode_frame(decoder, frame, frame_id, &std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)));
+                
+                if !pixels.is_empty() && timestamp.is_some() {
+                    // Create frame pair and add to synchronizer
+                    let pair = FramePair {
+                        decoded: Some(pixels),
+                        decoded_raw: Some(raw),
+                        reference: None,
+                        reference_raw: None,
+                        frame_id,
+                    };
+                    
+                    synchronizer.add_regular_frame(frame_id, pair);
+                    println!("Added decoded regular frame #{} to synchronizer", frame_id);
+                    return true;
+                }
+                false
+            },
+            Err(crossbeam::channel::TryRecvError::Empty) => false,
+            Err(e) => {
+                eprintln!("Error receiving regular frame: {}", e);
+                false
+            }
+        }
+    }
     
-    // Display thread - This runs on the main thread without async to avoid Send issues
+    // Process frames from the max bitrate stream
+    async fn process_max_stream(
+        decoder: &mut HevcDecoder, 
+        rx: &crossbeam::channel::Receiver<(Vec<u8>, usize)>,
+        synchronizer: &mut FrameSynchronizer,
+    ) -> bool {
+        match rx.try_recv() {
+            Ok((frame, frame_id)) => {
+                println!("Received max frame #{} (size: {})", frame_id, frame.len());
+                let (raw, pixels, timestamp) = decode_frame(decoder, frame, frame_id, &std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)));
+                
+                if !pixels.is_empty() && timestamp.is_some() {
+                    // Create frame pair and add to synchronizer
+                    let pair = FramePair {
+                        decoded: None,
+                        decoded_raw: None,
+                        reference: Some(pixels),
+                        reference_raw: Some(raw),
+                        frame_id,
+                    };
+                    
+                    synchronizer.add_reference_frame(frame_id, pair);
+                    println!("Added reference max frame #{} to synchronizer", frame_id);
+                    return true;
+                }
+                false
+            },
+            Err(crossbeam::channel::TryRecvError::Empty) => false,
+            Err(e) => {
+                eprintln!("Error receiving max frame: {}", e);
+                false
+            }
+        }
+    }
+    
+    // Calculate similarity between two frames (0.0 = identical, 1.0 = completely different)
+    fn compute_frame_similarity(frame1: &[u8], frame2: &[u8]) -> f64 {
+        // Return max difference if frames are different sizes
+        if frame1.len() != frame2.len() {
+            return 1.0;
+        }
+        
+        // Limit to certain number of sample points for performance
+        let max_samples = 100_000;
+        let sample_interval = (frame1.len() / 3).max(1) / max_samples.min(frame1.len() / 3);
+        let sample_interval = sample_interval.max(1);
+        
+        let mut total_diff = 0.0;
+        let mut samples = 0;
+        
+        // Sample RGB triplets
+        for i in (0..frame1.len() - 2).step_by(sample_interval * 3) {
+            let r_diff = (frame1[i] as i32 - frame2[i] as i32).abs() as f64;
+            let g_diff = (frame1[i+1] as i32 - frame2[i+1] as i32).abs() as f64;
+            let b_diff = (frame1[i+2] as i32 - frame2[i+2] as i32).abs() as f64;
+            
+            total_diff += r_diff + g_diff + b_diff;
+            samples += 3;
+        }
+        
+        // Normalize to 0.0-1.0 range
+        if samples > 0 {
+            total_diff / (samples as f64 * 255.0)
+        } else {
+            1.0
+        }
+    }
+    
+    // Display thread with enhanced visualization
     let running_display = running.clone();
     
     // Create window dimensions based on scaled frame size
@@ -2336,7 +3434,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WindowOptions {
             resize: true,
             scale: minifb::Scale::X1,
-            topmost: false,  // Don't make it topmost as it can be annoying
+            topmost: false,
             ..WindowOptions::default()
         },
     ).unwrap_or_else(|e| {
@@ -2346,21 +3444,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Main display loop - note this is NOT async
     let mut frames_displayed = 0;
+    let mut last_frame_time = Instant::now();
     let start_time = Instant::now();
     
     while running_display.load(Ordering::SeqCst) && window.is_open() {
+        // Target frame rate control
+        let target_frame_time = Duration::from_millis(33); // ~30 FPS
+        let elapsed = last_frame_time.elapsed();
+        if elapsed < target_frame_time {
+            std::thread::sleep(target_frame_time - elapsed);
+        }
+        last_frame_time = Instant::now();
+        
         // Try to receive frame pair with timeout
         match pair_rx.recv_timeout(Duration::from_millis(16)) {
-            Ok(pair) => {
-      
-                
-                // Display the frame pair
-                if display_frame_pair_to_window(&pair, &server_ip, pair.frame_id, &mut window) {
+            Ok((pair, sync_quality)) => {
+                // Display the frame pair with sync quality indicator
+                if display_frame_pair_enhanced(&pair, &server_ip, pair.frame_id, &mut window, sync_quality) {
                     frames_displayed += 1;
-                    println!("Displaying frame pair #{} (elapsed: {:?})", 
-                    pair.frame_id, start_time.elapsed());
+                    
+                    // Calculate and display FPS
+                    let fps = frames_displayed as f64 / start_time.elapsed().as_secs_f64();
+                    println!("Displaying frame pair #{} (elapsed: {:?}, FPS: {:.2})", 
+                            pair.frame_id, start_time.elapsed(), fps);
                 }
-                
             },
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                 // No new frames, just update window to keep it responsive
@@ -2391,6 +3498,226 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("All processing completed, shutting down");
     Ok(())
 }
+
+
+// fn main() -> Result<(), Box<dyn std::error::Error>> {
+//     // Define configuration parameters
+//     let max_bitrate_ladder_mbps = 100.0; 
+//     let current_bitrate_mbps = 5.0; 
+//     let max_frames = 300;
+    
+//     let maxbitrate_cmd = format!("{:.1}M", max_bitrate_ladder_mbps);
+//     let bitrate_cmd = format!("{:.1}M", current_bitrate_mbps);
+//     let random_offset = rand::thread_rng().gen_range(50.0..OFFSET_VIDEO);
+    
+//     // Define path to the input video
+//     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
+    
+//     // Define network endpoints
+//     let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+//     let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    
+//     // Signal for stopping threads
+//     let running = Arc::new(AtomicBool::new(true));
+    
+//     // Create channels for frame transmission
+//     let (regular_tx, regular_rx) = crossbeam::channel::bounded::<(Vec<u8>, usize)>(30);
+//     let (max_tx, max_rx) = crossbeam::channel::bounded::<(Vec<u8>, usize)>(30);
+    
+//     // Create frame pair channel for window display
+//     // This is the key channel that bridges the async processing world with the UI world
+//     let (pair_tx, pair_rx) = crossbeam::channel::bounded::<FramePair>(10);
+    
+//     println!("Starting HEVC encoding-decoding pipeline");
+//     let mut diagnostic_timer = Instant::now();
+//     let diagnostic_interval = Duration::from_secs(1);
+
+//     // Initialize encoders
+//     let mut encoder = ChunkedHevcEncoder::new(
+//         input_path,
+//         WIDTH_ENCODER as u32,
+//         HEIGHT_ENCODER as u32,
+//         &bitrate_cmd,
+//         CHUNK_DURATION_F64_s,
+//         format!("[ENCODER {}]", server_ip),
+//         random_offset,
+//     );
+    
+//     let mut max_encoder = ChunkedHevcEncoder::new(
+//         input_path,
+//         WIDTH_ENCODER as u32,
+//         HEIGHT_ENCODER as u32,
+//         &maxbitrate_cmd,
+//         CHUNK_DURATION_F64_s,
+//         format!("[Bitrate MAX ENCODER {}]", server_ip),
+//         random_offset,
+//     );
+    
+//     // Start async components in separate threads
+    
+//     // Encoder thread
+//     let running_encoder = running.clone();
+//     let encoder_thread = std::thread::spawn(move || {
+//         let rt = tokio::runtime::Builder::new_current_thread()
+//             .enable_all()
+//             .build()
+//             .unwrap();
+        
+//         rt.block_on(async {
+//             let mut frame_id = 0;
+            
+//             // Start initial chunking
+//             println!("Starting initial encoding chunks");
+//             max_encoder.start_chunking(max_bitrate_ladder_mbps).await;
+//             encoder.start_chunking(current_bitrate_mbps).await;
+            
+//             while running_encoder.load(Ordering::SeqCst) && frame_id < max_frames {
+//                 // First try to get a frame from the regular encoder
+//                 match encoder.next_frame().await {
+//                     Some(frame) => {
+//                         // Save frame to disk if needed (debug only)
+//                         // ...
+                        
+//                         // Send frame to decoder
+//                         if let Err(e) = regular_tx.send((frame, frame_id)) {
+//                             eprintln!("Failed to send regular frame to channel: {}", e);
+//                             break;
+//                         }
+//                         tokio::time::sleep(Duration::from_millis(16)).await;
+
+//                     },
+//                     None => {
+//                         println!("No regular frame available, restarting encoder");
+//                         encoder.parser.buffer.clear();
+//                         encoder.frame_queue.clear();
+//                         encoder.start_chunking(current_bitrate_mbps).await;
+                        
+//                         // Brief delay to let encoder produce frames
+//                         tokio::time::sleep(Duration::from_millis(100)).await;
+//                         continue;
+//                     }
+//                 }
+                
+//                 // Then try to get a frame from the max bitrate encoder
+//                 match max_encoder.next_frame().await {
+//                     Some(frame) => {
+//                         // Save frame to disk if needed (debug only)
+//                         // ...
+                        
+//                         // Send frame to decoder
+//                         if let Err(e) = max_tx.send((frame, frame_id)) {
+//                             eprintln!("Failed to send max frame to channel: {}", e);
+//                             break;
+//                         }
+//                     },
+//                     None => {
+//                         println!("No max frame available, restarting max encoder");
+//                         max_encoder.parser.buffer.clear();
+//                         max_encoder.frame_queue.clear();
+//                         max_encoder.start_chunking(max_bitrate_ladder_mbps).await;
+                        
+//                         // Brief delay to let encoder produce frames
+//                         tokio::time::sleep(Duration::from_millis(100)).await;
+//                         continue;
+//                     }
+//                 }
+                
+//                 // Increment frame ID after successfully processing both frames
+//                 frame_id += 1;
+                
+//                 // Brief delay to maintain reasonable frame rate
+//                 tokio::time::sleep(Duration::from_millis(33)).await;
+//             }
+            
+//             println!("Encoder thread completed after {} frames", frame_id);
+//         });
+//     });
+    
+//     // Decoder thread
+//     let running_decoder = running.clone();
+//     let decoder_thread = std::thread::spawn(move || {
+//         run_decoder_thread(
+//             running_decoder,
+//             regular_rx,
+//             max_rx,
+//             pair_tx,
+//             client_ip,
+//         );
+//     });
+    
+//     // Display thread - This runs on the main thread without async to avoid Send issues
+//     let running_display = running.clone();
+    
+//     // Create window dimensions based on scaled frame size
+//     let scale_factor = SCALE_FACTOR_WINDOW;
+//     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
+//     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
+//     let window_width = scaled_width * 2 + 10; // Two frames + separator
+    
+//     // Create window with explicit options
+//     println!("Creating display window ({} x {})", window_width, scaled_height);
+//     let mut window = Window::new(
+//         "HEVC Comparison",
+//         window_width,
+//         scaled_height,
+//         WindowOptions {
+//             resize: true,
+//             scale: minifb::Scale::X1,
+//             topmost: false,  // Don't make it topmost as it can be annoying
+//             ..WindowOptions::default()
+//         },
+//     ).unwrap_or_else(|e| {
+//         eprintln!("Failed to create window: {}", e);
+//         std::process::exit(1);
+//     });
+    
+//     // Main display loop - note this is NOT async
+//     let mut frames_displayed = 0;
+//     let start_time = Instant::now();
+    
+//     while running_display.load(Ordering::SeqCst) && window.is_open() {
+//         // Try to receive frame pair with timeout
+//         match pair_rx.recv_timeout(Duration::from_millis(16)) {
+//             Ok(pair) => {
+      
+                
+//                 // Display the frame pair
+//                 if display_frame_pair_to_window(&pair, &server_ip, pair.frame_id, &mut window) {
+//                     frames_displayed += 1;
+//                     println!("Displaying frame pair #{} (elapsed: {:?})", 
+//                     pair.frame_id, start_time.elapsed());
+//                 }
+                
+//             },
+//             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+//                 // No new frames, just update window to keep it responsive
+//                 window.update();
+//             },
+//             Err(e) => {
+//                 eprintln!("Error receiving frame pair: {}", e);
+//                 break;
+//             }
+//         }
+        
+//         // Check for window close or escape key
+//         if !window.is_open() || window.is_key_down(minifb::Key::Escape) {
+//             println!("Window closed or Escape pressed, shutting down");
+//             running_display.store(false, Ordering::SeqCst);
+//             running.store(false, Ordering::SeqCst);
+//             break;
+//         }
+//     }
+    
+//     println!("Display loop completed - displayed {} frames", frames_displayed);
+    
+//     // Signal all threads to stop and wait for them
+//     running.store(false, Ordering::SeqCst);
+//     encoder_thread.join().unwrap();
+//     decoder_thread.join().unwrap();
+    
+//     println!("All processing completed, shutting down");
+//     Ok(())
+// }
 
 
 // Implement this frame synchronization function in the decoder thread
