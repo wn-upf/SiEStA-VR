@@ -691,55 +691,55 @@ fn downlink_uplink_scenario_flexible(
     // }
     const DOWNLINK_SRC: i32 = 5;
 
-for (i, coords) in vec_coords.iter().enumerate() {
-    // Decide which configuration to use.
-    // If both uplink and downlink are active, split the STAs in half:
-    //   • First half: uplink (source = i, dest = AP, e.g. 2)
-    //   • Second half: downlink (source = fixed value, dest = corresponding uplink STA)
-    //
-    // If only one direction is active, then use all STAs for that direction.
-    let (sta_id, sta_dest) = if is_uplink && is_downlink {
-        if i < num_STAs / 2 {
-            // Uplink configuration
-            (i as i32, 10)
+    for (i, coords) in vec_coords.iter().enumerate() {
+        // Decide which configuration to use.
+        // If both uplink and downlink are active, split the STAs in half:
+        //   • First half: uplink (source = i, dest = AP, e.g. 2)
+        //   • Second half: downlink (source = fixed value, dest = corresponding uplink STA)
+        //
+        // If only one direction is active, then use all STAs for that direction.
+        let (sta_id, sta_dest) = if is_uplink && is_downlink {
+            if i < num_STAs / 2 {
+                // Uplink configuration
+                (i as i32, 10)
+            } else {
+                // Downlink configuration: use fixed AP source and let destination be the corresponding uplink STA.
+                (DOWNLINK_SRC, (i - num_STAs / 2) as i32)
+            }
+        } else if is_uplink {
+            (i as i32, 2)
+        } else if is_downlink {
+            (DOWNLINK_SRC, i as i32)
         } else {
-            // Downlink configuration: use fixed AP source and let destination be the corresponding uplink STA.
-            (DOWNLINK_SRC, (i - num_STAs / 2) as i32)
+            // (should not happen)
+            (i as i32, 2)
+        };
+
+        // (Optionally update your id_src_coords vector to match the same logic, if you need it later.)
+        id_src_coords.push(sta_id as usize);
+        map_coords.insert(sta_id as usize, *coords);
+
+        // Create the STA only if either uplink or downlink is requested.
+        if is_uplink || is_downlink {
+            let sta = STA_extended::new(
+                rate_bps_in,
+                mean_length,
+                sta_id,
+                sta_dest,
+                *coords,
+                true,
+                effective_rates[i],
+                t0,
+                true,
+                BG_rate,
+            );
+
+            let mbox_sta = Mailbox::new();
+            sta_addresses.push(mbox_sta.address());
+            mbox_stas.push(mbox_sta);
+            sta_bg_models.push(sta);
         }
-    } else if is_uplink {
-        (i as i32, 2)
-    } else if is_downlink {
-        (DOWNLINK_SRC, i as i32)
-    } else {
-        // (should not happen)
-        (i as i32, 2)
-    };
-
-    // (Optionally update your id_src_coords vector to match the same logic, if you need it later.)
-    id_src_coords.push(sta_id as usize);
-    map_coords.insert(sta_id as usize, *coords);
-
-    // Create the STA only if either uplink or downlink is requested.
-    if is_uplink || is_downlink {
-        let sta = STA_extended::new(
-            rate_bps_in,
-            mean_length,
-            sta_id,
-            sta_dest,
-            *coords,
-            true,
-            effective_rates[i],
-            t0,
-            true,
-            BG_rate,
-        );
-
-        let mbox_sta = Mailbox::new();
-        sta_addresses.push(mbox_sta.address());
-        mbox_stas.push(mbox_sta);
-        sta_bg_models.push(sta);
     }
-}
 
     // Prepare queue
     let vec_ids_stas: Vec<i32> = sta_bg_models.iter().map(|sta| sta.sta_id).collect();
@@ -1126,7 +1126,7 @@ for (i, coords) in vec_coords.iter().enumerate() {
 
 //     // After simulation, write the CSV data
 
-//     let filename = format!("MM1K_sim"); 
+//     let filename = format!("MM1K_sim");
 //     if let Ok(data) = csv_data_handle.lock() {
 //         if let Err(e) = data.write_to_csv(&filename, &dir_path) {
 //             eprintln!("Failed to write CSV file: {}", e);
@@ -1449,7 +1449,7 @@ fn main() {
             "Usage: {} <mean_length> <k_queue> <rate_bps_IN> <distance> <bandwidth_STA> <is_UL> <N_BG> <distance_STA0>",
             args[0]
         );
-        println!("ARGS: {:#?}", args); 
+        println!("ARGS: {:#?}", args);
         return;
     }
     let stoptime: f64 = args[1].parse().expect("Invalid T_END");
@@ -1469,7 +1469,7 @@ fn main() {
     let mut is_ul_arg = false;
 
     if is_uplink == 0 {
-        println!("DOWNLINK SCENARIO"); 
+        println!("DOWNLINK SCENARIO");
         is_downlink = true;
         is_ul_arg = false;
     } else {

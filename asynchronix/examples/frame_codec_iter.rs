@@ -14,9 +14,9 @@ use std::{
     thread,
 };
 
-use std::net::IpAddr;
 use std::hash::DefaultHasher;
 use std::io::BufRead;
+use std::net::IpAddr;
 // use sdl2::pixels::Color;
 // use sdl2::render::Canvas;
 // use sdl2::video::Window;
@@ -30,33 +30,29 @@ use std::time::Duration;
 
 use std::collections::HashMap;
 
-
-use std::sync::{Arc, Mutex}; 
 use std::hash::{Hash, Hasher};
-
-
+use std::sync::{Arc, Mutex};
 
 use asynchronix::model::Context;
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 // use futures_util::stream::empty;
 
-use std::process::{Child};  
-use std::os::unix::io::AsRawFd;
 use nix::fcntl;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use std::os::unix::io::AsRawFd;
+use std::process::Child;
 // use tokio::io::{AsyncReadExt, BufReader};
 
-use std::io::{BufReader};
+use std::io::BufReader;
 
 use lazy_static::lazy_static;
 
-use std::process::{ChildStdout, ChildStdin};
-use std::io::{ Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
+use std::process::{ChildStdin, ChildStdout};
 
-
-mod lib; 
-use crate::lib::{DEBUG_PRINT_ENABLED, USE_FFMPEG, DebugColor};
-// use crate::print_pretty; 
+mod lib;
+use crate::lib::{DebugColor, DEBUG_PRINT_ENABLED, USE_FFMPEG};
+// use crate::print_pretty;
 // use crate::{debug_bgprint, format_elapsed};
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
@@ -87,14 +83,10 @@ use anyhow::{anyhow, Result};
 use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 // use std::io::{Read, Write};
-use std::net::{Ipv4Addr};
+use std::net::Ipv4Addr;
 
 use std::result::Result::Ok;
 use tai_time::TaiTime;
-
-
-
-
 
 lazy_static! {
     // Thread-safe FFmpeg process pool
@@ -102,11 +94,8 @@ lazy_static! {
     // static ref FFMPEG_DECODE_POOL: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
-
-
-pub const INITIAL_FRAMERATE_FPS: f32 = 60.0; 
+pub const INITIAL_FRAMERATE_FPS: f32 = 60.0;
 pub const OFFSET_VIDEO_TIMESTAMP: f64 = 40.0;
-
 
 // pub const WIDTH_ENCODER: usize = 1280;
 // pub const HEIGHT_ENCODER: usize = 720;
@@ -253,7 +242,6 @@ pub fn encode_frame_sequence(
     Ok(())
 }
 
-
 // pub fn generate_all_bitrates_all_frames(
 //     list_bitrates: Vec<f32>,
 //     fps: f64,
@@ -337,8 +325,6 @@ pub fn encode_frame_sequence(
 //     Ok(())
 // }
 
-
-
 pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<u8> {
     let input_path =
         "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/bbb_1080p60fps.mp4";
@@ -367,10 +353,7 @@ pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64) -> Vec<
             "-pix_fmt",
             "yuv420p",
             "-vf",
-            &format!(
-                "scale={}:{},format=yuv420p",
-                WIDTH_ENCODER, HEIGHT_ENCODER
-            ),
+            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
             "-c:v",
             "hevc_nvenc",
             "-b:v",
@@ -486,12 +469,8 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
         .collect()
 }
 
-
-
-
-
 lazy_static! {
-    static ref FFMPEG_ENCODE_POOL: Arc<Mutex<HashMap<String, EncoderProcess>>> = 
+    static ref FFMPEG_ENCODE_POOL: Arc<Mutex<HashMap<String, EncoderProcess>>> =
         Arc::new(Mutex::new(HashMap::new()));
 }
 
@@ -507,11 +486,10 @@ fn main() {
     let mut current_bitrate_mbps = 20.0;
     let mut timestamp = 2.0;
 
-
     let scale_factor = 0.4;
     let scaled_width = (WIDTH_ENCODER as f64 * scale_factor) as usize;
     let scaled_height = (HEIGHT_ENCODER as f64 * scale_factor) as usize;
-    
+
     // Create a persistent window
     let mut window = Window::new(
         "FFmpeg Video Stream",
@@ -536,7 +514,6 @@ fn main() {
     let frame_count = 100;
     let base_output_dir = "/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates";
 
-
     // let mut yuv_loader = YuvFrameLoader::new("raw_frames.yuv").unwrap();
 
     // println!("Loaded YUV file with {} frames", yuv_loader.total_frames);
@@ -550,23 +527,21 @@ fn main() {
             current_bitrate_mbps = 0.9;
         } else if timestamp >= 2.5 && timestamp < 3.5 {
             current_bitrate_mbps = 0.1;
-        }
-        else{
+        } else {
             current_bitrate_mbps = 0.7;
         }
 
         // Process a new frame
-        // let frame_result = generate_sample_ffmpeg_opti_alvr(current_bitrate_mbps, timestamp, fps, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))); 
-        let frame_result: std::result::Result<Vec<u8>, std::io::Error> = Ok(generate_sample_ffmpeg(current_bitrate_mbps, timestamp) ); 
+        // let frame_result = generate_sample_ffmpeg_opti_alvr(current_bitrate_mbps, timestamp, fps, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        let frame_result: std::result::Result<Vec<u8>, std::io::Error> =
+            Ok(generate_sample_ffmpeg(current_bitrate_mbps, timestamp));
 
         match frame_result {
             Ok(frame) => {
-
                 if !frame.is_empty() {
-
                     // Decode and convert to display format
                     let rgb_frame = decode_hevc_to_rgb24(frame);
-                    
+
                     if rgb_frame.len() == WIDTH_ENCODER * HEIGHT_ENCODER * 3 {
                         window
                             .update_with_buffer(&rgb_frame, WIDTH_ENCODER, HEIGHT_ENCODER)
@@ -575,14 +550,13 @@ fn main() {
                         eprintln!("Invalid RGB frame size: {}", rgb_frame.len());
                     }
 
-
                     // Update the window with the new frame
                     window
                         .update_with_buffer(&rgb_frame, WIDTH_ENCODER, HEIGHT_ENCODER)
                         .unwrap();
-                    } else {
-                        eprintln!("Failed to decode frame at timestamp: {}", timestamp);
-                    }
+                } else {
+                    eprintln!("Failed to decode frame at timestamp: {}", timestamp);
+                }
             }
 
             Err(e) => {
@@ -592,7 +566,6 @@ fn main() {
             }
         }
 
-
         // Increment timestamp for the next frame
 
         // Allow the program to pause or quit if desired (optional feature)
@@ -600,11 +573,5 @@ fn main() {
             println!("Quitting...");
             break;
         }
-        
     }
 }
-
-
-
-
-

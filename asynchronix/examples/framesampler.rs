@@ -1,19 +1,19 @@
 use anyhow::Result;
-use std::hash::Hash;
-use std::io::{BufReader, Read, Write, BufWriter};
-use std::process::{ChildStdin, ChildStdout};
+use async_std::task;
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use minifb::{Key, Scale, Window, WindowOptions};
 use rand::Rng;
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::process::{ChildStdin, ChildStdout};
 use std::time::Duration;
 use std::time::Instant;
-use std::collections::{HashMap, VecDeque};
-use async_std::task;
 
 use std::fs::File;
 use std::path::Path;
-use std::process::Command; 
+use std::process::Command;
 
 // Define the expected (encoder) dimensions.
 // pub const WIDTH_ENCODER: usize = 3840;
@@ -21,19 +21,19 @@ use std::process::Command;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const INITIAL_BITRATE : &str= "70M"; 
-pub const WINDOW_SCALE_FACTOR: f64 = 0.7; 
+pub const INITIAL_BITRATE: &str = "70M";
+pub const WINDOW_SCALE_FACTOR: f64 = 0.7;
 
 pub const IDR_FRAME_SIZE_GOP: usize = 300;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.01; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.01;
 
-pub const CHUNK_SIZE_ENCODER_S: f64 = 10.0; 
-pub const FRAME_CUTOFF_LIMIT: usize = 1000; 
+pub const CHUNK_SIZE_ENCODER_S: f64 = 10.0;
+pub const FRAME_CUTOFF_LIMIT: usize = 1000;
 
 pub const OFFSET_VIDEO: f64 = 0.0;
 
-pub const REENCODE: bool = true; 
+pub const REENCODE: bool = true;
 
 #[derive(Debug, Clone)]
 struct FrameMetadata {
@@ -41,7 +41,6 @@ struct FrameMetadata {
     timestamp_ms: u64,
     is_keyframe: bool,
 }
-
 
 // New encoder type that chunks the video into fixed-duration segments.
 /// Each chunk is produced by invoking ffmpeg with "-ss" (start time)
@@ -51,8 +50,8 @@ pub struct ChunkedHevcEncoder {
     width: u32,
     height: u32,
     bitrate: String,
-    chunk_duration: f64,   // Duration of each chunk in seconds.
-    current_offset: f64,   // Current start timestamp.
+    chunk_duration: f64, // Duration of each chunk in seconds.
+    current_offset: f64, // Current start timestamp.
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
 }
@@ -61,8 +60,8 @@ impl ChunkedHevcEncoder {
     /// Create a new ChunkedHevcEncoder.
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64) -> Self {
         // We use a bounded channel to store parsed frames.
-        
-        println!("Initializing chunkedhevcencoder"); 
+
+        println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
         Self {
             input: input.to_string(),
@@ -82,7 +81,7 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self) -> Result<()> {
         loop {
-            println!("CHUNKING!"); 
+            println!("CHUNKING!");
 
             // Build an ffmpeg command for the current chunk:
             // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
@@ -103,9 +102,16 @@ impl ChunkedHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
-                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate, "-minrate", &self.bitrate])
+                .args(&[
+                    "-b:v",
+                    &self.bitrate,
+                    "-maxrate",
+                    &self.bitrate,
+                    "-minrate",
+                    &self.bitrate,
+                ])
                 .args(&["-rc-lookahead", "0"])
-                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])  // using your GOP size constant
+                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -157,7 +163,6 @@ impl ChunkedHevcEncoder {
     }
 }
 
-
 /// Represents a single HEVC NAL unit
 pub struct NalUnit {
     pub nal_type: u8,
@@ -184,9 +189,13 @@ impl HevcParser {
     fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
         for i in start_pos..self.buffer.len() - 3 {
             // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1)
+                || (i < self.buffer.len() - 4
+                    && self.buffer[i] == 0
+                    && self.buffer[i + 1] == 0
+                    && self.buffer[i + 2] == 0
+                    && self.buffer[i + 3] == 1)
+            {
                 return Some(i);
             }
         }
@@ -197,46 +206,49 @@ impl HevcParser {
     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
         // Find the first start code
         let start_pos = self.find_next_start_code(0)?;
-        
+
         // Determine start code length (3 or 4 bytes)
-        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
+        let start_code_len = if start_pos + 3 < self.buffer.len()
+            && self.buffer[start_pos + 2] == 0
+            && self.buffer[start_pos + 3] == 1
+        {
             4
         } else {
             3
         };
-        
+
         // Find the next start code
         let next_start = self.find_next_start_code(start_pos + start_code_len);
-        
+
         let (nal_end, has_next) = match next_start {
             Some(pos) => (pos, true),
-            None => (self.buffer.len(), false)
+            None => (self.buffer.len(), false),
         };
-        
+
         // If we don't have a complete NAL unit yet, wait for more data
         if !has_next {
             return None;
         }
-        
+
         // Extract NAL header and determine NAL type
         let nal_header_pos = start_pos + start_code_len;
         if nal_header_pos >= self.buffer.len() {
             return None;
         }
-        
+
         let nal_header = self.buffer[nal_header_pos];
         let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-        
+
         // Extract the complete NAL unit data (including header)
         let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
-        
+
         // Remove the processed NAL unit from the buffer
         self.buffer.drain(0..nal_end);
-        
+
         // Determine if this is a keyframe (I-frame)
         // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
         let is_keyframe = (16..=21).contains(&nal_type);
-        
+
         Some(NalUnit {
             nal_type,
             data: nal_data,
@@ -249,11 +261,11 @@ impl HevcParser {
         let mut frames = Vec::new();
         let mut current_frame = Vec::new();
         let mut saw_vcl = false;
-        
+
         while let Some(nal) = self.next_nal_unit() {
             // VCL NAL units (0-31) contain the actual picture data
             let is_vcl = nal.nal_type <= 31;
-            
+
             // If we see a VCL NAL and already saw one before, it's a new frame
             if is_vcl && saw_vcl {
                 if !current_frame.is_empty() {
@@ -262,25 +274,24 @@ impl HevcParser {
                 }
                 saw_vcl = false;
             }
-            
+
             if is_vcl {
                 saw_vcl = true;
             }
-            
+
             // Add start code and NAL data to current frame
             current_frame.extend_from_slice(&[0, 0, 0, 1]);
             current_frame.extend_from_slice(&nal.data);
         }
-        
+
         // Add the last frame if it's not empty
         if !current_frame.is_empty() {
             frames.push(current_frame);
         }
-        
+
         frames
     }
 }
-
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
@@ -294,24 +305,27 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
         );
         return Vec::new();
     }
-    
+
     let mut pixels = Vec::with_capacity(width * height);
     for chunk in rgb_data.chunks_exact(3) {
-        let pixel = ((chunk[0] as u32) << 16) | 
-                   ((chunk[1] as u32) << 8) | 
-                   (chunk[2] as u32);
+        let pixel = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
         pixels.push(pixel);
     }
 
     if !pixels.is_empty() {
-        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}", 
+        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}",
         //     pixels[0], pixels[1], pixels[2], pixels[3], pixels[4]);
     }
     pixels
 }
 
-
-fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width: usize, new_height: usize) -> Vec<u32> {
+fn scale_pixels(
+    buffer: &[u32],
+    orig_width: usize,
+    orig_height: usize,
+    new_width: usize,
+    new_height: usize,
+) -> Vec<u32> {
     let mut scaled = vec![0u32; new_width * new_height];
     let x_ratio = (orig_width << 16) / new_width;
     let y_ratio = (orig_height << 16) / new_height;
@@ -334,19 +348,17 @@ pub struct HevcDecoder {
     width: u32,
     height: u32,
     parser: HevcParser,
-    frame_buffer: VecDeque<Vec<u8>>,  // Buffer for parsed HEVC frames
+    frame_buffer: VecDeque<Vec<u8>>, // Buffer for parsed HEVC frames
     decoded_frames: VecDeque<Vec<u8>>, // Buffer for decoded RGB frames
 
-    ewma_frame_size: f64,  // Store the EWMA value
-    last_update: Instant,   // Track last update time
+    ewma_frame_size: f64, // Store the EWMA value
+    last_update: Instant, // Track last update time
 
-
-    epoch: Instant, 
-
+    epoch: Instant,
 }
 
 impl HevcDecoder {
-    pub fn new(framerate: u32, width: u32, height: u32, epoch: Instant, ) -> Result<Self> {
+    pub fn new(framerate: u32, width: u32, height: u32, epoch: Instant) -> Result<Self> {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
@@ -363,7 +375,7 @@ impl HevcDecoder {
 
         let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
         let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
-        
+
         // Start stdout reader thread
         std::thread::spawn({
             let frame_size = frame_size;
@@ -397,7 +409,7 @@ impl HevcDecoder {
                     eprintln!("Decoder write error: {}", e);
                     break;
                 }
-                
+
                 // It's important to flush after each frame to ensure real-time processing
                 if let Err(e) = writer.flush() {
                     eprintln!("Decoder flush error: {}", e);
@@ -435,22 +447,23 @@ impl HevcDecoder {
             decoded_frames: VecDeque::new(),
             ewma_frame_size: 0.0,
             last_update: Instant::now(),
-            epoch: epoch, 
+            epoch: epoch,
         })
     }
 
     pub fn is_keyframe(frame: &[u8]) -> bool {
         // Check for start code
         for i in 0..frame.len().saturating_sub(5) {
-            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
-               (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
+            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+                || (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
+            {
                 let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
                 let nal_header_pos = i + start_code_len;
-                
+
                 if nal_header_pos < frame.len() {
                     let nal_header = frame[nal_header_pos];
                     let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-                    
+
                     // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
                     if (16..=21).contains(&nal_type) {
                         return true;
@@ -463,7 +476,7 @@ impl HevcDecoder {
     // Process incoming encoded packets
     pub fn process_packet(&mut self, packet: Vec<u8>) -> Result<()> {
         // Add packet data to the parser
-        
+
         let frame_size = packet.len() as f64;
         let now = Instant::now();
         let delta_t = now.duration_since(self.last_update).as_secs_f64();
@@ -476,21 +489,22 @@ impl HevcDecoder {
         self.ewma_frame_size = alpha * frame_size + (1.0 - alpha) * self.ewma_frame_size;
 
         println!(
-            "{:.3} - Parsing w size: {}, EWMA size: {:.2}", 
+            "{:.3} - Parsing w size: {}, EWMA size: {:.2}",
             Instant::now().duration_since(self.epoch).as_secs_f64(),
-            frame_size, self.ewma_frame_size
-        );    
+            frame_size,
+            self.ewma_frame_size
+        );
         self.parser.add_data(&packet);
-        
+
         // Extract frames from the parser and buffer them
         let frames = self.parser.get_frames();
         for frame in frames {
             self.frame_buffer.push_back(frame);
         }
-        
+
         // Forward the packet to ffmpeg for decoding
         self.packet_tx.send(packet)?;
-        
+
         Ok(())
     }
 
@@ -499,10 +513,12 @@ impl HevcDecoder {
         match self.frame_rx.try_recv() {
             Ok(frame) => Ok(Some(frame)),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Decoder frame channel disconnected")),
+            Err(TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("Decoder frame channel disconnected"))
+            }
         }
     }
-    
+
     // Process any available decoded frames from ffmpeg
     pub fn process_decoded_frames(&mut self) -> Result<()> {
         // Drain any available decoded frames into our buffer
@@ -510,7 +526,7 @@ impl HevcDecoder {
             // println!("Frame got on decoder, size: {}", frame.len());
             self.decoded_frames.push_back(frame);
         }
-        
+
         Ok(())
     }
 
@@ -523,16 +539,14 @@ impl HevcDecoder {
     pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
         self.decoded_frames.pop_front()
     }
-
 }
 
 #[async_std::main]
 async fn main() -> Result<()> {
     // ffmpeg_sidecar::download::auto_download()?;
 
-
-    let mut num_updates_ref = 0; 
-    let EPOCH = Instant::now(); 
+    let mut num_updates_ref = 0;
+    let EPOCH = Instant::now();
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
     println!("Starting video codec simulation...");
 
@@ -542,12 +556,12 @@ async fn main() -> Result<()> {
         WIDTH_ENCODER as u32,
         HEIGHT_ENCODER as u32,
         INITIAL_BITRATE,
-        CHUNK_SIZE_ENCODER_S,  // Chunk duration in seconds
+        CHUNK_SIZE_ENCODER_S, // Chunk duration in seconds
     );
     // Clone the async receiver so we can poll for frames in the main loop.
     let frame_rx = chunked_encoder.frame_rx.clone();
 
-    if REENCODE == true{
+    if REENCODE == true {
         // Spawn the chunking task in the background.
         async_std::task::spawn(async move {
             if let Err(e) = chunked_encoder.start_chunking().await {
@@ -556,15 +570,16 @@ async fn main() -> Result<()> {
         });
 
         // Create the decoder as before.
-        let mut ref_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
-        let mut lossy_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+        let mut ref_decoder =
+            HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+        let mut lossy_decoder =
+            HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
 
         // let mut ref_file = BufWriter::new(File::create("Video_Sink/reference_video.rgb")?);
         // let mut lossy_file = BufWriter::new(File::create("Video_Sink/lossy_video.rgb")?);
 
-
         // let mut reference_frames_map = HashMap::new();
-        // let mut lossy_frames_map = HashMap::new(); 
+        // let mut lossy_frames_map = HashMap::new();
         let mut frame_counter: u64 = 0;
 
         std::fs::create_dir_all("Video_Sink/reference_hevc")?;
@@ -576,16 +591,14 @@ async fn main() -> Result<()> {
 
         // Write CSV headers
         writeln!(ref_index, "frame_number,timestamp_ms,is_keyframe,filename")?;
-        writeln!(lossy_index, "frame_number,timestamp_ms,is_keyframe,filename")?;
-
-
-
-
+        writeln!(
+            lossy_index,
+            "frame_number,timestamp_ms,is_keyframe,filename"
+        )?;
 
         let frame_size_rgb = WIDTH_ENCODER * HEIGHT_ENCODER * 3;
         let black_frame = vec![0u8; frame_size_rgb];
         let mut last_lossy_frame: Option<Vec<u8>> = None;
-
 
         println!("Encoder and decoder initialized");
 
@@ -600,12 +613,13 @@ async fn main() -> Result<()> {
             WindowOptions::default(),
         )?;
 
-        let mut lossy_window = Window::new("
-            Lossy Video", scaled_width,
+        let mut lossy_window = Window::new(
+            "
+            Lossy Video",
+            scaled_width,
             scaled_height,
             WindowOptions::default(),
-        )?; 
-
+        )?;
 
         println!("Window opened");
 
@@ -626,16 +640,18 @@ async fn main() -> Result<()> {
         let mut drop_probability = PACKET_LOSS_PROBABILITY;
         let mut rng = rand::thread_rng();
 
-        while reference_window.is_open() && lossy_window.is_open() 
-            && !reference_window.is_key_down(Key::Escape) 
-            && !lossy_window.is_key_down(Key::Escape) {
+        while reference_window.is_open()
+            && lossy_window.is_open()
+            && !reference_window.is_key_down(Key::Escape)
+            && !lossy_window.is_key_down(Key::Escape)
+        {
             // 1. Pipeline recovery: if no frame received in a while, try to recover using a keyframe.
             if Instant::now().duration_since(last_frame_time) > frame_timeout {
                 println!("Pipeline stalled, attempting recovery...");
                 // Await a frame (which should ideally be a keyframe) for recovery.
                 if let Ok(keyframe) = frame_rx.recv() {
                     println!("Sending recovery keyframe");
-                    
+
                     if let Err(e) = ref_decoder.process_packet(keyframe.clone()) {
                         eprintln!("Error sending recovery keyframe: {}", e);
                     }
@@ -653,13 +669,11 @@ async fn main() -> Result<()> {
             let now = Instant::now();
             if now >= next_transmission_time {
                 if let Ok(frame) = frame_rx.try_recv() {
-
-
                     //Retrieve reference frame
                     if let Err(e) = ref_decoder.process_packet(frame.clone()) {
                         eprintln!("Reference decoder error: {}", e);
                     }
-                    // Simulate frame loss probability. 
+                    // Simulate frame loss probability.
                     if rng.gen::<f64>() >= drop_probability {
                         if let Err(e) = lossy_decoder.process_packet(frame) {
                             eprintln!("Error sending frame to decoder: {}", e);
@@ -681,9 +695,8 @@ async fn main() -> Result<()> {
             }
 
             if let Some(frame) = ref_decoder.next_encoded_frame() {
+                frame_counter += 1;
 
-                frame_counter += 1; 
-                
                 let timestamp = Instant::now().duration_since(EPOCH).as_millis() as u64;
                 let is_keyframe = HevcDecoder::is_keyframe(&frame);
                 let metadata = FrameMetadata {
@@ -697,17 +710,14 @@ async fn main() -> Result<()> {
                 file.write_all(&frame)?;
 
                 writeln!(
-                    ref_index, 
-                    "{},{},{},{}", 
-                    metadata.frame_number, 
-                    metadata.timestamp_ms, 
-                    metadata.is_keyframe, 
-                    filename
+                    ref_index,
+                    "{},{},{},{}",
+                    metadata.frame_number, metadata.timestamp_ms, metadata.is_keyframe, filename
                 )?;
                 // reference_frames_map.insert(frame_counter, metadata);
 
-            
-                if let Some(lossy_frame) = lossy_decoder.next_encoded_frame() {   // ref frames always should appear, lossy frames not guaranteed so it can be inside scope of "let Some(ref_frame)"
+                if let Some(lossy_frame) = lossy_decoder.next_encoded_frame() {
+                    // ref frames always should appear, lossy frames not guaranteed so it can be inside scope of "let Some(ref_frame)"
                     let timestamp = Instant::now().duration_since(EPOCH).as_millis() as u64;
                     let is_keyframe = HevcDecoder::is_keyframe(&lossy_frame);
                     let metadata = FrameMetadata {
@@ -715,63 +725,70 @@ async fn main() -> Result<()> {
                         timestamp_ms: timestamp,
                         is_keyframe,
                     };
-                    
+
                     // Save encoded HEVC frame
                     let filename = format!("Video_Sink/lossy_hevc/frame_{:04}.hevc", frame_counter);
                     let mut file = File::create(&filename)?;
                     file.write_all(&lossy_frame)?;
-                    
+
                     // Update index
                     writeln!(
-                        lossy_index, 
-                        "{},{},{},{}", 
-                        metadata.frame_number, 
-                        metadata.timestamp_ms, 
-                        metadata.is_keyframe, 
+                        lossy_index,
+                        "{},{},{},{}",
+                        metadata.frame_number,
+                        metadata.timestamp_ms,
+                        metadata.is_keyframe,
                         filename
                     )?;
-                    
+
                     // lossy_frames_map.insert(frame_counter, metadata);
                 }
-            
-            
-            
             }
-        
+
             // 4. Display frames.
             let display_time = Instant::now();
             if display_time >= next_frame_time {
                 if let Some(frame) = ref_decoder.next_decoded_frame() {
-
                     // println!("Frame got on decoder, size: {}", frame.len());
 
                     // Update the last successful frame time.
                     // Convert and display the frame.
                     let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-                    let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-                    if let Err(e) = reference_window.update_with_buffer(&scaled, scaled_width, scaled_height) {
+                    let scaled = scale_pixels(
+                        &pixels,
+                        WIDTH_ENCODER,
+                        HEIGHT_ENCODER,
+                        scaled_width,
+                        scaled_height,
+                    );
+                    if let Err(e) =
+                        reference_window.update_with_buffer(&scaled, scaled_width, scaled_height)
+                    {
                         eprintln!("Error updating window buffer: {}", e);
                     } else {
                         frames_displayed += 1;
                     }
                     last_frame_time = Instant::now();
 
-
                     if let Some(lossy_frame) = lossy_decoder.next_decoded_frame() {
-                        let pixels = convert_rgb_to_u32(&lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-                        let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                        let pixels =
+                            convert_rgb_to_u32(&lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        let scaled = scale_pixels(
+                            &pixels,
+                            WIDTH_ENCODER,
+                            HEIGHT_ENCODER,
+                            scaled_width,
+                            scaled_height,
+                        );
                         last_lossy_frame = Some(lossy_frame.clone());
                         lossy_window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
 
                         // lossy_file.write_all(&lossy_frame)?;
-                    }
-                    else if let Some(prev_lossy_frame) = last_lossy_frame.clone() {
+                    } else if let Some(prev_lossy_frame) = last_lossy_frame.clone() {
                         // lossy_file.write_all(&prev_lossy_frame)?;
-                    }
-                    else{
+                    } else {
                         // lossy_file.write_all(&black_frame.clone())?;
-                        }
-
+                    }
 
                     next_frame_time += frame_duration;
                 }
@@ -788,19 +805,16 @@ async fn main() -> Result<()> {
             }
 
             reference_window.update();
-            lossy_window.update(); 
+            lossy_window.update();
 
-            num_updates_ref += 1; 
+            num_updates_ref += 1;
             if num_updates_ref >= FRAME_CUTOFF_LIMIT {
-                println!("REACHED {} FRAME LIMIT!", FRAME_CUTOFF_LIMIT); 
+                println!("REACHED {} FRAME LIMIT!", FRAME_CUTOFF_LIMIT);
                 std::thread::sleep(Duration::from_secs(5));
                 break;
             }
         }
     }
-   
-
-
 
     calculate_vmaf()?;
 
@@ -808,80 +822,85 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-
-
 pub fn calculate_vmaf() -> Result<()> {
     // Step 1: Create temporary YUV files from our frame collections
-    
+
     // First, read indexes to determine available frames
     let ref_frames = parse_index("Video_Sink/reference_index.csv")?;
     let lossy_frames = parse_index("Video_Sink/lossy_index.csv")?;
-    
-
-
 
     // Find common frames between reference and lossy videos
-    let mut common_frames: Vec<u64> = ref_frames.keys()
+    let mut common_frames: Vec<u64> = ref_frames
+        .keys()
         .filter(|k| lossy_frames.contains_key(k))
         .cloned()
         .collect();
-    common_frames.sort(); 
+    common_frames.sort();
 
-    println!("Found {} synchronized frames for VMAF comparison", common_frames.len());
+    println!(
+        "Found {} synchronized frames for VMAF comparison",
+        common_frames.len()
+    );
     // println!("\n\n**^***Common frames are the following: {:?}", common_frames);
 
-    // std::thread::sleep(Duration::from_secs(4)); 
-
-
+    // std::thread::sleep(Duration::from_secs(4));
 
     // Create synchronized frame lists
     let mut ref_list = File::create("Video_Sink/ref_frames.txt")?;
     let mut lossy_list = File::create("Video_Sink/lossy_frames.txt")?;
-    
 
-
-    for frame_num in &common_frames{
+    for frame_num in &common_frames {
         let ref_path = ref_frames[frame_num].replace("Video_Sink/", "");
         let lossy_path = lossy_frames[frame_num].replace("Video_Sink/", "");
         writeln!(ref_list, "file '{}'", ref_path)?;
         writeln!(lossy_list, "file '{}'", lossy_path)?;
     }
-    
+
     ref_list.flush()?;
     lossy_list.flush()?;
-    
-   // Create a raw reference video from your frames
-   Command::new("ffmpeg")
-   .args(&[
-       "-f", "hevc",
-       "-i", &ref_frames[&common_frames[0]], // Use first frame to get metadata
-       "-safe", "0",
-       "-c", "copy",
-       "-bsf:v", "hevc_mp4toannexb", // Ensure proper bitstream formatting
-       "-f", "mp4",
-       "Video_Sink/reference_temp.mp4",
-       "-y", 
 
-   ])
-   .status()?;
+    // Create a raw reference video from your frames
+    Command::new("ffmpeg")
+        .args(&[
+            "-f",
+            "hevc",
+            "-i",
+            &ref_frames[&common_frames[0]], // Use first frame to get metadata
+            "-safe",
+            "0",
+            "-c",
+            "copy",
+            "-bsf:v",
+            "hevc_mp4toannexb", // Ensure proper bitstream formatting
+            "-f",
+            "mp4",
+            "Video_Sink/reference_temp.mp4",
+            "-y",
+        ])
+        .status()?;
 
     // Create a raw lossy video from your frames
     Command::new("ffmpeg")
-    .args(&[
-        "-f", "hevc",
-        "-i", &lossy_frames[&common_frames[0]], // Use first frame to get metadata  
-        "-safe", "0",
-        "-c", "copy",
-        "-bsf:v", "hevc_mp4toannexb", // Ensure proper bitstream formatting
-        "-f", "mp4",
-        "Video_Sink/lossy_temp.mp4", 
-        "-y", 
-    ])
-    .status()?;
-
+        .args(&[
+            "-f",
+            "hevc",
+            "-i",
+            &lossy_frames[&common_frames[0]], // Use first frame to get metadata
+            "-safe",
+            "0",
+            "-c",
+            "copy",
+            "-bsf:v",
+            "hevc_mp4toannexb", // Ensure proper bitstream formatting
+            "-f",
+            "mp4",
+            "Video_Sink/lossy_temp.mp4",
+            "-y",
+        ])
+        .status()?;
 
     println!("TODO: Run VMAF calculation on the synchronized videos!!");
-    std::thread::sleep(Duration::from_millis(6000)); 
+    std::thread::sleep(Duration::from_millis(6000));
     // // Run VMAF directly on the MP4 files (which have complete headers)
     // let output = Command::new("ffmpeg")
     // .args(&[
@@ -899,13 +918,12 @@ pub fn calculate_vmaf() -> Result<()> {
     // println!("STDERR: {}", String::from_utf8_lossy(&output.stderr));
 
     Ok(())
-
 }
 
 fn parse_index(index_path: &str) -> Result<HashMap<u64, String>> {
     let content = std::fs::read_to_string(index_path)?;
     let mut frames = HashMap::new();
-    
+
     for line in content.lines().skip(1) {
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() >= 4 {
@@ -915,6 +933,6 @@ fn parse_index(index_path: &str) -> Result<HashMap<u64, String>> {
             frames.insert(frame_number, filename);
         }
     }
-    
+
     Ok(frames)
 }

@@ -1,9 +1,9 @@
 use crate::{debug_bgprint, print_pretty, print_prettyy};
 use asynchronix::time;
-use ffmpeg_next::codec::Debug;
 use core::net;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use crossbeam::queue;
+use ffmpeg_next::codec::Debug;
 use rand::Rng;
 use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
@@ -14,8 +14,8 @@ use std::result;
 
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
-use std::time::{Duration, Instant};
 use std::ops::Deref;
+use std::time::{Duration, Instant};
 
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::lib::ResultsFrameTXDelay;
@@ -30,7 +30,6 @@ use crate::lib::{
     CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
-
 
 //////////// CONST DEFINES ///////////
 
@@ -77,13 +76,13 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
 pub const STEP1_TBEGIN: f64 = 13.0;
-pub const STEP1_TEND: f64 =   16.0;
+pub const STEP1_TEND: f64 = 16.0;
 
 pub const STEP2_TBEGIN: f64 = 20.0;
-pub const STEP2_TEND: f64 =   22.5;
+pub const STEP2_TEND: f64 = 22.5;
 
 pub const STEP3_TBEGIN: f64 = 30.0;
-pub const STEP3_TEND: f64 =   30.1;
+pub const STEP3_TEND: f64 = 30.1;
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 60E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 25E6;
@@ -376,7 +375,7 @@ pub enum NetworkPattern {
     ProbabilisticDrop {
         drop_probability: f64,
         valid_from: TaiTime<0>,
-        valid_until: TaiTime<0>, 
+        valid_until: TaiTime<0>,
     },
     Bandwidth {
         max_bps: f64,
@@ -455,19 +454,30 @@ impl QueueMechanism {
     pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
-        let valid_from: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP1_TBEGIN)).unwrap();
-        let valid_until: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP1_TEND)).unwrap();
+        let valid_from: TaiTime<0> = TaiTime::EPOCH
+            .checked_add(Duration::from_secs_f64(STEP1_TBEGIN))
+            .unwrap();
+        let valid_until: TaiTime<0> = TaiTime::EPOCH
+            .checked_add(Duration::from_secs_f64(STEP1_TEND))
+            .unwrap();
 
-        let valid_from2: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP2_TBEGIN)).unwrap();
-        let valid_until2: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP2_TEND)).unwrap();
+        let valid_from2: TaiTime<0> = TaiTime::EPOCH
+            .checked_add(Duration::from_secs_f64(STEP2_TBEGIN))
+            .unwrap();
+        let valid_until2: TaiTime<0> = TaiTime::EPOCH
+            .checked_add(Duration::from_secs_f64(STEP2_TEND))
+            .unwrap();
 
-        let valid_from3: TaiTime<0>= TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP3_TBEGIN)).unwrap();
-        let valid_until3: TaiTime<0> = TaiTime::EPOCH.checked_add(Duration::from_secs_f64(STEP3_TEND)).unwrap();
+        let valid_from3: TaiTime<0> = TaiTime::EPOCH
+            .checked_add(Duration::from_secs_f64(STEP3_TBEGIN))
+            .unwrap();
+        let valid_until3: TaiTime<0> = TaiTime::EPOCH
+            .checked_add(Duration::from_secs_f64(STEP3_TEND))
+            .unwrap();
 
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.008), valid_from: valid_from, valid_until: valid_until });
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
         // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
-
 
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
@@ -489,8 +499,12 @@ impl QueueMechanism {
         for pattern in &self.network_emulator.patterns {
             if let NetworkPattern::Bandwidth { valid_until, .. } = pattern {
                 // If we've just passed the end time of a pattern, purge the queue
-                if current_time >= *valid_until && 
-                   current_time <= valid_until.checked_add(Duration::from_millis(200)).unwrap_or(*valid_until) {
+                if current_time >= *valid_until
+                    && current_time
+                        <= valid_until
+                            .checked_add(Duration::from_millis(200))
+                            .unwrap_or(*valid_until)
+                {
                     return true;
                 }
             }
@@ -563,7 +577,6 @@ impl QueueMechanism {
         let mut indexes_to_remove = vec![];
         while index < self.queue.len() {
             if let Some(packet) = self.queue.get_mut(index) {
-               
                 match packet.emulated_added_delay_deadline {
                     Some(delay) if delay == TaiTime::EPOCH => {
                         // Remove and process the packet
@@ -644,29 +657,34 @@ impl NetworkPatternEmulator {
         self.patterns.push(pattern);
     }
 
-
     pub fn check_active_patterns(&self, current_time: TaiTime<0>) -> (bool, bool) {
         let mut any_active = false;
         let mut just_ended = false;
-        
+
         for pattern in &self.patterns {
-            if let NetworkPattern::Bandwidth { valid_from, valid_until, .. } = pattern {
+            if let NetworkPattern::Bandwidth {
+                valid_from,
+                valid_until,
+                ..
+            } = pattern
+            {
                 // Check if pattern is active
                 if current_time >= *valid_from && current_time <= *valid_until {
                     any_active = true;
                 }
-                
+
                 // Check if pattern just ended (within last 100ms)
-                let end_window = valid_until.checked_add(Duration::from_millis(100)).unwrap_or(*valid_until);
+                let end_window = valid_until
+                    .checked_add(Duration::from_millis(100))
+                    .unwrap_or(*valid_until);
                 if current_time > *valid_until && current_time <= end_window {
                     just_ended = true;
                 }
             }
         }
-        
+
         (any_active, just_ended)
     }
-    
 
     pub fn should_transmit_with_delay(
         &mut self,
@@ -697,11 +715,10 @@ impl NetworkPatternEmulator {
                 DebugColor::Orange,
                 "{} [PATTERN TRANSITION] Bandwidth pattern just ended, need to purge queue",
                 format_elapsed!(current_time)
-            );        
+            );
 
             return None; // Signal to drop the packet (and potentially purge queue)
         }
-
 
         // Find all active bandwidth patterns at the current time
         let mut active_patterns: Vec<_> = self
@@ -723,14 +740,14 @@ impl NetworkPatternEmulator {
                     valid_from,
                     valid_until,
                     drop_probability,
-                    } = pattern { 
-                        if current_time >= *valid_from && current_time <= *valid_until {
+                } = pattern
+                {
+                    if current_time >= *valid_from && current_time <= *valid_until {
                         Some(pattern)
-                        } else {
-                            None
-                        }  
+                    } else {
+                        None
                     }
-                else{
+                } else {
                     None
                 }
             })
@@ -746,20 +763,28 @@ impl NetworkPatternEmulator {
 
         match active_patterns.first_mut() {
             Some(pattern) => match pattern {
+                NetworkPattern::ProbabilisticDrop {
+                    drop_probability,
+                    valid_from,
+                    valid_until,
+                } => {
+                    let mut rng = rand::thread_rng(); // Create a random number generator
+                    let rand_value: f64 = rng.gen(); // Generate a random value between 0 and 1
 
-                NetworkPattern::ProbabilisticDrop { drop_probability, valid_from, valid_until } => {
-                        let mut rng = rand::thread_rng(); // Create a random number generator
-                        let rand_value: f64 = rng.gen(); // Generate a random value between 0 and 1
-                
-                        if rand_value < *drop_probability {
-                            print_prettyy!(DebugColor::Red, "[RANDOM LOSS ( {} -> {} )]  prob= {:.4}! {:?}",format_elapsed!(valid_from), format_elapsed!(valid_until),*drop_probability, packet.print(DebugColor::Red)); 
-                            return None; // Drop the packet
-                        }
-                        else{
-                            return Some(Duration::ZERO); // transmit inmediatelyOM
-                        }
-                }, 
-
+                    if rand_value < *drop_probability {
+                        print_prettyy!(
+                            DebugColor::Red,
+                            "[RANDOM LOSS ( {} -> {} )]  prob= {:.4}! {:?}",
+                            format_elapsed!(valid_from),
+                            format_elapsed!(valid_until),
+                            *drop_probability,
+                            packet.print(DebugColor::Red)
+                        );
+                        return None; // Drop the packet
+                    } else {
+                        return Some(Duration::ZERO); // transmit inmediatelyOM
+                    }
+                }
 
                 NetworkPattern::Bandwidth {
                     current_tokens,
@@ -816,7 +841,6 @@ impl NetworkPatternEmulator {
     }
 }
 
-
 #[derive(Debug)]
 pub struct StatsUpdate {
     pub T_s: f64,
@@ -830,8 +854,6 @@ pub struct StatsUpdate {
     pub now: tai_time::TaiTime<0>,
     pub length_packet: usize,
 }
-
-
 
 #[derive(Clone)]
 pub struct QueueModule {
@@ -870,11 +892,10 @@ pub struct QueueModule {
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
     pub PL_probability: f64,
-    
+
     pub network_emulator: NetworkPatternEmulator,
     pub queue_network_emulator: QueueMechanism,
 }
-
 
 impl QueueModule {
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
@@ -885,7 +906,13 @@ impl QueueModule {
         self.array_stas_stats.clone()
     }
 
-    pub fn new(num_stas: usize, queue_size: usize, PL_prob: f64, vec_ids: Vec<i32>, folder_dir: String) -> Self {
+    pub fn new(
+        num_stas: usize,
+        queue_size: usize,
+        PL_prob: f64,
+        vec_ids: Vec<i32>,
+        folder_dir: String,
+    ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
 
@@ -1043,62 +1070,78 @@ impl QueueModule {
                 .queue_network_emulator
                 .process_emu_queued_packets(context);
             // println!("Processing packets. Empty? {}", processed_packets.is_empty());
-            
+
             // Check if we should purge the queue based on bandwidth pattern changes
-        if self.queue_network_emulator.should_purge_queue(now) && !self.queue.is_empty() {
-            let queue_size = self.queue_network_emulator.queue.len();
-            print_pretty!(
+            if self.queue_network_emulator.should_purge_queue(now) && !self.queue.is_empty() {
+                let queue_size = self.queue_network_emulator.queue.len();
+                print_pretty!(
                 DebugColor::Red,
                 "{} [QUEUE PURGE] Bandwidth pattern change at time boundary! Purging {} packets from emulated queue",
                 format_elapsed!(now),
                 queue_size
             );
-            
-            // Optional: log details about purged packets
-            if queue_size > 0 {
-                print_pretty!(
-                    DebugColor::Red,
-                    "  First packet: ALVR F_id: {}, shard: {}/{}",
-                    self.queue_network_emulator.queue.front().unwrap().header_alvr.next_packet_index,
-                    self.queue_network_emulator.queue.front().unwrap().header_alvr.shard_index,
-                    self.queue_network_emulator.queue.front().unwrap().header_alvr.shards_count - 1
-                );
-                
-                print_pretty!(
-                    DebugColor::Red,
-                    "  Last packet: ALVR F_id: {}, shard: {}/{}",
-                    self.queue_network_emulator.queue.back().unwrap().header_alvr.next_packet_index,
-                    self.queue_network_emulator.queue.back().unwrap().header_alvr.shard_index,
-                    self.queue_network_emulator.queue.back().unwrap().header_alvr.shards_count - 1
-                );
+
+                // Optional: log details about purged packets
+                if queue_size > 0 {
+                    print_pretty!(
+                        DebugColor::Red,
+                        "  First packet: ALVR F_id: {}, shard: {}/{}",
+                        self.queue_network_emulator
+                            .queue
+                            .front()
+                            .unwrap()
+                            .header_alvr
+                            .next_packet_index,
+                        self.queue_network_emulator
+                            .queue
+                            .front()
+                            .unwrap()
+                            .header_alvr
+                            .shard_index,
+                        self.queue_network_emulator
+                            .queue
+                            .front()
+                            .unwrap()
+                            .header_alvr
+                            .shards_count
+                            - 1
+                    );
+
+                    print_pretty!(
+                        DebugColor::Red,
+                        "  Last packet: ALVR F_id: {}, shard: {}/{}",
+                        self.queue_network_emulator
+                            .queue
+                            .back()
+                            .unwrap()
+                            .header_alvr
+                            .next_packet_index,
+                        self.queue_network_emulator
+                            .queue
+                            .back()
+                            .unwrap()
+                            .header_alvr
+                            .shard_index,
+                        self.queue_network_emulator
+                            .queue
+                            .back()
+                            .unwrap()
+                            .header_alvr
+                            .shards_count
+                            - 1
+                    );
+                }
+                for (i, packet) in self.queue_network_emulator.queue.clone().iter().enumerate() {
+                    print!("Packet {} in queue:", i);
+                    packet.print(DebugColor::Rose);
+                }
+
+                // Clear the queue
+                self.queue_network_emulator.queue.clear();
+
+                // Return an empty vector since we've purged everything
+                // return Vec::new();
             }
-            for (i, packet) in self.queue_network_emulator.queue.clone().iter().enumerate(){
-                print!("Packet {} in queue:", i); 
-                packet.print(DebugColor::Rose); 
-            } 
-
-            // Clear the queue
-            self.queue_network_emulator.queue.clear();
-
-            
-            // Return an empty vector since we've purged everything
-            // return Vec::new();
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
             if !processed_packets.is_empty() {
                 debug_bgprint!(
@@ -1228,11 +1271,8 @@ impl QueueModule {
         //     _ => {
         //         println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE");
         //     }
-        // }    
+        // }
         // if AMPDU_sent.is_uplink....
-
-
-
 
         self.output_port_sta1.send(AMPDU_sent).await;
 
@@ -1399,33 +1439,32 @@ impl QueueModule {
             let mut selected_sta = None;
 
             if LYAPUNOV_POLICY == true {
-                    let mut min_priority = f64::MAX;
+                let mut min_priority = f64::MAX;
+                debug_schedule!(
+                    "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
+                    format_elapsed!(now)
+                );
+
+                for (key, info) in sta_packets.iter() {
+                    // iterate through all STAs present in queue
+
+                    // FIRST APPROACH: works well, but can be improved by only considering right hand term if queue size is greater than AMPDU size
+                    // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms;
+                    // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
+
+                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i
+                    let rhs = info.expected_queue_delivery_ms; // max-weight scheduling (Q_i * rate_i)
+                    let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
+                        // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
+                        lhs - rhs
+                    } else {
+                        1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet, TODO: Try proportional instead ->  K_penalty_ampdu * ( lhs - rhs)
+                    };
+
+                    let is_ul = if key.0 > key.1 {1} // if sta_src >> sta_dest, then it should be UL traffic
+                            else{0};
+
                     debug_schedule!(
-                        "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
-                        format_elapsed!(now)
-                    );
-
-                    for (key, info) in sta_packets.iter() {
-
-                        // iterate through all STAs present in queue
-
-                        // FIRST APPROACH: works well, but can be improved by only considering right hand term if queue size is greater than AMPDU size
-                        // let priority = LYAPUNOV_V * info.per_packet_channel_access_efficiency - info.expected_queue_delivery_ms;
-                        // println!("Priority STA{:.0} = ({:.3}) == {} - {} = {:.3} | Q_{:.0} = {}", key.0,  priority, LYAPUNOV_V * info.per_packet_channel_access_efficiency, info.expected_queue_delivery_ms, priority, key.0, info.packet_count);
-
-                        let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency; // how "channel-efficient" is the avg packet for STA_i
-                        let rhs = info.expected_queue_delivery_ms; // max-weight scheduling (Q_i * rate_i)
-                        let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
-                            // Only consider if Q >= MAX_AMPDU for greater channel access efficiency
-                            lhs - rhs
-                        } else {
-                            1E12 as f64 // make arbitrarily large if we can't send a full AMPDU yet, TODO: Try proportional instead ->  K_penalty_ampdu * ( lhs - rhs)
-                        };
-
-                        let is_ul = if key.0 > key.1 {1} // if sta_src >> sta_dest, then it should be UL traffic
-                            else{0}; 
-
-                        debug_schedule!(
                             "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | is_ul = {} (src: {} dest: {}) ",
                             key.0,
                             info.packet_count,
@@ -1435,49 +1474,53 @@ impl QueueModule {
                             rhs,
                             is_ul,
                             key.0,
-                            key.1, 
+                            key.1,
 
                         );
 
-                        if priority < min_priority {
-                            min_priority = priority;
-                            selected_sta = Some(*key);
-                        }
+                    if priority < min_priority {
+                        min_priority = priority;
+                        selected_sta = Some(*key);
                     }
-                } else if SOFTMAX_POLICY == true {
-                    // let key_softmax: (i32, i32);
-                    debug_schedule!("SOFTMAX POLICY",);
-                    let mut softmax_values: Vec<f64> = Vec::new();
-                    let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
-                    for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                        let is_ul = if sta_src > sta_dest {1} // if sta_src >> sta_dest, then it should be UL traffic
-                        else{0}; 
+                }
+            } else if SOFTMAX_POLICY == true {
+                // let key_softmax: (i32, i32);
+                debug_schedule!("SOFTMAX POLICY",);
+                let mut softmax_values: Vec<f64> = Vec::new();
+                let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
+                for ((sta_src, sta_dest), packets) in sta_packets.iter() {
+                    let is_ul = if sta_src > sta_dest {1} // if sta_src >> sta_dest, then it should be UL traffic
+                        else{0};
 
-                        debug_schedule!("IS_UL = {} | ( src: {}, dest: {} )",
-                                        is_ul, sta_src, sta_dest); 
+                    debug_schedule!(
+                        "IS_UL = {} | ( src: {}, dest: {} )",
+                        is_ul,
+                        sta_src,
+                        sta_dest
+                    );
 
-                        softmax_values.push(packets.expected_queue_delivery_ms); // since softmax function is sensitive to scale, we ensure values at least are > 1
-                        softmax_keys.push((*sta_src, *sta_dest));
-                    }
-                    // println!("Expected queue delivery values: {:?} in microseconds", softmax_values);
+                    softmax_values.push(packets.expected_queue_delivery_ms); // since softmax function is sensitive to scale, we ensure values at least are > 1
+                    softmax_keys.push((*sta_src, *sta_dest));
+                }
+                // println!("Expected queue delivery values: {:?} in microseconds", softmax_values);
 
-                    pub const SOFTMAX_TEMP: f64 = 1000.0;
+                pub const SOFTMAX_TEMP: f64 = 1000.0;
 
-                    let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
+                let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
 
-                    let mut rng = rand::thread_rng();
+                let mut rng = rand::thread_rng();
 
-                    // println!("RNG = {}, Softmax probabilities: {:?}", rng.gen::<f64>(), softmax_probs);
+                // println!("RNG = {}, Softmax probabilities: {:?}", rng.gen::<f64>(), softmax_probs);
 
-                    let selected_index = softmax_probs
-                        .iter()
-                        .position(|&p| (1.0 - p) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
-                        .unwrap_or(softmax_probs.len() - 1);
-                    let selected_key = softmax_keys[selected_index];
-                    // key_softmax = selected_key.clone();
+                let selected_index = softmax_probs
+                    .iter()
+                    .position(|&p| (1.0 - p) > rng.gen::<f64>()) // we invert the probabilities to make favor lower queue deplete delays
+                    .unwrap_or(softmax_probs.len() - 1);
+                let selected_key = softmax_keys[selected_index];
+                // key_softmax = selected_key.clone();
 
-                    selected_sta = Some(selected_key);
-                } else { // NORMAL POLICY: FIFO
+                selected_sta = Some(selected_key);
+            } else { // NORMAL POLICY: FIFO
             }
 
             let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
@@ -1592,7 +1635,7 @@ impl QueueModule {
                             }
 
                             packet_rmvd.T_q = now.duration_since(packet_rmvd.queue_in_instant);
-                 
+
                             // Move packet into AMPDU without cloning
                             self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
                             self.aux_ampdu_serviced.total_length = new_total_length;

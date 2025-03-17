@@ -106,8 +106,7 @@ pub struct StatisticsManager {
     folder: String,
     last_stats: GraphNetworkStatistics_csv,
 
-    id_XR: IpAddr, 
-
+    id_XR: IpAddr,
 }
 
 #[allow(unused)]
@@ -117,7 +116,7 @@ impl StatisticsManager {
         nominal_server_frame_interval: Duration,
         steamvr_pipeline_frames: f32,
         folder: &str,
-        ip_self: IpAddr, 
+        ip_self: IpAddr,
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(),
@@ -199,8 +198,7 @@ impl StatisticsManager {
             folder: folder.to_string(),
             last_stats: GraphNetworkStatistics_csv::default(),
 
-            id_XR: ip_self, 
-
+            id_XR: ip_self,
         }
     }
     // This statistics are reported for every succesfully received frame
@@ -209,7 +207,7 @@ impl StatisticsManager {
         network_stats: NetworkStatisticsPacket,
         rtt: Duration,
         now: TaiTime<0>,
-        current_bitrate_target_mbps: f32, 
+        current_bitrate_target_mbps: f32,
     ) -> (f32, f32) {
         self.packets_skipped_total += network_stats.frames_skipped as usize;
         self.packets_skipped_partial_sum += network_stats.frames_skipped as usize;
@@ -359,7 +357,7 @@ impl StatisticsManager {
         return (peak_network_throughput_bps, frame_interarrival);
     }
     // Add a method to save stats to CSV
-    
+
     pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
         fn get_4_octet(ip: IpAddr) -> Option<u8> {
             match ip {
@@ -369,7 +367,7 @@ impl StatisticsManager {
         }
         let num = get_4_octet(self.id_XR).unwrap();
         let file_path = format!("Results/{}/XR_stats_{:?}.csv", self.folder, num);
-        
+
         let path = Path::new(&file_path);
 
         // Open the CSV file in append mode or create it if it doesn't exist

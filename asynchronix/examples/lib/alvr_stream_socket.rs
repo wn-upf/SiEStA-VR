@@ -1,33 +1,33 @@
 use asynchronix::model::Context;
-use crossbeam::channel::{unbounded, bounded,  Receiver, RecvTimeoutError, Sender, TryRecvError};
+use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 // use futures_util::stream::empty;
-use std::io::{Read, Write};
-#[allow(unused_imports)]
-#[allow(dead_code)]
-use std::process::{Child, Command, Stdio};
-use std::os::unix::io::AsRawFd;
 use nix::fcntl;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
+#[allow(unused_imports)]
+#[allow(dead_code)]
+use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 // use tokio::io::{AsyncReadExt, BufReader};
-use std::io::{BufReader};
-use crate::DebugColor;
-use lazy_static::lazy_static;
-use std::thread;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::process::ChildStdout;
-use ffmpeg_sidecar::command::FfmpegCommand;
-use tokio::io::{AsyncReadExt, BufReader as tokBufReader, AsyncBufReadExt}; // Import AsyncBufReadExt
-use std::io::{BufRead};
-use std::path::PathBuf;
-use std::fs;
-use tokio::sync::Mutex as tokMutex; 
-use std::sync::atomic::AtomicBool; 
 use crate::lib::HevcParser;
+use crate::DebugColor;
+use ffmpeg_sidecar::command::FfmpegCommand;
+use lazy_static::lazy_static;
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::BufWriter;
 use std::path::Path;
-use std::io::{BufWriter};
+use std::path::PathBuf;
+use std::process::ChildStdout;
+use std::sync::atomic::AtomicBool;
+use std::thread;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader as tokBufReader}; // Import AsyncBufReadExt
+use tokio::sync::Mutex as tokMutex;
 
 use std::sync::atomic::Ordering as AtOrdering;
 // lazy_static! {
@@ -37,12 +37,9 @@ use std::sync::atomic::Ordering as AtOrdering;
 
 use tokio::time::{sleep, Duration as Durtokio};
 
-
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
 
 use crate::{debug_bgprint, format_elapsed};
-
-
 
 use rand::Rng;
 use std::cell::RefCell;
@@ -58,9 +55,7 @@ use std::{
 };
 
 use crate::debug_print;
-use crate::lib::models_XR::{
-    XRDevice, XRServer, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER
-};
+use crate::lib::models_XR::{XRDevice, XRServer, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER};
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 // use crate::lib::DebugColor;
@@ -74,8 +69,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::result::Result::Ok;
 use tai_time::TaiTime;
 
-use crate::lib::alvr_packets::{DeviceMotion, Pose}; 
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering as atomOrdering};
+use crate::lib::alvr_packets::{DeviceMotion, Pose};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as atomOrdering};
 use tokio::sync::Semaphore;
 
 // use super::alvr_packets::NetworkStatisticsPacket;
@@ -84,15 +79,13 @@ use tokio::sync::Semaphore;
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-
 pub const CHUNK_DURATION_F64_s: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 300.0;
 
-
-// pub const CHUNK_SIZE_FRAMES: usize = 300; 
-pub const IDR_FRAME_SIZE_GOP: usize = 120; 
+// pub const CHUNK_SIZE_FRAMES: usize = 300;
+pub const IDR_FRAME_SIZE_GOP: usize = 120;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -105,28 +98,34 @@ pub const CONTROL_STREAM: u16 = 5;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
-
 pub struct ChunkedHevcEncoder {
     input: String,
     width: u32,
     height: u32,
     bitrate: String,
-    chunk_duration: f64,   // Duration of each chunk in seconds.
-    current_offset: f64,   // Current start timestamp.
+    chunk_duration: f64, // Duration of each chunk in seconds.
+    current_offset: f64, // Current start timestamp.
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
 
-    frame_queue: VecDeque<Vec<u8>>,  // Add this new field for queuing frames
-    parser: HevcParser, 
-    encoder_str: String, 
-
+    frame_queue: VecDeque<Vec<u8>>, // Add this new field for queuing frames
+    parser: HevcParser,
+    encoder_str: String,
 }
 
 impl ChunkedHevcEncoder {
     /// Create a new ChunkedHevcEncoder.
-    pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64, string: String, offset_video: f64) -> Self {
+    pub fn new(
+        input: &str,
+        width: u32,
+        height: u32,
+        bitrate: &str,
+        chunk_duration: f64,
+        string: String,
+        offset_video: f64,
+    ) -> Self {
         // We use a bounded channel to store parsed frames.
-        println!("Initializing chunkedhevcencoder"); 
+        println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
 
         Self {
@@ -138,10 +137,9 @@ impl ChunkedHevcEncoder {
             current_offset: offset_video,
             frame_tx,
             frame_rx,
-            frame_queue: VecDeque::new(),  // Initialize the queue
-            parser: HevcParser::new(), 
-            encoder_str: string.clone(), 
-
+            frame_queue: VecDeque::new(), // Initialize the queue
+            parser: HevcParser::new(),
+            encoder_str: string.clone(),
         }
     }
 
@@ -153,14 +151,16 @@ impl ChunkedHevcEncoder {
     /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32)  {
-
-        let bitrate_adjusted_fps = bitrate_mbps *  FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS ; 
-        // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units. 
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
+        let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
+        // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
-        println!("{} CHUNKING with bitrate {}!", self.encoder_str, bitrate_mbps); 
+        println!(
+            "{} CHUNKING with bitrate {}!",
+            self.encoder_str, bitrate_mbps
+        );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         command
@@ -181,7 +181,7 @@ impl ChunkedHevcEncoder {
             .args(&["-rc", "cbr"])
             .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
             .args(&["-rc-lookahead", "0"])
-            .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])  // using your GOP size constant
+            .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
             .args(&["-movflags", "+frag_keyframe+empty_moov"])
             .args(&["-flush_packets", "1"])
             .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -195,17 +195,17 @@ impl ChunkedHevcEncoder {
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
-        print!("{} SPAWN CHUNK...", self.encoder_str ,); 
+        print!("{} SPAWN CHUNK...", self.encoder_str,);
         // let loop_limit = 1000000;
-        let mut i = 0;  
+        let mut i = 0;
         // Read data from the process until it ends.
         loop {
             // println!("loop {}", i);
-            // i += 1; 
+            // i += 1;
             // if i > loop_limit {
-            //     i = 0; 
-            //     print!("BREAK\n"); 
-            //     break; 
+            //     i = 0;
+            //     print!("BREAK\n");
+            //     break;
             // }
             match reader.read(&mut buf) {
                 Ok(0) => break, // end of chunk
@@ -215,12 +215,12 @@ impl ChunkedHevcEncoder {
                     let frames = self.parser.get_frames();
                     for frame in frames {
                         if let Err(e) = self.frame_tx.send(frame) {
-                            eprintln!("{} Error sending frame: {}", e, self.encoder_str ,);
+                            eprintln!("{} Error sending frame: {}", e, self.encoder_str,);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("{} Error reading ffmpeg chunk: {}", e, self.encoder_str ,);
+                    eprintln!("{} Error reading ffmpeg chunk: {}", e, self.encoder_str,);
                     break;
                 }
             }
@@ -230,40 +230,46 @@ impl ChunkedHevcEncoder {
 
         // Update offset for the next chunk.
         self.current_offset += self.chunk_duration;
-            // Add a safety check to clear parser buffer if it gets too large
-        if self.parser.buffer.len() > 1_000_000_00 {  // 100MB limit
-            println!("{} Parser buffer getting too large ({}), clearing", self.parser.buffer.len(), self.encoder_str ,);
+        // Add a safety check to clear parser buffer if it gets too large
+        if self.parser.buffer.len() > 1_000_000_00 {
+            // 100MB limit
+            println!(
+                "{} Parser buffer getting too large ({}), clearing",
+                self.parser.buffer.len(),
+                self.encoder_str,
+            );
             self.parser.buffer.clear();
         }
-
     }
     pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
-
         let extracted_frames = self.parser.get_frames();
         if !extracted_frames.is_empty() {
-            println!("{} Extracted {} frames from parser buffer, size {}", self.encoder_str , 
-                     extracted_frames.len(), self.parser.buffer.len());
-            
+            println!(
+                "{} Extracted {} frames from parser buffer, size {}",
+                self.encoder_str,
+                extracted_frames.len(),
+                self.parser.buffer.len()
+            );
+
             // Store all but first frame for future use
             for frame in extracted_frames.iter().skip(1) {
                 self.frame_queue.push_back(frame.clone());
             }
-            
+
             // Return the first extracted frame immediately
             return Some(extracted_frames[0].clone());
         }
-        
+
         // Check queue next
         if let Some(frame) = self.frame_queue.pop_front() {
             return Some(frame);
         }
-        
+
         // Only now try channel
         if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(1)) {
             return Some(frame);
         }
-        
-        
+
         None
     }
 }
@@ -276,8 +282,6 @@ pub struct NalUnit {
 
 /// A parser for HEVC bitstreams to extract individual frames
 /// A parser for HEVC bitstreams to extract individual frames
-
-  
 
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
@@ -466,7 +470,6 @@ impl VideoPacketHeader {
     }
 }
 
- 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct FaceData {
     pub eye_gazes: [Option<Pose>; 2],
@@ -909,11 +912,11 @@ impl StreamSocket {
             shards_count: 0,
             ref_time: t0,
             frame_tracker: FrameTracker::new(),
-            ffmpeg_encoder: None, 
-            ffmpeg_maxbitrate_encoder: None, 
-            chunk_frames: VecDeque::new(), 
-            is_initializing_encoder: Arc::new(AtomicBool::new(false)), 
-            time_since_last_update: t0, 
+            ffmpeg_encoder: None,
+            ffmpeg_maxbitrate_encoder: None,
+            chunk_frames: VecDeque::new(),
+            is_initializing_encoder: Arc::new(AtomicBool::new(false)),
+            time_since_last_update: t0,
             last_buffer_size: 0,
             static_buffer_count: 0,
         }
@@ -988,7 +991,6 @@ impl StreamSocket {
 
         // Now you can iterate over the keys and remove them from the map
         for frame_deadlined in keys {
-    
             vec_keys.push(frame_deadlined);
 
             let lost_in_frame = self
@@ -1010,7 +1012,7 @@ impl StreamSocket {
 
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
-        ip_client: IpAddr, 
+        ip_client: IpAddr,
         arc_receiver: Arc<Mutex<Box<dyn SocketReader>>>,
         context: &Context<T>,
     ) -> ConResult {
@@ -1267,9 +1269,15 @@ impl StreamSocket {
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            print_pretty!(DebugColor::DarkGreen, "(socketRX {} ) FRAME {} IS COMPLETE! ({} / {}) ",ip_client ,in_progress_packet.id_frame, in_progress_packet.received_shard_indices.len(), shard_recv_state_mut.shards_count);
+            print_pretty!(
+                DebugColor::DarkGreen,
+                "(socketRX {} ) FRAME {} IS COMPLETE! ({} / {}) ",
+                ip_client,
+                in_progress_packet.id_frame,
+                in_progress_packet.received_shard_indices.len(),
+                shard_recv_state_mut.shards_count
+            );
             if shard_recv_state_mut.stream_id == VIDEO {
-
                 if let Some(inner_map) = self.map_rx.get(&shard_recv_state_mut.packet_index) {
                     // println!("Retrieved from innermap, got {}",shard_recv_state_mut.packet_index);
 
@@ -1739,7 +1747,6 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
     }
 }
 
-
 pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &'static str> {
     if data.len() < 22 {
         return Err("Received data is too short to contain a complete shard prefix");
@@ -1762,7 +1769,6 @@ pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &
     ))
 }
 
-
 #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
@@ -1781,7 +1787,6 @@ pub struct StreamSender<H> {
     // encoder_hevc: Option<Arc<tokMutex<HevcEncoder>>>,
 
     // encoder_wrapper: Option<Arc<tokMutex<EncoderWrapper>>>,
-
     chunk_frames: VecDeque<Vec<u8>>,
 
     // is_initializing_encoder: Arc<AtomicBool>,
@@ -1797,7 +1802,6 @@ pub struct StreamSender<H> {
 
     last_buffer_size: usize,
     static_buffer_count: u32,
-
 }
 
 #[allow(unused)]
@@ -1869,39 +1873,42 @@ impl<H> StreamSender<H> {
     }
 }
 
-
 impl<H: Serialize> StreamSender<H> {
-   
-
-
     pub async fn get_buffer_emu(
         &mut self,
         header: &H,
         current_bitrate_mbps: f32,
         now: TaiTime<0>,
         ip: IpAddr,
-        id_frame: usize, 
-        name_folder: &str, 
-        max_bitrate_ladder_mbps: f32, 
+        id_frame: usize,
+        name_folder: &str,
+        max_bitrate_ladder_mbps: f32,
     ) -> Result<Buffer<H>> {
-
-        let id_frame_files_ref = id_frame + 1; 
-        let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
+        let id_frame_files_ref = id_frame + 1;
+        let input_path =
+            "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
         let mut buffer: Vec<u8> = Vec::new();
-        print_pretty!(DebugColor::Blue, "[BUFFEREMU] SENDING FRAME {} from SERVER", id_frame_files_ref ); 
+        print_pretty!(
+            DebugColor::Blue,
+            "[BUFFEREMU] SENDING FRAME {} from SERVER",
+            id_frame_files_ref
+        );
         if USE_FFMPEG {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
 
-                let maxbitrate_cmd = format!("{:.0}M", max_bitrate_ladder_mbps); 
+                let maxbitrate_cmd = format!("{:.0}M", max_bitrate_ladder_mbps);
 
-                print_prettyy!(DebugColor::Yellow, "FRAME {} MAXENCODER EXISTS: {}", 
-                    id_frame_files_ref, self.ffmpeg_maxbitrate_encoder.is_some());
+                print_prettyy!(
+                    DebugColor::Yellow,
+                    "FRAME {} MAXENCODER EXISTS: {}",
+                    id_frame_files_ref,
+                    self.ffmpeg_maxbitrate_encoder.is_some()
+                );
 
-                        
-                let random_offset =  rand::thread_rng().gen_range(50.0..OFFSET_VIDEO); 
-                // let random_offset = OFFSET_VIDEO; 
+                let random_offset = rand::thread_rng().gen_range(50.0..OFFSET_VIDEO);
+                // let random_offset = OFFSET_VIDEO;
 
                 let encoder = ChunkedHevcEncoder::new(
                     input_path,
@@ -1909,9 +1916,8 @@ impl<H: Serialize> StreamSender<H> {
                     HEIGHT_ENCODER as u32,
                     &bitrate_cmd,
                     CHUNK_DURATION_F64_s, // Chunk duration in seconds
-                    format!("[ENCODER {}]", ip), 
+                    format!("[ENCODER {}]", ip),
                     random_offset,
-                    
                 );
                 let max_encoder = ChunkedHevcEncoder::new(
                     input_path,
@@ -1919,151 +1925,180 @@ impl<H: Serialize> StreamSender<H> {
                     HEIGHT_ENCODER as u32,
                     &maxbitrate_cmd,
                     CHUNK_DURATION_F64_s, // Chunk duration in seconds
-                    format!("[Bitrate MAX ENCODER {}]", ip), 
+                    format!("[Bitrate MAX ENCODER {}]", ip),
                     random_offset,
-
                 );
-                
+
                 // Wrap the encoder in an Arc<Mutex<_>>
                 let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
 
                 let maxencoder_arc = Arc::new(async_std::sync::Mutex::new(max_encoder));
 
-                
                 // Initialize the encoder BEFORE storing it
                 {
-                    print_prettyy!(DebugColor::Coral, "Initializing MAXENCODER", ); 
-                    let mut maxencoder = maxencoder_arc.lock().await; 
-                    maxencoder.start_chunking(max_bitrate_ladder_mbps).await; 
+                    print_prettyy!(DebugColor::Coral, "Initializing MAXENCODER",);
+                    let mut maxencoder = maxencoder_arc.lock().await;
+                    maxencoder.start_chunking(max_bitrate_ladder_mbps).await;
                 }
                 {
-                    let mut encoder: async_std::sync::MutexGuard<'_, ChunkedHevcEncoder> = encoder_arc.lock().await;
+                    let mut encoder: async_std::sync::MutexGuard<'_, ChunkedHevcEncoder> =
+                        encoder_arc.lock().await;
                     encoder.start_chunking(current_bitrate_mbps).await;
-
                 } // Lock is dropped here
-                
 
                 // Store the initialized encoder
                 self.ffmpeg_encoder = Some(encoder_arc);
-                self.ffmpeg_maxbitrate_encoder = Some(maxencoder_arc); 
+                self.ffmpeg_maxbitrate_encoder = Some(maxencoder_arc);
                 self.time_since_last_update = now;
             }
-               // Now that the encoder is initialized and the lock released, get a frame
-               if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
+            // Now that the encoder is initialized and the lock released, get a frame
+            if let Some(encoder_arc) = self.ffmpeg_encoder.as_ref() {
                 let mut encoder = encoder_arc.lock().await;
 
                 match encoder.next_frame().await {
                     Some(frame) => {
                         buffer = frame;
 
-                        let hevc_file_path: String = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
-                        
+                        let hevc_file_path: String = format!(
+                            "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",
+                            name_folder, ip
+                        );
+
                         std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref); 
-                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY", id_frame_files_ref); 
+                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref);
+                        print_pretty!(
+                            DebugColor::ForestGreen,
+                            "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY",
+                            id_frame_files_ref
+                        );
                         let mut file = std::fs::File::create(filename).unwrap();
                         file.write_all(&buffer).unwrap();
                     }
                     None => {
-                        print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
-                        
+                        print_pretty!(
+                            DebugColor::SaddleBrown,
+                            "No frame available, restarting encoder",
+                        );
+
                         // Clear ALL buffers before restart
                         encoder.parser.buffer.clear();
                         encoder.frame_queue.clear();
-                        
+
                         // Restart chunking
                         encoder.start_chunking(current_bitrate_mbps).await;
-                        
+
                         // Wait for encoder to produce frames
                         // task::sleep(Duration::from_millis(100)).await;
-                        
+
                         // Try again after waiting
                         match encoder.next_frame().await {
                             Some(frame) => {
-                                    let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
-                                    
-                                    std::fs::create_dir_all(hevc_file_path).unwrap();
-                                    let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
-                                    print_pretty!(DebugColor::Peach, "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}", id_frame_files_ref, buffer.len() ); 
+                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
 
-                                    file.write_all(&frame.clone()).unwrap();
+                                std::fs::create_dir_all(hevc_file_path).unwrap();
+                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                print_pretty!(
+                                    DebugColor::Peach,
+                                    "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}",
+                                    id_frame_files_ref,
+                                    buffer.len()
+                                );
 
-                                    buffer = frame
-                                    },
+                                file.write_all(&frame.clone()).unwrap();
+
+                                buffer = frame
+                            }
                             None => {
-                                print_pretty!(DebugColor::Red, "Still no frame after restart, using empty buffer", );
+                                print_pretty!(
+                                    DebugColor::Red,
+                                    "Still no frame after restart, using empty buffer",
+                                );
                                 buffer = Vec::new();
                             }
                         }
                     }
                 };
-
-            }; 
+            };
             if let Some(maxb_encoder_arc) = self.ffmpeg_maxbitrate_encoder.as_ref() {
-                
-                let mut maxencoder = maxb_encoder_arc.lock().await; 
-                
+                let mut maxencoder = maxb_encoder_arc.lock().await;
+
                 // print_pretty!(DebugColor::SaddleBrown, "\n\n******** MAX ENCODER FOUND!! ******* | parser buffer size: {}", maxencoder.parser.buffer.len());
-                
+
                 match maxencoder.next_frame().await {
                     Some(frame) => {
                         // buffer = frame;
                         // println!("Storing original frame as .hevc in Sink_Video");
-                        let hevc_file_path: String = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max",name_folder ,ip);
-                        
+                        let hevc_file_path: String = format!(
+                            "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max",
+                            name_folder, ip
+                        );
+
                         std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc",name_folder,ip, id_frame_files_ref); 
-                        print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF MAX FRAME  {} SAVED TO MEMORY", id_frame_files_ref); 
+                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc",name_folder,ip, id_frame_files_ref);
+                        print_pretty!(
+                            DebugColor::ForestGreen,
+                            "[Encoder XRServer] REF MAX FRAME  {} SAVED TO MEMORY",
+                            id_frame_files_ref
+                        );
                         let mut file = std::fs::File::create(filename).unwrap();
                         file.write_all(&frame).unwrap();
                     }
                     None => {
-                        print_pretty!(DebugColor::SaddleBrown, "No frame available, restarting encoder", );
-                        
+                        print_pretty!(
+                            DebugColor::SaddleBrown,
+                            "No frame available, restarting encoder",
+                        );
+
                         // Clear ALL buffers before restart
                         maxencoder.parser.buffer.clear();
                         maxencoder.frame_queue.clear();
-                        
+
                         // Restart chunking
                         maxencoder.start_chunking(max_bitrate_ladder_mbps).await;
-                        
+
                         // Wait for encoder to produce frames
                         // task::sleep(Duration::from_millis(100)).await;
-                        
+
                         // Try again after waiting
                         match maxencoder.next_frame().await {
                             Some(frame) => {
-                                    let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max",name_folder ,ip);
-                                    
-                                    std::fs::create_dir_all(hevc_file_path).unwrap();
-                                    let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
-                                    print_pretty!(DebugColor::ForestGreen, "[Encoder XRServer] REF FRAME MAX {} SAVED TO MEMORY", id_frame_files_ref); 
-                                    file.write_all(&frame.clone()).unwrap();
+                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max",name_folder ,ip);
 
-                                    // buffer = frame
-                                    },
+                                std::fs::create_dir_all(hevc_file_path).unwrap();
+                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                print_pretty!(
+                                    DebugColor::ForestGreen,
+                                    "[Encoder XRServer] REF FRAME MAX {} SAVED TO MEMORY",
+                                    id_frame_files_ref
+                                );
+                                file.write_all(&frame.clone()).unwrap();
+
+                                // buffer = frame
+                            }
                             None => {
-                                print_pretty!(DebugColor::Red, "Still no MAX frame after restart, using empty buffer", );
+                                print_pretty!(
+                                    DebugColor::Red,
+                                    "Still no MAX frame after restart, using empty buffer",
+                                );
                                 buffer = Vec::new();
                             }
                         }
                     }
-                }; 
+                };
             };
-
         } else {
             // Fallback for non-FFMPEG mode
             buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
         }
-        
+
         // Rest of your function remains the same
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
-        
+
         if buffer.len() < hidden_offset {
             buffer.resize(hidden_offset, 0);
         }
-        
+
         let buffer_len = buffer.len();
 
         self.next_packet_index += 1;
@@ -2094,7 +2129,7 @@ impl<H: Serialize> StreamSender<H> {
             _phantom: PhantomData,
         })
     }
-    pub fn send_header_tracking(&mut self, header: &H, now: TaiTime<0>) -> Result<()>{
+    pub fn send_header_tracking(&mut self, header: &H, now: TaiTime<0>) -> Result<()> {
         let buffer = self.get_buffer_tracking(header, now).unwrap();
         self.send(buffer, now)
     }
@@ -2107,22 +2142,26 @@ pub fn contains_keyframe(frame: &[u8]) -> bool {
     if frame.len() < 6 {
         return false;
     }
-    
+
     // Scan for HEVC NAL units with types 16-21 (keyframes)
     for i in 0..frame.len().saturating_sub(5) {
         // Look for start codes (0x000001 or 0x00000001)
-        if (frame[i] == 0 && frame[i+1] == 0 && frame[i+2] == 1) || 
-           (i+3 < frame.len() && frame[i] == 0 && frame[i+1] == 0 && frame[i+2] == 0 && frame[i+3] == 1) {
-            
+        if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+            || (i + 3 < frame.len()
+                && frame[i] == 0
+                && frame[i + 1] == 0
+                && frame[i + 2] == 0
+                && frame[i + 3] == 1)
+        {
             // Determine start code length
-            let start_code_len = if frame[i+2] == 0 { 4 } else { 3 };
-            
+            let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
+
             // Check NAL header if there's enough data
             let header_pos = i + start_code_len;
             if header_pos < frame.len() {
                 let nal_header = frame[header_pos];
-                let nal_type = (nal_header >> 1) & 0x3F;  // HEVC NAL type is bits 1-6
-                
+                let nal_type = (nal_header >> 1) & 0x3F; // HEVC NAL type is bits 1-6
+
                 // HEVC keyframes are NAL types 16-21 (IRAP pictures)
                 if (16..=21).contains(&nal_type) {
                     return true;
@@ -2287,4 +2326,3 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
 
     buffer_inner
 }
-

@@ -1,23 +1,23 @@
 use anyhow::Result;
-use std::hash::Hash;
-use std::io::{BufReader, Read, Write, BufWriter};
-use std::process::{ChildStdin, ChildStdout};
+use async_std::sync::{Arc, Mutex};
+use async_std::task;
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use minifb::{Key, Scale, Window, WindowOptions};
 use rand::Rng;
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::{HashMap, VecDeque};
+use std::error::Error;
+use std::fs::File;
+use std::hash::Hash;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::process::Command;
+use std::process::{ChildStdin, ChildStdout};
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
-use std::collections::{HashMap, VecDeque};
-use async_std::task;
-use std::fs::File;
-use std::process::Command; 
-use std::thread;
-use std::error::Error;
-use serde::Deserialize;
-use serde_json::Value;
-use async_std::sync::{Arc, Mutex};
-use serde::Serialize;
 
 use tempfile::TempDir;
 
@@ -27,25 +27,23 @@ use tempfile::TempDir;
 pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080;
 
-pub const INITIAL_BITRATE : &str= "10M"; 
-pub const WINDOW_SCALE_FACTOR: f64 = 0.7; 
+pub const INITIAL_BITRATE: &str = "10M";
+pub const WINDOW_SCALE_FACTOR: f64 = 0.7;
 
 pub const IDR_FRAME_SIZE_GOP: usize = 120;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.01; 
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.01;
 
-pub const CHUNK_SIZE_ENCODER_S: f64 = 3.0; 
-pub const FRAME_CUTOFF_LIMIT: usize = 1200; 
+pub const CHUNK_SIZE_ENCODER_S: f64 = 3.0;
+pub const FRAME_CUTOFF_LIMIT: usize = 1200;
 
-pub const FRAME_GROUP_SIZE: usize = 5; 
-
+pub const FRAME_GROUP_SIZE: usize = 5;
 
 pub const OFFSET_VIDEO: f64 = 250.0;
 
-pub const REENCODE: bool = true; 
+pub const REENCODE: bool = true;
 
-pub const USE_VMAF_EXAMPLE: bool = true; 
-
+pub const USE_VMAF_EXAMPLE: bool = true;
 
 /// Results of video quality metrics analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,19 +64,22 @@ fn cleanup_old_data(
     retention_duration: Duration,
 ) -> Result<(), Box<dyn Error>> {
     // Calculate cutoff timestamp (current time - 20 seconds)
-    let cutoff_time_ms = current_time.duration_since(epoch).as_millis() as u64 
+    let cutoff_time_ms = current_time.duration_since(epoch).as_millis() as u64
         - retention_duration.as_millis() as u64;
-    
-    println!("Cleaning up frames older than {} seconds (before timestamp {}ms)", 
-        retention_duration.as_secs(), cutoff_time_ms);
-    
+
+    println!(
+        "Cleaning up frames older than {} seconds (before timestamp {}ms)",
+        retention_duration.as_secs(),
+        cutoff_time_ms
+    );
+
     // Track how many files we clean up
     let mut cleaned_count = 0;
-    
+
     // Remove old frame pairs and delete their files
     synced_pairs.retain(|pair| {
         let keep = pair.timestamp_ms >= cutoff_time_ms;
-        
+
         if !keep {
             // Delete the RGB files from disk
             if let Err(e) = std::fs::remove_file(&pair.ref_path) {
@@ -89,10 +90,10 @@ fn cleanup_old_data(
             }
             cleaned_count += 1;
         }
-        
+
         keep
     });
-    
+
     // Also clean up temporary Y4M files
     for dir_name in &["Video_Sink/reference_rgb", "Video_Sink/lossy_rgb"] {
         if let Ok(entries) = std::fs::read_dir(dir_name) {
@@ -111,11 +112,11 @@ fn cleanup_old_data(
             }
         }
     }
-    
+
     if cleaned_count > 0 {
         println!("Cleaned up {} old frame pairs", cleaned_count);
     }
-    
+
     Ok(())
 }
 /// Buffer for frame analysis that processes frames in batches
@@ -128,42 +129,55 @@ struct MetricsResult {
     psnr: f64,
     ssim: f64,
 }
-// 
+//
 // Update the process_group function to use the enhanced method
 async fn process_group_vmaf(group: FrameGroup, logger: &MetricsLogger) -> Result<()> {
     let temp_dir = TempDir::new()?;
-    
+
     println!("Processing group with {} frames", group.frames.len());
-    
+
     for frame in &group.frames {
         // Save frames to temporary files
-        let ref_path = temp_dir.path().join(format!("ref_{}.rgb", frame.frame_number)).to_string_lossy().to_string();
-        let lossy_path = temp_dir.path().join(format!("lossy_{}.rgb", frame.frame_number)).to_string_lossy().to_string();
-        
+        let ref_path = temp_dir
+            .path()
+            .join(format!("ref_{}.rgb", frame.frame_number))
+            .to_string_lossy()
+            .to_string();
+        let lossy_path = temp_dir
+            .path()
+            .join(format!("lossy_{}.rgb", frame.frame_number))
+            .to_string_lossy()
+            .to_string();
+
         std::fs::write(&ref_path, &frame.ref_rgb)?;
         std::fs::write(&lossy_path, &frame.lossy_rgb)?;
-        
+
         // Process and log metrics for this frame
-        match logger.process_frame_metrics(
-            frame.frame_number,
-            frame.timestamp_ms,
-            &ref_path,
-            &lossy_path
-        ).await {
+        match logger
+            .process_frame_metrics(
+                frame.frame_number,
+                frame.timestamp_ms,
+                &ref_path,
+                &lossy_path,
+            )
+            .await
+        {
             Ok(_) => {
                 // Successfully processed
                 println!("Processed frame {}", frame.frame_number);
-            },
+            }
             Err(e) => {
-                eprintln!("Error processing metrics for frame {}: {}", frame.frame_number, e);
+                eprintln!(
+                    "Error processing metrics for frame {}: {}",
+                    frame.frame_number, e
+                );
             }
         }
     }
-    
+
     println!("Group processing complete");
     Ok(())
 }
-
 
 #[derive(Debug, Clone)]
 struct FrameData {
@@ -193,74 +207,108 @@ impl MetricsLogger {
         frame_number: u64,
         timestamp_ms: u64,
         ref_path: &str,
-        lossy_path: &str
+        lossy_path: &str,
     ) -> Result<()> {
         // Create a temporary directory for processing
         let temp_dir = TempDir::new()?;
-        
+
         // Convert RGB frames to Y4M format (better for VMAF processing)
-        let ref_y4m = temp_dir.path().join("reference.y4m").to_string_lossy().to_string();
-        let lossy_y4m = temp_dir.path().join("lossy.y4m").to_string_lossy().to_string();
-        
+        let ref_y4m = temp_dir
+            .path()
+            .join("reference.y4m")
+            .to_string_lossy()
+            .to_string();
+        let lossy_y4m = temp_dir
+            .path()
+            .join("lossy.y4m")
+            .to_string_lossy()
+            .to_string();
+
         // Convert reference frame to Y4M
         let ref_status = Command::new("ffmpeg")
             .args(&[
                 "-y",
-                "-f", "rawvideo",
-                "-pixel_format", "rgb24",
-                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-i", ref_path,
-                "-pix_fmt", "yuv420p",
-                &ref_y4m
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "rgb24",
+                "-video_size",
+                &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-i",
+                ref_path,
+                "-pix_fmt",
+                "yuv420p",
+                &ref_y4m,
             ])
             .status()?;
-        
+
         if !ref_status.success() {
             return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
         }
-        
+
         // Convert lossy frame to Y4M
         let lossy_status = Command::new("ffmpeg")
             .args(&[
                 "-y",
-                "-f", "rawvideo",
-                "-pixel_format", "rgb24",
-                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-i", lossy_path,
-                "-pix_fmt", "yuv420p",
-                &lossy_y4m
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "rgb24",
+                "-video_size",
+                &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-i",
+                lossy_path,
+                "-pix_fmt",
+                "yuv420p",
+                &lossy_y4m,
             ])
             .status()?;
-        
+
         if !lossy_status.success() {
             return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
         }
-                
-            // Create the Video_Sink directory within the temp directory
+
+        // Create the Video_Sink directory within the temp directory
         let video_sink_dir = temp_dir.path().join("Video_Sink");
         std::fs::create_dir_all(&video_sink_dir)?;
 
         // Set up paths correctly
-        let vmaf_json = video_sink_dir.join("vmaf.json").to_string_lossy().to_string();
-        let psnr_log = video_sink_dir.join("psnr.log").to_string_lossy().to_string();
-        let ssim_log = video_sink_dir.join("ssim.log").to_string_lossy().to_string();
+        let vmaf_json = video_sink_dir
+            .join("vmaf.json")
+            .to_string_lossy()
+            .to_string();
+        let psnr_log = video_sink_dir
+            .join("psnr.log")
+            .to_string_lossy()
+            .to_string();
+        let ssim_log = video_sink_dir
+            .join("ssim.log")
+            .to_string_lossy()
+            .to_string();
 
         // Calculate all metrics in a single ffmpeg call
         let metrics_status = Command::new("ffmpeg")
             .args(&[
-                "-i", &ref_y4m,
-                "-i", &lossy_y4m,
-                "-filter_complex", &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
-                "-filter_complex", &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-                "-filter_complex", &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
-                "-f", "null", "-"
+                "-i",
+                &ref_y4m,
+                "-i",
+                &lossy_y4m,
+                "-filter_complex",
+                &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
+                "-filter_complex",
+                &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
+                "-filter_complex",
+                &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
+                "-f",
+                "null",
+                "-",
             ])
             .status()?;
 
         if !metrics_status.success() {
             return Err(anyhow::anyhow!("Failed to calculate video metrics"));
         }
-                
+
         // Parse VMAF score
         let mut vmaf_score = 0.0;
         if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
@@ -276,12 +324,12 @@ impl MetricsLogger {
                 }
             }
         }
-        
+
         // Parse PSNR score
         let mut psnr_avg = 0.0;
         if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
             if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
-                let remaining = &psnr_content[avg_idx+9..];
+                let remaining = &psnr_content[avg_idx + 9..];
                 let end_idx = remaining.find(" ").unwrap_or(10);
                 let avg_str = &remaining[..end_idx];
                 if let Ok(value) = avg_str.trim().parse::<f64>() {
@@ -289,12 +337,12 @@ impl MetricsLogger {
                 }
             }
         }
-        
+
         // Parse SSIM score
         let mut ssim_score = 0.0;
         if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
             if let Some(all_idx) = ssim_content.find("All:") {
-                let remaining = &ssim_content[all_idx+4..];
+                let remaining = &ssim_content[all_idx + 4..];
                 let end_idx = remaining.find(" ").unwrap_or(10);
                 let all_str = &remaining[..end_idx];
                 if let Ok(value) = all_str.trim().parse::<f64>() {
@@ -302,10 +350,12 @@ impl MetricsLogger {
                 }
             }
         }
-        
+
         // Print debug info
-        println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
-                frame_number, vmaf_score, psnr_avg, ssim_score);
+        println!(
+            "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+            frame_number, vmaf_score, psnr_avg, ssim_score
+        );
 
         let metrics = FrameMetrics {
             frame_number: frame_number,
@@ -314,19 +364,20 @@ impl MetricsLogger {
             psnr: psnr_avg,
             ssim: ssim_score,
         };
-            
+
         // Log the metrics
         self.log_metrics(&metrics).await?;
-                
+
         // Print progress information
         if frame_number % 10 == 0 {
-            println!("Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}", 
-                frame_number, vmaf_score, psnr_avg, ssim_score);
+            println!(
+                "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+                frame_number, vmaf_score, psnr_avg, ssim_score
+            );
         }
 
         Ok(())
     }
-
 
     async fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
         let mut writer = self.writer.lock().await;
@@ -345,8 +396,6 @@ struct FrameMetrics {
     ssim: f64,
 }
 
-
-
 #[derive(Debug, Clone)]
 struct FrameMetadata {
     frame_number: u64,
@@ -363,9 +412,6 @@ struct SyncedFramePair {
     timestamp_ms: u64,
 }
 
-
-
-
 // New encoder type that chunks the video into fixed-duration segments.
 /// Each chunk is produced by invoking ffmpeg with "-ss" (start time)
 /// and "-t" (duration) options. Parsed complete frames are sent over an async channel.
@@ -374,8 +420,8 @@ pub struct ChunkedHevcEncoder {
     width: u32,
     height: u32,
     bitrate: String,
-    chunk_duration: f64,   // Duration of each chunk in seconds.
-    current_offset: f64,   // Current start timestamp.
+    chunk_duration: f64, // Duration of each chunk in seconds.
+    current_offset: f64, // Current start timestamp.
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
 }
@@ -384,10 +430,10 @@ impl ChunkedHevcEncoder {
     /// Create a new ChunkedHevcEncoder.
     pub fn new(input: &str, width: u32, height: u32, bitrate: &str, chunk_duration: f64) -> Self {
         // We use a bounded channel to store parsed frames.
-        
+
         let random_offset = rand::random::<f64>() * OFFSET_VIDEO;
 
-        println!("Initializing chunkedhevcencoder"); 
+        println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
         Self {
             input: input.to_string(),
@@ -395,7 +441,7 @@ impl ChunkedHevcEncoder {
             height,
             bitrate: bitrate.to_string(),
             chunk_duration,
-            current_offset: OFFSET_VIDEO, 
+            current_offset: OFFSET_VIDEO,
             frame_tx,
             frame_rx,
         }
@@ -407,7 +453,7 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self) -> Result<()> {
         loop {
-            println!("CHUNKING!"); 
+            println!("CHUNKING!");
 
             // Build an ffmpeg command for the current chunk:
             // –ss <current_offset> –t <chunk_duration> plus the rest of your encoding options.
@@ -428,9 +474,16 @@ impl ChunkedHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
-                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate, "-minrate", &self.bitrate])
+                .args(&[
+                    "-b:v",
+                    &self.bitrate,
+                    "-maxrate",
+                    &self.bitrate,
+                    "-minrate",
+                    &self.bitrate,
+                ])
                 .args(&["-rc-lookahead", "0"])
-                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)])  // using your GOP size constant
+                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -482,7 +535,6 @@ impl ChunkedHevcEncoder {
     }
 }
 
-
 /// Represents a single HEVC NAL unit
 pub struct NalUnit {
     pub nal_type: u8,
@@ -509,9 +561,13 @@ impl HevcParser {
     fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
         for i in start_pos..self.buffer.len() - 3 {
             // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-               (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-                self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+            if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1)
+                || (i < self.buffer.len() - 4
+                    && self.buffer[i] == 0
+                    && self.buffer[i + 1] == 0
+                    && self.buffer[i + 2] == 0
+                    && self.buffer[i + 3] == 1)
+            {
                 return Some(i);
             }
         }
@@ -522,46 +578,49 @@ impl HevcParser {
     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
         // Find the first start code
         let start_pos = self.find_next_start_code(0)?;
-        
+
         // Determine start code length (3 or 4 bytes)
-        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
+        let start_code_len = if start_pos + 3 < self.buffer.len()
+            && self.buffer[start_pos + 2] == 0
+            && self.buffer[start_pos + 3] == 1
+        {
             4
         } else {
             3
         };
-        
+
         // Find the next start code
         let next_start = self.find_next_start_code(start_pos + start_code_len);
-        
+
         let (nal_end, has_next) = match next_start {
             Some(pos) => (pos, true),
-            None => (self.buffer.len(), false)
+            None => (self.buffer.len(), false),
         };
-        
+
         // If we don't have a complete NAL unit yet, wait for more data
         if !has_next {
             return None;
         }
-        
+
         // Extract NAL header and determine NAL type
         let nal_header_pos = start_pos + start_code_len;
         if nal_header_pos >= self.buffer.len() {
             return None;
         }
-        
+
         let nal_header = self.buffer[nal_header_pos];
         let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-        
+
         // Extract the complete NAL unit data (including header)
         let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
-        
+
         // Remove the processed NAL unit from the buffer
         self.buffer.drain(0..nal_end);
-        
+
         // Determine if this is a keyframe (I-frame)
         // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
         let is_keyframe = (16..=21).contains(&nal_type);
-        
+
         Some(NalUnit {
             nal_type,
             data: nal_data,
@@ -574,11 +633,11 @@ impl HevcParser {
         let mut frames = Vec::new();
         let mut current_frame = Vec::new();
         let mut saw_vcl = false;
-        
+
         while let Some(nal) = self.next_nal_unit() {
             // VCL NAL units (0-31) contain the actual picture data
             let is_vcl = nal.nal_type <= 31;
-            
+
             // If we see a VCL NAL and already saw one before, it's a new frame
             if is_vcl && saw_vcl {
                 if !current_frame.is_empty() {
@@ -587,25 +646,24 @@ impl HevcParser {
                 }
                 saw_vcl = false;
             }
-            
+
             if is_vcl {
                 saw_vcl = true;
             }
-            
+
             // Add start code and NAL data to current frame
             current_frame.extend_from_slice(&[0, 0, 0, 1]);
             current_frame.extend_from_slice(&nal.data);
         }
-        
+
         // Add the last frame if it's not empty
         if !current_frame.is_empty() {
             frames.push(current_frame);
         }
-        
+
         frames
     }
 }
-
 
 /// Converts raw RGB byte data (3 bytes per pixel) into a Vec<u32> pixel buffer
 /// where each pixel is represented as 0xRRGGBB.
@@ -619,24 +677,27 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
         );
         return Vec::new();
     }
-    
+
     let mut pixels = Vec::with_capacity(width * height);
     for chunk in rgb_data.chunks_exact(3) {
-        let pixel = ((chunk[0] as u32) << 16) | 
-                   ((chunk[1] as u32) << 8) | 
-                   (chunk[2] as u32);
+        let pixel = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
         pixels.push(pixel);
     }
 
     if !pixels.is_empty() {
-        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}", 
+        // println!("First 5 pixels: {:x} {:x} {:x} {:x} {:x}",
         //     pixels[0], pixels[1], pixels[2], pixels[3], pixels[4]);
     }
     pixels
 }
 
-
-fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width: usize, new_height: usize) -> Vec<u32> {
+fn scale_pixels(
+    buffer: &[u32],
+    orig_width: usize,
+    orig_height: usize,
+    new_width: usize,
+    new_height: usize,
+) -> Vec<u32> {
     let mut scaled = vec![0u32; new_width * new_height];
     let x_ratio = (orig_width << 16) / new_width;
     let y_ratio = (orig_height << 16) / new_height;
@@ -659,18 +720,17 @@ pub struct HevcDecoder {
     width: u32,
     height: u32,
     parser: HevcParser,
-    frame_buffer: VecDeque<Vec<u8>>,  // Buffer for parsed HEVC frames
+    frame_buffer: VecDeque<Vec<u8>>, // Buffer for parsed HEVC frames
     decoded_frames: VecDeque<Vec<u8>>, // Buffer for decoded RGB frames
 
-    ewma_frame_size: f64,  // Store the EWMA value
-    last_update: Instant,   // Track last update time
+    ewma_frame_size: f64, // Store the EWMA value
+    last_update: Instant, // Track last update time
 
-
-    epoch: Instant, 
+    epoch: Instant,
 }
 
 impl HevcDecoder {
-    pub fn new(framerate: u32, width: u32, height: u32, epoch: Instant, ) -> Result<Self> {
+    pub fn new(framerate: u32, width: u32, height: u32, epoch: Instant) -> Result<Self> {
         let frame_size = (width as usize) * (height as usize) * 3;
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
@@ -687,7 +747,7 @@ impl HevcDecoder {
 
         let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
         let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
-        
+
         // Start stdout reader thread
         std::thread::spawn({
             let frame_size = frame_size;
@@ -706,7 +766,6 @@ impl HevcDecoder {
 
                                 if let Ok(_) = frame_tx.send(frame) {
                                     // frame
-
                                 } else {
                                     println!("SEND ERROR!");
                                     // break;
@@ -729,7 +788,7 @@ impl HevcDecoder {
                     eprintln!("Decoder write error: {}", e);
                     break;
                 }
-                
+
                 // It's important to flush after each frame to ensure real-time processing
                 if let Err(e) = writer.flush() {
                     eprintln!("Decoder flush error: {}", e);
@@ -767,22 +826,23 @@ impl HevcDecoder {
             decoded_frames: VecDeque::new(),
             ewma_frame_size: 0.0,
             last_update: Instant::now(),
-            epoch: epoch, 
+            epoch: epoch,
         })
     }
 
     pub fn is_keyframe(frame: &[u8]) -> bool {
         // Check for start code
         for i in 0..frame.len().saturating_sub(5) {
-            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1) || 
-               (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1) {
+            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+                || (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
+            {
                 let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
                 let nal_header_pos = i + start_code_len;
-                
+
                 if nal_header_pos < frame.len() {
                     let nal_header = frame[nal_header_pos];
                     let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-                    
+
                     // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
                     if (16..=21).contains(&nal_type) {
                         return true;
@@ -795,7 +855,7 @@ impl HevcDecoder {
     // Process incoming encoded packets
     pub fn process_packet(&mut self, packet: Vec<u8>) -> Result<()> {
         // Add packet data to the parser
-        
+
         let frame_size = packet.len() as f64;
         let now = Instant::now();
         let delta_t = now.duration_since(self.last_update).as_secs_f64();
@@ -808,21 +868,22 @@ impl HevcDecoder {
         self.ewma_frame_size = alpha * frame_size + (1.0 - alpha) * self.ewma_frame_size;
 
         println!(
-            "{:.3} - Parsing w size: {}, EWMA size: {:.2}", 
+            "{:.3} - Parsing w size: {}, EWMA size: {:.2}",
             Instant::now().duration_since(self.epoch).as_secs_f64(),
-            frame_size, self.ewma_frame_size
-        );    
+            frame_size,
+            self.ewma_frame_size
+        );
         self.parser.add_data(&packet);
-        
+
         // Extract frames from the parser and buffer them
         let frames = self.parser.get_frames();
         for frame in frames {
             self.frame_buffer.push_back(frame);
         }
-        
+
         // Forward the packet to ffmpeg for decoding
         self.packet_tx.send(packet)?;
-        
+
         Ok(())
     }
 
@@ -831,10 +892,12 @@ impl HevcDecoder {
         match self.frame_rx.try_recv() {
             Ok(frame) => Ok(Some(frame)),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Decoder frame channel disconnected")),
+            Err(TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("Decoder frame channel disconnected"))
+            }
         }
     }
-    
+
     // Process any available decoded frames from ffmpeg
     pub fn process_decoded_frames(&mut self) -> Result<()> {
         // Drain any available decoded frames into our buffer
@@ -842,7 +905,7 @@ impl HevcDecoder {
             // println!("Frame got on decoder, size: {}", frame.len());
             self.decoded_frames.push_back(frame);
         }
-        
+
         Ok(())
     }
 
@@ -868,7 +931,7 @@ fn convert_rgb_to_yuv420p(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
             let g = rgb[idx + 1] as f32;
             let b = rgb[idx + 2] as f32;
             // ITU-R BT.601 conversion for example
-            let y = (0.299*r + 0.587*g + 0.114*b).round() as u8;
+            let y = (0.299 * r + 0.587 * g + 0.114 * b).round() as u8;
             yuv[j * width + i] = y;
         }
     }
@@ -891,8 +954,8 @@ fn convert_rgb_to_yuv420p(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
                     let g = rgb[idx + 1] as f32;
                     let b = rgb[idx + 2] as f32;
                     // Using BT.601 formulas for U and V:
-                    let u = (-0.168736*r - 0.331264*g + 0.5*b + 128.0).round();
-                    let v = (0.5*r - 0.418688*g - 0.081312*b + 128.0).round();
+                    let u = (-0.168736 * r - 0.331264 * g + 0.5 * b + 128.0).round();
+                    let v = (0.5 * r - 0.418688 * g - 0.081312 * b + 128.0).round();
                     sum_u += u;
                     sum_v += v;
                 }
@@ -914,8 +977,8 @@ fn convert_rgb_to_yuv420p(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
 async fn main() -> Result<()> {
     // ffmpeg_sidecar::download::auto_download()?;
 
-    let mut num_updates_ref = 0; 
-    let EPOCH = Instant::now(); 
+    let mut num_updates_ref = 0;
+    let EPOCH = Instant::now();
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
     println!("Starting video codec simulation...");
 
@@ -923,28 +986,26 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all("Video_Sink/reference_rgb")?;
     std::fs::create_dir_all("Video_Sink/lossy_rgb")?;
 
-
     let (group_tx, group_rx) = bounded(5); // Buffer up to 5 groups
     let metrics_logger = MetricsLogger::new()?;
 
     if USE_VMAF_EXAMPLE {
         async_std::task::spawn(async move {
             while let Ok(group) = group_rx.recv() {
-                println!("GOT GROUP!!"); 
-                process_group_vmaf(group, &metrics_logger).await.unwrap_or_else(|e| {
-                    eprintln!("Error processing group: {}", e);
-                });
+                println!("GOT GROUP!!");
+                process_group_vmaf(group, &metrics_logger)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error processing group: {}", e);
+                    });
             }
         });
-    }
-    else{
-        for i in 1..1000{
-            println!("NO VMAF FOUNDDDDDD"); 
+    } else {
+        for i in 1..1000 {
+            println!("NO VMAF FOUNDDDDDD");
         }
     }
     // Start processing thread
-
-
 
     let retention_duration = Duration::from_secs(20); // 20-second retention window
     let mut last_cleanup_time = Instant::now();
@@ -956,7 +1017,7 @@ async fn main() -> Result<()> {
         WIDTH_ENCODER as u32,
         HEIGHT_ENCODER as u32,
         INITIAL_BITRATE,
-        CHUNK_SIZE_ENCODER_S,  // Chunk duration in seconds
+        CHUNK_SIZE_ENCODER_S, // Chunk duration in seconds
     );
     // Clone the async receiver so we can poll for frames in the main loop.
     let frame_rx = chunked_encoder.frame_rx.clone();
@@ -973,8 +1034,10 @@ async fn main() -> Result<()> {
         });
 
         // Create the decoder as before.
-        let mut ref_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
-        let mut lossy_decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+        let mut ref_decoder =
+            HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
+        let mut lossy_decoder =
+            HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, EPOCH)?;
 
         let mut frame_counter: u64 = 0;
 
@@ -1008,11 +1071,13 @@ async fn main() -> Result<()> {
             WindowOptions::default(),
         )?;
 
-        let mut lossy_window = Window::new("
-            Lossy Video", scaled_width,
+        let mut lossy_window = Window::new(
+            "
+            Lossy Video",
+            scaled_width,
             scaled_height,
             WindowOptions::default(),
-        )?; 
+        )?;
 
         println!("Window opened");
 
@@ -1033,16 +1098,16 @@ async fn main() -> Result<()> {
         let mut drop_probability = PACKET_LOSS_PROBABILITY;
         let mut rng = rand::thread_rng();
 
-
         // let mut frame_buffer: HashMap<u64, (Option<Vec<u8>>, Option<Vec<u8>>)> = HashMap::new();
-        let mut current_group = FrameGroup { frames: Vec::with_capacity(FRAME_GROUP_SIZE) };
+        let mut current_group = FrameGroup {
+            frames: Vec::with_capacity(FRAME_GROUP_SIZE),
+        };
 
-        while reference_window.is_open() && lossy_window.is_open()
-            && !reference_window.is_key_down(Key::Escape) 
-            && !lossy_window.is_key_down(Key::Escape) {
-
-
-
+        while reference_window.is_open()
+            && lossy_window.is_open()
+            && !reference_window.is_key_down(Key::Escape)
+            && !lossy_window.is_key_down(Key::Escape)
+        {
             // Check if it's time to clean up old data
             // if Instant::now().duration_since(last_cleanup_time) >= cleanup_interval {
             //     if let Err(e) = cleanup_old_data(&mut synced_pairs, Instant::now(), EPOCH, retention_duration) {
@@ -1057,7 +1122,7 @@ async fn main() -> Result<()> {
                 // Await a frame (which should ideally be a keyframe) for recovery.
                 if let Ok(keyframe) = frame_rx.recv() {
                     println!("Sending recovery keyframe");
-                    
+
                     if let Err(e) = ref_decoder.process_packet(keyframe.clone()) {
                         eprintln!("Error sending recovery keyframe: {}", e);
                     }
@@ -1079,13 +1144,16 @@ async fn main() -> Result<()> {
                     if let Err(e) = ref_decoder.process_packet(frame.clone()) {
                         eprintln!("Reference decoder error: {}", e);
                     }
-                    // Simulate frame loss probability. 
+                    // Simulate frame loss probability.
                     if rng.gen::<f64>() >= drop_probability {
                         if let Err(e) = lossy_decoder.process_packet(frame) {
                             eprintln!("Error sending frame to decoder: {}", e);
                         }
                     } else {
-                        println!("{:.3} Simulated frame loss!", now.duration_since(lossy_decoder.epoch).as_secs_f32());
+                        println!(
+                            "{:.3} Simulated frame loss!",
+                            now.duration_since(lossy_decoder.epoch).as_secs_f32()
+                        );
                         frames_dropped += 1;
                     }
                     next_transmission_time += transmission_interval;
@@ -1102,9 +1170,9 @@ async fn main() -> Result<()> {
 
             // Process encoded frames for frame numbers
             if let Some(_) = ref_decoder.next_encoded_frame() {
-                frame_counter += 1; 
+                frame_counter += 1;
             }
-        
+
             // 4. Display frames and save synchronized pairs
             let display_time = Instant::now();
 
@@ -1113,26 +1181,36 @@ async fn main() -> Result<()> {
                     // Update the last successful frame time
                     last_frame_time = Instant::now();
                     let frame_number = frame_counter; // Get the frame number
-                    // Convert and display the reference frame
+                                                      // Convert and display the reference frame
                     let pixels = convert_rgb_to_u32(&ref_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-                    let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
-                    if let Err(e) = reference_window.update_with_buffer(&scaled, scaled_width, scaled_height) {
+                    let scaled = scale_pixels(
+                        &pixels,
+                        WIDTH_ENCODER,
+                        HEIGHT_ENCODER,
+                        scaled_width,
+                        scaled_height,
+                    );
+                    if let Err(e) =
+                        reference_window.update_with_buffer(&scaled, scaled_width, scaled_height)
+                    {
                         eprintln!("Error updating window buffer: {}", e);
                     } else {
                         frames_displayed += 1;
                     }
-                    
+
                     // Check if we also have a lossy frame
-                    if let Some( mut lossy_frame) = lossy_decoder.next_decoded_frame() {
+                    if let Some(mut lossy_frame) = lossy_decoder.next_decoded_frame() {
                         // We have both frames - save them as a synchronized pair
                         let timestamp = Instant::now().duration_since(EPOCH).as_millis() as u64;
-                        
-                        let ref_path = format!("Video_Sink/reference_rgb/frame_{:04}.rgb", frame_counter);
+
+                        let ref_path =
+                            format!("Video_Sink/reference_rgb/frame_{:04}.rgb", frame_counter);
                         std::fs::write(&ref_path, &ref_frame)?;
-                        
-                        let lossy_path = format!("Video_Sink/lossy_rgb/frame_{:04}.rgb", frame_counter);
+
+                        let lossy_path =
+                            format!("Video_Sink/lossy_rgb/frame_{:04}.rgb", frame_counter);
                         std::fs::write(&lossy_path, &lossy_frame)?;
-                        
+
                         // Record the synchronized pair with these consistent paths
                         synced_pairs.push(SyncedFramePair {
                             frame_number: frame_counter,
@@ -1141,11 +1219,11 @@ async fn main() -> Result<()> {
                             timestamp_ms: timestamp,
                         });
                         // Write the synchronized pair to the CSV file immediately
-                        writeln!(sync_index, "{},{},{},{}", 
-                        frame_counter, 
-                        timestamp, 
-                        ref_path, 
-                        lossy_path)?;
+                        writeln!(
+                            sync_index,
+                            "{},{},{},{}",
+                            frame_counter, timestamp, ref_path, lossy_path
+                        )?;
 
                         let frame_data = FrameData {
                             ref_rgb: ref_frame,
@@ -1153,29 +1231,43 @@ async fn main() -> Result<()> {
                             timestamp_ms: Instant::now().duration_since(EPOCH).as_millis() as u64,
                             frame_number: frame_counter,
                         };
-            
+
                         current_group.frames.push(frame_data);
-            
+
                         // Send group when full
                         if current_group.frames.len() >= FRAME_GROUP_SIZE {
                             if let Err(e) = group_tx.send(current_group) {
                                 eprintln!("Error sending group: {}", e);
                             }
-                            current_group = FrameGroup { frames: Vec::with_capacity(FRAME_GROUP_SIZE) };
+                            current_group = FrameGroup {
+                                frames: Vec::with_capacity(FRAME_GROUP_SIZE),
+                            };
                         }
 
                         // Display the lossy frame
-                        let pixels = convert_rgb_to_u32(&lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-                        let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                        let pixels =
+                            convert_rgb_to_u32(&lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        let scaled = scale_pixels(
+                            &pixels,
+                            WIDTH_ENCODER,
+                            HEIGHT_ENCODER,
+                            scaled_width,
+                            scaled_height,
+                        );
                         last_lossy_frame = Some(lossy_frame.clone());
                         lossy_window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
                     } else if let Some(prev_lossy_frame) = last_lossy_frame.clone() {
                         // Use the previous lossy frame if no new one is available
-                        let pixels = convert_rgb_to_u32(&prev_lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-                        let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+                        let pixels =
+                            convert_rgb_to_u32(&prev_lossy_frame, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        let scaled = scale_pixels(
+                            &pixels,
+                            WIDTH_ENCODER,
+                            HEIGHT_ENCODER,
+                            scaled_width,
+                            scaled_height,
+                        );
                         lossy_window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
-
-                     
                     }
 
                     next_frame_time += frame_duration;
@@ -1187,36 +1279,37 @@ async fn main() -> Result<()> {
 
             // FPS counter.
             if Instant::now().duration_since(fps_timer) >= Duration::from_secs(2) {
-                println!("FPS: {}, Synced Pairs: {}", frames_displayed / 2, synced_pairs.len());
+                println!(
+                    "FPS: {}, Synced Pairs: {}",
+                    frames_displayed / 2,
+                    synced_pairs.len()
+                );
                 frames_displayed = 0;
                 fps_timer = Instant::now();
             }
 
             reference_window.update();
-            lossy_window.update(); 
+            lossy_window.update();
             sync_index.flush()?;
 
-            num_updates_ref += 1; 
+            num_updates_ref += 1;
             if num_updates_ref >= FRAME_CUTOFF_LIMIT {
-                println!("REACHED {} FRAME LIMIT!", FRAME_CUTOFF_LIMIT); 
-                
+                println!("REACHED {} FRAME LIMIT!", FRAME_CUTOFF_LIMIT);
+
                 // Flush the sync index
-                
+
                 // Wait a moment to ensure all files are written
                 // std::thread::sleep(Duration::from_secs(2));
                 break;
             }
             // vmaf_window.update();
-
-           
         }
 
-            // Process remaining frames
+        // Process remaining frames
         if !current_group.frames.is_empty() {
             group_tx.send(current_group)?;
         }
-
-    }   
+    }
 
     // Calculate VMAF after processing is complete
 

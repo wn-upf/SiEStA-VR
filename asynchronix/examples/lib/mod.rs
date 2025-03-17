@@ -7,21 +7,20 @@ use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
 
+use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
-use crate::lib::alvr_packets::DeviceMotion; 
 use colored::Colorize;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 
 use std::io::{self, Write};
 use std::path::Path;
-
 
 const CW_MIN: i32 = 15;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -58,7 +57,6 @@ pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
 pub const USE_VMAF: bool = false;
-
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -167,7 +165,7 @@ pub enum DebugColor {
     Crimson,
     Amber,
     SaddleBrown,
-    Tan, 
+    Tan,
 }
 #[allow(unused)]
 impl DebugColor {
@@ -210,9 +208,8 @@ impl DebugColor {
             DebugColor::Rose => |s| s.truecolor(255, 228, 225),
             DebugColor::Crimson => |s| s.truecolor(220, 20, 60),
             DebugColor::Amber => |s| s.truecolor(255, 191, 0),
-            DebugColor::SaddleBrown => |s| s.truecolor(139,69, 19),
-            DebugColor::Tan => |s| s.truecolor(160,82, 45),
-
+            DebugColor::SaddleBrown => |s| s.truecolor(139, 69, 19),
+            DebugColor::Tan => |s| s.truecolor(160, 82, 45),
         }
     }
     pub fn to_background_fn(&self) -> fn(String) -> colored::ColoredString {
@@ -254,10 +251,8 @@ impl DebugColor {
             DebugColor::Rose => |s| s.on_truecolor(255, 228, 225),
             DebugColor::Crimson => |s| s.on_truecolor(220, 20, 60),
             DebugColor::Amber => |s| s.on_truecolor(255, 191, 0),
-            DebugColor::SaddleBrown => |s| s.truecolor(139,69, 19),
-            DebugColor::Tan => |s| s.truecolor(160,82, 45),
-
-
+            DebugColor::SaddleBrown => |s| s.truecolor(139, 69, 19),
+            DebugColor::Tan => |s| s.truecolor(160, 82, 45),
         }
     }
 }
@@ -416,7 +411,7 @@ pub struct HevcParser {
 
 impl HevcParser {
     pub fn new() -> Self {
-        Self { 
+        Self {
             buffer: Vec::new(),
             vps: None,
             sps: None,
@@ -431,90 +426,98 @@ impl HevcParser {
 
     /// Find the next NAL unit start code in the buffer
     fn find_next_start_code(&self, start_pos: usize) -> Option<usize> {
-
-        if !self.buffer.is_empty(){
+        if !self.buffer.is_empty() {
             for i in start_pos..self.buffer.len() - 3 {
                 // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-                if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1) || 
-                   (i < self.buffer.len() - 4 && self.buffer[i] == 0 && self.buffer[i + 1] == 0 && 
-                    self.buffer[i + 2] == 0 && self.buffer[i + 3] == 1) {
+                if (self.buffer[i] == 0 && self.buffer[i + 1] == 0 && self.buffer[i + 2] == 1)
+                    || (i < self.buffer.len() - 4
+                        && self.buffer[i] == 0
+                        && self.buffer[i + 1] == 0
+                        && self.buffer[i + 2] == 0
+                        && self.buffer[i + 3] == 1)
+                {
                     return Some(i);
                 }
             }
             None
-        }
-        else{
-            println!("PARSER BUFFER EMPTTTTTTTTTTTY" ); 
+        } else {
+            println!("PARSER BUFFER EMPTTTTTTTTTTTY");
             None
         }
     }
-    
+
     pub fn clear(&mut self) {
         println!("Clearing parser buffer: {} bytes", self.buffer.len());
         self.buffer.clear();
     }
-    
+
     /// Extract the next complete NAL unit from the buffer
     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
         // Find the first start code
         let start_pos = self.find_next_start_code(0)?;
-        
+
         // Determine start code length (3 or 4 bytes)
-        let start_code_len = if start_pos + 3 < self.buffer.len() && self.buffer[start_pos + 2] == 0 && self.buffer[start_pos + 3] == 1 {
+        let start_code_len = if start_pos + 3 < self.buffer.len()
+            && self.buffer[start_pos + 2] == 0
+            && self.buffer[start_pos + 3] == 1
+        {
             4
         } else {
             3
         };
-        
+
         // Find the next start code
         let next_start = self.find_next_start_code(start_pos + start_code_len);
-        
+
         let (nal_end, has_next) = match next_start {
             Some(pos) => (pos, true),
-            None => (self.buffer.len(), false)
+            None => (self.buffer.len(), false),
         };
-        
+
         // If we don't have a complete NAL unit yet, wait for more data
         if !has_next {
             return None;
         }
-        
+
         // Extract NAL header and determine NAL type
         let nal_header_pos = start_pos + start_code_len;
         if nal_header_pos >= self.buffer.len() {
             return None;
         }
-        
+
         let nal_header = self.buffer[nal_header_pos];
         let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
-        
+
         // Extract the complete NAL unit data (including header)
         let nal_data = self.buffer[nal_header_pos..nal_end].to_vec();
-        
+
         // Store parameter sets based on NAL type
         match nal_type {
-            32 => { // VPS
+            32 => {
+                // VPS
                 let full_nal = self.create_full_nal(&self.buffer[start_pos..nal_end]);
                 self.vps = Some(full_nal);
-            },
-            33 => { // SPS
+            }
+            33 => {
+                // SPS
                 let full_nal = self.create_full_nal(&self.buffer[start_pos..nal_end]);
                 self.sps = Some(full_nal);
-            },
-            34 => { // PPS
+            }
+            34 => {
+                // PPS
                 let full_nal = self.create_full_nal(&self.buffer[start_pos..nal_end]);
                 self.pps = Some(full_nal);
-            },
+            }
             _ => {}
         }
-        
+
         // Remove the processed NAL unit from the buffer
         self.buffer.drain(0..nal_end);
-        
+
         // Determine if this is a keyframe (I-frame)
         // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
         let is_keyframe = (16..=21).contains(&nal_type);
-        
+
         Some(NalUnit {
             nal_type,
             data: nal_data,
@@ -534,11 +537,11 @@ impl HevcParser {
         let mut frames = Vec::new();
         let mut current_frame = Vec::new();
         let mut saw_vcl = false;
-        
+
         while let Some(nal) = self.next_nal_unit() {
             // VCL NAL units (0-31) contain the actual picture data
             let is_vcl = nal.nal_type <= 31;
-            
+
             // If we see a VCL NAL and already saw one before, it's a new frame
             if is_vcl && saw_vcl {
                 if !current_frame.is_empty() {
@@ -547,56 +550,56 @@ impl HevcParser {
                 }
                 saw_vcl = false;
             }
-            
+
             if is_vcl {
                 saw_vcl = true;
             }
-            
+
             // Add start code and NAL data to current frame
             current_frame.extend_from_slice(&[0, 0, 0, 1]);
             current_frame.extend_from_slice(&nal.data);
         }
-        
+
         // Add the last frame if it's not empty
         if !current_frame.is_empty() {
             frames.push(current_frame);
         }
-        
+
         frames
     }
 
     // New methods to access parameter sets
-    
+
     /// Get the current VPS (Video Parameter Set)
     pub fn get_vps(&self) -> Option<&Vec<u8>> {
         self.vps.as_ref()
     }
-    
+
     /// Get the current SPS (Sequence Parameter Set)
     pub fn get_sps(&self) -> Option<&Vec<u8>> {
         self.sps.as_ref()
     }
-    
+
     /// Get the current PPS (Picture Parameter Set)
     pub fn get_pps(&self) -> Option<&Vec<u8>> {
         self.pps.as_ref()
     }
 
-    pub fn update_vps(&mut self, vps: &Vec<u8>){
-        self.vps = Some(vps.clone()); 
+    pub fn update_vps(&mut self, vps: &Vec<u8>) {
+        self.vps = Some(vps.clone());
     }
-    pub fn update_sps(&mut self, sps: &Vec<u8>){
-        self.sps = Some(sps.clone()); 
+    pub fn update_sps(&mut self, sps: &Vec<u8>) {
+        self.sps = Some(sps.clone());
     }
-    pub fn update_pps(&mut self, pps: &Vec<u8>){
-        self.pps = Some(pps.clone()); 
+    pub fn update_pps(&mut self, pps: &Vec<u8>) {
+        self.pps = Some(pps.clone());
     }
-    
+
     /// Get all parameter sets as a tuple
     pub fn get_parameter_sets(&self) -> (Option<&Vec<u8>>, Option<&Vec<u8>>, Option<&Vec<u8>>) {
         (self.vps.as_ref(), self.sps.as_ref(), self.pps.as_ref())
     }
-    
+
     /// Print parameter sets as hex strings
     pub fn print_parameter_sets(&self) {
         if let Some(vps) = &self.vps {
@@ -604,25 +607,25 @@ impl HevcParser {
         } else {
             println!("VPS: Not found");
         }
-        
+
         if let Some(sps) = &self.sps {
             println!("SPS ({}): {}", sps.len(), self.format_hex(sps));
         } else {
             println!("SPS: Not found");
         }
-        
+
         if let Some(pps) = &self.pps {
             println!("PPS ({}): {}", pps.len(), self.format_hex(pps));
         } else {
             println!("PPS: Not found");
         }
     }
-    
+
     /// Format bytes as hex string with limited length
     fn format_hex(&self, data: &[u8]) -> String {
         let max_display = 48; // Show at most 48 bytes
         let mut result = String::new();
-        
+
         for (i, byte) in data.iter().enumerate() {
             if i >= max_display {
                 result.push_str("...");
@@ -633,7 +636,7 @@ impl HevcParser {
                 result.push(' ');
             }
         }
-        
+
         result
     }
 }
@@ -718,8 +721,6 @@ pub fn exponential(mean: f64) -> f64 {
     -mean * u.ln()
 }
 
-
-
 // Separate struct to hold the data that will be shared
 #[derive(Clone)]
 pub struct CsvData {
@@ -786,14 +787,14 @@ impl CsvData {
 
         // writer.flush()?;
         // Ok(())
-        println!("DEPRECATED FUNCTIONNNNNNN TODO: DELETE ALL REFERENCES!"); 
+        println!("DEPRECATED FUNCTIONNNNNNN TODO: DELETE ALL REFERENCES!");
         Ok(())
     }
 }
 #[derive(Clone)]
 pub struct CsvType {
     csv_data: Arc<Mutex<CsvData>>,
-    folder: String, 
+    folder: String,
 }
 impl CsvType {
     pub fn new(folder_name: &str) -> Self {
@@ -805,7 +806,7 @@ impl CsvType {
             // v_queue_tq: Vec::new(),
             // v_packet_l: Vec::new(),
             csv_data: Arc::new(Mutex::new(CsvData::new())),
-            folder: folder_name.to_string(), 
+            folder: folder_name.to_string(),
         }
     }
 
@@ -849,8 +850,8 @@ impl CsvType {
             data.v_id_dest.push(id_dest);
         }
 
-         // Dump all the current data to CSV each time this is called.
-         if let Err(e) = self.save_network_stats_to_csv() {
+        // Dump all the current data to CSV each time this is called.
+        if let Err(e) = self.save_network_stats_to_csv() {
             eprintln!("Error writing CSV: {}", e);
         }
     }
@@ -906,9 +907,7 @@ impl CsvType {
 
         Ok(())
     }
-
 }
-
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -1308,8 +1307,23 @@ impl MpduPacket {
     }
 
     pub fn print(&self, color: DebugColor) -> String {
-        print_pretty!(color , "Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
-        let a = format!("Packet ID: {}, ALVR F: {} S: {}/{} L: {}", self.packet_id, self.header_alvr.next_packet_index,self.header_alvr.shard_index, self.header_alvr.shards_count - 1, self.length_packet);
+        print_pretty!(
+            color,
+            "Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
+            self.packet_id,
+            self.header_alvr.next_packet_index,
+            self.header_alvr.shard_index,
+            self.header_alvr.shards_count - 1,
+            self.length_packet
+        );
+        let a = format!(
+            "Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
+            self.packet_id,
+            self.header_alvr.next_packet_index,
+            self.header_alvr.shard_index,
+            self.header_alvr.shards_count - 1,
+            self.length_packet
+        );
         a
     }
 }
@@ -1348,7 +1362,7 @@ impl AmpduPacket {
         let mut i = 0;
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms", 
+                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms",
                 // |  ALVR: S{}/{} , F: {}  \x1b[0m",
                 packet.packet_id,
                 packet.T_q.as_secs_f64() * 1000.0,
@@ -1416,11 +1430,7 @@ impl Coords {
         }
     }
     pub fn with_coords(x: f64, y: f64, z: f64) -> Self {
-        Self {
-            x,
-            y,
-            z,
-        }
+        Self { x, y, z }
     }
 }
 
@@ -1774,27 +1784,25 @@ pub struct GraphStatistics {
     pub actual_bitrate_bps: f32,
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
 pub struct HeuristicStats {
-        pub frame_interval_s: f32,
-        pub server_fps: f32,
-        pub steps_mbps: f32,
-    
-        pub network_heur_fps: f32,
-        pub rtt_avg_heur_s: f32,
-        pub random_prob: f32,
-    
-        pub threshold_fps: f32,
-        pub threshold_rtt_s: f32,
-        pub threshold_u: f32,
+    pub frame_interval_s: f32,
+    pub server_fps: f32,
+    pub steps_mbps: f32,
 
-        pub capacity_estimated_mbps: f32, 
-    
-        pub requested_bitrate_mbps: f32,
-    }
+    pub network_heur_fps: f32,
+    pub rtt_avg_heur_s: f32,
+    pub random_prob: f32,
 
-    
+    pub threshold_fps: f32,
+    pub threshold_rtt_s: f32,
+    pub threshold_u: f32,
+
+    pub capacity_estimated_mbps: f32,
+
+    pub requested_bitrate_mbps: f32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HapticsEvent {
     pub path: String,

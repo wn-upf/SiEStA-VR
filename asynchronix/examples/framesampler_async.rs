@@ -1,11 +1,13 @@
 use anyhow::Result;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::ChildStdin;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use minifb::{Key, Scale, Window, WindowOptions};
 use rand::Rng;
-use tokio::sync::mpsc::{unbounded_channel, bounded, UnboundedReceiver, Receiver, Sender, error::TryRecvError};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::ChildStdin;
+use tokio::sync::mpsc::{
+    bounded, error::TryRecvError, unbounded_channel, Receiver, Sender, UnboundedReceiver,
+};
 use tokio::time;
 
 pub const WIDTH_ENCODER: usize = 1920;
@@ -32,7 +34,13 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Vec<u32> 
         .collect()
 }
 
-fn scale_pixels(buffer: &[u32], orig_width: usize, orig_height: usize, new_width: usize, new_height: usize) -> Vec<u32> {
+fn scale_pixels(
+    buffer: &[u32],
+    orig_width: usize,
+    orig_height: usize,
+    new_width: usize,
+    new_height: usize,
+) -> Vec<u32> {
     let mut scaled = vec![0u32; new_width * new_height];
     for y in 0..new_height {
         let orig_y = y * orig_height / new_height;
@@ -56,7 +64,13 @@ impl HevcEncoder {
             .args(&["-re"])
             .args(&["-stream_loop", "-1"])
             .input(input)
-            .args(&["-vf", &format!("scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", width, height)])
+            .args(&[
+                "-vf",
+                &format!(
+                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                    width, height
+                ),
+            ])
             .args(&["-c:v", "hevc_nvenc"])
             .args(&["-preset", "fast"])
             .args(&["-rc", "cbr"])
@@ -219,7 +233,9 @@ impl HevcDecoder {
         match self.frame_rx.try_recv() {
             Ok(frame) => Ok(Some(frame)),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Decoder frame channel disconnected")),
+            Err(TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("Decoder frame channel disconnected"))
+            }
         }
     }
 }
@@ -229,9 +245,15 @@ async fn main() -> Result<()> {
     ffmpeg_sidecar::download::auto_download()?;
     let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/cut_video.mp4";
 
-    let mut encoder = HevcEncoder::new(input_path, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, INITIAL_BITRATE).await?;
+    let mut encoder = HevcEncoder::new(
+        input_path,
+        WIDTH_ENCODER as u32,
+        HEIGHT_ENCODER as u32,
+        INITIAL_BITRATE,
+    )
+    .await?;
     let mut decoder = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32).await?;
-    
+
     let drop_probability = 0.000;
     let mut rng = rand::thread_rng();
 
@@ -262,7 +284,13 @@ async fn main() -> Result<()> {
 
         if let Ok(Some(frame)) = decoder.try_next_frame().await {
             let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER);
-            let scaled = scale_pixels(&pixels, WIDTH_ENCODER, HEIGHT_ENCODER, scaled_width, scaled_height);
+            let scaled = scale_pixels(
+                &pixels,
+                WIDTH_ENCODER,
+                HEIGHT_ENCODER,
+                scaled_width,
+                scaled_height,
+            );
             window.update_with_buffer(&scaled, scaled_width, scaled_height)?;
             number_fps += 1;
         }
