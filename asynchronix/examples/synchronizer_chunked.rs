@@ -598,8 +598,8 @@ fn display_frame_pair_enhanced(
     let text_color = 0x00FF00;  // bright green for high visibility
     let highlight_color = 0xFF0033;  // bright red for emphasis
     
-    render_text(&mut combined_buffer,   &format!("LOW BITRATE ({} Mbps)", curb), 10, 10, window_width, text_color, 2);
-    render_text(&mut combined_buffer, &format!("MAX BITRATE ({} Mbps)", maxb), scaled_width + 20, 10, window_width, text_color, 2);
+    render_text(&mut combined_buffer,   &format!("LOW BITRATE ({} Mbps)", curb), 10, 10, window_width, text_color, 4);
+    render_text(&mut combined_buffer, &format!("MAX BITRATE ({} Mbps)", maxb), scaled_width + 20, 10, window_width, text_color, 4);
     
     // Display frame ID with proper centering
     let frame_info = format!("FRAME #{}", display_frame_id);
@@ -622,7 +622,7 @@ fn display_frame_pair_enhanced(
             0xFF0000 // Red for poor
         };
         
-        render_text(&mut combined_buffer, &sync_text, text_x, scaled_height - 40, window_width, quality_color, 2);
+        render_text(&mut combined_buffer, &sync_text, text_x, scaled_height - 40, window_width, quality_color, 4);
     }
     
     // Add difference visualization in bottom corner

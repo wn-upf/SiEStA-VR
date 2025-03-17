@@ -2146,7 +2146,7 @@ impl BitrateManager {
                 max_history_size,
             ),
 
-            bitrate_mode: BitrateMode::ConstantMbps( 5.0 ),   // ONLY CBR FOR NOW!!!
+            bitrate_mode: BitrateMode::ConstantMbps(initial_bitrate_mbps),   // ONLY CBR FOR NOW!!!
 
             last_target_bitrate_bps: 0.0, 
         }
@@ -4066,8 +4066,10 @@ impl XRClient {
             let now = context.scheduler.time();
             let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
             
+            
             // Initialize synchronized decoder if needed
-            if self.synchronized_decoder.is_none() {
+            
+            if self.synchronized_decoder.is_none(){
                 self.initialize_synchronized_decoder();
             }
             
@@ -4120,8 +4122,6 @@ impl XRClient {
                     self.name_folder, ip_client, id_f);
                 
 
-
-
                 if id_f % 10 == 0 {
 
                     if USE_VMAF
@@ -4131,21 +4131,12 @@ impl XRClient {
                         }
                     }
                 
-
-                    if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client){
-                        eprintln!("Error during hevc ref frame cleanup: {}", e); 
+                    if USE_FFMPEG{
+                        if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client){
+                            eprintln!("Error during hevc ref frame cleanup: {}", e); 
+                        }
                     }
                 }
-
-
-
-
-
-
-
-
-
-
 
                 // Missing frame detection and recovery logic
                 if id_f > self.last_processed_frame_id + 1 {
@@ -4235,170 +4226,172 @@ impl XRClient {
                 
                 // Update last processed frame ID
                 self.last_processed_frame_id = id_f;
-                
-                // Load reference frames for current frame
                 let mut max_frame = Vec::new();
                 let mut ref_frame = Vec::new();
-                
-                // Try reading max bitrate reference with retry logic
-                for attempt in 1..=5 {
-                    match fs::read(&maxb_file_path) {
-                        Ok(data) if !data.is_empty() => {
-                            max_frame = data;
-                            break;
-                        },
-                        Ok(_) => {
-                            print_pretty!(DebugColor::Yellow, 
-                                "MAX file for frame #{} exists but is empty (attempt {}/5)", 
-                                id_f, attempt,);
-                            if id_f < 10 {
-                                continue;
-                            } else {
-                                thread::sleep(Duration::from_millis(100));
-                            }
-                        },
-                        Err(e) => {
-                            if attempt < 5 {
+
+                if USE_FFMPEG {    
+                    // Try reading max bitrate reference with retry logic
+                    for attempt in 1..=5 {
+                        match fs::read(&maxb_file_path) {
+                            Ok(data) if !data.is_empty() => {
+                                max_frame = data;
+                                break;
+                            },
+                            Ok(_) => {
                                 print_pretty!(DebugColor::Yellow, 
-                                    "Error reading MAX HEVC file for frame #{} (attempt {}/5): {}", 
-                                    id_f, attempt, e,);
+                                    "MAX file for frame #{} exists but is empty (attempt {}/5)", 
+                                    id_f, attempt,);
                                 if id_f < 10 {
                                     continue;
-                                }
-                                thread::sleep(Duration::from_millis(100));
-                            } else {
-                                print_pretty!(DebugColor::Red, 
-                                    "Failed to read MAX HEVC file for frame #{} after 5 attempts", 
-                                    id_f,);
-                            }
-                        }
-                    }
-                }
-                
-                // Try reading regular reference with retry logic
-                for attempt in 1..=5 {
-                    match fs::read(&currentb_path) {
-                        Ok(data) if !data.is_empty() => {
-                            ref_frame = data;
-                            break;
-                        },
-                        Ok(_) => {
-                            print_pretty!(DebugColor::Yellow, 
-                                "REF file for frame #{} exists but is empty (attempt {}/5)", 
-                                id_f, attempt,);
-                            if id_f < 10 {
-                                continue;
-                            } else {
-                                thread::sleep(Duration::from_millis(100));
-                            }
-                        },
-                        Err(e) => {
-                            if attempt < 5 {
-                                print_pretty!(DebugColor::Yellow, 
-                                    "Error reading REF HEVC file for frame #{} (attempt {}/5): {}", 
-                                    id_f, attempt, e,);
-                                if id_f < 10 {
-                                    continue;
-                                }
-                                thread::sleep(Duration::from_millis(100));
-                            } else {
-                                print_pretty!(DebugColor::Red, 
-                                    "Failed to read REF HEVC file for frame #{} after 5 attempts", 
-                                    id_f,);
-                            }
-                        }
-                    }
-                }
-                
-                // Detect keyframes
-                if self.is_keyframe(&video_frame) {
-                    self.dec_saw_keyframe = true;
-                    print_pretty!(DebugColor::Magenta, 
-                        "*** KEYFRAME DETECTED IN REGULAR STREAM *** Size: {} bytes", 
-                        video_frame.len(),);
-                    self.dec_saw_keyframe_last_t = now;
-                }
-    
-                if self.is_keyframe(&max_frame) {
-                    print_pretty!(DebugColor::Magenta, 
-                        "*** KEYFRAME DETECTED IN MAX BITRATE STREAM *** Size: {} bytes", 
-                        max_frame.len(),);
-                }
-                
-                // Handle initialization phase
-                if !self.is_decoder_ready {
-                    // Buffer frames for initialization
-                    if !video_frame.is_empty() {
-                        self.initialization_buffer.push(video_frame.clone());
-                    }
-                    if !ref_frame.is_empty() {
-                        self.initialization_buffer_ref.push(ref_frame.clone());
-                    }
-                    if !max_frame.is_empty() {
-                        self.initialization_buffer_max.push(max_frame.clone());
-                    }
-                    
-                    let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
-                    
-                    if has_enough_frames && (self.dec_saw_keyframe || self.is_keyframe(&video_frame)) {
-                        if self.is_keyframe(&video_frame) {
-                            self.dec_saw_keyframe = true;
-                            self.dec_saw_keyframe_last_t = now;
-                        }
-                        
-                        print_pretty!(DebugColor::Cyan, 
-                            "Decoder initialization complete! Buffered {} frames", 
-                            self.initialization_buffer.len(),);
-                        
-                        // Initialize synchronized decoder
-                        if self.synchronized_decoder.is_none() {
-                            self.initialize_synchronized_decoder();
-                        }
-                        
-                        // Process all buffered frames through synchronized decoder
-                        if let Some(sync_decoder) = &self.synchronized_decoder {
-                            let mut sync_decoder_guard = sync_decoder.lock().unwrap();
-                            
-                            // Process all buffered frames as pairs
-                            for i in 0..self.initialization_buffer.len() {
-                                let dec_frame = &self.initialization_buffer[i];
-                                let max_frame = if i < self.initialization_buffer_max.len() {
-                                    &self.initialization_buffer_max[i]
                                 } else {
-                                    continue;
-                                };
-                                
-                                // Process through synchronized decoder
-                                if !dec_frame.is_empty() && !max_frame.is_empty() {
-                                    sync_decoder_guard.process_frame_pair(
-                                        dec_frame.clone(), 
-                                        max_frame.clone(), 
-                                        i
-                                    );
-                                    
-                                    print_pretty!(DebugColor::Green, 
-                                        "Processed initialization frame pair #{}", 
-                                        i,);
+                                    thread::sleep(Duration::from_millis(100));
+                                }
+                            },
+                            Err(e) => {
+                                if attempt < 5 {
+                                    print_pretty!(DebugColor::Yellow, 
+                                        "Error reading MAX HEVC file for frame #{} (attempt {}/5): {}", 
+                                        id_f, attempt, e,);
+                                    if id_f < 10 {
+                                        continue;
+                                    }
+                                    thread::sleep(Duration::from_millis(100));
+                                } else {
+                                    print_pretty!(DebugColor::Red, 
+                                        "Failed to read MAX HEVC file for frame #{} after 5 attempts", 
+                                        id_f,);
                                 }
                             }
                         }
-                        
-                        // Mark decoder as ready and clear buffers
-                        self.is_decoder_ready = true;
-                        self.is_ref_decoder_ready = true;
-                        self.initialization_buffer.clear();
-                        self.initialization_buffer_ref.clear();
-                        self.initialization_buffer_max.clear();
-                    } else {
-                        print_pretty!(DebugColor::Blue, 
-                            "Buffering frame {} of {} (keyframe seen: {})", 
-                            self.initialization_buffer.len(), 
-                            self.min_buffered_frames, 
-                            self.dec_saw_keyframe,);
                     }
-                }
+                    
+                    // Try reading regular reference with retry logic
+                    for attempt in 1..=5 {
+                        match fs::read(&currentb_path) {
+                            Ok(data) if !data.is_empty() => {
+                                ref_frame = data;
+                                break;
+                            },
+                            Ok(_) => {
+                                print_pretty!(DebugColor::Yellow, 
+                                    "REF file for frame #{} exists but is empty (attempt {}/5)", 
+                                    id_f, attempt,);
+                                if id_f < 10 {
+                                    continue;
+                                } else {
+                                    thread::sleep(Duration::from_millis(100));
+                                }
+                            },
+                            Err(e) => {
+                                if attempt < 5 {
+                                    print_pretty!(DebugColor::Yellow, 
+                                        "Error reading REF HEVC file for frame #{} (attempt {}/5): {}", 
+                                        id_f, attempt, e,);
+                                    if id_f < 10 {
+                                        continue;
+                                    }
+                                    thread::sleep(Duration::from_millis(100));
+                                } else {
+                                    print_pretty!(DebugColor::Red, 
+                                        "Failed to read REF HEVC file for frame #{} after 5 attempts", 
+                                        id_f,);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Detect keyframes
+                    if self.is_keyframe(&video_frame) {
+                        self.dec_saw_keyframe = true;
+                        print_pretty!(DebugColor::Magenta, 
+                            "*** KEYFRAME DETECTED IN REGULAR STREAM *** Size: {} bytes", 
+                            video_frame.len(),);
+                        self.dec_saw_keyframe_last_t = now;
+                    }
+        
+                    if self.is_keyframe(&max_frame) {
+                        print_pretty!(DebugColor::Magenta, 
+                            "*** KEYFRAME DETECTED IN MAX BITRATE STREAM *** Size: {} bytes", 
+                            max_frame.len(),);
+                    }
+                    
+                    if !self.is_decoder_ready {
+                        // Buffer frames for initialization
+                        if !video_frame.is_empty() {
+                            self.initialization_buffer.push(video_frame.clone());
+                        }
+                        if !ref_frame.is_empty() {
+                            self.initialization_buffer_ref.push(ref_frame.clone());
+                        }
+                        if !max_frame.is_empty() {
+                            self.initialization_buffer_max.push(max_frame.clone());
+                        }
+                        
+                        let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
+                        
+                        if has_enough_frames && (self.dec_saw_keyframe || self.is_keyframe(&video_frame)) {
+                            if self.is_keyframe(&video_frame) {
+                                self.dec_saw_keyframe = true;
+                                self.dec_saw_keyframe_last_t = now;
+                            }
+                            
+                            print_pretty!(DebugColor::Cyan, 
+                                "Decoder initialization complete! Buffered {} frames", 
+                                self.initialization_buffer.len(),);
+                            
+                            // Initialize synchronized decoder
+                            if self.synchronized_decoder.is_none() {
+                                self.initialize_synchronized_decoder();
+                            }
+                            
+                            // Process all buffered frames through synchronized decoder
+                            if let Some(sync_decoder) = &self.synchronized_decoder {
+                                let mut sync_decoder_guard = sync_decoder.lock().unwrap();
+                                
+                                // Process all buffered frames as pairs
+                                for i in 0..self.initialization_buffer.len() {
+                                    let dec_frame = &self.initialization_buffer[i];
+                                    let max_frame = if i < self.initialization_buffer_max.len() {
+                                        &self.initialization_buffer_max[i]
+                                    } else {
+                                        continue;
+                                    };
+                                    
+                                    // Process through synchronized decoder
+                                    if !dec_frame.is_empty() && !max_frame.is_empty() {
+                                        sync_decoder_guard.process_frame_pair(
+                                            dec_frame.clone(), 
+                                            max_frame.clone(), 
+                                            i
+                                        );
+                                        
+                                        print_pretty!(DebugColor::Green, 
+                                            "Processed initialization frame pair #{}", 
+                                            i,);
+                                    }
+                                }
+                            }
+                            
+                            // Mark decoder as ready and clear buffers
+                            self.is_decoder_ready = true;
+                            self.is_ref_decoder_ready = true;
+                            self.initialization_buffer.clear();
+                            self.initialization_buffer_ref.clear();
+                            self.initialization_buffer_max.clear();
+                        } else {
+                            print_pretty!(DebugColor::Blue, 
+                                "Buffering frame {} of {} (keyframe seen: {})", 
+                                self.initialization_buffer.len(), 
+                                self.min_buffered_frames, 
+                                self.dec_saw_keyframe,);
+                        }
+                    }
+
+
+
+                }            
                 // Normal processing mode
-                else if !video_frame.is_empty() && !max_frame.is_empty() {
+                if !video_frame.is_empty() && (!max_frame.is_empty()|| !USE_FFMPEG ) {
                     if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                         let miin: usize = usize::min(video_frame.len(), 50);
                         print_pretty!(
@@ -4411,128 +4404,130 @@ impl XRClient {
                             self.decoder_queue.len(),
                             interarrival.as_secs_f32(),
                         );
-                        
-                        // Process through synchronized decoder
-                        if let Some(sync_decoder) = &self.synchronized_decoder {
-                            let mut sync_decoder_guard = sync_decoder.lock().unwrap();
-                            
-                            // Process the frame pair through synchronized decoder
-                            sync_decoder_guard.process_frame_pair(
-                                video_frame.clone(), 
-                                max_frame.clone(), 
-                                id_f
-                            );
-                            
-                            print_pretty!(DebugColor::Green, 
-                                "Processed frame pair #{} through synchronized decoder", 
-                                id_f,);
-                            
-                            // Try to get a synchronized frame pair
-                            if let Some(frame_pair) = sync_decoder_guard.next_frame_pair() {
+                        if USE_FFMPEG{
+                            if let Some(sync_decoder) = &self.synchronized_decoder {
+                                let mut sync_decoder_guard = sync_decoder.lock().unwrap();
+                                
+                                // Process the frame pair through synchronized decoder
+                                sync_decoder_guard.process_frame_pair(
+                                    video_frame.clone(), 
+                                    max_frame.clone(), 
+                                    id_f
+                                );
+                                
                                 print_pretty!(DebugColor::Green, 
-                                    "Retrieved synchronized frame pair #{} from decoder", 
-                                    frame_pair.frame_id,);
+                                    "Processed frame pair #{} through synchronized decoder", 
+                                    id_f,);
                                 
-                                // Display synchronized frame pair
-                                thread_local! {
-                                    static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
-                                }
-                                
-                                DISPLAY_WINDOWS.with(|windows_cell| {
-                                    let mut windows = windows_cell.borrow_mut();
+                                // Try to get a synchronized frame pair
+                                if let Some(frame_pair) = sync_decoder_guard.next_frame_pair() {
+                                    print_pretty!(DebugColor::Green, 
+                                        "Retrieved synchronized frame pair #{} from decoder", 
+                                        frame_pair.frame_id,);
                                     
-                                    // Create window if it doesn't exist
-                                    if !windows.contains_key(&self.server_ip) {
-                                        let window_title = format!("{} - Frame Compare {}", 
-                                                                 format_elapsed!(now), self.server_ip);
-                                        
-                                        let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW * 2.0 + 10.0) as usize;
-                                        let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-                                        
-                                        match Window::new(
-                                            &window_title,
-                                            window_width,
-                                            window_height,
-                                            WindowOptions::default()
-                                        ) {
-                                            Ok(window) => {
-                                                windows.insert(self.server_ip.clone(), window);
-                                                print_pretty!(DebugColor::Green, 
-                                                    "Created display window for {} ({} x {})", 
-                                                    self.server_ip, window_width, window_height,);
-                                            },
-                                            Err(e) => {
-                                                print_pretty!(DebugColor::Red, 
-                                                    "Failed to create display window: {}", 
-                                                    e,);
-                                            }
-                                        }
+                                    // Display synchronized frame pair
+                                    thread_local! {
+                                        static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
                                     }
                                     
-                                    // Update window with frame pair
-                                    if let Some(window) = windows.get_mut(&self.server_ip) {
-                                        if let (Some(decoded), Some(reference)) = 
-                                            (&frame_pair.decoded, &frame_pair.reference) {
+                                    DISPLAY_WINDOWS.with(|windows_cell| {
+                                        let mut windows = windows_cell.borrow_mut();
+                                        
+                                        // Create window if it doesn't exist
+                                        if !windows.contains_key(&self.server_ip) {
+                                            let window_title = format!("{} - Frame Compare {}", 
+                                                                     format_elapsed!(now), self.server_ip);
                                             
-                                            // Calculate content-based similarity
-                                            let similarity = if let (Some(raw1), Some(raw2)) = 
-                                                (&frame_pair.decoded_raw, &frame_pair.reference_raw) {
-                                                compute_enhanced_frame_similarity(
-                                                    raw1, raw2, WIDTH_ENCODER, HEIGHT_ENCODER
-                                                )
-                                            } else {
-                                                0.1 // Default value
-                                            };
+                                            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW * 2.0 + 10.0) as usize;
+                                            let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
                                             
-                                            // Use hardcoded bitrate values as requested
-                                            let current_bitrate = 66.66;
-                                            let max_bitrate = 100.0;
-                                            
-                                            // Display with enhanced visualization
-                                            let display_result = display_frame_pair_enhanced(
-                                                &frame_pair,
-                                                &self.server_ip,
-                                                frame_pair.frame_id,
-                                                window,
-                                                Some(similarity),
-                                                max_bitrate,
-                                                current_bitrate
-                                            );
-                                            
-                                            if display_result {
-                                                print_pretty!(DebugColor::Green, 
-                                                    "Successfully displayed frame pair #{} (similarity: {:.2}%)", 
-                                                    frame_pair.frame_id, (1.0 - similarity) * 100.0,);
+                                            match Window::new(
+                                                &window_title,
+                                                window_width,
+                                                window_height,
+                                                WindowOptions::default()
+                                            ) {
+                                                Ok(window) => {
+                                                    windows.insert(self.server_ip.clone(), window);
+                                                    print_pretty!(DebugColor::Green, 
+                                                        "Created display window for {} ({} x {})", 
+                                                        self.server_ip, window_width, window_height,);
+                                                },
+                                                Err(e) => {
+                                                    print_pretty!(DebugColor::Red, 
+                                                        "Failed to create display window: {}", 
+                                                        e,);
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Update window with frame pair
+                                        if let Some(window) = windows.get_mut(&self.server_ip) {
+                                            if let (Some(decoded), Some(reference)) = 
+                                                (&frame_pair.decoded, &frame_pair.reference) {
                                                 
-                                                // Offload VMAF analysis to channel for async processing
-                                                if USE_VMAF {
-                                                    if let (Some(raw_decoded), Some(raw_maxb)) = 
-                                                        (&frame_pair.decoded_raw, &frame_pair.reference_raw) {
-                                                        
-                                                        let _ = self.channel_tx_vmaf.send((
-                                                            raw_decoded.clone(), 
-                                                            raw_maxb.clone(), 
-                                                            frame_pair.frame_id
-                                                        ));
+                                                // Calculate content-based similarity
+                                                let similarity = if let (Some(raw1), Some(raw2)) = 
+                                                    (&frame_pair.decoded_raw, &frame_pair.reference_raw) {
+                                                    compute_enhanced_frame_similarity(
+                                                        raw1, raw2, WIDTH_ENCODER, HEIGHT_ENCODER
+                                                    )
+                                                } else {
+                                                    0.1 // Default value
+                                                };
+                                                
+                                                // Use hardcoded bitrate values as requested
+                                                let current_bitrate = 66.66;
+                                                let max_bitrate = 100.0;
+                                                
+                                                // Display with enhanced visualization
+                                                let display_result = display_frame_pair_enhanced(
+                                                    &frame_pair,
+                                                    &self.server_ip,
+                                                    frame_pair.frame_id,
+                                                    window,
+                                                    Some(similarity),
+                                                    max_bitrate,
+                                                    current_bitrate
+                                                );
+                                                
+                                                if display_result {
+                                                    print_pretty!(DebugColor::Green, 
+                                                        "Successfully displayed frame pair #{} (similarity: {:.2}%)", 
+                                                        frame_pair.frame_id, (1.0 - similarity) * 100.0,);
+                                                    
+                                                    // Offload VMAF analysis to channel for async processing
+                                                    if USE_VMAF {
+                                                        if let (Some(raw_decoded), Some(raw_maxb)) = 
+                                                            (&frame_pair.decoded_raw, &frame_pair.reference_raw) {
+                                                            
+                                                            let _ = self.channel_tx_vmaf.send((
+                                                                raw_decoded.clone(), 
+                                                                raw_maxb.clone(), 
+                                                                frame_pair.frame_id
+                                                            ));
+                                                        }
                                                     }
+                                                } else {
+                                                    print_pretty!(DebugColor::Red, 
+                                                        "Failed to display frame pair #{}", 
+                                                        frame_pair.frame_id,);
                                                 }
                                             } else {
-                                                print_pretty!(DebugColor::Red, 
-                                                    "Failed to display frame pair #{}", 
+                                                print_pretty!(DebugColor::Yellow, 
+                                                    "Frame pair #{} missing decoded or reference frame", 
                                                     frame_pair.frame_id,);
                                             }
-                                        } else {
-                                            print_pretty!(DebugColor::Yellow, 
-                                                "Frame pair #{} missing decoded or reference frame", 
-                                                frame_pair.frame_id,);
                                         }
-                                    }
-                                });
+                                    });
+                                }
+                            } else {
+                                print_pretty!(DebugColor::Red, 
+                                    "Synchronized decoder not initialized!", );
                             }
-                        } else {
-                            print_pretty!(DebugColor::Red, 
-                                "Synchronized decoder not initialized!", );
-                        }
+
+                        }                        
+                        
                     }
                 }
                 
@@ -4943,13 +4938,13 @@ fn display_frame_pair_enhanced(
     let text_color = 0x00FF00;  // bright green for high visibility
     let highlight_color = 0xFF0033;  // bright red for emphasis
     
-    render_text(&mut combined_buffer,   &format!("LOW BITRATE"), 10, 10, window_width, text_color, 2);
-    render_text(&mut combined_buffer, &format!("MAX BITRATE ({} Mbps)", maxb), scaled_width + 20, 10, window_width, text_color, 2);
+    render_text(&mut combined_buffer,   &format!("LOW BITRATE"), 10, 10, window_width, text_color, 3);
+    render_text(&mut combined_buffer, &format!("MAX BITRATE ({} Mbps)", maxb), scaled_width + 20, 10, window_width, text_color, 3);
     
     // Display frame ID with proper centering
     let frame_info = format!("FRAME #{}", display_frame_id);
     let text_x = (window_width - frame_info.len() * 6 * 2) / 2;
-    render_text(&mut combined_buffer, &frame_info, text_x, scaled_height - 20, window_width, highlight_color, 2);
+    render_text(&mut combined_buffer, &frame_info, text_x, scaled_height - 10, window_width, highlight_color, 2);
     
     // Add sync quality indicator if available
     if let Some(quality) = sync_quality {
@@ -4967,7 +4962,7 @@ fn display_frame_pair_enhanced(
             0xFF0000 // Red for poor
         };
         
-        render_text(&mut combined_buffer, &sync_text, text_x, scaled_height - 40, window_width, quality_color, 2);
+        render_text(&mut combined_buffer, &sync_text, text_x, scaled_height, window_width, quality_color, 3);
     }
     
     // Add difference visualization in bottom corner
@@ -4992,7 +4987,7 @@ fn display_frame_pair_enhanced(
             );
             
             // Label the visualization
-            render_text(&mut combined_buffer, "DIFF", diff_x, diff_y - 15, window_width, 0xFFFFFF, 1);
+            render_text(&mut combined_buffer, "DIFF", diff_x, diff_y - 16, window_width, 0xFFFFFF, 3);
         }
     }
     

@@ -59,10 +59,7 @@ use std::{
 
 use crate::debug_print;
 use crate::lib::models_XR::{
-    XRDevice,
-    XRServer, // ,XRClient
-    HEIGHT_ENCODER,
-    WIDTH_ENCODER,
+    XRDevice, XRServer, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER
 };
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
@@ -158,9 +155,12 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
     pub async fn start_chunking(&mut self, bitrate_mbps: f32)  {
 
-        self.bitrate = format!("{:.2}M", bitrate_mbps);
+        let bitrate_adjusted_fps = bitrate_mbps *  FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS ; 
+        // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units. 
 
-        println!("{} CHUNKING with bitrate {}!", self.encoder_str, self.bitrate); 
+        self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
+
+        println!("{} CHUNKING with bitrate {}!", self.encoder_str, bitrate_mbps); 
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         command
@@ -2053,7 +2053,6 @@ impl<H: Serialize> StreamSender<H> {
 
         } else {
             // Fallback for non-FFMPEG mode
-            println!("ERROR IN DOING FFMPEG!"); 
             buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
         }
         
@@ -2287,168 +2286,5 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     );
 
     buffer_inner
-}
-
-#[rustfmt::skip]
-pub fn generate_sample_ffmpeg(current_bitrate_mbps: f32, timestamp: f64, fps: f64) -> Vec<u8> {
-    let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
-    let hours = (timestamp / 3600.0) as u32;
-    let minutes = ((timestamp % 3600.0) / 60.0) as u32;
-    let seconds = timestamp % 60.0;
-    let formatted_timestamp = format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds - 10.0);
-
-    let current_bitrate_mbps = current_bitrate_mbps / 90.0; // fps
-
-    print_pretty!(DebugColor::ForestGreen, "T_VIDEO={}", formatted_timestamp);
-
-    // First pass: Analysis (multi-pass encoding)
-    let first_pass_log = "/tmp/ffmpeg_first_pass.log";
-    let mut first_pass = Command::new("ffmpeg")
-        .args([
-            "-hwaccel",
-            "cuda",
-            "-ss",
-            &formatted_timestamp,
-            "-i",
-            input_path,
-            "-pix_fmt",
-            "yuv420p",
-            "-vf",
-            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-c:v",
-            "hevc_nvenc",
-            "-b:v",
-            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset", "medium", // Higher quality preset
-            "-rc", "vbr_hq", // Variable Bitrate High Quality mode
-            "-cq", "19", // Constant Quality level (lower is higher quality)
-            "-b_ref_mode", "2", // Enable B-frame reference mode
-            "-bf", "3", // Number of B-frames (0-3)
-            "-temporal-aq", "1", // Temporal Adaptive Quantization
-            "-spatial-aq", "1", // Spatial Adaptive Quantization
-            "-aq-strength", "8", // Adaptive Quantization strength
-            "-frames:v", "1",
-            "-an",              // no audio 
-            "-pass", "1", 
-            "-passlogfile", first_pass_log,
-            "-f", "null",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn first pass FFMPEG");
-
-    let first_pass_status = first_pass.wait().expect("Failed to wait for first pass");
-
-    if !first_pass_status.success() {
-        eprintln!("First pass encoding failed");
-        return Vec::new();
-    }
-
-    // Second pass: Actual encoding with analysis from first pass
-    let mut ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-hwaccel",
-            "cuda",
-            "-ss",
-            &formatted_timestamp,
-            "-i",
-            input_path,
-            "-pix_fmt",
-            "yuv420p",
-            "-vf",
-            &format!("scale={}:{},format=yuv420p", WIDTH_ENCODER, HEIGHT_ENCODER),
-            "-c:v",
-            "hevc_nvenc",
-            "-b:v",
-            &format!("{:.0}K", current_bitrate_mbps as f64 * 1000.0),
-            "-preset",
-            "medium", // Higher quality preset
-            "-rc",
-            "vbr_hq", // Variable Bitrate High Quality mode
-            "-cq",
-            "19", // Constant Quality level (lower is higher quality)
-            "-b_ref_mode",
-            "2", // Enable B-frame reference mode
-            "-bf",
-            "3", // Number of B-frames (0-3)
-            "-temporal-aq",
-            "1", // Temporal Adaptive Quantization
-            "-spatial-aq",
-            "1", // Spatial Adaptive Quantization
-            "-aq-strength",
-            "8", // Adaptive Quantization strength
-            "-frames:v",
-            "1",
-            "-an",
-            "-pass",
-            "2",
-            "-passlogfile",
-            first_pass_log,
-            "-f",
-            "mp4", // Output as mp4 container
-            "-bsf:v",
-            "hevc_mp4toannexb", // Crucial: Add this filter
-            "-movflags",
-            "+frag_keyframe+empty_moov",
-            "-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn second pass FFMPEG");
-
-    let mut ffmpeg_stdout = ffmpeg.stdout.take().unwrap();
-    let mut buf = Vec::new();
-    ffmpeg_stdout
-        .read_to_end(&mut buf); 
-        // .expect("Failed to read encoded buffer")
-
-    // Save for debugging
-    std::fs::write("sample_frame_encoded.hevc", &buf.clone()).expect("Failed to write debug file");
-
-    print_pretty!(
-        DebugColor::Salmon,
-        "Encoded frame size: {} bytes ({} KB)\nData = {:?}",
-        buf.len(),
-        buf.len() / 1024,
-        &buf[..200]
-    );
-
-    buf
-}
-
-// pub fn generate_all_bitrates_all_frames(list_bitrates: Vec<f32>, fps: f64) {
-
-//     let MAX_DURATION_MOVIE = 30.0;
-
-//     for bitrate in list_bitrates{
-
-//         let num_frames = MAX_DURATION_MOVIE * fps;
-//         for frame in 0..num_frames as usize {
-
-//         }
-//         println!("Encoding movie with bitrate: {}", bitrate);
-
-//         let input_path = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/sample_short.mp4";
-
-//         let output_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/temp_video_bitrates/f{}_{}.mp4",  ,bitrate);
-
-//     }
-
-// }
-
-// A structure to hold the process and its output buffering channel.
-struct EncoderBuffer {
-    process: Child,
-    frame_rx: Receiver<Vec<u8>>,
-}
-lazy_static! {
-    // Thread-safe FFmpeg process pool
-    static ref FFMPEG_ENCODE_POOL: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
-    // static ref FFMPEG_DECODE_POOL: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
