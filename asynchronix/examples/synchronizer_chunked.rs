@@ -2371,7 +2371,7 @@ impl ChunkedHevcEncoder {
                 ),
             ])
             .args(&["-c:v", "hevc_nvenc"])
-            .args(&["-preset", "fast"])
+            .args(&["-preset", "ultrafast"])
             .args(&["-rc", "cbr"])
             .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
             .args(&["-rc-lookahead", "0"])
@@ -2389,7 +2389,7 @@ impl ChunkedHevcEncoder {
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
-        print!("{} SPAWN CHUNK...", self.encoder_str,);
+        // print!("{} SPAWN CHUNK...", self.encoder_str,);
         // let loop_limit = 1000000;
         let mut i = 0;
         // Read data from the process until it ends.

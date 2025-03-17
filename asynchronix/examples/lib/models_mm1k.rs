@@ -75,8 +75,8 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: f64 = 13.0;
-pub const STEP1_TEND: f64 = 16.0;
+pub const STEP1_TBEGIN: f64 = 15.0;
+pub const STEP1_TEND: f64 = 17.0;
 
 pub const STEP2_TBEGIN: f64 = 20.0;
 pub const STEP2_TEND: f64 = 22.5;
@@ -475,9 +475,9 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.008), valid_from: valid_from, valid_until: valid_until });
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.008), valid_from: valid_from, valid_until: valid_until });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
 
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));

@@ -4728,7 +4728,8 @@ impl XRClient {
                                                     window,
                                                     Some(similarity),
                                                     max_bitrate,
-                                                    current_bitrate
+                                                    current_bitrate,
+                                                    now, 
                                                 );
                                                 if display_result {
                                                     print_pretty!(DebugColor::Green,
@@ -5116,6 +5117,7 @@ fn display_frame_pair_enhanced(
     sync_quality: Option<f64>,
     maxb: f32,
     curb: f32,
+    now: TaiTime<0>, 
 ) -> bool {
     let decoded = match &pair.decoded {
         Some(frame) => frame,
@@ -5233,10 +5235,10 @@ fn display_frame_pair_enhanced(
         &mut combined_buffer,
         &frame_info,
         text_x,
-        scaled_height - 10,
+        scaled_height - 55,
         window_width,
         highlight_color,
-        2,
+        3,
     );
 
     // Add sync quality indicator if available
@@ -5259,7 +5261,7 @@ fn display_frame_pair_enhanced(
             &mut combined_buffer,
             &sync_text,
             text_x,
-            scaled_height,
+            scaled_height - 30,
             window_width,
             quality_color,
             3,
@@ -5305,9 +5307,10 @@ fn display_frame_pair_enhanced(
     // Update window title with precise frame information and sync quality
     let title = if let Some(quality) = sync_quality {
         format!(
-            "HEVC Comparison - Frame #{} - Sync: {:.1}%",
+            "HEVC Comparison - Frame #{} - Sync: {:.1}% - t: {}",
             display_frame_id,
-            (1.0 - quality) * 100.0
+            (1.0 - quality) * 100.0,
+            format_elapsed!(now), 
         )
     } else {
         format!("HEVC Comparison - Frame #{}", display_frame_id)
