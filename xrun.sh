@@ -1,9 +1,9 @@
-NUMBER_OF_JOBS=4
+NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=0
 
 
 
-simTime=50.0
+simTime=35.0
 k_queue=10000
 mean_length=12000.0
 rate_bps_src=20E6; 
@@ -23,8 +23,8 @@ IS_UL_BG=(0)
 # initial_bitrate_mbps=(0.1 1 2 3 5 10 20 40 60 80 100)
 
 
-N_XR=(1)
-initial_bitrate_mbps=(0.1 1.0 2.0 3.0 5.0 10.0 20.0 40.0 60.0 80.0 100.0)
+N_XR=(2)
+initial_bitrate_mbps=(3.0 5.0 10.0 20.0 40.0 60.0 80.0 100.0)
 
 # Define the function to execute on Ctrl+C
 handle_interrupt() {

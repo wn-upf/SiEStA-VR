@@ -96,7 +96,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.55;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.35;
 pub const VMAF_BATCH_SIZE: usize = 10; // Process 10 frames at a time
 pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000; // Process batch after 1 second even if
 
@@ -139,7 +139,7 @@ lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
 }
 
-struct FramePair {
+pub struct FramePair {
     decoded: Option<Vec<u32>>,
     reference: Option<Vec<u32>>,
     decoded_raw: Option<Vec<u8>>,
@@ -827,7 +827,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..5 {
+        for _ in 0..20 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
@@ -847,7 +847,7 @@ impl SynchronizedDecoder {
                 find_best_frame_match(&regular_decoded, &max_decoded);
 
             // If the similarity is below threshold, create a synchronized pair.
-            if similarity < 0.05 {
+            if similarity < 0.015 {
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
                     decoded: Some(regular_decoded[best_regular_idx].1.clone()),
@@ -879,10 +879,10 @@ impl SynchronizedDecoder {
                             frame_id,
                         };
                         self.output_queue.push_back(pair);
-                        println!(
-                            "Buffered extra regular frame as pair #{} (duplicating max)",
-                            frame_id
-                        );
+                        // println!(
+                        //     "Buffered extra regular frame as pair #{} (duplicating max)",
+                        //     frame_id
+                        // );
                     }
                 }
             }
@@ -902,10 +902,10 @@ impl SynchronizedDecoder {
                             frame_id,
                         };
                         self.output_queue.push_back(pair);
-                        println!(
-                            "Buffered extra max frame as pair #{} (duplicating regular)",
-                            frame_id
-                        );
+                        // println!(
+                        //     "Buffered extra max frame as pair #{} (duplicating regular)",
+                        //     frame_id
+                        // );
                     }
                 }
             }
@@ -2836,6 +2836,8 @@ impl MetricsLogger {
         ref_path: &str,
         lossy_path: &str,
     ) -> Result<()> {
+
+
         // Create a temporary directory for processing
         let temp_dir = TempDir::new()?;
 
@@ -3861,8 +3863,8 @@ impl XRClient {
         }
         // print_prettyy!(DebugColor::ForestGreen, "Inside VMAF analysis - Frame files written", );
 
-        // Calculate timestamp in milliseconds - convert to f64 as required by process_frame_metrics
-        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64() * 1000.0;
+        // convert to f64 as required by process_frame_metrics
+        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64();
         // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", );
 
         // Process frame metrics
@@ -3877,9 +3879,9 @@ impl XRClient {
                 .await
             {
                 Ok(_) => {
-                    if frame_id % 10 == 0 {
-                        println!("Processed VMAF analysis for frame {}", frame_id);
-                    }
+                    // if frame_id % 10 == 0 {
+                    //     println!("Processed VMAF analysis for frame {}", frame_id);
+                    // }
                 }
                 Err(e) => {
                     eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
@@ -5298,10 +5300,10 @@ fn display_frame_pair_enhanced(
     // Critical operation: Update the window buffer with our composite frame
     match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
         Ok(_) => {
-            println!(
-                "✅ Successfully rendered frame #{} to window",
-                display_frame_id
-            );
+            // println!(
+            //     "✅ Successfully rendered frame #{} to window",
+            //     display_frame_id
+            // );
             true
         }
         Err(e) => {

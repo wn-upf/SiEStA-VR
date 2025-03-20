@@ -56,7 +56,7 @@ use crate::lib::{DebugColor, DEBUG_PRINT_ENABLED, USE_FFMPEG};
 // use crate::{debug_bgprint, format_elapsed};
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 350.0;
+pub const OFFSET_VIDEO: f64 = 180.0;
 use rand::Rng;
 use std::cell::RefCell;
 use std::fmt::{self, Debug};
