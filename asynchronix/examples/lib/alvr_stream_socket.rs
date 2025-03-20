@@ -87,7 +87,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_s: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 120.0;
+pub const OFFSET_VIDEO: f64 = 43.2;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 120;
@@ -250,7 +250,7 @@ impl ChunkedHevcEncoder {
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
-        print!("{} SPAWN CHUNK...", self.encoder_str,);
+        // print!("{} SPAWN CHUNK...", self.encoder_str,);
         // let loop_limit = 1000000;
         let mut i = 0;
         // Read data from the process until it ends.
@@ -1941,7 +1941,7 @@ impl<H: Serialize> StreamSender<H> {
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k", "zoro", "furbo", "cut_video", ]; 
+        let random_file_list = ["garp4k", "zoro", "furbo", "cut_video", "snow", ]; 
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());        
         let final_file = match choice_random {
             Some(file) => {file},
@@ -1951,9 +1951,10 @@ impl<H: Serialize> StreamSender<H> {
             },
 
         }; 
+        let grp= "garp4k"; 
         
         let input_path =
-            &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4");
+            &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{grp}.mp4");
 
         let mut buffer: Vec<u8> = Vec::new();
         print_pretty!(
@@ -1975,8 +1976,8 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                // let random_offset = OFFSET_VIDEO;
+                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                let random_offset = OFFSET_VIDEO;
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,

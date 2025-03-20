@@ -423,37 +423,31 @@ fn compute_enhanced_frame_similarity(
 
     // Multi-scale analysis
     for (scale_idx, &block_size) in BLOCK_SIZES.iter().enumerate() {
-        // Calculate sampling positions - sparse sampling for efficiency
-        let step_x = (width / block_size).max(1);
-        let step_y = (height / block_size).max(1);
-
-        // Process each block
+        // Overlapping block steps: step by half the block size.
+        let step_x = (block_size / 2).max(1);
+        let step_y = (block_size / 2).max(1);
+    
+        // Process each overlapping block
         for by in (0..height).step_by(step_y) {
             for bx in (0..width).step_by(step_x) {
-                // Calculate block boundaries
                 let block_end_x = (bx + block_size).min(width);
                 let block_end_y = (by + block_size).min(height);
-
-                // Initialize block statistics
+    
+                // Initialize block statistics.
                 let mut block_diff_r = 0.0;
                 let mut block_diff_g = 0.0;
                 let mut block_diff_b = 0.0;
                 let mut block_samples = 0;
-
-                // Sample pixels within the block (sparse)
-                for y in (by..block_end_y).step_by(2) {
-                    for x in (bx..block_end_x).step_by(2) {
+    
+                // Increased sampling density: sample every pixel (step of 1).
+                for y in by..block_end_y {
+                    for x in bx..block_end_x {
                         let idx = (y * width + x) * 3;
-
                         if idx + 2 < frame1.len() && idx + 2 < frame2.len() {
-                            // Calculate color channel differences
                             let r_diff = (frame1[idx] as i32 - frame2[idx] as i32).abs() as f64;
-                            let g_diff =
-                                (frame1[idx + 1] as i32 - frame2[idx + 1] as i32).abs() as f64;
-                            let b_diff =
-                                (frame1[idx + 2] as i32 - frame2[idx + 2] as i32).abs() as f64;
-
-                            // Accumulate weighted differences
+                            let g_diff = (frame1[idx + 1] as i32 - frame2[idx + 1] as i32).abs() as f64;
+                            let b_diff = (frame1[idx + 2] as i32 - frame2[idx + 2] as i32).abs() as f64;
+    
                             block_diff_r += r_diff;
                             block_diff_g += g_diff;
                             block_diff_b += b_diff;
@@ -461,16 +455,12 @@ fn compute_enhanced_frame_similarity(
                         }
                     }
                 }
-
-                // Only process blocks with valid samples
+    
                 if block_samples > 0 {
-                    // Calculate perceptually weighted block difference
                     let avg_diff = (block_diff_r * PERCEPTUAL_WEIGHTS[0]
                         + block_diff_g * PERCEPTUAL_WEIGHTS[1]
                         + block_diff_b * PERCEPTUAL_WEIGHTS[2])
-                        / (block_samples as f64 * 255.0); // Normalize to [0-1]
-
-                    // Add to scale accumulator
+                        / (block_samples as f64 * 255.0);
                     scale_diffs[scale_idx] += avg_diff;
                     scale_samples[scale_idx] += 1;
                 }
@@ -827,7 +817,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..20 {
+        for _ in 0..10 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
@@ -847,7 +837,7 @@ impl SynchronizedDecoder {
                 find_best_frame_match(&regular_decoded, &max_decoded);
 
             // If the similarity is below threshold, create a synchronized pair.
-            if similarity < 0.015 {
+            if similarity < 0.4 {
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
                     decoded: Some(regular_decoded[best_regular_idx].1.clone()),
@@ -2855,7 +2845,9 @@ impl MetricsLogger {
 
         // Convert reference frame to Y4M
         let ref_status = Command::new("ffmpeg")
+            
             .args(&[
+                "-hwaccel", "cuda",
                 "-loglevel",
                 "error", // Add this line to reduce verbosity
                 "-y",
@@ -2880,6 +2872,7 @@ impl MetricsLogger {
         // Convert lossy frame to Y4M
         let lossy_status = Command::new("ffmpeg")
             .args(&[
+                "-hwaccel", "cuda",
                 "-loglevel",
                 "error", // Add this line to reduce verbosity
                 "-y",
@@ -2922,6 +2915,7 @@ impl MetricsLogger {
         // Calculate all metrics in a single ffmpeg call
         let metrics_status = Command::new("ffmpeg")
             .args(&[
+                "-hwaccel", "cuda",
                 "-loglevel",
                 "error", // Add this line to reduce verbosity
                 "-i",
@@ -3130,8 +3124,8 @@ pub struct XRClient {
 #[allow(unused)]
 impl XRClient {
     pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>, name_folder: &str) -> Self {
-        let (vmaf_tx, vmaf_rx) = bounded(5);
-        let (group_tx, group_rx) = bounded(5); // Buffer up to 5 groups
+        let (vmaf_tx, vmaf_rx) = bounded(10);
+        let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
         let synchronized_throttle = Arc::new(Semaphore::new(0));
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
@@ -3890,40 +3884,7 @@ impl XRClient {
         }
 
         // Add to frame group for batch processing if enabled
-        if self.enable_batch_processing {
-            if self.current_frame_group.is_none() {
-                self.current_frame_group = Some(FrameGroup {
-                    frames: Vec::with_capacity(VMAF_FRAME_GROUP_SIZE),
-                });
-            }
-
-            if let Some(group) = &mut self.current_frame_group {
-                group.frames.push(FrameData {
-                    ref_rgb: ref_sample,
-                    lossy_rgb: sample,
-                    timestamp_ms: timestamp_ms, // Now using f64
-                    frame_number: frame_id as u64,
-                });
-
-                // Send group when full
-                if group.frames.len() >= VMAF_FRAME_GROUP_SIZE {
-                    if let Some(tx) = &self.group_tx {
-                        // Create a new group to send
-                        let frames_to_send = std::mem::replace(
-                            &mut group.frames,
-                            Vec::with_capacity(VMAF_FRAME_GROUP_SIZE),
-                        );
-                        let group_to_send = FrameGroup {
-                            frames: frames_to_send,
-                        };
-
-                        if let Err(e) = tx.send(group_to_send) {
-                            eprintln!("Error sending frame group: {}", e);
-                        }
-                    }
-                }
-            }
-        }
+        
         // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 33333333333333 ? ", );
 
         // Update clean-up timer
@@ -4724,8 +4685,10 @@ impl XRClient {
                                                         "Successfully displayed frame pair #{} (similarity: {:.2}%)", 
                                                         frame_pair.frame_id, (1.0 - similarity) * 100.0,);
                                                     // Offload VMAF analysis to channel for async processing
-                                                    if USE_VMAF {
-                                                        if let (Some(raw_decoded), Some(raw_maxb)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw) {
+                                                    // println!("FRAME SIMILARITY = {:.3}", similarity); 
+                                                    
+                                                    if USE_VMAF && similarity < 0.01 {
+                                                        if let (Some(raw_decoded), Some(raw_maxb)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw)  {
                                                             let _ = self.channel_tx_vmaf.send((
                                                                 raw_decoded.clone(),
                                                                 raw_maxb.clone(),
@@ -5196,7 +5159,7 @@ fn display_frame_pair_enhanced(
         10,
         window_width,
         text_color,
-        3,
+        2,
     );
     render_text(
         &mut combined_buffer,
@@ -5205,7 +5168,7 @@ fn display_frame_pair_enhanced(
         10,
         window_width,
         text_color,
-        3,
+        2,
     );
 
     // Display frame ID with proper centering
@@ -5218,7 +5181,7 @@ fn display_frame_pair_enhanced(
         scaled_height - 55,
         window_width,
         highlight_color,
-        3,
+        2,
     );
 
     // Add sync quality indicator if available
@@ -5244,14 +5207,14 @@ fn display_frame_pair_enhanced(
             scaled_height - 30,
             window_width,
             quality_color,
-            3,
+            2,
         );
     }
 
     // Add difference visualization in bottom corner
     if let (Some(raw_decoded), Some(raw_reference)) = (&pair.decoded_raw, &pair.reference_raw) {
         // Create a small difference visualization
-        let diff_size = 256;
+        let diff_size = 128;
         let diff_x = window_width - diff_size - 10;
         let diff_y = scaled_height - diff_size - 10;
 
@@ -5275,11 +5238,11 @@ fn display_frame_pair_enhanced(
             render_text(
                 &mut combined_buffer,
                 "DIFF",
-                diff_x,
+                diff_x + diff_size/4 ,
                 diff_y - 16,
                 window_width,
                 0xFFFFFF,
-                3,
+                2,
             );
         }
     }
@@ -5298,21 +5261,27 @@ fn display_frame_pair_enhanced(
     window.set_title(&title);
 
     // Critical operation: Update the window buffer with our composite frame
-    match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
-        Ok(_) => {
-            // println!(
-            //     "✅ Successfully rendered frame #{} to window",
-            //     display_frame_id
-            // );
-            true
+    if sync_quality.unwrap() <= 0.013{
+        match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
+            Ok(_) => {
+                // println!(
+                //     "✅ Successfully rendered frame #{} to window",
+                //     display_frame_id
+                // );
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "❌ Buffer update failed for frame #{}: {}",
+                    display_frame_id, e
+                );
+                false
+            }
         }
-        Err(e) => {
-            eprintln!(
-                "❌ Buffer update failed for frame #{}: {}",
-                display_frame_id, e
-            );
-            false
-        }
+    }
+    else{
+        println!("No good sync, skipping frame display"); 
+        false
     }
 }
 
