@@ -15,7 +15,7 @@ use std::{
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
-
+use regex::Regex;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::HevcParser;
 use anyhow::Result;
@@ -96,7 +96,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.35;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.25;
 pub const VMAF_BATCH_SIZE: usize = 10; // Process 10 frames at a time
 pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000; // Process batch after 1 second even if
 
@@ -129,6 +129,10 @@ pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES / 2;
 pub const VMAF_FRAME_GROUP_SIZE: usize = 10;
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
+
+
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.013; 
+
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -837,7 +841,7 @@ impl SynchronizedDecoder {
                 find_best_frame_match(&regular_decoded, &max_decoded);
 
             // If the similarity is below threshold, create a synchronized pair.
-            if similarity < 0.4 {
+            if similarity <= RGB_SIMILARITY_THRESHOLD {
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
                     decoded: Some(regular_decoded[best_regular_idx].1.clone()),
@@ -4590,7 +4594,7 @@ impl XRClient {
                             DebugColor::Violet,
                             "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                             format_elapsed!(now),
-                            self.server_ip,
+                            ip_client
                             id_f,
                             video_frame.len(),
                             self.decoder_queue.len(),
@@ -4670,15 +4674,20 @@ impl XRClient {
                                                 let current_bitrate = 66.66;
                                                 let max_bitrate = 100.0;
                                                 // Display with enhanced visualization
+                                               
+                                               
+                                                let mut bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap();
+                                                // println!("bitrate: {}", bitrate_sample_mbps);  
                                                 let display_result = display_frame_pair_enhanced(
                                                     &frame_pair,
-                                                    &self.server_ip,
+                                                    &ip_client,
                                                     frame_pair.frame_id,
                                                     window,
                                                     Some(similarity),
                                                     max_bitrate,
                                                     current_bitrate,
                                                     now, 
+                                                    bitrate_sample_mbps, 
                                                 );
                                                 if display_result {
                                                     print_pretty!(DebugColor::Green,
@@ -4687,7 +4696,7 @@ impl XRClient {
                                                     // Offload VMAF analysis to channel for async processing
                                                     // println!("FRAME SIMILARITY = {:.3}", similarity); 
                                                     
-                                                    if USE_VMAF && similarity < 0.01 {
+                                                    if USE_VMAF && similarity <= RGB_SIMILARITY_THRESHOLD {  // put threshold at 98.7% frame similarity
                                                         if let (Some(raw_decoded), Some(raw_maxb)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw)  {
                                                             let _ = self.channel_tx_vmaf.send((
                                                                 raw_decoded.clone(),
@@ -5069,6 +5078,7 @@ fn display_frame_pair_enhanced(
     maxb: f32,
     curb: f32,
     now: TaiTime<0>, 
+    bitrate_sample: f32, 
 ) -> bool {
     let decoded = match &pair.decoded {
         Some(frame) => frame,
@@ -5154,12 +5164,13 @@ fn display_frame_pair_enhanced(
 
     render_text(
         &mut combined_buffer,
-        &format!("LOW BITRATE"),
+        &format!("LOW BITRATE {} Mbps", bitrate_sample),
         10,
         10,
         window_width,
         text_color,
-        2,
+        3,
+        
     );
     render_text(
         &mut combined_buffer,
@@ -5168,7 +5179,7 @@ fn display_frame_pair_enhanced(
         10,
         window_width,
         text_color,
-        2,
+        3,
     );
 
     // Display frame ID with proper centering
@@ -5250,7 +5261,8 @@ fn display_frame_pair_enhanced(
     // Update window title with precise frame information and sync quality
     let title = if let Some(quality) = sync_quality {
         format!(
-            "HEVC Comparison - Frame #{} - Sync: {:.1}% - t: {}",
+            "{} Comparison - Frame #{} - Sync: {:.1}% - t: {}",
+            server_ip, 
             display_frame_id,
             (1.0 - quality) * 100.0,
             format_elapsed!(now), 
@@ -5261,7 +5273,7 @@ fn display_frame_pair_enhanced(
     window.set_title(&title);
 
     // Critical operation: Update the window buffer with our composite frame
-    if sync_quality.unwrap() <= 0.013{
+    if sync_quality.unwrap() <= RGB_SIMILARITY_THRESHOLD {
         match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
             Ok(_) => {
                 // println!(
@@ -5543,6 +5555,15 @@ impl STA_extended {
 
 impl Model for STA_extended {}
 
+fn extract_br_value(input: &str) -> Option<f32> {
+    let re = Regex::new(r"Br(\d+\.\d+)").unwrap(); // Regex to match "Br" followed by a float.
+    
+    if let Some(captures) = re.captures(input) {
+        captures.get(1).map(|m| m.as_str().parse::<f32>().unwrap())
+    } else {
+        None
+    }
+}
 // Update the process_group function to use the enhanced method
 async fn process_group(group: FrameGroup, logger: &MetricsLogger) -> Result<()> {
     let temp_dir = TempDir::new()?;

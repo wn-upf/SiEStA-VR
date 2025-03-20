@@ -56,7 +56,7 @@ pub mod alvr_control_socket;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool = true;
+pub const USE_VMAF: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
