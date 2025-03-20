@@ -72,8 +72,8 @@ macro_rules! debug_bgprint {
 macro_rules! print_pretty {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_color_fn()(msg));
+            // let msg = format!($fmt, $($arg)*);
+            // println!("{}", $color.to_color_fn()(msg));
         // }
     }
 }
@@ -82,8 +82,8 @@ macro_rules! print_pretty {
 macro_rules! print_prettyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
+            // let msg = format!($fmt, $($arg)*);
+            // println!("{}", $color.to_background_fn()(msg));
         // }
     };
 }
@@ -91,8 +91,8 @@ macro_rules! print_prettyy {
 macro_rules! print_prettyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
+            // let msg = format!($fmt, $($arg)*);
+            // println!("{}", $color.to_background_fn()(msg));
         }
     // };
 }

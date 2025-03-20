@@ -847,7 +847,7 @@ impl SynchronizedDecoder {
                 find_best_frame_match(&regular_decoded, &max_decoded);
 
             // If the similarity is below threshold, create a synchronized pair.
-            if similarity < 0.15 {
+            if similarity < 0.05 {
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
                     decoded: Some(regular_decoded[best_regular_idx].1.clone()),
@@ -857,11 +857,7 @@ impl SynchronizedDecoder {
                     frame_id,
                 };
                 self.output_queue.push_back(sync_pair);
-                println!(
-                    "✓ Created synchronized pair #{} (similarity: {:.2}%)",
-                    frame_id,
-                    similarity * 100.0
-                );
+
             }
 
             // Buffer extra frames so that none are dropped.
@@ -3802,16 +3798,6 @@ impl XRClient {
         ip: IpAddr,
     ) -> Result<()> {
         // Skip if either sample is empty
-        println!(
-            "VMAF analysis - Current frame size: {}, Reference frame size: {}",
-            sample.len(),
-            ref_sample.len()
-        );
-        println!(
-            "VMAF analysis - Current frame size: {}, Reference frame size: {}",
-            sample.len(),
-            ref_sample.len()
-        );
 
         if sample.is_empty() || ref_sample.is_empty() {
             println!(
@@ -5134,14 +5120,6 @@ fn display_frame_pair_enhanced(
             return false;
         }
     };
-
-    // Log frame dimensions for diagnostic purposes
-    println!(
-        "Processing frame #{} for display: decoded={} pixels, reference={} pixels",
-        display_frame_id,
-        decoded.len(),
-        reference.len()
-    );
 
     // Calculate dimensions with careful attention to scaling and alignment
     let scale_factor = SCALE_FACTOR_WINDOW;

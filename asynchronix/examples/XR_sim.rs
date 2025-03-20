@@ -183,7 +183,7 @@ fn main() {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.0}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}",
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}",
         stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
     );
 

@@ -75,6 +75,10 @@ use tokio::sync::Semaphore;
 
 // use super::alvr_packets::NetworkStatisticsPacket;
 
+
+
+pub const INTRAREFRESH_ENABLED :bool = true; 
+
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
@@ -151,6 +155,8 @@ impl ChunkedHevcEncoder {
     /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
+    
+    
     pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
         let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
@@ -163,7 +169,36 @@ impl ChunkedHevcEncoder {
         );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
-        command
+        if INTRAREFRESH_ENABLED{
+            command
+            .hwaccel("cuda")
+            .args(&["-ss", &self.current_offset.to_string()])
+            .args(&["-t", &self.chunk_duration.to_string()])
+            .args(&["-re"]) // read at real-time speed
+            .input(&self.input)
+            .args(&[
+                "-vf",
+                &format!(
+                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                    self.width, self.height
+                ),
+            ])
+            .args(&["-c:v", "hevc_nvenc"])
+            .args(&["-preset", "fast"])
+            .args(&["-rc", "cbr"])
+            .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+            .args(&["-rc-lookahead", "0"])
+            .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
+            .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
+            .args(&["-movflags", "+frag_keyframe+empty_moov"])
+            .args(&["-flush_packets", "1"])
+            .args(&["-bsf:v", "hevc_mp4toannexb"])
+            .args(&["-an"])
+            .args(&["-f", "hevc", "-"]); // output raw HEVC
+
+        }
+        else{
+            command
             .hwaccel("cuda")
             .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-t", &self.chunk_duration.to_string()])
@@ -188,10 +223,29 @@ impl ChunkedHevcEncoder {
             .args(&["-an"])
             .args(&["-f", "hevc", "-"]); // output raw HEVC
 
+        }
+        
+
         // Spawn the ffmpeg process for this chunk.
         let mut child = command.spawn().unwrap();
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
+        
+        
+        // if let Some(stderr) = child.take_stderr() {
+        //     let mut err_reader = std::io::BufReader::new(stderr);
+        //     std::thread::spawn(move || {
+        //         for line in err_reader.lines() {
+        //             match line {
+        //                 Ok(l) => println!("ffmpeg stderr: {}", l),
+        //                 Err(e) => {
+        //                     eprintln!("Error reading ffmpeg stderr: {}", e);
+        //                     break;
+        //                 }
+        //             }
+        //         }
+        //     });
+        // }      
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
@@ -1910,7 +1964,7 @@ impl<H: Serialize> StreamSender<H> {
                 let random_offset = rand::thread_rng().gen_range(50.0..OFFSET_VIDEO);
                 // let random_offset = OFFSET_VIDEO;
 
-                let encoder = ChunkedHevcEncoder::new(
+                let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
