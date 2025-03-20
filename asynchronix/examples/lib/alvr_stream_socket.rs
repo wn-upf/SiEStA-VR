@@ -1951,9 +1951,10 @@ impl<H: Serialize> StreamSender<H> {
             },
 
         }; 
+        let grp = "zoro"; 
         
         let input_path =
-            &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4");
+            &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{grp}.mp4");
 
         let mut buffer: Vec<u8> = Vec::new();
         print_pretty!(

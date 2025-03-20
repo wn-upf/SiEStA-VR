@@ -15,6 +15,10 @@ use std::{
     io,
     process::{ChildStdin, ChildStdout, Stdio},
 };
+
+use image::{ImageBuffer, Rgb};
+use image_compare::rgb_hybrid_compare;
+
 use regex::Regex;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::HevcParser;
@@ -96,7 +100,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.25;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.33;
 pub const VMAF_BATCH_SIZE: usize = 10; // Process 10 frames at a time
 pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000; // Process batch after 1 second even if
 
@@ -131,7 +135,7 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.013; 
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.7; 
 
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -403,102 +407,133 @@ fn resize_buffer(
     scaled
 }
 
-// Advanced frame similarity computation with configurable thresholds
-// Implements perceptual frame comparison techniques with multi-scale analysis
+// // Advanced frame similarity computation with configurable thresholds
+// // Implements perceptual frame comparison techniques with multi-scale analysis
+// fn compute_enhanced_frame_similarity(
+//     frame1: &[u8],
+//     frame2: &[u8],
+//     width: usize,
+//     height: usize,
+// ) -> f64 {
+//     // Return maximum difference if frames are incompatible
+//     if frame1.len() != frame2.len() || frame1.len() != width * height * 3 {
+//         return 1.0;
+//     }
+
+//     // Configuration parameters for multi-scale analysis
+//     const BLOCK_SIZES: [usize; 3] = [4, 16, 64]; // Multi-scale block sizes
+//     const WEIGHTS: [f64; 3] = [0.5, 0.3, 0.2]; // Relative importance of each scale
+//     const PERCEPTUAL_WEIGHTS: [f64; 3] = [0.3, 0.6, 0.1]; // R,G,B perceptual importance
+
+//     // Initialize accumulators for each scale
+//     let mut scale_diffs = [0.0; 3];
+//     let mut scale_samples = [0; 3];
+
+//     // Multi-scale analysis
+//     for (scale_idx, &block_size) in BLOCK_SIZES.iter().enumerate() {
+//         // Overlapping block steps: step by half the block size.
+//         let step_x = (block_size / 2).max(1);
+//         let step_y = (block_size / 2).max(1);
+    
+//         // Process each overlapping block
+//         for by in (0..height).step_by(step_y) {
+//             for bx in (0..width).step_by(step_x) {
+//                 let block_end_x = (bx + block_size).min(width);
+//                 let block_end_y = (by + block_size).min(height);
+    
+//                 // Initialize block statistics.
+//                 let mut block_diff_r = 0.0;
+//                 let mut block_diff_g = 0.0;
+//                 let mut block_diff_b = 0.0;
+//                 let mut block_samples = 0;
+    
+//                 // Increased sampling density: sample every pixel (step of 1).
+//                 for y in by..block_end_y {
+//                     for x in bx..block_end_x {
+//                         let idx = (y * width + x) * 3;
+//                         if idx + 2 < frame1.len() && idx + 2 < frame2.len() {
+//                             let r_diff = (frame1[idx] as i32 - frame2[idx] as i32).abs() as f64;
+//                             let g_diff = (frame1[idx + 1] as i32 - frame2[idx + 1] as i32).abs() as f64;
+//                             let b_diff = (frame1[idx + 2] as i32 - frame2[idx + 2] as i32).abs() as f64;
+    
+//                             block_diff_r += r_diff;
+//                             block_diff_g += g_diff;
+//                             block_diff_b += b_diff;
+//                             block_samples += 1;
+//                         }
+//                     }
+//                 }
+    
+//                 if block_samples > 0 {
+//                     let avg_diff = (block_diff_r * PERCEPTUAL_WEIGHTS[0]
+//                         + block_diff_g * PERCEPTUAL_WEIGHTS[1]
+//                         + block_diff_b * PERCEPTUAL_WEIGHTS[2])
+//                         / (block_samples as f64 * 255.0);
+//                     scale_diffs[scale_idx] += avg_diff;
+//                     scale_samples[scale_idx] += 1;
+//                 }
+//             }
+//         }
+//     }
+
+//     // Calculate weighted average across scales
+//     let mut final_diff = 0.0;
+//     let mut weight_sum = 0.0;
+
+//     for i in 0..BLOCK_SIZES.len() {
+//         if scale_samples[i] > 0 {
+//             let scale_avg = scale_diffs[i] / scale_samples[i] as f64;
+//             final_diff += scale_avg * WEIGHTS[i];
+//             weight_sum += WEIGHTS[i];
+//         }
+//     }
+
+//     // Normalize result
+//     if weight_sum > 0.0 {
+//         final_diff /= weight_sum;
+//     }
+
+//     // Apply non-linear transformation to enhance sensitivity
+//     // This emphasizes small differences, which is crucial for detecting
+//     // subtle temporal misalignments in nearly-identical frames
+//     let enhanced_diff = 1.0 - ((1.0 - final_diff).powf(0.5));
+
+//     // Scale final similarity measure to emphasize high similarity
+//     // This creates a more sensitive metric where 99% similar frames
+//     // are distinguished from 99.9% similar frames
+//     enhanced_diff
+// }
+
+
+
 fn compute_enhanced_frame_similarity(
     frame1: &[u8],
     frame2: &[u8],
     width: usize,
     height: usize,
 ) -> f64 {
-    // Return maximum difference if frames are incompatible
+    // Validate that both frames have the expected size (width * height * 3)
     if frame1.len() != frame2.len() || frame1.len() != width * height * 3 {
         return 1.0;
     }
 
-    // Configuration parameters for multi-scale analysis
-    const BLOCK_SIZES: [usize; 3] = [4, 16, 64]; // Multi-scale block sizes
-    const WEIGHTS: [f64; 3] = [0.5, 0.3, 0.2]; // Relative importance of each scale
-    const PERCEPTUAL_WEIGHTS: [f64; 3] = [0.3, 0.6, 0.1]; // R,G,B perceptual importance
+    // Construct an RGB image from the raw byte slice.
+    let img1 = ImageBuffer::<Rgb<u8>, _>::from_raw(width as u32, height as u32, frame1.to_vec())
+        .expect("Failed to create image 1");
+    let img2 = ImageBuffer::<Rgb<u8>, _>::from_raw(width as u32, height as u32, frame2.to_vec())
+        .expect("Failed to create image 2");
 
-    // Initialize accumulators for each scale
-    let mut scale_diffs = [0.0; 3];
-    let mut scale_samples = [0; 3];
+    // Use the image-compare crate's hybrid comparison method.
+    // This method internally converts to YUV, applies MSSIM on Y and RMS on U/V,
+    // then combines the differences into a single similarity score.
+    let result = rgb_hybrid_compare(&img1, &img2)
+        .expect("Images must have the same dimensions");
 
-    // Multi-scale analysis
-    for (scale_idx, &block_size) in BLOCK_SIZES.iter().enumerate() {
-        // Overlapping block steps: step by half the block size.
-        let step_x = (block_size / 2).max(1);
-        let step_y = (block_size / 2).max(1);
-    
-        // Process each overlapping block
-        for by in (0..height).step_by(step_y) {
-            for bx in (0..width).step_by(step_x) {
-                let block_end_x = (bx + block_size).min(width);
-                let block_end_y = (by + block_size).min(height);
-    
-                // Initialize block statistics.
-                let mut block_diff_r = 0.0;
-                let mut block_diff_g = 0.0;
-                let mut block_diff_b = 0.0;
-                let mut block_samples = 0;
-    
-                // Increased sampling density: sample every pixel (step of 1).
-                for y in by..block_end_y {
-                    for x in bx..block_end_x {
-                        let idx = (y * width + x) * 3;
-                        if idx + 2 < frame1.len() && idx + 2 < frame2.len() {
-                            let r_diff = (frame1[idx] as i32 - frame2[idx] as i32).abs() as f64;
-                            let g_diff = (frame1[idx + 1] as i32 - frame2[idx + 1] as i32).abs() as f64;
-                            let b_diff = (frame1[idx + 2] as i32 - frame2[idx + 2] as i32).abs() as f64;
-    
-                            block_diff_r += r_diff;
-                            block_diff_g += g_diff;
-                            block_diff_b += b_diff;
-                            block_samples += 1;
-                        }
-                    }
-                }
-    
-                if block_samples > 0 {
-                    let avg_diff = (block_diff_r * PERCEPTUAL_WEIGHTS[0]
-                        + block_diff_g * PERCEPTUAL_WEIGHTS[1]
-                        + block_diff_b * PERCEPTUAL_WEIGHTS[2])
-                        / (block_samples as f64 * 255.0);
-                    scale_diffs[scale_idx] += avg_diff;
-                    scale_samples[scale_idx] += 1;
-                }
-            }
-        }
-    }
-
-    // Calculate weighted average across scales
-    let mut final_diff = 0.0;
-    let mut weight_sum = 0.0;
-
-    for i in 0..BLOCK_SIZES.len() {
-        if scale_samples[i] > 0 {
-            let scale_avg = scale_diffs[i] / scale_samples[i] as f64;
-            final_diff += scale_avg * WEIGHTS[i];
-            weight_sum += WEIGHTS[i];
-        }
-    }
-
-    // Normalize result
-    if weight_sum > 0.0 {
-        final_diff /= weight_sum;
-    }
-
-    // Apply non-linear transformation to enhance sensitivity
-    // This emphasizes small differences, which is crucial for detecting
-    // subtle temporal misalignments in nearly-identical frames
-    let enhanced_diff = 1.0 - ((1.0 - final_diff).powf(0.5));
-
-    // Scale final similarity measure to emphasize high similarity
-    // This creates a more sensitive metric where 99% similar frames
-    // are distinguished from 99.9% similar frames
-    enhanced_diff
+    // println!("SCORE = {}", 1.0 - result.score); 
+    1.0 - result.score
 }
+
+
 
 fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
     if rgb_data.len() != width * height * 3 {
@@ -821,7 +856,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..10 {
+        for _ in 0..3 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
@@ -5195,32 +5230,6 @@ fn display_frame_pair_enhanced(
         2,
     );
 
-    // Add sync quality indicator if available
-    if let Some(quality) = sync_quality {
-        let sync_text = format!("SYNC QUALITY: {:.2}%", (1.0 - quality) * 100.0);
-        let text_x = (window_width - sync_text.len() * 6 * 2) / 2;
-
-        // Color based on quality
-        let quality_color = if quality < 0.05 {
-            0x00FF00 // Green for excellent
-        } else if quality < 0.15 {
-            0xFFFF00 // Yellow for good
-        } else if quality < 0.30 {
-            0xFF8000 // Orange for marginal
-        } else {
-            0xFF0000 // Red for poor
-        };
-
-        render_text(
-            &mut combined_buffer,
-            &sync_text,
-            text_x,
-            scaled_height - 30,
-            window_width,
-            quality_color,
-            2,
-        );
-    }
 
     // Add difference visualization in bottom corner
     if let (Some(raw_decoded), Some(raw_reference)) = (&pair.decoded_raw, &pair.reference_raw) {
@@ -5232,29 +5241,29 @@ fn display_frame_pair_enhanced(
         if raw_decoded.len() == raw_reference.len()
             && raw_decoded.len() >= WIDTH_ENCODER * HEIGHT_ENCODER * 3
         {
-            // Draw difference visualization
-            render_enhanced_difference_visualization(
-                &mut combined_buffer,
-                raw_decoded,
-                raw_reference,
-                WIDTH_ENCODER,
-                HEIGHT_ENCODER,
-                diff_x,
-                diff_y,
-                diff_size,
-                window_width,
-            );
+            // // Draw difference visualization
+            // render_enhanced_difference_visualization(
+            //     &mut combined_buffer,
+            //     raw_decoded,
+            //     raw_reference,
+            //     WIDTH_ENCODER,
+            //     HEIGHT_ENCODER,
+            //     diff_x,
+            //     diff_y,
+            //     diff_size,
+            //     window_width,
+            // );
 
-            // Label the visualization
-            render_text(
-                &mut combined_buffer,
-                "DIFF",
-                diff_x + diff_size/4 ,
-                diff_y - 16,
-                window_width,
-                0xFFFFFF,
-                2,
-            );
+            // // Label the visualization
+            // render_text(
+            //     &mut combined_buffer,
+            //     "DIFF",
+            //     diff_x + diff_size/4 ,
+            //     diff_y - 16,
+            //     window_width,
+            //     0xFFFFFF,
+            //     2,
+            // );
         }
     }
 

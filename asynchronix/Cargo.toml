@@ -80,6 +80,8 @@ plotters = "0.3.7"
 show-image = "0.14.1"
 regex = "1.11.1"
 minifb_fonts = "0.1.3"
+image-compare = "0.4.1"
+image = "0.25.5"
 
 
 [dev-dependencies]
@@ -100,7 +102,6 @@ anyhow = { version = "1", features = ["backtrace"] }
 once_cell = "1"
 crossbeam = "0.8.4"
 dashmap = "6.1.0"
-image = "0.24"
 sdl2 = "0.35"
 minifb = "0.22"
 tokio = { version = "1.0", features = ["full"]}
