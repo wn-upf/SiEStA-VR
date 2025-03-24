@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, print_pretty, print_prettyy};
+use crate::{debug_bgprint, print_pretty, print_prettyy, print_red};
 use asynchronix::time;
 use core::net;
 use crossbeam::channel::{unbounded, Receiver, Sender};
@@ -26,22 +26,37 @@ use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 
 use crate::lib::{
-    exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords, CsvType,
+    exponential, frametransmission_delay, collision_delay,  perStaLockStats, AmpduPacket, Coords, CsvType,
     CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
+
+pub const UPLINK_QUEUE_SIZE: usize = 128 ;
+
 //////////// CONST DEFINES ///////////
+
+// #[macro_export]
+// macro_rules! debug_schedule {
+//     ($fmt:expr,$($arg:tt)*) => {
+//         if DEBUG_SCHEDULING == true {
+//             println!($fmt, $($arg)*);
+//         }
+//     }
+// }
 
 #[macro_export]
 macro_rules! debug_schedule {
-    ($fmt:expr,$($arg:tt)*) => {
-        if DEBUG_SCHEDULING == true {
-            println!($fmt, $($arg)*);
-        }
-    }
+    ($fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::Navy.to_background_fn()(msg));
+    };
 }
-pub const DEBUG_SCHEDULING: bool = false;
+
+
+
+
+pub const DEBUG_SCHEDULING: bool = true;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_POLICY: bool = false;
@@ -75,8 +90,8 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: f64 = 11.6;
-pub const STEP1_TEND: f64 = 14.5;
+pub const STEP1_TBEGIN: f64 = 11.2;
+pub const STEP1_TEND: f64 = 18.5;
 
 pub const STEP2_TBEGIN: f64 = 15.0;
 pub const STEP2_TEND: f64 = 15.5;
@@ -475,9 +490,9 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.008), valid_from: valid_from, valid_until: valid_until });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.001), valid_from: valid_from, valid_until: valid_until });
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
+        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
 
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
@@ -897,6 +912,7 @@ pub struct QueueModule {
 
     pub network_emulator: NetworkPatternEmulator,
     pub queue_network_emulator: QueueMechanism,
+    pub ul_capacity_queue_device: usize, 
 }
 
 impl QueueModule {
@@ -914,6 +930,7 @@ impl QueueModule {
         PL_prob: f64,
         vec_ids: Vec<i32>,
         folder_dir: String,
+        ul_size: usize, 
     ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
@@ -978,6 +995,7 @@ impl QueueModule {
             PL_probability: PL_prob,
             network_emulator: network_emulator,
             queue_network_emulator: queue_mechanism,
+            ul_capacity_queue_device: ul_size, 
         }
     }
 
@@ -1422,6 +1440,9 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
+
+            let mut lost_packets = Vec::new();
+
             let now = context.scheduler.time();
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, select first packet fairly to ensure channel access with reduced backlog for each user.
             // We need to consider the rate of each STA and the queue length of each STA to select the next packet to serve.
@@ -1430,13 +1451,95 @@ impl QueueModule {
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
             // Select the STA with the highest priority based on Lyapunov optimization
 
-            debug_schedule!("\n******************* STA packets *******************\n",);
+            debug_schedule!("{} | ***************** SCHEDULING *******************", format_elapsed!(now));
+
+
+            let mut is_ul_count = 0; 
+            let mut is_dl = 0; 
+
+            const TAU_COLLISIONS: f32 = 2.0 / 9.0; 
 
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                debug_schedule!("src: {}, dest: {} | queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
+                let is_ul = sta_src > sta_dest;
 
-                debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms);
+                if is_ul{
+                    is_ul_count += 1; //count all UL devices for colisions
+                }
+                else{
+                    is_dl = 1; // bool to count only one device for all DL flows. 
+                }
+
+
+                debug_schedule!("src: {}, dest: {} | UL_FLOW: {} |queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, is_ul,  packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
+
+                // debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms);
+           
+           
+                if is_ul && packets.packet_count > self.ul_capacity_queue_device {
+                    // This STA has UL traffic exceeding capacity
+                    debug_print!(
+                        DebugColor::Red,
+                        "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {})",
+                        format_elapsed!(now),
+                        sta_src,
+                        sta_dest,
+                        packets.packet_count,
+                        self.ul_capacity_queue_device
+                    );
+                    let excess_count = packets.packet_count - self.ul_capacity_queue_device;
+
+                    let mut packets_to_remove = excess_count;
+                    
+                    let mut indices_to_remove = Vec::new();
+                        // Scan from the back of the queue (newest packets first)
+                    for i in (0..self.queue.len()).rev() {
+                        if let Some(packet) = self.queue.get(i) {
+                            if packet.sta_src_id == *sta_src && packet.sta_dest_id == *sta_dest {
+                                indices_to_remove.push(i);
+                                packets_to_remove -= 1;
+                                
+                                if packets_to_remove == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Remove identified packets (from back to front to avoid index issues)
+                    for idx in indices_to_remove {
+                        if let Some(removed_packet) = self.queue.remove(idx) {
+                            debug_print!(
+                                DebugColor::Red,
+                                "{} [UL PACKET DROPPED] Packet_ID: {}",
+                                format_elapsed!(now),
+                                removed_packet.packet_id
+                            );
+                            self.blocked_packet_counter += 1;
+                        }
+                    }
+                    // Add this STA to the overflow set
+                }
             }
+
+
+
+            let n_devices_collisions = is_ul_count + is_dl ; 
+            
+            let collision_probability = 1.0 - (1.0 - TAU_COLLISIONS).powf( n_devices_collisions as f32 - 1.0 );  
+
+            let mut rng = rand::thread_rng();
+            let random_value: f32 = rng.gen(); // Generates a random uniform float in [0, 1)
+
+            let collision_now: bool = if random_value < collision_probability { // TODO: are collisions independent of scheduling?
+                    true
+                }
+                else{
+                    false
+                }; 
+
+            debug_schedule!("Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}", is_ul_count, is_dl, n_devices_collisions, collision_probability, random_value, collision_now );
+ 
+
 
             let mut selected_sta = None;
 
@@ -1525,210 +1628,335 @@ impl QueueModule {
             } else { // NORMAL POLICY: FIFO
             }
 
-            let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
-            if let Some(packet) = packet_with_id {
-                debug_schedule!(
-                    "QUEUE FRONT: SRC {}, DEST: {}",
-                    packet.sta_src_id,
-                    packet.sta_dest_id
-                );
-            }
-            if let Some(key) = selected_sta {
-                // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
-                //
-                if LYAPUNOV_POLICY || SOFTMAX_POLICY {
-                    // redundant if, might delete
-                    packet_with_id = Some(
-                        self.queue
-                            .iter()
-                            .find(|&packet| {
-                                packet.sta_src_id == key.0 && packet.sta_dest_id == key.1
-                            })
-                            .unwrap(),
-                    ); // retrieve a packet that would match
+
+            if collision_now{
+                // Use the same STA selection logic from non-collision path
+                if let Some(key) = selected_sta {
+
+                    // Use the selected STA from earlier logic
+                    selected_sta = Some(key);
+                } else if !self.queue.is_empty() {
+                    // Fallback to first packet if no STA selected
+                    let first = self.queue.front().unwrap();
+                    selected_sta = Some((first.sta_src_id, first.sta_dest_id));
                 }
-            } else {
-                // no error if no scheduling algorithm is used
-                // println!("{} - ERROR: No STA selected! | Q_len = {}", format_elapsed!(now), self.queue.len());
+                
+                if let Some(sta_key) = selected_sta {
+                    // Find matching packets for this STA
+                    let mut total_length = 0;
+                    let mut mpdu_count = 0;
+                    let mut sta_coords = Coords::default();
+                    
+                    // Count packets and total length for this STA, no need to remove packets because they're not transmitted on collision! 
+                    for packet in self.queue.iter() {
+                        if packet.sta_src_id == sta_key.0 && packet.sta_dest_id == sta_key.1 {
+                            if mpdu_count == 0 {
+                                // Store coordinates from first matching packet
+                                sta_coords = packet.sta_src_coords.clone();
+                            }
+                            
+                            total_length += packet.length_packet;
+                            mpdu_count += 1;
+                            
+                            
+                            // Simulate calculation of aggregation delay limit
+                            let test_result = frametransmission_delay(
+                                total_length as f64,
+                                mpdu_count,
+                                self.coords_queue,
+                                sta_coords,
+                                P_TX
+                            );
+                            
+                            if test_result.service_delay >= DEFAULT_TMAX_AGG || mpdu_count >= MAX_AMPDU_SIZE  {
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Now calculate collision delay with accurate parameters
+                    let T_col = collision_delay(
+                        total_length as f64,
+                        mpdu_count,
+                        self.coords_queue,
+                        sta_coords,
+                        P_TX
+                    );
+                    
+                    print_red!("COLLISION! Packets in potential A-MPDU: {}, Total length: {}, Waiting T = {} for next transmission", 
+                              mpdu_count, total_length, T_col);
+                    
+                    // Schedule event to retry queue processing after collision backoff
+                    let collision_duration = Duration::from_secs_f64(T_col as f64);
+                    context.scheduler.schedule_event(
+                        collision_duration, 
+                        Self::deque_schedule_service, 
+                        ()
+                    ).unwrap();
+                }
             }
 
-            if let Some(first_packet) = packet_with_id {
-                debug_schedule!(
-                    "Selected STA: Src{:.0} ,Dest{:.0}",
-                    first_packet.sta_src_id,
-                    first_packet.sta_dest_id
-                );
-                debug_schedule!("*************************************\n",);
+            else{
 
-                let now: tai_time::TaiTime<0> = context.scheduler.time();
+                let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
+                if let Some(packet) = packet_with_id {
+                    debug_schedule!(
+                        "QUEUE FRONT: SRC {}, DEST: {}",
+                        packet.sta_src_id,
+                        packet.sta_dest_id
+                    );
+                }
+                if let Some(key) = selected_sta {
+                    // always should evaluate to true unless we don't use lyapunov or softmax to select the STA
+                    //
+                    if LYAPUNOV_POLICY || SOFTMAX_POLICY {
+                        // redundant if, might delete
+                        packet_with_id = Some(
+                            self.queue
+                                .iter()
+                                .find(|&packet| {
+                                    packet.sta_src_id == key.0 && packet.sta_dest_id == key.1
+                                })
+                                .unwrap(),
+                        ); // retrieve a packet that would match
+                    }
+                } else {
+                    // no error if no scheduling algorithm is used
+                    // println!("{} - ERROR: No STA selected! | Q_len = {}", format_elapsed!(now), self.queue.len());
+                }
 
-                // Initialize AMPDU with first packet's info
-                self.aux_ampdu_serviced.reset();
+                if let Some(first_packet) = packet_with_id {
+                    debug_schedule!(
+                        "Selected STA: Src{:.0} ,Dest{:.0}",
+                        first_packet.sta_src_id,
+                        first_packet.sta_dest_id
+                    );
+                    // debug_schedule!("****************************************************\n",);
 
-                self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
-                self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
-                self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
+                    let now: tai_time::TaiTime<0> = context.scheduler.time();
 
-                let mut last_service_duration = Duration::default();
-                let mut packet_index = 0;
+                    // Initialize AMPDU with first packet's info
+                    self.aux_ampdu_serviced.reset();
 
-                let mut resultz = ResultsFrameTXDelay::new();
+                    self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
+                    self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
+                    self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
 
-                // Process packets that match the AMPDU destination (and source?)
-                while packet_index < self.queue.len() {
-                    if let Some(current_packet) = self.queue.get(packet_index) {
-                        if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
-                            || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                        {
-                            // make sure we select packets at a single interface (sta)
-                            packet_index += 1;
-                            continue;
-                        }
+                    let mut last_service_duration = Duration::default();
+                    let mut packet_index = 0;
 
-                        let new_total_length =
-                            self.aux_ampdu_serviced.total_length + current_packet.length_packet;
-                        let new_size = self.aux_ampdu_serviced.size + 1;
+                    let mut resultz = ResultsFrameTXDelay::new();
 
-                        resultz = frametransmission_delay(
-                            new_total_length as f64,
-                            new_size,
-                            self.coords_queue,
-                            current_packet.sta_src_coords,
-                            P_TX,
-                        );
-                        // println!("RESULTZ {} frame {} shard {}/{} ", resultz.service_delay, current_packet.header_alvr.next_packet_index, current_packet.header_alvr.shard_index, current_packet.header_alvr.shards_count - 1);
-
-                        if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
-                            debug_print!(
-                                DebugColor::DarkRed,
-                                "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
-                                new_size,
-                                MAX_AMPDU_SIZE,
-                                resultz.service_delay * 1000.0,
-                                DEFAULT_TMAX_AGG * 1000.0
-                            );
-                            break;
-                        }
-
-                        // Remove packet and update AMPDU
-                        if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
-                            packet_rmvd.queue_length_when_out = self.queue.len();
-                            packet_rmvd.queue_out_instant = now;
-
-                            // Update stats before moving packet
-                            if let Some(stats_tx) = &self.stats_tx {
-                                let stats_update = StatsUpdate {
-                                    T_s: resultz.service_delay,
-                                    T_q: now
-                                        .duration_since(packet_rmvd.queue_in_instant)
-                                        .as_secs_f64(),
-                                    blocked_packet_counter: self.blocked_packet_counter,
-                                    arrived_packet_counter: self.arrived_packet_counter,
-                                    queue_length_when_out: packet_rmvd.queue_length_when_out,
-                                    sta_src_id: packet_rmvd.sta_src_id as usize,
-                                    sta_dest_id: packet_rmvd.sta_dest_id as usize,
-                                    packet_id: packet_rmvd.packet_id as i32,
-                                    now,
-                                    length_packet: packet_rmvd.length_packet,
-                                };
-                                stats_tx
-                                    .send(stats_update)
-                                    .expect("Failed to send stats update");
+                    // Process packets that match the AMPDU destination (and source?)
+                    while packet_index < self.queue.len() {
+                        if let Some(current_packet) = self.queue.get(packet_index) {
+                            if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
+                                || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
+                            {
+                                // make sure we select packets at a single interface (sta)
+                                packet_index += 1;
+                                continue;
                             }
 
-                            packet_rmvd.T_q = now.duration_since(packet_rmvd.queue_in_instant);
+                            let new_total_length =
+                                self.aux_ampdu_serviced.total_length + current_packet.length_packet;
+                            let new_size = self.aux_ampdu_serviced.size + 1;
 
-                            // Move packet into AMPDU without cloning
-                            self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
-                            self.aux_ampdu_serviced.total_length = new_total_length;
-                            self.aux_ampdu_serviced.size = new_size;
-                            last_service_duration = Duration::from_secs_f64(resultz.service_delay);
+                            resultz = frametransmission_delay(
+                                new_total_length as f64,
+                                new_size,
+                                self.coords_queue,
+                                current_packet.sta_src_coords,
+                                P_TX,
+                            );
+                            // println!("RESULTZ {} frame {} shard {}/{} ", resultz.service_delay, current_packet.header_alvr.next_packet_index, current_packet.header_alvr.shard_index, current_packet.header_alvr.shards_count - 1);
+
+                            if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+                                debug_print!(
+                                    DebugColor::DarkRed,
+                                    "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
+                                    new_size,
+                                    MAX_AMPDU_SIZE,
+                                    resultz.service_delay * 1000.0,
+                                    DEFAULT_TMAX_AGG * 1000.0
+                                );
+                                break;
+                            }
+
+                            // Remove packet and update AMPDU
+                            if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
+                                packet_rmvd.queue_length_when_out = self.queue.len();
+                                packet_rmvd.queue_out_instant = now;
+
+                                // Update stats before moving packet
+                                if let Some(stats_tx) = &self.stats_tx {
+                                    let stats_update = StatsUpdate {
+                                        T_s: resultz.service_delay,
+                                        T_q: now
+                                            .duration_since(packet_rmvd.queue_in_instant)
+                                            .as_secs_f64(),
+                                        blocked_packet_counter: self.blocked_packet_counter,
+                                        arrived_packet_counter: self.arrived_packet_counter,
+                                        queue_length_when_out: packet_rmvd.queue_length_when_out,
+                                        sta_src_id: packet_rmvd.sta_src_id as usize,
+                                        sta_dest_id: packet_rmvd.sta_dest_id as usize,
+                                        packet_id: packet_rmvd.packet_id as i32,
+                                        now,
+                                        length_packet: packet_rmvd.length_packet,
+                                    };
+                                    stats_tx
+                                        .send(stats_update)
+                                        .expect("Failed to send stats update");
+                                }
+
+                                packet_rmvd.T_q = now.duration_since(packet_rmvd.queue_in_instant);
+
+                                // Move packet into AMPDU without cloning
+                                self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
+                                self.aux_ampdu_serviced.total_length = new_total_length;
+                                self.aux_ampdu_serviced.size = new_size;
+                                last_service_duration = Duration::from_secs_f64(resultz.service_delay);
+                            }
                         }
                     }
+
+                    for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
+                        packet.T_s = Duration::from_secs_f64(resultz.service_delay);
+
+                        // Update stats before moving packet
+                        if let Some(stats_tx) = &self.stats_tx {
+                            let stats_update = StatsUpdate {
+                                T_s: packet.T_s.as_secs_f64(),
+                                T_q: now.duration_since(packet.queue_in_instant).as_secs_f64(),
+                                blocked_packet_counter: self.blocked_packet_counter,
+                                arrived_packet_counter: self.arrived_packet_counter,
+                                queue_length_when_out: packet.queue_length_when_out,
+                                sta_src_id: packet.sta_src_id as usize,
+                                sta_dest_id: packet.sta_dest_id as usize,
+
+                                packet_id: packet.packet_id as i32,
+                                now,
+                                length_packet: packet.length_packet,
+                            };
+                            stats_tx
+                                .send(stats_update)
+                                .expect("Failed to send stats update");
+                        }
+                    }
+
+                    if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
+                        debug_print!(
+                            DebugColor::Yellow,
+                            "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
+                            format_elapsed!(now),
+                            format_elapsed!(now + last_service_duration),
+                        );
+
+                        if DEBUG_PRINT_ENABLED == true {
+                            self.aux_ampdu_serviced.print();
+                        }
+                        // debug_bgprint!(
+                        //     DebugColor::Yellow,
+                        //     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
+                        //     format_elapsed!(now),
+                        //     format_elapsed!(now + last_service_duration),
+                        // );
+
+                        // if DEBUG_PRINT_ENABLED {
+                        // self.aux_ampdu_serviced.print();
+                        // }
+
+                        self.packet_being_served = true;
+
+                        let mut rng = rand::thread_rng();
+
+                        self.aux_ampdu_serviced.mpdu_packets.retain(|packet| {
+                            let random_value: f64 = rng.gen();
+                            if random_value <= self.PL_probability {
+                                print_red!(
+                                    "{:.6} [DBG QUEUE TX] --packet lost in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Probs: {:.3} (< {:.2})", 
+                                    format_elapsed!(now),
+                                    packet.packet_id,
+                                    packet.header_alvr.shard_index,
+                                    packet.header_alvr.shards_count,
+                                    packet.header_alvr.next_packet_index,
+                                    random_value,
+                                    self.PL_probability,
+                                );
+                                self.blocked_packet_counter += 1;
+                                lost_packets.push(packet.clone());
+
+                                false // Do not retain the packet
+                            } else {
+                                true // Retain the packet
+                            }
+                        });
+
+                        // Move AMPDU to scheduled event instead of cloning
+                        let ampdu_to_send =
+                            std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
+
+                        context
+                            .scheduler
+                            .schedule_event(last_service_duration, Self::send_ampdu, ampdu_to_send)
+                            .unwrap();
+                    }                  
                 }
 
-                for packet in self.aux_ampdu_serviced.mpdu_packets.iter_mut() {
-                    packet.T_s = Duration::from_secs_f64(resultz.service_delay);
+                if !lost_packets.is_empty(){
 
-                    // Update stats before moving packet
-                    if let Some(stats_tx) = &self.stats_tx {
-                        let stats_update = StatsUpdate {
-                            T_s: packet.T_s.as_secs_f64(),
-                            T_q: now.duration_since(packet.queue_in_instant).as_secs_f64(),
-                            blocked_packet_counter: self.blocked_packet_counter,
-                            arrived_packet_counter: self.arrived_packet_counter,
-                            queue_length_when_out: packet.queue_length_when_out,
-                            sta_src_id: packet.sta_src_id as usize,
-                            sta_dest_id: packet.sta_dest_id as usize,
+                    // print_red!("Queue previous to returning MAC lost packets. Length = {} \n", self.queue.len()); 
+                    // Print front elements (first few elements)
+                    // if !self.queue.is_empty() {
+                    //     let front_count = 10.min(self.queue.len()); // Show elements from front
+                    //     let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
+                        
+                    //     println!("queue front - prev:\n"); 
 
-                            packet_id: packet.packet_id as i32,
-                            now,
-                            length_packet: packet.length_packet,
-                        };
-                        stats_tx
-                            .send(stats_update)
-                            .expect("Failed to send stats update");
-                    }
-                }
-
-                if !self.aux_ampdu_serviced.mpdu_packets.is_empty() {
-                    debug_print!(
-                        DebugColor::Yellow,
-                        "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                        format_elapsed!(now),
-                        format_elapsed!(now + last_service_duration),
-                    );
-
-                    if DEBUG_PRINT_ENABLED == true {
-                        self.aux_ampdu_serviced.print();
-                    }
-                    // debug_bgprint!(
-                    //     DebugColor::Yellow,
-                    //     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                    //     format_elapsed!(now),
-                    //     format_elapsed!(now + last_service_duration),
-                    // );
-
-                    // if DEBUG_PRINT_ENABLED {
-                    // self.aux_ampdu_serviced.print();
+                    //     for packet in a {
+                    //         packet.print(DebugColor::Chocolate); 
+                    //     }
                     // }
 
-                    self.packet_being_served = true;
+                    // // Print back elements (last few elements)
+                    // if !self.queue.is_empty() {
+                    //     let back_count = 10.min(self.queue.len()); // Show elements from back
+                    //     let b = self.queue.iter().rev().take(back_count).collect::<Vec<_>>();
+                        
+                    //     // println!("queue back - prev:"); 
 
-                    let mut rng = rand::thread_rng();
+                    //     // for packet in b {
+                    //     //     packet.print(DebugColor::Chocolate); 
+                    //     // }           
+                    // }
 
-                    self.aux_ampdu_serviced.mpdu_packets.retain(|packet| {
-                        let random_value: f64 = rng.gen();
-                        if random_value <= self.PL_probability {
-                            debug_bgprint!(
-                                DebugColor::Red,
-                                "{} [DBG QUEUE TX] --packet lost: Packet_ID: {}\t ALVR: {}/{} in frame {} due to probability {}/{}", 
-                                format_elapsed!(now),
-                                packet.packet_id,
-                                packet.header_alvr.shard_index,
-                                packet.header_alvr.shards_count,
-                                packet.header_alvr.next_packet_index,
-                                random_value,
-                                self.PL_probability,
-                            );
-                            self.blocked_packet_counter += 1;
-                            false // Do not retain the packet
-                        } else {
-                            true // Retain the packet
-                        }
-                    });
+                    lost_packets.reverse();
+                    for lost_packet in lost_packets {
+                    
+                        self.queue.push_front(lost_packet);
+                    }
+                    // print_red!("Queue after re-putting packets. Length = {} \n", self.queue.len());
 
-                    // Move AMPDU to scheduled event instead of cloning
-                    let ampdu_to_send =
-                        std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
-
-                    context
-                        .scheduler
-                        .schedule_event(last_service_duration, Self::send_ampdu, ampdu_to_send)
-                        .unwrap();
+                    // Print front elements (first few elements)
+                    // if !self.queue.is_empty() {
+                    //     let front_count = 10.min(self.queue.len()); // Show elements from front
+                    //     let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
+                    //     println!("NEW queue front:"); 
+                    //     for packet in a {
+                    //         packet.print(DebugColor::Chocolate); 
+                    //     }
+                    // }
                 }
+            
             }
+
+
+
         }
+
+
+
+
     }
 }
 impl Model for QueueModule {}

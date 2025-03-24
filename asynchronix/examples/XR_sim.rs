@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::lib::models_XR::{STA_extended, SinkVideo_XR, XRClient, XRServer};
-
+use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE; 
 struct VRPair {
     xr_server: XRServer,
     xr_client: XRClient,
@@ -245,6 +245,7 @@ fn main() {
         pl_prob,
         all_sta_ids.clone(),
         name_folder,
+        UPLINK_QUEUE_SIZE, 
     );
     let mbox_queue = Mailbox::new();
     let queue_address = mbox_queue.address();

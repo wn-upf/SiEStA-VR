@@ -135,7 +135,7 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.7; 
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.1; 
 
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -856,7 +856,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..3 {
+        for _ in 0..5 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
@@ -2850,7 +2850,14 @@ struct MetricsLogger {
 }
 impl MetricsLogger {
     fn new(ip: IpAddr, name_folder: &str) -> Result<Self> {
-        let file = File::create(format!("Video_Sink/{}/{}/metrics.csv", name_folder, ip))?;
+
+        let mut value = 99; 
+        if let IpAddr::V4(mut ip4) = ip {
+            let octets = ip4.octets();
+            value = octets[2]
+        }
+
+        let file = File::create(format!("Results/{}/VMAF_metrics_{}.csv", name_folder, value))?;
         let writer = csv::Writer::from_writer(file);
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
@@ -3846,6 +3853,9 @@ impl XRClient {
 
         // Ensure metrics logger is initialized
         if self.metrics_logger.is_none() {
+
+            println!("INITIALIZING LOGGER IN FOLDER: {}", self.name_folder); 
+
             match MetricsLogger::new(ip, &self.name_folder) {
                 Ok(logger) => {
                     println!("Initialized metrics logger for VMAF analysis");
@@ -4302,7 +4312,7 @@ impl XRClient {
                 // Process any pending VMAF analysis tasks via channel
                 if USE_VMAF {
                     if let Ok((refe, maxbe, id)) = self.channel_rx_vmaf.try_recv() {
-                        self.vmaf_analysis(refe, maxbe, now, id, ip_client)
+                        self.vmaf_analysis(refe, maxbe, now, id, self.server_ip)
                             .await
                             .unwrap_or_else(|e| {
                                 print_pretty!(DebugColor::Red, "VMAF analysis error: {}", e,);
@@ -4629,7 +4639,7 @@ impl XRClient {
                             DebugColor::Violet,
                             "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                             format_elapsed!(now),
-                            ip_client
+                            ip_client,
                             id_f,
                             video_frame.len(),
                             self.decoder_queue.len(),
@@ -5301,7 +5311,7 @@ fn display_frame_pair_enhanced(
         }
     }
     else{
-        println!("No good sync, skipping frame display"); 
+        println!("[{}] - No good sync, skipping frame display", server_ip); 
         false
     }
 }

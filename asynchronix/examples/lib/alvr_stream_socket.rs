@@ -90,7 +90,7 @@ pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 120.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
-pub const IDR_FRAME_SIZE_GOP: usize = 120;
+pub const IDR_FRAME_SIZE_GOP: usize = 60;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -1941,7 +1941,7 @@ impl<H: Serialize> StreamSender<H> {
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k", "zoro", "furbo", "snow", ]; // also cut_video ( tired of it) 
+        let random_file_list = ["garp4k", "zoro", "furbo", "snow", "assemble", "cut_video" ]; 
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());        
         let final_file = match choice_random {
             Some(file) => {file},
@@ -1951,7 +1951,7 @@ impl<H: Serialize> StreamSender<H> {
             },
 
         }; 
-        let grp = "zoro"; 
+        let grp = "garp4k"; 
         
         let input_path =
             &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{grp}.mp4");
