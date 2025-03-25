@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, print_pretty, print_prettyy, print_red};
+use crate::{debug_bgprint, print_pretty, print_prettyy, print_red, print_yellow};
 use asynchronix::time;
 use core::net;
 use crossbeam::channel::{unbounded, Receiver, Sender};
@@ -48,15 +48,15 @@ pub const UPLINK_QUEUE_SIZE: usize = 128 ;
 #[macro_export]
 macro_rules! debug_schedule {
     ($fmt:expr, $($arg:tt)*) => {
-        let msg = format!($fmt, $($arg)*);
-        println!("{}", DebugColor::Navy.to_background_fn()(msg));
+        // let msg = format!($fmt, $($arg)*);
+        // println!("{}", DebugColor::Navy.to_background_fn()(msg));
     };
 }
 
 
 
 
-pub const DEBUG_SCHEDULING: bool = true;
+pub const DEBUG_SCHEDULING: bool = false;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_POLICY: bool = false;
@@ -90,14 +90,14 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: f64 = 11.2;
-pub const STEP1_TEND: f64 = 18.5;
+pub const STEP1_TBEGIN: f64 = 11.5;
+pub const STEP1_TEND: f64 = 12.0;
 
-pub const STEP2_TBEGIN: f64 = 15.0;
-pub const STEP2_TEND: f64 = 15.5;
+pub const STEP2_TBEGIN: f64 = 14.0;
+pub const STEP2_TEND: f64 = 14.2;
 
-pub const STEP3_TBEGIN: f64 = 60.0;
-pub const STEP3_TEND: f64 = 70.0;
+pub const STEP3_TBEGIN: f64 = 16.0;
+pub const STEP3_TEND: f64 = 16.3;
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
@@ -490,9 +490,9 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.001), valid_from: valid_from, valid_until: valid_until });
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.005), valid_from: valid_from, valid_until: valid_until });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
+        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
 
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
         // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
@@ -789,9 +789,9 @@ impl NetworkPatternEmulator {
                     let rand_value: f64 = rng.gen(); // Generate a random value between 0 and 1
 
                     if rand_value < *drop_probability {
-                        print_prettyy!(
-                            DebugColor::Red,
-                            "[RANDOM LOSS ( {} -> {} )]  prob= {:.4}! {:?}",
+                        print_red!(
+                            "[{} | RANDOM LOSS ( {:.5} -> {:.5} )]  prob= {:.4}! {:?}",
+                            format_elapsed!(current_time), 
                             format_elapsed!(valid_from),
                             format_elapsed!(valid_until),
                             *drop_probability,
@@ -1683,7 +1683,7 @@ impl QueueModule {
                         P_TX
                     );
                     
-                    print_red!("COLLISION! Packets in potential A-MPDU: {}, Total length: {}, Waiting T = {} for next transmission", 
+                    print_yellow!("COLLISION! Packets in potential A-MPDU: {}, Total length: {}, Waiting T = {} for next transmission", 
                               mpdu_count, total_length, T_col);
                     
                     // Schedule event to retry queue processing after collision backoff
@@ -1873,9 +1873,11 @@ impl QueueModule {
                         self.aux_ampdu_serviced.mpdu_packets.retain(|packet| {
                             let random_value: f64 = rng.gen();
                             if random_value <= self.PL_probability {
-                                print_red!(
-                                    "{:.6} [DBG QUEUE TX] --packet lost in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Probs: {:.3} (< {:.2})", 
+                                print_yellow!(
+                                    "{:.6} [DBG QUEUE] -packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Probs: {:.3} (< {:.2})", 
                                     format_elapsed!(now),
+                                    packet.sta_src_id,
+                                    packet.sta_dest_id, 
                                     packet.packet_id,
                                     packet.header_alvr.shard_index,
                                     packet.header_alvr.shards_count,

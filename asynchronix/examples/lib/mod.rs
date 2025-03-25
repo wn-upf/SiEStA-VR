@@ -56,7 +56,7 @@ pub mod alvr_control_socket;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool = true;
+pub const USE_VMAF: bool   = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -85,6 +85,15 @@ macro_rules! print_prettyy {
             let msg = format!($fmt, $($arg)*);
             println!("{}", $color.to_background_fn()(msg));
         }
+    };
+}
+#[macro_export]
+macro_rules! print_prettyyyy {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        // }
     };
 }
 #[macro_export]
@@ -129,6 +138,14 @@ macro_rules! print_red {
     ($fmt:expr, $($arg:tt)*) => {
         let msg = format!($fmt, $($arg)*);
         println!("{}", DebugColor::Red.to_background_fn()(msg));
+    };
+}
+
+#[macro_export]
+macro_rules! print_yellow {
+    ($fmt:expr, $($arg:tt)*) => {
+        // let msg = format!($fmt, $($arg)*);
+        // println!("{}", DebugColor::Yellow.to_background_fn()(msg));
     };
 }
 
@@ -454,7 +471,7 @@ impl HevcParser {
             }
             None
         } else {
-            println!("PARSER BUFFER EMPTTTTTTTTTTTY");
+            // println!("PARSER BUFFER EMPTTTTTTTTTTTY");
             None
         }
     }
@@ -1322,15 +1339,21 @@ impl MpduPacket {
     pub fn print(&self, color: DebugColor) -> String {
         print_pretty!(
             color,
-            "Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
+            "SRC: {} DEST: {}|  Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
+            self.sta_src_id,
+            self.sta_dest_id, 
             self.packet_id,
             self.header_alvr.next_packet_index,
             self.header_alvr.shard_index,
             self.header_alvr.shards_count - 1,
             self.length_packet
+            
         );
         let a = format!(
-            "Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
+            "SRC: {} DEST: {}| Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
+            
+            self.sta_src_id,
+            self.sta_dest_id, 
             self.packet_id,
             self.header_alvr.next_packet_index,
             self.header_alvr.shard_index,

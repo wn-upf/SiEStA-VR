@@ -40,7 +40,7 @@ use tokio::sync::Semaphore;
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread, write};
 
-use crate::debug_print;
+use crate::{debug_print, print_yellow};
 use crate::format_elapsed;
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
 use crate::print_pretty;
@@ -100,7 +100,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.33;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.5;
 pub const VMAF_BATCH_SIZE: usize = 10; // Process 10 frames at a time
 pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000; // Process batch after 1 second even if
 
@@ -135,7 +135,7 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.1; 
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.3; 
 
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -856,7 +856,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..5 {
+        for _ in 0..2 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
@@ -4741,13 +4741,17 @@ impl XRClient {
                                                     // Offload VMAF analysis to channel for async processing
                                                     // println!("FRAME SIMILARITY = {:.3}", similarity); 
                                                     
-                                                    if USE_VMAF && similarity <= RGB_SIMILARITY_THRESHOLD {  // put threshold at 98.7% frame similarity
+                                                    if USE_VMAF {  // put threshold at 98.7% frame similarity
                                                         if let (Some(raw_decoded), Some(raw_maxb)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw)  {
                                                             let _ = self.channel_tx_vmaf.send((
                                                                 raw_decoded.clone(),
                                                                 raw_maxb.clone(),
                                                                 frame_pair.frame_id
                                                             ));
+                                                        }
+                                                        if similarity > RGB_SIMILARITY_THRESHOLD {
+                                                            print_yellow!( "VMAF analysis for frame #{} with high artifacts (similarity: {:.2}%)", 
+                                                                frame_pair.frame_id, (1.0 - similarity) * 100.0);
                                                         }
                                                     }
                                                 } else {
@@ -5209,7 +5213,7 @@ fn display_frame_pair_enhanced(
 
     render_text(
         &mut combined_buffer,
-        &format!("LOW BITRATE {} Mbps", bitrate_sample),
+        &format!("LOW BITRATE ({} Mbps)", bitrate_sample),
         10,
         10,
         window_width,
@@ -5292,27 +5296,68 @@ fn display_frame_pair_enhanced(
     window.set_title(&title);
 
     // Critical operation: Update the window buffer with our composite frame
-    if sync_quality.unwrap() <= RGB_SIMILARITY_THRESHOLD {
-        match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
-            Ok(_) => {
-                // println!(
-                //     "✅ Successfully rendered frame #{} to window",
-                //     display_frame_id
-                // );
-                true
-            }
-            Err(e) => {
-                eprintln!(
-                    "❌ Buffer update failed for frame #{}: {}",
-                    display_frame_id, e
-                );
-                false
+    let sync_value = sync_quality.unwrap();
+    if sync_value > RGB_SIMILARITY_THRESHOLD {
+        // Add a red border to indicate high dissimilarity frames
+        let border_thickness = 4;
+        let border_color = 0xFF0000; // Red
+        
+        // Create border around the entire frame
+        for y in 0..scaled_height {
+            for x in 0..border_thickness {
+                // Left border
+                if y * window_width + x < combined_buffer.len() {
+                    combined_buffer[y * window_width + x] = border_color;
+                }
+                // Right border
+                if y * window_width + window_width - x - 1 < combined_buffer.len() {
+                    combined_buffer[y * window_width + window_width - x - 1] = border_color;
+                }
             }
         }
+        for x in 0..window_width {
+            for y in 0..border_thickness {
+                // Top border
+                if y * window_width + x < combined_buffer.len() {
+                    combined_buffer[y * window_width + x] = border_color;
+                }
+                // Bottom border
+                if (scaled_height - y - 1) * window_width + x < combined_buffer.len() {
+                    combined_buffer[(scaled_height - y - 1) * window_width + x] = border_color;
+                }
+            }
+        }
+        
+        // Add text overlay indicating high dissimilarity
+        render_text(
+            &mut combined_buffer,
+            "HIGH ARTIFACT",
+            10,
+            scaled_height - 30,
+            window_width,
+            0xFF0000, // Red
+            2,
+        );
+        
+        println!("[{}] - Low similarity ({:.2}%) for frame #{} but displaying anyway",
+                  server_ip, (1.0 - sync_value) * 100.0, display_frame_id);
     }
-    else{
-        println!("[{}] - No good sync, skipping frame display", server_ip); 
-        false
+    
+    // Always attempt to display the frame
+    match window.update_with_buffer(&combined_buffer, window_width, scaled_height) {
+        Ok(_) => {
+            // Log successful display with similarity information
+            if sync_value <= RGB_SIMILARITY_THRESHOLD {
+                print_pretty!(DebugColor::Green,
+                    "Frame #{} displayed with good similarity ({:.2}%)", 
+                    display_frame_id, (1.0 - sync_value) * 100.0);
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("❌ Buffer update failed for frame #{}: {}", display_frame_id, e);
+            false
+        }
     }
 }
 

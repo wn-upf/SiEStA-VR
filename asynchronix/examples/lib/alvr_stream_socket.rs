@@ -9,6 +9,8 @@ use std::os::unix::io::AsRawFd;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
+use crate::lib::alvr_stream_socket::thread::JoinHandle;
+
 use std::sync::{mpsc, Arc, Mutex};
 // use tokio::io::{AsyncReadExt, BufReader};
 use crate::lib::HevcParser;
@@ -87,10 +89,10 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_s: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 120.0;
+pub const OFFSET_VIDEO: f64 = 500.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
-pub const IDR_FRAME_SIZE_GOP: usize = 60;
+pub const IDR_FRAME_SIZE_GOP: usize = 30;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -102,24 +104,22 @@ pub const STATISTICS: u16 = 4;
 pub const CONTROL_STREAM: u16 = 5;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
-
 pub struct ChunkedHevcEncoder {
     input: String,
     width: u32,
     height: u32,
     bitrate: String,
-    chunk_duration: f64, // Duration of each chunk in seconds.
-    current_offset: f64, // Current start timestamp.
+    chunk_duration: f64,
+    current_offset: f64,
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
-
-    frame_queue: VecDeque<Vec<u8>>, // Add this new field for queuing frames
+    
+    frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
 }
 
 impl ChunkedHevcEncoder {
-    /// Create a new ChunkedHevcEncoder.
     pub fn new(
         input: &str,
         width: u32,
@@ -129,7 +129,6 @@ impl ChunkedHevcEncoder {
         string: String,
         offset_video: f64,
     ) -> Self {
-        // We use a bounded channel to store parsed frames.
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
 
@@ -142,12 +141,12 @@ impl ChunkedHevcEncoder {
             current_offset: offset_video,
             frame_tx,
             frame_rx,
-            frame_queue: VecDeque::new(), // Initialize the queue
+            frame_queue: VecDeque::new(),
             parser: HevcParser::new(),
             encoder_str: string.clone(),
         }
     }
-
+    
     pub fn clear_parser(&mut self) {
         self.parser.buffer.clear();
     }
@@ -297,6 +296,7 @@ impl ChunkedHevcEncoder {
         }
     }
     pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
+        // First try parser's frames - keeping original behavior
         let extracted_frames = self.parser.get_frames();
         if !extracted_frames.is_empty() {
             println!(
@@ -305,16 +305,16 @@ impl ChunkedHevcEncoder {
                 extracted_frames.len(),
                 self.parser.buffer.len()
             );
-
+            
             // Store all but first frame for future use
             for frame in extracted_frames.iter().skip(1) {
                 self.frame_queue.push_back(frame.clone());
             }
-
+            
             // Return the first extracted frame immediately
             return Some(extracted_frames[0].clone());
         }
-
+        
         // Check queue next
         if let Some(frame) = self.frame_queue.pop_front() {
             return Some(frame);
@@ -1951,7 +1951,7 @@ impl<H: Serialize> StreamSender<H> {
             },
 
         }; 
-        let grp = "garp4k"; 
+        let grp = "snow"; 
         
         let input_path =
             &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{grp}.mp4");
