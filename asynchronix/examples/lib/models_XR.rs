@@ -135,7 +135,7 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.3; 
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.2; 
 
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -856,7 +856,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..2 {
+        for _ in 0..10 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
