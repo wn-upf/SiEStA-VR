@@ -135,7 +135,7 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.2; 
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.3; 
 
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -856,7 +856,7 @@ impl SynchronizedDecoder {
         let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
         let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
 
-        for _ in 0..10 {
+        for _ in 0..30 {
             if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
                 if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     regular_decoded.push((raw, pixels));
@@ -3165,11 +3165,12 @@ pub struct XRClient {
     shared_params: Option<Arc<SharedParameterSetManager>>,
     channel_tx_vmaf: Sender<(Vec<u8>, Vec<u8>, usize)>,
     channel_rx_vmaf: Receiver<(Vec<u8>, Vec<u8>, usize)>,
+    test: String, 
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
 impl XRClient {
-    pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>, name_folder: &str) -> Self {
+    pub fn new(server_ip: IpAddr, fps: f32, now: TaiTime<0>, name_folder: &str, test: &str) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
         let synchronized_throttle = Arc::new(Semaphore::new(0));
@@ -3236,6 +3237,7 @@ impl XRClient {
 
             channel_tx_vmaf: vmaf_tx,
             channel_rx_vmaf: vmaf_rx,
+            test: test.to_string(), 
             // visualize_decoder_window: None,
         }
     }
@@ -4733,6 +4735,7 @@ impl XRClient {
                                                     current_bitrate,
                                                     now, 
                                                     bitrate_sample_mbps, 
+                                                    &self.test, 
                                                 );
                                                 if display_result {
                                                     print_pretty!(DebugColor::Green,
@@ -5128,6 +5131,7 @@ fn display_frame_pair_enhanced(
     curb: f32,
     now: TaiTime<0>, 
     bitrate_sample: f32, 
+    test: &str, 
 ) -> bool {
     let decoded = match &pair.decoded {
         Some(frame) => frame,
@@ -5284,11 +5288,12 @@ fn display_frame_pair_enhanced(
     // Update window title with precise frame information and sync quality
     let title = if let Some(quality) = sync_quality {
         format!(
-            "{} Comparison - Frame #{} - Sync: {:.1}% - t: {}",
+            "{} Comparison - Frame #{} - Sync: {:.1}% - t: {}| Test: {}",
             server_ip, 
             display_frame_id,
             (1.0 - quality) * 100.0,
             format_elapsed!(now), 
+            test,
         )
     } else {
         format!("HEVC Comparison - Frame #{}", display_frame_id)

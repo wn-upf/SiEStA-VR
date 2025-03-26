@@ -90,18 +90,19 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: f64 = 11.5;
-pub const STEP1_TEND: f64 = 12.0;
+pub const STEP1_TBEGIN: f64 = 15.0;
+pub const STEP1_TEND: f64 = 25.0;
 
-pub const STEP2_TBEGIN: f64 = 14.0;
-pub const STEP2_TEND: f64 = 14.2;
+pub const STEP2_TBEGIN: f64 = 35.0;
+pub const STEP2_TEND: f64 = 45.0;
 
-pub const STEP3_TBEGIN: f64 = 16.0;
-pub const STEP3_TEND: f64 = 16.3;
+pub const STEP3_TBEGIN: f64 = 55.0;
+pub const STEP3_TEND: f64 = 65.0;
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
 pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
+
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -377,6 +378,18 @@ impl QueueStats {
     }
 }
 
+
+// First, let's add a new enum for distribution types
+#[derive(Clone, Debug)]
+pub enum JitterDistributionType {
+    Gaussian,
+    Uniform,
+}
+
+
+
+
+
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum NetworkPattern {
@@ -400,6 +413,15 @@ pub enum NetworkPattern {
         valid_from: TaiTime<0>,
         valid_until: TaiTime<0>,
     },
+    Jitter {
+        mean_delay: Duration,
+        distribution_type: JitterDistributionType,
+        variance: f64,                // Standard deviation for Gaussian, half-width for Uniform
+        correlation_pct: f64,         // Correlation with previous delay (0-100%)
+        last_delay: Duration,         // Stores previous delay for correlation
+        valid_from: TaiTime<0>,
+        valid_until: TaiTime<0>,
+    },
 }
 
 impl NetworkPattern {
@@ -415,6 +437,42 @@ impl NetworkPattern {
             current_tokens: max_bps, // Initialize tokens to maximum
             max_tokens: max_bps,     // Maximum bucket capacity
             token_refill_rate,
+            valid_from,
+            valid_until,
+        }
+    }
+
+    pub fn new_jitter_gaussian(
+        mean_delay_ms: f64,
+        std_dev_ms: f64,
+        correlation_pct: f64,
+        valid_from: TaiTime<0>,
+        valid_until: TaiTime<0>,
+    ) -> Self {
+        Self::Jitter {
+            mean_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0),
+            distribution_type: JitterDistributionType::Gaussian,
+            variance: std_dev_ms / 1000.0,  // Convert ms to seconds
+            correlation_pct: correlation_pct.clamp(0.0, 100.0),
+            last_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0), // Initialize with mean
+            valid_from,
+            valid_until,
+        }
+    }
+
+    pub fn new_jitter_uniform(
+        mean_delay_ms: f64,
+        half_width_ms: f64,
+        correlation_pct: f64,
+        valid_from: TaiTime<0>,
+        valid_until: TaiTime<0>,
+    ) -> Self {
+        Self::Jitter {
+            mean_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0),
+            distribution_type: JitterDistributionType::Uniform,
+            variance: half_width_ms / 1000.0,  // Convert ms to seconds
+            correlation_pct: correlation_pct.clamp(0.0, 100.0),
+            last_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0), // Initialize with mean
             valid_from,
             valid_until,
         }
@@ -466,7 +524,7 @@ pub struct QueueMechanism {
 }
 
 impl QueueMechanism {
-    pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>) -> Self {
+    pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>, tests: (bool, bool, bool)) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
         let valid_from: TaiTime<0> = TaiTime::EPOCH
@@ -490,15 +548,60 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.005), valid_from: valid_from, valid_until: valid_until });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
-        network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
 
-        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
-        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
-        // network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
+        let (test_bw, test_jitter, test_pl) = tests; 
+
+        if test_bw{
+            network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
+            network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
+            network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
+        }
         
-        
+        if test_pl{
+
+            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.005), valid_from: valid_from, valid_until: valid_until });
+            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from2, valid_until: valid_until2 });
+            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.02), valid_from: valid_from3, valid_until: valid_until3 });
+        }
+        if test_jitter{
+
+            network_emulator.add_pattern(
+                NetworkPattern::new_jitter_uniform(
+                    3.0,    // mean delay in ms
+                    3.0,     // standard deviation in ms
+                    0.0,    // 20% correlation with previous packet delay
+                    valid_from,
+                    valid_until
+                )
+            );
+            
+            // Example 2: Uniform jitter with 15ms mean delay and 10ms half-width
+            network_emulator.add_pattern(
+                NetworkPattern::new_jitter_uniform(
+                    5.0,    // mean delay in ms
+                    5.0,    // half-width in ms
+                    0.0,     // no correlation with previous packet
+                    valid_from2,
+                    valid_until2
+                )
+            );
+            
+            // Example 3: Highly correlated gaussian jitter (simulates slow fluctuations)
+            network_emulator.add_pattern(
+                NetworkPattern::new_jitter_uniform(
+                    10.0,    // mean delay in ms
+                    10.0,     // standard deviation in ms
+                    0.0,    // 80% correlation with previous packet delay
+                    valid_from3,
+                    valid_until3
+                )
+            );
+
+        }
+
+
+
+
         let bandwidth_limit = BANDWIDTH_LIMIT_S1;
 
         Self {
@@ -764,7 +867,23 @@ impl NetworkPatternEmulator {
                     } else {
                         None
                     }
-                } else {
+                } else if let NetworkPattern::Jitter{
+                mean_delay,
+                distribution_type,
+                variance,         // Standard deviation for Gaussian, half-width for Uniform
+                correlation_pct,         // Correlation with previous delay (0-100%)
+                last_delay,         // Stores previous delay for correlation
+                valid_from,
+                valid_until      ,
+                } = pattern
+                {
+                    if current_time >= *valid_from && current_time <= *valid_until {
+                        Some(pattern)
+                    } else {
+                        None
+                    }
+                }
+                 else {
                     None
                 }
             })
@@ -851,6 +970,70 @@ impl NetworkPatternEmulator {
                         return Some(Duration::from_secs_f64(delay_seconds));
                     }
                 }
+
+                NetworkPattern::Jitter {
+                    mean_delay,
+                    distribution_type,
+                    variance,
+                    correlation_pct,
+                    last_delay,
+                    valid_from,
+                    valid_until,
+                } => {
+                    let mut rng = rand::thread_rng();
+                    
+                    // Calculate the new random delay
+                    let random_component = match distribution_type {
+                        JitterDistributionType::Gaussian => {
+                            // Using a normal distribution
+                            let normal = rand_distr::Normal::new(0.0, *variance).unwrap();
+                            rng.sample(normal)
+                        },
+                        JitterDistributionType::Uniform => {
+                            // Using a uniform distribution centered on 0 with width 2*variance
+                            rng.gen_range(-*variance..*variance)
+                        }
+                    };
+                    
+                    // Apply correlation with previous delay if correlation_pct > 0
+                    let correlated_offset = if *correlation_pct > 0.0 {
+                        // Calculate deviation from mean of last delay
+                        let last_deviation = last_delay.as_secs_f64() - mean_delay.as_secs_f64();
+                        
+                        // Apply correlation factor
+                        let correlation_factor = *correlation_pct / 100.0;
+                        last_deviation * correlation_factor
+                    } else {
+                        0.0
+                    };
+                    
+                    // Combine mean delay, random component, and correlation
+                    let new_delay_secs = mean_delay.as_secs_f64() + random_component + correlated_offset;
+                    
+                    // Ensure delay is not negative
+                    let new_delay_secs = new_delay_secs.max(0.0);
+                    
+                    // Update last_delay for next packet
+                    *last_delay = Duration::from_secs_f64(new_delay_secs);
+                    self.debug_counter += 1;
+
+                    if self.debug_counter >= 128 {
+                        print_red!("{:4.9} [DBG JITTER ({:.5} -> {:.5})] Delay: {:.3} ms | Mean: {:.3} ms, Rand: {:.3} ms, Corr: {:.3} ms | (ALVR F_id: {} - {}/{})",
+                            format_elapsed!(current_time),
+                            format_elapsed!(valid_from),
+                            format_elapsed!(valid_until),
+                            new_delay_secs * 1000.0,
+                            mean_delay.as_secs_f64() * 1000.0,
+                            random_component * 1000.0,
+                            correlated_offset * 1000.0,
+                            alvr_header.next_packet_index,
+                            alvr_header.shard_index,
+                            alvr_header.shards_count - 1
+                        );
+                    }
+                    
+                    return Some(Duration::from_secs_f64(new_delay_secs));
+                }
                 _ => return Some(Duration::ZERO),
             },
             None => Some(Duration::ZERO), // No active pattern
@@ -931,6 +1114,7 @@ impl QueueModule {
         vec_ids: Vec<i32>,
         folder_dir: String,
         ul_size: usize, 
+        emulated_tests: Option<(bool, bool, bool )>  // BW, Jitter, PL
     ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
@@ -949,21 +1133,13 @@ impl QueueModule {
         let network_emulator = NetworkPatternEmulator::new();
 
         // println!("Scheduling EMU TX daemon in 1 second");
-
-        let queue_mechanism = QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH);
-
-        // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-        //     drop_probability: 0.06, //
-        // });
-
-        // network_emulator.add_pattern(NetworkPattern::OnOffPeriodic {
-        //     on_duration: Duration::from_secs(5),
-        //     off_duration: Duration::from_secs(2),
-        //     current_state: true,
-        //     last_state_change: TaiTime::default(),
-        // });
-
-        // Example: Bandwidth limitation
+        let queue_mechanism: QueueMechanism; 
+        if let Some(values_tests) = emulated_tests{
+            queue_mechanism = QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, values_tests);
+        }
+        else{
+            queue_mechanism = QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, (false,false,false));
+        }
 
         Self {
             queue: VecDeque::new(),
@@ -982,7 +1158,7 @@ impl QueueModule {
             csv_metrics: CsvType::new(&folder_dir),
 
             coords_queue: Coords::new(),
-            p_tx: 20.0,
+            p_tx: P_TX,
             STA_coords_grid: Vec::new(),
             STA_coords_map: HashMap::new(),
 

@@ -12,6 +12,8 @@ use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 use ffmpeg_next::packet::packet;
 use std::collections::HashMap;
+
+
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
@@ -62,6 +64,7 @@ impl VRPair {
         initial_bitrate: f64,
         distance: f64,
         name_folder: &str,
+        test: &str, 
     ) -> Self {
         let server_id = 100 + pair_index as i32;
         let client_id = 200 + pair_index as i32;
@@ -94,7 +97,7 @@ impl VRPair {
             initial_bitrate as f32,
             name_folder,
         );
-        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0, name_folder);
+        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0, name_folder, test);
 
         let mut sta_server = STA_extended::new(
             initial_bitrate * 1e6,
@@ -160,8 +163,8 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 12 {
-        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL>", args[0]);
+    if args.len() != 13 {
+        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <emu_effect>", args[0]);
         return;
     }
 
@@ -176,14 +179,40 @@ fn main() {
     let pl_prob: f64 = args[8].parse().unwrap();
     let n_xr: usize = args[9].parse().unwrap();
     let n_bg: usize = args[10].parse().unwrap(); // New parameter for background STAs
-
     let is_ul_bg_traffic: usize = args[11].parse().unwrap();
+    let test_type: String = args[12].parse().unwrap();  // New test type parameter
 
     let is_ul: bool = is_ul_bg_traffic == 1;
 
+    // let mut suffix : &str = "STD"; 
+    // if TEST_BANDWIDTH{
+    //     suffix = "BW"; 
+    // }
+    // else if TEST_JITTER{
+    //     suffix = "JI"; 
+    // }
+    // else if TEST_PL{
+    //     suffix = "PL";
+    // }
+
+    // Set test constants based on test_type parameter
+    let (test_bandwidth, test_jitter, test_pl) = match test_type.as_str() {
+        "BW" => (true, false, false),
+        "JI" => (false, true, false),
+        "PL" => (false, false, true),
+        _ => (false, false, false),  // Default/STD case
+    };
+     // Use the test type from parameter as suffix directly
+     let suffix = if ["BW", "JI", "PL", "STD"].contains(&test_type.as_str()) {
+        test_type.as_str()
+    } else {
+        "STD"  // Default suffix if invalid test type provided
+    };
+
+
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}",
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}",
         stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
     );
 
@@ -201,7 +230,7 @@ fn main() {
 
     // Create XR pairs
     for i in 0..n_xr {
-        let vr = VRPair::new(i, t0, mean_length, initial_bitrate, distance, &name_folder);
+        let vr = VRPair::new(i, t0, mean_length, initial_bitrate, distance, &name_folder, suffix);
         all_sta_ids.push(100 + i as i32);
         all_sta_ids.push(200 + i as i32);
         xr_client_addresses.push(vr.mbox_xr_client.address());
@@ -246,6 +275,7 @@ fn main() {
         all_sta_ids.clone(),
         name_folder,
         UPLINK_QUEUE_SIZE, 
+        Some((test_bandwidth, test_jitter, test_pl)),
     );
     let mbox_queue = Mailbox::new();
     let queue_address = mbox_queue.address();

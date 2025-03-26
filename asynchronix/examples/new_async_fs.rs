@@ -19,7 +19,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const INITIAL_BITRATE: &str = "2M";
 
-pub const IDR_FRAME_SIZE_GOP: usize = 90;
+pub const IDR_FRAME_SIZE_GOP: usize = 180;
 
 pub const FRAMERATE_CODEC: usize = 60;
 

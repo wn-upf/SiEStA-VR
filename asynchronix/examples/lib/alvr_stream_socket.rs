@@ -86,13 +86,13 @@ pub const INTRAREFRESH_ENABLED :bool = false;
 pub const MAX_HISTORY_SIZE: usize = 256;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-pub const CHUNK_DURATION_F64_s: f64 = 1.5;
+pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 500.0;
+pub const OFFSET_VIDEO: f64 = 320.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
-pub const IDR_FRAME_SIZE_GOP: usize = 30;
+pub const IDR_FRAME_SIZE_GOP: usize = 60;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -1951,7 +1951,7 @@ impl<H: Serialize> StreamSender<H> {
             },
 
         }; 
-        let grp = "snow"; 
+        let grp = "cut_video"; 
         
         let input_path =
             &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{grp}.mp4");
@@ -1976,15 +1976,15 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                // let random_offset = OFFSET_VIDEO;
+                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                let random_offset = OFFSET_VIDEO;
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
                     &bitrate_cmd,
-                    CHUNK_DURATION_F64_s, // Chunk duration in seconds
+                    CHUNK_DURATION_F64_S, // Chunk duration in seconds
                     format!("[ENCODER {}]", ip),
                     random_offset,
                 );
@@ -1993,7 +1993,7 @@ impl<H: Serialize> StreamSender<H> {
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
                     &maxbitrate_cmd,
-                    CHUNK_DURATION_F64_s, // Chunk duration in seconds
+                    CHUNK_DURATION_F64_S, // Chunk duration in seconds
                     format!("[Bitrate MAX ENCODER {}]", ip),
                     random_offset,
                 );
