@@ -139,8 +139,8 @@ pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10; 
 
 // Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.2;      // 80% similar to establish sync
-const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.5; // 60% similar to maintain sync
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.15;      // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.22; // 60% similar to maintain sync
 /// Threshold for considering a frame match "good" (lower value = more similar)
 /// Value of 0.2 means frames are approximately 80% similar
 
@@ -148,10 +148,10 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.5; // 60% similar to maintain syn
 pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 3;
 
 /// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 3;
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 3.5 ) as u32;
 
 /// Number of consecutive good matches required to re-establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_RELOCK: u32 = 2;
+pub const CONSECUTIVE_MATCHES_TO_RELOCK: u32 = 1;
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -550,6 +550,7 @@ fn compute_enhanced_frame_similarity(
 
 
 
+
 fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
     if rgb_data.len() != width * height * 3 {
         println!(
@@ -838,7 +839,7 @@ pub struct SynchronizedDecoder {
     consecutive_good_matches: u32,      // Counter for stability confirmation
     consecutive_poor_matches: u32,      // Counter for detecting sync loss
     last_matched_frame_ids: Option<(usize, usize)>, // 
-
+    last_max_reference: Option<(Vec<u8>, Vec<u32>, usize)>,
 
 }
 #[derive(Debug, Clone)]
@@ -874,8 +875,36 @@ impl SynchronizedDecoder {
             consecutive_good_matches: 0,
             consecutive_poor_matches: 0,
             last_matched_frame_ids: None,
+            last_max_reference: None,
         }
     }
+
+
+
+    // Helper method to check if a frame contains a keyframe
+    fn is_keyframe(&self, frame: &[u8]) -> bool {
+        // Check for start code
+        for i in 0..frame.len().saturating_sub(5) {
+            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+                || (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
+            {
+                let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
+                let nal_header_pos = i + start_code_len;
+
+                if nal_header_pos < frame.len() {
+                    let nal_header = frame[nal_header_pos];
+                    let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+
+                    // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
+                    if (16..=21).contains(&nal_type) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn synchronize_frame_buffers(&mut self) {
         // Skip if output queue is sufficiently filled
         if self.output_queue.len() > 1 {
@@ -887,8 +916,11 @@ impl SynchronizedDecoder {
         self.max_decoder.process_decoded_frames();
     
         // Create inspection snapshots of current decoder frame buffers
-        let mut regular_decoded = self.peek_regular_frames(8);
-        let mut max_decoded = self.peek_max_frames(8);
+        let mut regular_decoded = self.peek_regular_frames(20);
+        let mut max_decoded = self.peek_max_frames(20);
+
+
+
     
         if regular_decoded.is_empty() || max_decoded.is_empty() {
             return; // Insufficient frames for synchronization
@@ -897,22 +929,78 @@ impl SynchronizedDecoder {
         // Core synchronization logic
         match self.sync_state {
             SyncState::Seeking => {
-                // Find best match using similarity metrics
-                let (best_regular_idx, best_max_idx, similarity) = 
-                    find_best_frame_match(&regular_decoded, &max_decoded);
-    
-                if similarity <= GOOD_SIMILARITY_THRESHOLD {
-                    // Found a good match - consume these frames for display
-                    let regular_frame = self.consume_regular_frames(best_regular_idx + 1).last().unwrap().clone();
-                    let max_frame: (Vec<u8>, Vec<u32>, usize) = self.consume_max_frames(best_max_idx + 1).last().unwrap().clone();
-                    
-                    // Update synchronization state
+                // Expand the search window for both streams
+                let mut regular_decoded = self.peek_regular_frames(50);
+                let mut max_decoded = self.peek_max_frames(50);
+                
+                if regular_decoded.is_empty() || max_decoded.is_empty() {
+                    return; // Insufficient frames for synchronization
+                }
+                
+                // Rough global offset estimation (scanning a small range)
+                let mut best_offset = 0;
+                let mut best_avg_similarity = f64::MAX;
+                for offset in -10..10 {
+                    let mut total_similarity = 0.0;
+                    let count = regular_decoded.len().min(max_decoded.len());
+                    for i in 0..count {
+                        let reg_idx = if offset < 0 { i } else { i + offset as usize };
+                        let max_idx = if offset < 0 { i + (-offset) as usize } else { i };
+                        if reg_idx < regular_decoded.len() && max_idx < max_decoded.len() {
+                            total_similarity += compute_enhanced_frame_similarity(
+                                &regular_decoded[reg_idx].0,
+                                &max_decoded[max_idx].0,
+                                WIDTH_ENCODER,
+                                HEIGHT_ENCODER,
+                            );
+                        }
+                    }
+                    let avg_similarity = total_similarity / count as f64;
+                    if avg_similarity < best_avg_similarity {
+                        best_avg_similarity = avg_similarity;
+                        best_offset = offset;
+                    }
+                }
+                println!("Estimated global offset: {}", best_offset);
+                
+                // Detailed matching with offset penalty:
+                let id_penalty_factor = 0.01;
+                let mut best_regular_idx = 0;
+                let mut best_max_idx = 0;
+                let mut best_similarity = f64::MAX;
+                
+                for (reg_idx, reg_frame) in regular_decoded.iter().enumerate() {
+                    for (max_idx, max_frame) in max_decoded.iter().enumerate() {
+                        let similarity = compute_enhanced_frame_similarity(
+                            &reg_frame.0,
+                            &max_frame.0,
+                            WIDTH_ENCODER,
+                            HEIGHT_ENCODER,
+                        );
+                        let id_diff = (reg_frame.2 as i64 - max_frame.2 as i64).abs();
+                        // Add a penalty based on frame ID difference
+                        let penalty = (id_diff as f64 * id_penalty_factor).abs();
+                        let weighted_similarity = similarity + penalty;
+                
+                        if weighted_similarity < best_similarity {
+                            best_similarity = weighted_similarity;
+                            best_regular_idx = reg_idx;
+                            best_max_idx = max_idx;
+                        }
+                    }
+                }
+                
+                // If the best match is good enough, consume frames accordingly
+                if best_similarity <= GOOD_SIMILARITY_THRESHOLD {
+                    let regular_frame = self.consume_regular_frames(best_regular_idx + 1)
+                                            .last().unwrap().clone();
+                    let max_frame = self.consume_max_frames(best_max_idx + 1)
+                                            .last().unwrap().clone();
                     let reg_frame_id = regular_frame.2;
                     let max_frame_id = max_frame.2;
                     self.stable_offset = Some(reg_frame_id as i64 - max_frame_id as i64);
                     self.consecutive_good_matches += 1;
-                    
-                    // Create synchronized frame pair
+                
                     let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                     let sync_pair = FramePair {
                         decoded: Some(regular_frame.1.clone()),
@@ -921,22 +1009,30 @@ impl SynchronizedDecoder {
                         reference_raw: Some(max_frame.0.clone()),
                         frame_id,
                     };
+                
+                    // If keyframes, reset buffers
+                    if self.is_keyframe(&regular_frame.0) && self.is_keyframe(&max_frame.0) {
+                        println!("🔑 Keyframe pair detected - forcing immediate resync");
+                        self.sync_state = SyncState::Seeking;
+                        self.stable_offset = None;
+                        self.consecutive_good_matches = 0;
+                        self.regular_decoder.decoded_frames.clear();
+                        self.max_decoder.decoded_frames.clear();
+                        return;
+                    }
+                
                     self.output_queue.push_back(sync_pair);
-                    
+                
                     if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK {
-                        println!("🔒 Synchronization locked with offset: {}", 
-                                 self.stable_offset.unwrap());
+                        println!("🔒 Synchronization locked with offset: {}", self.stable_offset.unwrap());
                         self.sync_state = SyncState::Locked;
                     }
                 } else {
-                    // Not a good match, reset counter but still use best available
+                    // If no good match is found, fallback gracefully:
                     self.consecutive_good_matches = 0;
-                    
-                    // Consume only the regular frame, reference frame is too precious to skip
-                    let regular_frame = self.consume_regular_frames(best_regular_idx + 1).last().unwrap().clone();
+                    let regular_frame = self.consume_regular_frames(best_regular_idx + 1)
+                                            .last().unwrap().clone();
                     let max_frame = max_decoded[0].clone();  // Use first reference frame without consuming
-                    
-                    // Create frame pair with best effort
                     let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                     let sync_pair = FramePair {
                         decoded: Some(regular_frame.1.clone()),
@@ -947,7 +1043,7 @@ impl SynchronizedDecoder {
                     };
                     self.output_queue.push_back(sync_pair);
                 }
-            },
+            }
             
             SyncState::Locked => {
                 // When locked, we maintain the reference stream integrity absolutely
@@ -1051,45 +1147,94 @@ impl SynchronizedDecoder {
             },
             
             SyncState::Recovering => {
-                // Find the best matching frames using similarity metric
-                let (best_regular_idx, best_max_idx, similarity) = 
-                    find_best_frame_match(&regular_decoded, &max_decoded);
-            
-                // Consume frames up to the best match indices to advance the buffers
-                if best_regular_idx > 0 {
-                    self.consume_regular_frames(best_regular_idx);
+                // Get a snapshot of max candidate frames
+                let max_candidates = self.peek_max_frames(30);
+                if max_candidates.is_empty() {
+                    return;
                 }
-                if best_max_idx > 0 {
-                    self.consume_max_frames(best_max_idx);
+        
+                // Get the current candidate. If none, initialize it to the first available frame.
+                let current_ref = self.last_max_reference.clone().unwrap_or_else(|| max_candidates[0].clone());
+        
+                // We'll compute the similarity of the regular frame (peek the oldest one) to the current candidate.
+                if regular_decoded.is_empty() {
+                    return; // Can't proceed without a regular frame.
                 }
-            
-                // Create the synchronized pair with the best match
+                // Peek the next regular frame (we don't consume it until we decide on the max frame)
+                let reg_frame = &regular_decoded[0];
+        
+                // Compute similarity with current candidate
+                let mut best_candidate = current_ref.clone();
+                let mut best_similarity = compute_enhanced_frame_similarity(
+                    &reg_frame.0,
+                    &current_ref.0,
+                    WIDTH_ENCODER,
+                    HEIGHT_ENCODER,
+                );
+        
+                // Search among the upcoming max frames to see if one gives better similarity.
+                // Limit the search to frames that are at most 5 frames ahead in sequence.
+                for candidate in max_candidates.iter().skip(1) {
+                    // Ensure we don't jump ahead too far (e.g., more than 5 frames)
+                    if candidate.2 as i64 - current_ref.2 as i64 > 5 {
+                        break;
+                    }
+                    let candidate_similarity = compute_enhanced_frame_similarity(
+                        &reg_frame.0,
+                        &candidate.0,
+                        WIDTH_ENCODER,
+                        HEIGHT_ENCODER,
+                    );
+                    // If the new candidate is clearly better, update our candidate.
+                    if candidate_similarity < best_similarity {
+                        best_similarity = candidate_similarity;
+                        best_candidate = candidate.clone();
+                    }
+                }
+        
+                // Find the candidate's index in the current max candidate list.
+                let candidate_index = max_candidates.iter().position(|x| x.2 == best_candidate.2).unwrap_or(0);
+        
+                // Consume max frames up through the candidate (to preserve sequential order)
+                if candidate_index > 0 {
+                    self.consume_max_frames(candidate_index);
+                }
+        
+                // Store the updated candidate for future recovery rounds.
+                self.last_max_reference = Some(best_candidate.clone());
+        
+                // Now, consume one regular frame (the one we peeked above)
                 let regular_frame = self.consume_regular_frames(1).pop().unwrap();
-                let max_frame = self.consume_max_frames(1).pop().unwrap();
-            
+        
+                // Compute a new offset if needed (optional, depending on your logic)
+                let new_offset = regular_frame.2 as i64 - best_candidate.2 as i64;
+                self.stable_offset = Some(new_offset);
+        
+                // Create the synchronized frame pair using the chosen max candidate.
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
                     decoded: Some(regular_frame.1.clone()),
-                    reference: Some(max_frame.1.clone()),
+                    reference: Some(best_candidate.1.clone()),
                     decoded_raw: Some(regular_frame.0.clone()),
-                    reference_raw: Some(max_frame.0.clone()),
+                    reference_raw: Some(best_candidate.0.clone()),
                     frame_id,
                 };
                 self.output_queue.push_back(sync_pair);
-            
-                // Check if similarity is sufficient to re-establish sync
-                if similarity <= GOOD_SIMILARITY_THRESHOLD {
+        
+                // Update counters and potentially transition back to Locked state if the match is good.
+                if best_similarity <= GOOD_SIMILARITY_THRESHOLD {
                     self.consecutive_good_matches += 1;
                     if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_RELOCK {
                         self.sync_state = SyncState::Locked;
                         self.consecutive_poor_matches = 0;
-                        println!("🔒 Synchronization re-established with offset: {:?}", self.stable_offset);
+                        println!("🔒 Sync locked: Offset {}", new_offset);
                     }
                 } else {
                     self.consecutive_good_matches = 0;
+                    println!("⚠️ Poor recovery match: {:.2}%", (1.0 - best_similarity) * 100.0);
                 }
-            }
-        }
+            },
+        }            
     }
 
     pub fn process_ref_only_sample(
@@ -4921,7 +5066,6 @@ impl XRClient {
                                                 let max_bitrate = 100.0;
                                                 // Display with enhanced visualization
                                                
-                                               
                                                 let mut bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap();
                                                 // println!("bitrate: {}", bitrate_sample_mbps);  
                                                 let display_result = display_frame_pair_enhanced(
@@ -4935,6 +5079,7 @@ impl XRClient {
                                                     now, 
                                                     bitrate_sample_mbps, 
                                                     &self.test, 
+                                                    sync_decoder_guard.sync_state.clone(), 
                                                 );
                                                 if display_result {
                                                     print_pretty!(DebugColor::Green,
@@ -5152,6 +5297,7 @@ fn display_frame_pair_enhanced(
     now: TaiTime<0>, 
     bitrate_sample: f32, 
     test: &str, 
+    state_machine_state: SyncState, 
 ) -> bool {
     let decoded = match &pair.decoded {
         Some(frame) => frame,
@@ -5268,6 +5414,17 @@ fn display_frame_pair_enhanced(
         2,
     );
 
+    let state_print = format!("Sync state: {:#?}", state_machine_state); 
+    render_text(
+        &mut combined_buffer,
+        &state_print,
+        text_x,
+        scaled_height - 25,
+        window_width,
+        highlight_color,
+        2,
+    );
+
 
     // Add difference visualization in bottom corner
     if let (Some(raw_decoded), Some(raw_reference)) = (&pair.decoded_raw, &pair.reference_raw) {
@@ -5365,7 +5522,7 @@ fn display_frame_pair_enhanced(
         );
         
         println!("[{}] - Low similarity ({:.2}%) for frame #{} but displaying anyway",
-                  server_ip, (1.0 - sync_value) * 100.0, display_frame_id);
+                  server_ip, (sync_value) * 100.0, display_frame_id);
     }
     
     // Always attempt to display the frame

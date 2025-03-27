@@ -47,7 +47,7 @@ use crate::lib::models_XR::{STA_extended, SinkVideo_XR, XRClient, XRServer};
 use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE; 
 
 
-pub const SIM_START_TIME: u64 = 9; 
+pub const SIM_START_TIME: u64 = 13; 
 
 
 struct VRPair {
