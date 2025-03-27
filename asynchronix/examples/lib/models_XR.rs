@@ -148,7 +148,7 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.5; // 60% similar to maintain syn
 pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 3;
 
 /// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 5;
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 3;
 
 /// Number of consecutive good matches required to re-establish synchronization
 pub const CONSECUTIVE_MATCHES_TO_RELOCK: u32 = 2;
@@ -841,6 +841,7 @@ pub struct SynchronizedDecoder {
 
 
 }
+#[derive(Debug, Clone)]
 enum SyncState {
     Seeking,     // Initial state, looking for a good match
     Locked,      // Stable synchronization established
@@ -962,21 +963,66 @@ impl SynchronizedDecoder {
                         // Find closest max frame without consuming until confirmed
                         let mut best_max_idx = 0;
                         let mut best_similarity = f64::MAX;
+                        let mut exact_id_match_found = false;
                         
                         for (idx, (max_raw, _, max_id)) in max_decoded.iter().enumerate() {
                             if *max_id == expected_max_id {
-                                // Found exact frame ID match
+                                // Found exact frame ID match - compute similarity to validate quality
+                                let frame_similarity = compute_enhanced_frame_similarity(
+                                    &regular_frame.0, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                                
                                 best_max_idx = idx;
+                                best_similarity = frame_similarity;
+                                exact_id_match_found = true;
+                                
+                                // We found an exact ID match, so break early
                                 break;
                             }
                             
-                            // Calculate similarity as backup matching method
-                            let similarity = compute_enhanced_frame_similarity(
-                                &regular_frame.0, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                            // If no exact ID match, compute similarity as backup matching method
+                            if !exact_id_match_found {
+                                let frame_similarity = compute_enhanced_frame_similarity(
+                                    &regular_frame.0, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                                
+                                if frame_similarity < best_similarity {
+                                    best_similarity = frame_similarity;
+                                    best_max_idx = idx;
+                                }
+                            }
+                        }
+                        
+                        // Now we have the best match and its similarity score to evaluate
+                        if best_similarity <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                            // Good match by similarity threshold
+                            self.consecutive_poor_matches = 0; // Reset the counter
+                        } else {
+                            // Poor match detected - increment counter
+                            self.consecutive_poor_matches += 1;
                             
-                            if similarity < best_similarity {
-                                best_similarity = similarity;
-                                best_max_idx = idx;
+                            // Log the poor match for debugging
+                            println!("⚠️ Poor match detected: similarity={:.4}, consecutive={}/{}",
+                                    best_similarity,
+                                    self.consecutive_poor_matches,
+                                    CONSECUTIVE_MISMATCHES_TO_RECOVER);
+                            
+                            // Check if we've reached the threshold for state transition
+                            if self.consecutive_poor_matches >= CONSECUTIVE_MISMATCHES_TO_RECOVER {
+                                let old_state = self.sync_state.clone();
+                                self.sync_state = SyncState::Recovering;
+                                
+                                println!("🔄 Sync state transition: {:?} → {:?} - {} consecutive poor matches",
+                                        old_state,
+                                        self.sync_state,
+                                        self.consecutive_poor_matches);
+                                        
+                                println!("🔍 Sync diagnostics: offset={:?}, best_similarity={:.4}, frame_ids=({}, {})",
+                                        self.stable_offset,
+                                        best_similarity,
+                                        reg_id,
+                                        expected_max_id);
+                                        
+                                // Reset good match counter as we're now in recovery
+                                self.consecutive_good_matches = 0;
                             }
                         }
                         
@@ -1005,41 +1051,41 @@ impl SynchronizedDecoder {
             },
             
             SyncState::Recovering => {
-                // Similar to Seeking but with different thresholds
                 // Find the best matching frames using similarity metric
-             // Original problematic call:
-            let (best_regular_idx, best_max_idx, similarity) = 
-            find_best_frame_match(&regular_decoded, &max_decoded);
-
-// This will now work with the updated function signature
-                // Output the best pair we found regardless of similarity
+                let (best_regular_idx, best_max_idx, similarity) = 
+                    find_best_frame_match(&regular_decoded, &max_decoded);
+            
+                // Consume frames up to the best match indices to advance the buffers
+                if best_regular_idx > 0 {
+                    self.consume_regular_frames(best_regular_idx);
+                }
+                if best_max_idx > 0 {
+                    self.consume_max_frames(best_max_idx);
+                }
+            
+                // Create the synchronized pair with the best match
+                let regular_frame = self.consume_regular_frames(1).pop().unwrap();
+                let max_frame = self.consume_max_frames(1).pop().unwrap();
+            
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
-                    decoded: Some(regular_decoded[best_regular_idx].1.clone()),
-                    reference: Some(max_decoded[best_max_idx].1.clone()),
-                    decoded_raw: Some(regular_decoded[best_regular_idx].0.clone()),
-                    reference_raw: Some(max_decoded[best_max_idx].0.clone()),
+                    decoded: Some(regular_frame.1.clone()),
+                    reference: Some(max_frame.1.clone()),
+                    decoded_raw: Some(regular_frame.0.clone()),
+                    reference_raw: Some(max_frame.0.clone()),
                     frame_id,
                 };
                 self.output_queue.push_back(sync_pair);
-                
-                // If similarity is very good, prepare to establish synchronization again
+            
+                // Check if similarity is sufficient to re-establish sync
                 if similarity <= GOOD_SIMILARITY_THRESHOLD {
-                    let reg_frame_id = regular_decoded[best_regular_idx].2;
-                    let max_frame_id = max_decoded[best_max_idx].2;
-                    
-                    self.last_matched_frame_ids = Some((reg_frame_id, max_frame_id));
-                    self.stable_offset = Some(reg_frame_id as i64 - max_frame_id as i64);
                     self.consecutive_good_matches += 1;
-                    
-                    // If we've seen several consecutive good matches, transition to Locked state
-                    if self.consecutive_good_matches >= 2 { // Easier to re-establish than initial sync
-                        println!("Synchronization re-established with offset: {}", self.stable_offset.unwrap());
+                    if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_RELOCK {
                         self.sync_state = SyncState::Locked;
                         self.consecutive_poor_matches = 0;
+                        println!("🔒 Synchronization re-established with offset: {:?}", self.stable_offset);
                     }
                 } else {
-                    // Reset good match counter if this wasn't a good match
                     self.consecutive_good_matches = 0;
                 }
             }
@@ -5039,185 +5085,6 @@ impl XRClient {
 
 impl Model for XRClient {}
 // Render an enhanced difference visualization with improved perceptual scaling
-fn render_enhanced_difference_visualization(
-    buffer: &mut [u32],
-    frame1: &[u8],
-    frame2: &[u8],
-    width: usize,
-    height: usize,
-    x_pos: usize,
-    y_pos: usize,
-    size: usize,
-    stride: usize,
-) {
-    // Calculate block size for visualization with appropriate bounds checking
-    let block_width = width.checked_div(size).unwrap_or(1);
-    let block_height = height.checked_div(size).unwrap_or(1);
-
-    // Draw enhanced border with 3D effect
-    for y in 0..size + 2 {
-        for x in 0..size + 2 {
-            // Calculate pixel coordinates with safety bounds checking
-            let buffer_y = y_pos.saturating_add(y).saturating_sub(1);
-            let buffer_x = x_pos.saturating_add(x).saturating_sub(1);
-            let buffer_idx = buffer_y.saturating_mul(stride).saturating_add(buffer_x);
-
-            if buffer_idx < buffer.len() {
-                if x == 0 || y == 0 || x == size + 1 || y == size + 1 {
-                    // Enhanced border with depth effect
-                    let is_top_left = x == 0 || y == 0;
-                    buffer[buffer_idx] = if is_top_left { 0xA0A0A0 } else { 0x606060 };
-                }
-            }
-        }
-    }
-
-    // Track statistics for auto-scaling
-    let mut min_diff: f64 = 1.0;
-    let mut max_diff: f64 = 0.0;
-    let mut diffs = vec![0.0; size * size];
-
-    // First pass: Calculate differences and gather statistics
-    for y in 0..size {
-        for x in 0..size {
-            // Calculate source region with bounds validation
-            let src_x = x.saturating_mul(block_width);
-            let src_y = y.saturating_mul(block_height);
-
-            // Use advanced block comparison
-            let mut total_diff = 0.0;
-            let mut samples = 0;
-
-            // Enhanced adaptive sampling based on block size
-            let sample_step = block_width.max(block_height).max(4).min(16) / 4;
-
-            for dy in (0..block_height.min(16)).step_by(sample_step.max(1)) {
-                for dx in (0..block_width.min(16)).step_by(sample_step.max(1)) {
-                    let pixel_x = src_x.saturating_add(dx);
-                    let pixel_y = src_y.saturating_add(dy);
-
-                    // Calculate pixel index with bounds validation
-                    let pixel_idx = pixel_y
-                        .saturating_mul(width)
-                        .saturating_add(pixel_x)
-                        .saturating_mul(3);
-
-                    // Ensure we don't go out of bounds
-                    if pixel_idx + 2 < frame1.len() && pixel_idx + 2 < frame2.len() {
-                        // Calculate perceptually weighted RGB differences
-                        let r_diff =
-                            (frame1[pixel_idx] as i32 - frame2[pixel_idx] as i32).abs() as f64;
-                        let g_diff = (frame1[pixel_idx + 1] as i32 - frame2[pixel_idx + 1] as i32)
-                            .abs() as f64;
-                        let b_diff = (frame1[pixel_idx + 2] as i32 - frame2[pixel_idx + 2] as i32)
-                            .abs() as f64;
-
-                        // Perceptual weighting (human eye is more sensitive to green)
-                        total_diff += r_diff * 0.2126 + g_diff * 0.7152 + b_diff * 0.0722;
-                        samples += 1;
-                    }
-                }
-            }
-
-            // Calculate normalized difference with enhanced sensitivity
-            let avg_diff = if samples > 0 {
-                // Normalize and apply non-linear scaling to emphasize subtle differences
-                let normalized = total_diff / (samples as f64 * 255.0);
-                // Use a power function to enhance sensitivity to small differences
-                1.0 - (1.0 - normalized).powf(0.4)
-            } else {
-                0.0
-            };
-
-            // Store diff for auto-scaling
-            let idx = y * size + x;
-            if idx < diffs.len() {
-                diffs[idx] = avg_diff;
-                min_diff = min_diff.min(avg_diff);
-                max_diff = max_diff.max(avg_diff);
-            }
-        }
-    }
-
-    // Calculate dynamic range for auto-scaling
-    let diff_range = max_diff - min_diff;
-
-    // Second pass: Render with auto-scaled intensity
-    for y in 0..size {
-        for x in 0..size {
-            let idx = y * size + x;
-            if idx < diffs.len() {
-                // Apply auto-scaling to maximize visualization contrast
-                let norm_diff = if diff_range > 0.001 {
-                    (diffs[idx] - min_diff) / diff_range
-                } else {
-                    // If range is too small, normalize around midpoint
-                    let center = (min_diff + max_diff) / 2.0;
-                    let scaled = (diffs[idx] - center) * 100.0 + 0.5;
-                    scaled.max(0.0).min(1.0)
-                };
-
-                // Convert to heatmap color with enhanced perceptual mapping
-                let heatmap_color = enhanced_diff_to_heatmap_color(norm_diff);
-
-                // Plot the pixel with bounds validation
-                let buffer_idx = (y_pos + y).saturating_mul(stride).saturating_add(x_pos + x);
-                if buffer_idx < buffer.len() {
-                    buffer[buffer_idx] = heatmap_color;
-                }
-            }
-        }
-    }
-
-    // Add enhancement markers (grid lines) for better visualization interpretation
-    for i in 1..4 {
-        let line_pos = (size * i) / 4;
-
-        // Horizontal grid line
-        for x in 0..size {
-            let buffer_idx = (y_pos + line_pos)
-                .saturating_mul(stride)
-                .saturating_add(x_pos + x);
-            if buffer_idx < buffer.len() {
-                // Semi-transparent grid line
-                let existing = buffer[buffer_idx];
-                let r = (existing >> 16) & 0xFF;
-                let g = (existing >> 8) & 0xFF;
-                let b = existing & 0xFF;
-
-                // Blend with grid color (dark semi-transparent)
-                let blend_factor = 0.8;
-                let new_r = (r as f64 * blend_factor) as u32;
-                let new_g = (g as f64 * blend_factor) as u32;
-                let new_b = (b as f64 * blend_factor) as u32;
-
-                buffer[buffer_idx] = (new_r << 16) | (new_g << 8) | new_b;
-            }
-        }
-
-        // Vertical grid line
-        for y in 0..size {
-            let buffer_idx = (y_pos + y)
-                .saturating_mul(stride)
-                .saturating_add(x_pos + line_pos);
-            if buffer_idx < buffer.len() {
-                // Semi-transparent grid line
-                let existing = buffer[buffer_idx];
-                let r = (existing >> 16) & 0xFF;
-                let g = (existing >> 8) & 0xFF;
-                let b = existing & 0xFF;
-
-                // Blend with grid color (dark semi-transparent)
-                let blend_factor = 0.8;
-                let new_r = (r as f64 * blend_factor) as u32;
-                let new_g = (g as f64 * blend_factor) as u32;
-                let new_b = (b as f64 * blend_factor) as u32;
-
-                buffer[buffer_idx] = (new_r << 16) | (new_g << 8) | new_b;
-            }
-        }
-    }
-}
 
 fn enhanced_diff_to_heatmap_color(diff: f64) -> u32 {
     // Apply logarithmic scaling to enhance small differences
