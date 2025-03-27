@@ -45,6 +45,11 @@ use std::time::Duration;
 
 use crate::lib::models_XR::{STA_extended, SinkVideo_XR, XRClient, XRServer};
 use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE; 
+
+
+pub const SIM_START_TIME: u64 = 9; 
+
+
 struct VRPair {
     xr_server: XRServer,
     xr_client: XRClient,
@@ -345,14 +350,14 @@ fn main() {
         let epsilon = Duration::from_secs_f64(0.01);
         scheduler
             .schedule_event(
-                Duration::from_secs(10) + epsilon,
+                Duration::from_secs(SIM_START_TIME) + epsilon,
                 XRClient::configure_streams,
                 packet_size,
                 addr,
             )
             .unwrap(); // Why pass packet_size? -> compiler complains if no other arg is found when context is needed:)
         scheduler
-            .schedule_event(Duration::from_secs(10) + epsilon, XRClient::vsync, (), addr)
+            .schedule_event(Duration::from_secs(SIM_START_TIME) + epsilon, XRClient::vsync, (), addr)
             .unwrap();
     }
 
@@ -361,7 +366,7 @@ fn main() {
         let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
         scheduler
             .schedule_event(
-                Duration::from_secs(10) + epsilon,
+                Duration::from_secs(SIM_START_TIME) + epsilon,
                 XRServer::connection_pipeline,
                 dest_ip,
                 addr,
@@ -379,7 +384,7 @@ fn main() {
 
     scheduler
         .schedule_event(
-            Duration::from_secs(10),
+            Duration::from_secs(SIM_START_TIME),
             QueueModule::self_scheduled_emu_queue_tx,
             (),
             &queue_address,

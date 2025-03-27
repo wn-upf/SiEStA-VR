@@ -40,7 +40,7 @@ use tokio::sync::Semaphore;
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread, write};
 
-use crate::{debug_print, print_yellow};
+use crate::{debug_print, print_prettyyyy, print_yellow};
 use crate::format_elapsed;
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
 use crate::print_pretty;
@@ -100,7 +100,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.5;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.38;
 pub const VMAF_BATCH_SIZE: usize = 10; // Process 10 frames at a time
 pub const VMAF_BATCH_TIMEOUT_MS: u64 = 1000; // Process batch after 1 second even if
 
@@ -135,8 +135,23 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.3; 
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5; 
+pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10; 
 
+// Similarity thresholds for sync state transitions
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.2;      // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.5; // 60% similar to maintain sync
+/// Threshold for considering a frame match "good" (lower value = more similar)
+/// Value of 0.2 means frames are approximately 80% similar
+
+/// Number of consecutive good matches required to establish synchronization
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 3;
+
+/// Number of consecutive poor matches before considering sync lost
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 5;
+
+/// Number of consecutive good matches required to re-establish synchronization
+pub const CONSECUTIVE_MATCHES_TO_RELOCK: u32 = 2;
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -778,17 +793,19 @@ impl DecoderSyncManager {
     }
 }
 
+/// Find the best matching frame pair between regular and max bitrate streams
+/// Returns (regular_index, max_index, similarity_score)
 fn find_best_frame_match(
-    regular_frames: &[(Vec<u8>, Vec<u32>)],
-    max_frames: &[(Vec<u8>, Vec<u32>)],
+    regular_frames: &[(Vec<u8>, Vec<u32>, usize)],
+    max_frames: &[(Vec<u8>, Vec<u32>, usize)],
 ) -> (usize, usize, f64) {
     let mut best_regular_idx = 0;
     let mut best_max_idx = 0;
     let mut best_similarity = 1.0; // Start with worst similarity (1.0 = completely different)
 
     // Compute similarity for all possible frame pairs
-    for (reg_idx, (reg_raw, _)) in regular_frames.iter().enumerate() {
-        for (max_idx, (max_raw, _)) in max_frames.iter().enumerate() {
+    for (reg_idx, (reg_raw, _, _)) in regular_frames.iter().enumerate() {
+        for (max_idx, (max_raw, _, _)) in max_frames.iter().enumerate() {
             // Use an enhanced frame similarity metric
             let similarity =
                 compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
@@ -813,6 +830,21 @@ pub struct SynchronizedDecoder {
     throttle_semaphore: Arc<Semaphore>,
     next_frame_id: Arc<AtomicUsize>,
     toggle_output: bool, // new field to alternate between queues
+
+
+    // New fields for maintaining synchronization state
+    sync_state: SyncState,
+    stable_offset: Option<i64>,         // Offset between stream frame IDs once sync is established
+    consecutive_good_matches: u32,      // Counter for stability confirmation
+    consecutive_poor_matches: u32,      // Counter for detecting sync loss
+    last_matched_frame_ids: Option<(usize, usize)>, // 
+
+
+}
+enum SyncState {
+    Seeking,     // Initial state, looking for a good match
+    Locked,      // Stable synchronization established
+    Recovering,  // Lost sync, attempting to recover
 }
 
 impl SynchronizedDecoder {
@@ -835,48 +867,152 @@ impl SynchronizedDecoder {
             throttle_semaphore,
             next_frame_id: Arc::new(AtomicUsize::new(0)),
             toggle_output: false, // start with false
+
+            sync_state: SyncState::Seeking,
+            stable_offset: None,
+            consecutive_good_matches: 0,
+            consecutive_poor_matches: 0,
+            last_matched_frame_ids: None,
         }
     }
-
-    fn synchronize_frame_buffers(&mut self) {
-        // Only proceed if the output queue is almost empty.
+    pub fn synchronize_frame_buffers(&mut self) {
+        // Skip if output queue is sufficiently filled
         if self.output_queue.len() > 1 {
             return;
         }
-
-        // Process pending decoded frames from both decoders.
-        let regular_count = self.regular_decoder.process_decoded_frames();
-        let max_count = self.max_decoder.process_decoded_frames();
-
-        if regular_count == 0 || max_count == 0 {
-            return; // Need frames from both decoders.
+    
+        // Process pending decoded frames without consuming them yet
+        self.regular_decoder.process_decoded_frames();
+        self.max_decoder.process_decoded_frames();
+    
+        // Create inspection snapshots of current decoder frame buffers
+        let mut regular_decoded = self.peek_regular_frames(8);
+        let mut max_decoded = self.peek_max_frames(8);
+    
+        if regular_decoded.is_empty() || max_decoded.is_empty() {
+            return; // Insufficient frames for synchronization
         }
-
-        // Collect up to 5 decoded frames from each decoder.
-        let mut regular_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
-        let mut max_decoded: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
-
-        for _ in 0..30 {
-            if let Some((raw, _timestamp)) = self.regular_decoder.next_decoded_frame() {
-                if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                    regular_decoded.push((raw, pixels));
+    
+        // Core synchronization logic
+        match self.sync_state {
+            SyncState::Seeking => {
+                // Find best match using similarity metrics
+                let (best_regular_idx, best_max_idx, similarity) = 
+                    find_best_frame_match(&regular_decoded, &max_decoded);
+    
+                if similarity <= GOOD_SIMILARITY_THRESHOLD {
+                    // Found a good match - consume these frames for display
+                    let regular_frame = self.consume_regular_frames(best_regular_idx + 1).last().unwrap().clone();
+                    let max_frame: (Vec<u8>, Vec<u32>, usize) = self.consume_max_frames(best_max_idx + 1).last().unwrap().clone();
+                    
+                    // Update synchronization state
+                    let reg_frame_id = regular_frame.2;
+                    let max_frame_id = max_frame.2;
+                    self.stable_offset = Some(reg_frame_id as i64 - max_frame_id as i64);
+                    self.consecutive_good_matches += 1;
+                    
+                    // Create synchronized frame pair
+                    let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
+                    let sync_pair = FramePair {
+                        decoded: Some(regular_frame.1.clone()),
+                        reference: Some(max_frame.1.clone()),
+                        decoded_raw: Some(regular_frame.0.clone()),
+                        reference_raw: Some(max_frame.0.clone()),
+                        frame_id,
+                    };
+                    self.output_queue.push_back(sync_pair);
+                    
+                    if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK {
+                        println!("🔒 Synchronization locked with offset: {}", 
+                                 self.stable_offset.unwrap());
+                        self.sync_state = SyncState::Locked;
+                    }
+                } else {
+                    // Not a good match, reset counter but still use best available
+                    self.consecutive_good_matches = 0;
+                    
+                    // Consume only the regular frame, reference frame is too precious to skip
+                    let regular_frame = self.consume_regular_frames(best_regular_idx + 1).last().unwrap().clone();
+                    let max_frame = max_decoded[0].clone();  // Use first reference frame without consuming
+                    
+                    // Create frame pair with best effort
+                    let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
+                    let sync_pair = FramePair {
+                        decoded: Some(regular_frame.1.clone()),
+                        reference: Some(max_frame.1.clone()),
+                        decoded_raw: Some(regular_frame.0.clone()),
+                        reference_raw: Some(max_frame.0.clone()),
+                        frame_id,
+                    };
+                    self.output_queue.push_back(sync_pair);
                 }
-            }
-            if let Some((raw, _timestamp)) = self.max_decoder.next_decoded_frame() {
-                if let Some(pixels) = convert_rgb_to_u32(&raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                    max_decoded.push((raw, pixels));
+            },
+            
+            SyncState::Locked => {
+                // When locked, we maintain the reference stream integrity absolutely
+                if let Some(offset) = self.stable_offset {
+                    // Get the oldest regular frame
+                    if !regular_decoded.is_empty() {
+                        let regular_frame = self.consume_regular_frames(1)[0].clone();
+                        let reg_id = regular_frame.2;
+                        
+                        // Calculate expected matching max frame ID
+                        let expected_max_id = (reg_id as i64 - offset) as usize;
+                        
+                        // Find closest max frame without consuming until confirmed
+                        let mut best_max_idx = 0;
+                        let mut best_similarity = f64::MAX;
+                        
+                        for (idx, (max_raw, _, max_id)) in max_decoded.iter().enumerate() {
+                            if *max_id == expected_max_id {
+                                // Found exact frame ID match
+                                best_max_idx = idx;
+                                break;
+                            }
+                            
+                            // Calculate similarity as backup matching method
+                            let similarity = compute_enhanced_frame_similarity(
+                                &regular_frame.0, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                            
+                            if similarity < best_similarity {
+                                best_similarity = similarity;
+                                best_max_idx = idx;
+                            }
+                        }
+                        
+                        // CRITICAL: We never skip reference frames!
+                        // Only consume the exact number needed to reach our target
+                        let max_frame = max_decoded[best_max_idx].clone();
+                        
+                        // If this max frame index isn't 0, we need to consume preceding frames
+                        if best_max_idx > 0 {
+                            // Consume up through the best match, preserving continuity
+                            self.consume_max_frames(best_max_idx + 1);
+                        }
+                        
+                        // Create synchronized frame pair
+                        let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
+                        let sync_pair = FramePair {
+                            decoded: Some(regular_frame.1.clone()),
+                            reference: Some(max_frame.1.clone()),
+                            decoded_raw: Some(regular_frame.0.clone()),
+                            reference_raw: Some(max_frame.0.clone()),
+                            frame_id,
+                        };
+                        self.output_queue.push_back(sync_pair);
+                    }
                 }
-            }
-        }
+            },
+            
+            SyncState::Recovering => {
+                // Similar to Seeking but with different thresholds
+                // Find the best matching frames using similarity metric
+             // Original problematic call:
+            let (best_regular_idx, best_max_idx, similarity) = 
+            find_best_frame_match(&regular_decoded, &max_decoded);
 
-        // Only continue if we have frames from both decoders.
-        if !regular_decoded.is_empty() && !max_decoded.is_empty() {
-            // Find the best matching frames using your similarity metric.
-            let (best_regular_idx, best_max_idx, similarity) =
-                find_best_frame_match(&regular_decoded, &max_decoded);
-
-            // If the similarity is below threshold, create a synchronized pair.
-            if similarity <= RGB_SIMILARITY_THRESHOLD {
+// This will now work with the updated function signature
+                // Output the best pair we found regardless of similarity
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
                     decoded: Some(regular_decoded[best_regular_idx].1.clone()),
@@ -886,56 +1022,25 @@ impl SynchronizedDecoder {
                     frame_id,
                 };
                 self.output_queue.push_back(sync_pair);
-
-            }
-
-            // Buffer extra frames so that none are dropped.
-            // If the regular side has extra frames (i.e. best_regular_idx > best_max_idx),
-            // we create pairs by duplicating the matched max frame.
-            if best_regular_idx > best_max_idx {
-                let duplicate_max_pixels = max_decoded[best_max_idx].1.clone();
-                let duplicate_max_raw = max_decoded[best_max_idx].0.clone();
-                // Buffer the extra regular frames that occur before the best match.
-                for i in 0..(best_regular_idx - best_max_idx) {
-                    // Ensure the index exists.
-                    if i < regular_decoded.len() {
-                        let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
-                        let pair = FramePair {
-                            decoded: Some(regular_decoded[i].1.clone()),
-                            reference: Some(duplicate_max_pixels.clone()),
-                            decoded_raw: Some(regular_decoded[i].0.clone()),
-                            reference_raw: Some(duplicate_max_raw.clone()),
-                            frame_id,
-                        };
-                        self.output_queue.push_back(pair);
-                        // println!(
-                        //     "Buffered extra regular frame as pair #{} (duplicating max)",
-                        //     frame_id
-                        // );
+                
+                // If similarity is very good, prepare to establish synchronization again
+                if similarity <= GOOD_SIMILARITY_THRESHOLD {
+                    let reg_frame_id = regular_decoded[best_regular_idx].2;
+                    let max_frame_id = max_decoded[best_max_idx].2;
+                    
+                    self.last_matched_frame_ids = Some((reg_frame_id, max_frame_id));
+                    self.stable_offset = Some(reg_frame_id as i64 - max_frame_id as i64);
+                    self.consecutive_good_matches += 1;
+                    
+                    // If we've seen several consecutive good matches, transition to Locked state
+                    if self.consecutive_good_matches >= 2 { // Easier to re-establish than initial sync
+                        println!("Synchronization re-established with offset: {}", self.stable_offset.unwrap());
+                        self.sync_state = SyncState::Locked;
+                        self.consecutive_poor_matches = 0;
                     }
-                }
-            }
-            // Otherwise, if the max side has extra frames (i.e. best_max_idx > best_regular_idx),
-            // we duplicate the matched regular frame.
-            else if best_max_idx > best_regular_idx {
-                let duplicate_regular_pixels = regular_decoded[best_regular_idx].1.clone();
-                let duplicate_regular_raw = regular_decoded[best_regular_idx].0.clone();
-                for i in 0..(best_max_idx - best_regular_idx) {
-                    if i < max_decoded.len() {
-                        let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
-                        let pair = FramePair {
-                            decoded: Some(duplicate_regular_pixels.clone()),
-                            reference: Some(max_decoded[i].1.clone()),
-                            decoded_raw: Some(duplicate_regular_raw.clone()),
-                            reference_raw: Some(max_decoded[i].0.clone()),
-                            frame_id,
-                        };
-                        self.output_queue.push_back(pair);
-                        // println!(
-                        //     "Buffered extra max frame as pair #{} (duplicating regular)",
-                        //     frame_id
-                        // );
-                    }
+                } else {
+                    // Reset good match counter if this wasn't a good match
+                    self.consecutive_good_matches = 0;
                 }
             }
         }
@@ -959,7 +1064,71 @@ impl SynchronizedDecoder {
             None
         }
     }
+    /// Non-destructively peek at frames in the regular decoder buffer
+    fn peek_regular_frames(&mut self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(max_count);
+        let base_id = self.regular_decoder.frames_processed - self.regular_decoder.decoded_frames.len();
+        
+        // Create clone of frames without removing them
+        for (idx, frame) in self.regular_decoder.decoded_frames.iter().take(max_count).enumerate() {
+            if let Some(pixels) = convert_rgb_to_u32(frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                frames.push((frame.clone(), pixels, base_id + idx));
+            }
+        }
+        
+        frames
+    }
 
+    /// Non-destructively peek at frames in the max decoder buffer
+    fn peek_max_frames(&mut self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(max_count);
+        let base_id = self.max_decoder.frames_processed - self.max_decoder.decoded_frames.len();
+        
+        // Create clone of frames without removing them
+        for (idx, frame) in self.max_decoder.decoded_frames.iter().take(max_count).enumerate() {
+            if let Some(pixels) = convert_rgb_to_u32(frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                frames.push((frame.clone(), pixels, base_id + idx));
+            }
+        }
+        
+        frames
+    }
+
+    /// Consume specified number of frames from regular decoder
+    fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(count);
+        let base_id = self.regular_decoder.frames_processed - self.regular_decoder.decoded_frames.len();
+        
+        for idx in 0..count {
+            if let Some(frame) = self.regular_decoder.decoded_frames.pop_front() {
+                if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                    frames.push((frame, pixels, base_id + idx));
+                }
+            } else {
+                break;
+            }
+        }
+        
+        frames
+    }
+
+    /// Consume specified number of frames from max decoder
+    fn consume_max_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(count);
+        let base_id = self.max_decoder.frames_processed - self.max_decoder.decoded_frames.len();
+        
+        for idx in 0..count {
+            if let Some(frame) = self.max_decoder.decoded_frames.pop_front() {
+                if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                    frames.push((frame, pixels, base_id + idx));
+                }
+            } else {
+                break;
+            }
+        }
+        
+        frames
+    }
     // Modify process_frame_pair to use the new synchronization logic
     pub fn process_frame_pair(
         &mut self,
@@ -3027,7 +3196,7 @@ impl MetricsLogger {
         }
 
         // Print debug info
-        print_prettyy!(
+        print_prettyyyy!(
             DebugColor::ForestGreen,
             "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
             frame_number,
@@ -3972,17 +4141,17 @@ impl XRClient {
         if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
             return Ok(());
         }
-
+    
         let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
         let base_dir = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}",
             &self.name_folder
         );
-
+    
         // Define path to hevc_ref directory
         let hevc_ref_dir = format!("{}/{}/hevc_ref", base_dir, ip);
         let max_ref_dir = format!("{}/{}/hevc_max", base_dir, ip);
-
+    
         // Ensure the directory exists before trying to read it
         if !std::path::Path::new(&hevc_ref_dir).exists() {
             return Ok(()); // Nothing to clean if directory doesn't exist
@@ -3990,42 +4159,35 @@ impl XRClient {
         if !std::path::Path::new(&max_ref_dir).exists() {
             return Ok(()); // Nothing to clean if directory doesn't exist
         }
-
+    
+        // Process hevc_ref directory
         if let Ok(entries) = std::fs::read_dir(&hevc_ref_dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-
-                // Only process .rgb files
+    
+                // Process both .rgb and .hevc files
                 if let Some(extension) = path.extension() {
-                    if extension == "rgb" {
+                    if extension == "rgb" || extension == "hevc" {
                         if let Some(filename) = path.file_stem() {
                             if let Some(file_str) = filename.to_str() {
-                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
+                                // Parse frame number from filename
                                 if let Ok(frame_num) = file_str.parse::<usize>() {
                                     if frame_num < oldest_frame_to_keep {
+                                        // Log before deletion attempt for debugging
+                                        // println!("Attempting to delete old file: {}", path.display());
+                                        
                                         if let Err(e) = std::fs::remove_file(&path) {
+                                            let file_type = if extension == "rgb" { "RGB" } else { "HEVC" };
                                             eprintln!(
-                                                "Failed to remove old RGB file {}: {}",
+                                                "Failed to remove old {} file {}: {}",
+                                                file_type,
                                                 path.display(),
                                                 e
                                             );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else if extension == "hevc" {
-                        if let Some(filename) = path.file_stem() {
-                            if let Some(file_str) = filename.to_str() {
-                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
-                                if let Ok(frame_num) = file_str.parse::<usize>() {
-                                    if frame_num < oldest_frame_to_keep {
-                                        if let Err(e) = std::fs::remove_file(&path) {
-                                            eprintln!(
-                                                "Failed to remove old RGB file {}: {}",
-                                                path.display(),
-                                                e
-                                            );
+                                        } else {
+                                            // Optional: Log successful deletion
+                                            let file_type = if extension == "rgb" { "RGB" } else { "HEVC" };
+                                            // println!("Successfully deleted old {} file: {}", file_type, path.display());
                                         }
                                     }
                                 }
@@ -4035,43 +4197,35 @@ impl XRClient {
                 }
             }
         }
-
-        // Read the directory and find .rgb files to remove
+    
+        // Process hevc_max directory
         if let Ok(entries) = std::fs::read_dir(&max_ref_dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-
-                // Only process .rgb files
+    
+                // Process both .rgb and .hevc files
                 if let Some(extension) = path.extension() {
-                    if extension == "rgb" {
+                    if extension == "rgb" || extension == "hevc" {
                         if let Some(filename) = path.file_stem() {
                             if let Some(file_str) = filename.to_str() {
-                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
+                                // Parse frame number from filename
                                 if let Ok(frame_num) = file_str.parse::<usize>() {
                                     if frame_num < oldest_frame_to_keep {
+                                        // Log before deletion attempt for debugging
+                                        // println!("Attempting to delete old MAX file: {}", path.display());
+                                        
                                         if let Err(e) = std::fs::remove_file(&path) {
+                                            let file_type = if extension == "rgb" { "RGB" } else { "HEVC" };
                                             eprintln!(
-                                                "Failed to remove old MAX RGB file {}: {}",
+                                                "Failed to remove old MAX {} file {}: {}",
+                                                file_type,
                                                 path.display(),
                                                 e
                                             );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else if extension == "hevc" {
-                        if let Some(filename) = path.file_stem() {
-                            if let Some(file_str) = filename.to_str() {
-                                // Parse frame number from filename (e.g., "142.rgb" -> 142)
-                                if let Ok(frame_num) = file_str.parse::<usize>() {
-                                    if frame_num < oldest_frame_to_keep {
-                                        if let Err(e) = std::fs::remove_file(&path) {
-                                            eprintln!(
-                                                "Failed to remove old MAX RGB file {}: {}",
-                                                path.display(),
-                                                e
-                                            );
+                                        } else {
+                                            // Optional: Log successful deletion
+                                            let file_type = if extension == "rgb" { "RGB" } else { "HEVC" };
+                                            // println!("Successfully deleted old MAX {} file: {}", file_type, path.display());
                                         }
                                     }
                                 }
@@ -4081,17 +4235,16 @@ impl XRClient {
                 }
             }
         }
-
+    
         if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
             println!(
-                "Cleaned up HEVC RGB files older than frame {}",
+                "Cleaned up HEVC and RGB files older than frame {}",
                 oldest_frame_to_keep
             );
         }
-
+    
         Ok(())
     }
-
     // pub async fn decode_hevc_to_rgb2(
     //     &mut self,
     //     encoded_buffer: Vec<u8>,
@@ -4314,7 +4467,7 @@ impl XRClient {
                 // Process any pending VMAF analysis tasks via channel
                 if USE_VMAF {
                     if let Ok((refe, maxbe, id)) = self.channel_rx_vmaf.try_recv() {
-                        self.vmaf_analysis(refe, maxbe, now, id, self.server_ip)
+                        self.vmaf_analysis(refe, maxbe, now, id, ip_client)
                             .await
                             .unwrap_or_else(|e| {
                                 print_pretty!(DebugColor::Red, "VMAF analysis error: {}", e,);
@@ -5186,14 +5339,14 @@ fn display_frame_pair_enhanced(
         }
 
         // Separator between frames
-        for x in 0..10 {
+        for x in 0..30 {
             let idx = y * window_width + scaled_width + x;
             if idx < combined_buffer.len() {
                 // Change separator color based on sync quality
                 let separator_color = match sync_quality {
-                    Some(q) if q < 0.05 => 0x00FF00, // Green for excellent sync
-                    Some(q) if q < 0.15 => 0xFFFF00, // Yellow for good sync
-                    Some(q) if q < 0.30 => 0xFF8000, // Orange for marginal sync
+                    Some(q) if q < 0.1 => 0x00FF00, // Green for excellent sync
+                    Some(q) if q < 0.3 => 0xFFFF00, // Yellow for good sync
+                    Some(q) if q < 0.50 => 0xFF8000, // Orange for marginal sync
                     Some(_) => 0xFF0000,             // Red for poor sync
                     None => 0x404040,                // Gray if no sync info
                 };
