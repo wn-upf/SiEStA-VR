@@ -834,17 +834,8 @@ fn downlink_uplink_scenario_flexible(
         return;
     }
 
-    if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv(&filename, &dir_path) {
-            eprintln!("Failed to write CSV file: {}", e);
-        }
-    }
 
-    if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv(&filename, &dir_path) {
-            eprintln!("Failed to write CSV file: {}", e);
-        }
-    }
+
     if let Ok(stats_vec) = stats_sta_data_handle.lock() {
         // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
         for (id, sta_stats) in stats_vec.iter() {
@@ -1426,12 +1417,6 @@ fn downlink_uplink_scenario_1BG(
         return; // Stop execution if the directory creation fails
     }
 
-    if let Ok(data) = csv_data_handle.lock() {
-        if let Err(e) = data.write_to_csv(&filename, &dir_path) {
-            eprintln!("FILENAMEEE: {}   aaand {}", filename, dir_path);
-            eprintln!("Failed to write CSV file: {}", e);
-        }
-    }
     if let Ok(stats_vec) = stats_sta_data_handle.lock() {
         // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
         for (id, sta_stats) in stats_vec.iter() {

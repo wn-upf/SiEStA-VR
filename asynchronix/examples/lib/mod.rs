@@ -10,14 +10,13 @@ use tai_time::TaiTime;
 use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
 use colored::Colorize;
-use once_cell::sync::Lazy;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -286,7 +285,7 @@ impl DebugColor {
 // 	int CW = Random(MIN(pow(2,attempt),pow(2,max_BEB_stages))*(CWmin+1));
 // 	return CW;
 // };
-
+#[allow(unused)] // to use for non-deterministic backoff
 pub fn time_of_BinaryExponentialBackoff(attempt: i32) -> i32 {
         let max_beb_stages = 6;
         let cw_min = 15;
@@ -424,7 +423,7 @@ impl SlidingWindowTimely<f32> {
         variance.sqrt()
     }
 }
-
+#[allow(dead_code)]
 pub struct NalUnit {
     pub nal_type: u8,
     pub data: Vec<u8>,
@@ -438,7 +437,7 @@ pub struct HevcParser {
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
 }
-
+#[allow(dead_code)]
 impl HevcParser {
     pub fn new() -> Self {
         Self {
@@ -476,10 +475,10 @@ impl HevcParser {
         }
     }
 
-    pub fn clear(&mut self) {
-        println!("Clearing parser buffer: {} bytes", self.buffer.len());
-        self.buffer.clear();
-    }
+    // pub fn clear(&mut self) {
+    //     println!("Clearing parser buffer: {} bytes", self.buffer.len());
+    //     self.buffer.clear();
+    // }
 
     /// Extract the next complete NAL unit from the buffer
     pub fn next_nal_unit(&mut self) -> Option<NalUnit> {
@@ -778,54 +777,16 @@ impl CsvData {
             v_id_dest: Vec::new(),
         }
     }
-
-    pub fn write_to_csv(&self, folder: &str, dir_path: &str) -> std::io::Result<()> {
-        // let path = format!("{dir_path}/QUEUE_stats.csv");
-        // let file = OpenOptions::new()
-        //     .write(true)
-        //     .create(true)
-        //     .truncate(true)
-        //     .open(path)?;
-
-        // let mut writer = Writer::from_writer(file);
-
-        // // Write header
-        // writer.write_record(&[
-        //     "timestamp",
-        //     "packet_ID",
-        //     "queue_size",
-        //     "L_packet",
-        //     "T_s",
-        //     "T_q",
-        //     "id_src",
-        //     "id_dest",
-        // ])?;
-
-        // // Write all stored data at once
-        // for i in 0..self.v_timestamp.len() {
-        //     writer.write_record(&[
-        //         &self.v_timestamp[i],
-        //         &self.v_packet_id[i].to_string(),
-        //         &self.v_queue_size[i].to_string(),
-        //         &self.v_packet_l[i].to_string(),
-        //         &self.v_queue_ts[i].to_string(),
-        //         &self.v_queue_tq[i].to_string(),
-        //         &self.v_id_src[i].to_string(),
-        //         &self.v_id_dest[i].to_string(),
-        //     ])?;
-        // }
-
-        // writer.flush()?;
-        // Ok(())
-        println!("DEPRECATED FUNCTIONNNNNNN TODO: DELETE ALL REFERENCES!");
-        Ok(())
-    }
 }
+
+    
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct CsvType {
     csv_data: Arc<Mutex<CsvData>>,
     folder: String,
 }
+#[allow(dead_code)]
 impl CsvType {
     pub fn new(folder_name: &str) -> Self {
         Self {
@@ -1025,23 +986,24 @@ impl CumulativeStats {
     }
 }
 
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types, unused)]
 #[derive(Clone)]
 pub struct perStaStats {
     pub sta_id: i32,
-    pub rx_packets_counter: i32,
-    pub q_time_sta_cum: CumulativeStats,
-    pub s_time_sta_cum: CumulativeStats,
-    pub csv_data: CsvData,
+    pub _rx_packets_counter: i32,
+    pub _q_time_sta_cum: CumulativeStats,
+    pub _s_time_sta_cum: CumulativeStats,
+    pub _csv_data: CsvData,
 }
+#[allow(non_camel_case_types, unused)]
 impl perStaStats {
     pub fn new() -> Self {
         Self {
             sta_id: -1,
-            q_time_sta_cum: CumulativeStats::new(),
-            s_time_sta_cum: CumulativeStats::new(),
-            csv_data: CsvData::new(),
-            rx_packets_counter: 0,
+            _q_time_sta_cum: CumulativeStats::new(),
+            _s_time_sta_cum: CumulativeStats::new(),
+            _csv_data: CsvData::new(),
+            _rx_packets_counter: 0,
         }
     }
     pub fn print_nicely(&self) {
@@ -1054,15 +1016,15 @@ impl perStaStats {
         let rows = vec![
             (
                 "Packets received from STA:",
-                format!("{:>10}", self.rx_packets_counter),
+                format!("{:>10}", self._rx_packets_counter),
             ),
             (
                 &tq_label,
-                format!("{:>10.6}", self.q_time_sta_cum.get_average()),
+                format!("{:>10.6}", self._q_time_sta_cum.get_average()),
             ),
             (
                 &ts_label,
-                format!("{:>10.6}", self.s_time_sta_cum.get_average()),
+                format!("{:>10.6}", self._s_time_sta_cum.get_average()),
             ),
         ];
 
@@ -1087,9 +1049,9 @@ impl perStaStats {
         sta_src_id: usize,
         sta_dest_id: usize,
     ) {
-        self.q_time_sta_cum.add(Tq);
-        self.s_time_sta_cum.add(Ts);
-        self.rx_packets_counter += 1;
+        self._q_time_sta_cum.add(Tq);
+        self._s_time_sta_cum.add(Ts);
+        self._rx_packets_counter += 1;
 
         let formatted_timestamp = format_timestamp!(now);
 
@@ -1107,14 +1069,14 @@ impl perStaStats {
         //     sta_dest_id
         // );
 
-        self.csv_data.v_timestamp.push(formatted_timestamp);
-        self.csv_data.v_packet_id.push(id_packet);
-        self.csv_data.v_queue_size.push(queue_size);
-        self.csv_data.v_queue_ts.push(Ts);
-        self.csv_data.v_queue_tq.push(Tq);
-        self.csv_data.v_packet_l.push(length_packet);
-        self.csv_data.v_id_src.push(sta_src_id);
-        self.csv_data.v_id_dest.push(sta_dest_id);
+        self._csv_data.v_timestamp.push(formatted_timestamp);
+        self._csv_data.v_packet_id.push(id_packet);
+        self._csv_data.v_queue_size.push(queue_size);
+        self._csv_data.v_queue_ts.push(Ts);
+        self._csv_data.v_queue_tq.push(Tq);
+        self._csv_data.v_packet_l.push(length_packet);
+        self._csv_data.v_id_src.push(sta_src_id);
+        self._csv_data.v_id_dest.push(sta_dest_id);
     }
 }
 #[allow(non_camel_case_types)]
@@ -1295,7 +1257,6 @@ pub struct MpduPacket {
     pub length_packet: usize,
     pub queue_in_instant: TaiTime<0>,
     pub queue_out_instant: TaiTime<0>,
-    pub sink_in_instant: Instant,
     pub T_q: Duration,
     pub T_s: Duration,
     // pub expected_T_s: Duration,
@@ -1320,7 +1281,6 @@ impl MpduPacket {
             length_packet: 0,
             queue_in_instant: TaiTime::default(),
             queue_out_instant: TaiTime::default(),
-            sink_in_instant: Instant::now(),
             T_q: Duration::ZERO,
             T_s: Duration::ZERO,
             // expected_T_s: Duration::ZERO,
@@ -1395,7 +1355,6 @@ impl AmpduPacket {
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
-        let mut i = 0;
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms",
@@ -1407,11 +1366,6 @@ impl AmpduPacket {
                 // packet.header_alvr.shards_count - 1,
                 // packet.header_alvr.next_packet_index,
             );
-            // i +=1;
-            // if i >10 {
-            //     println!( "\x1b[33m\t...");
-            //     break;
-            // }
         }
     }
 
@@ -1469,7 +1423,7 @@ impl Coords {
         Self { x, y, z }
     }
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct ResultsFrameTXDelay {
     pub service_delay: f64,
@@ -1489,12 +1443,6 @@ impl ResultsFrameTXDelay {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.service_delay = 0.0;
-        self.data_service_delay = 0.0;
-        self.pathloss = 0.0;
-        self.p_rx = 0.0;
-    }
 }
 
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
@@ -1511,8 +1459,9 @@ pub fn path_loss(d: f64) -> f64 {
 }
 
 
-pub fn collision_delay(total_bits_transmitted: f64, 
-    n_mpdus: i32,
+pub fn collision_delay(
+    _total_bits_transmitted: f64, 
+    _n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
     p_tx: f64,) -> f32 {
@@ -1521,7 +1470,7 @@ pub fn collision_delay(total_bits_transmitted: f64,
 
     let SU_spatial_streams = 2.0;
 
-    if (SU_spatial_streams > 1.0) {
+    if SU_spatial_streams > 1.0 {
         effPt = effPt - 3.0 * SU_spatial_streams
     };
 
@@ -1574,22 +1523,22 @@ pub fn collision_delay(total_bits_transmitted: f64,
         _ => 0, // Default case,  fallback
     };
 
-    let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    let _ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
 
-    let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    // let _L: f64 = total_bits_transmitted / n_mpdus as f64;
 
     let SF = 16.0;
     let TB = 18.0;
-    let MD = 32.0;
-    let MAC_H_size = 240.0;
+    // let _MD = 32.0;
+    // let _MAC_H_size = 240.0;
 
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
-    let T_DATA: f64 =
-        PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6;
-    let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    // let _T_DATA: f64 =
+    //     PHY_DURATION + ((SF + n_mpdus as f64 * (_MD + _MAC_H_size + _L) + TB) / _ORate).ceil() * 16E-6;
+    // let _T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
 
 
@@ -1616,7 +1565,7 @@ pub fn frametransmission_delay(
 
     let SU_spatial_streams = 2.0;
 
-    if (SU_spatial_streams > 1.0) {
+    if SU_spatial_streams > 1.0 {
         effPt = effPt - 3.0 * SU_spatial_streams
     };
 
@@ -1702,6 +1651,7 @@ pub fn frametransmission_delay(
     }
 }
 
+#[allow(unused)] // as it's shared with other sims than XR. 
 pub fn write_all_sta_csvs(
     sta_stats_vec: &HashMap<usize, perStaLockStats>,
     folder: &str,
@@ -1736,16 +1686,16 @@ pub fn write_all_sta_csvs(
             ])?;
 
             // Write all stored data for this station
-            for i in 0..stats.csv_data.v_timestamp.len() {
+            for i in 0..stats._csv_data.v_timestamp.len() {
                 writer.write_record(&[
-                    &stats.csv_data.v_timestamp[i],
-                    &stats.csv_data.v_packet_id[i].to_string(),
-                    &stats.csv_data.v_queue_size[i].to_string(),
-                    &stats.csv_data.v_packet_l[i].to_string(),
-                    &stats.csv_data.v_queue_ts[i].to_string(),
-                    &stats.csv_data.v_queue_tq[i].to_string(),
-                    &stats.csv_data.v_id_src[i].to_string(),
-                    &stats.csv_data.v_id_dest[i].to_string(),
+                    &stats._csv_data.v_timestamp[i],
+                    &stats._csv_data.v_packet_id[i].to_string(),
+                    &stats._csv_data.v_queue_size[i].to_string(),
+                    &stats._csv_data.v_packet_l[i].to_string(),
+                    &stats._csv_data.v_queue_ts[i].to_string(),
+                    &stats._csv_data.v_queue_tq[i].to_string(),
+                    &stats._csv_data.v_id_src[i].to_string(),
+                    &stats._csv_data.v_id_dest[i].to_string(),
                 ])?;
             }
 
@@ -1813,7 +1763,7 @@ pub struct GraphNetworkStatistics {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct GraphNetworkStatistics_csv {
+pub struct GraphNetworkStatisticsCsv {
     pub timestamp: f64,
     pub frame_index: usize,
 

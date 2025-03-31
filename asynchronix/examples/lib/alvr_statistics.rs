@@ -1,24 +1,21 @@
-use crate::debug_bgprint;
 use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::alvr_packets::NetworkStatisticsPacket;
 use crate::lib::SlidingWindowAverage;
 
 use crate::lib::{
-    EventType, GraphNetworkStatistics, GraphNetworkStatistics_csv, NominalBitrateStats,
+    GraphNetworkStatisticsCsv, NominalBitrateStats,
     SlidingWindowTimely, SlidingWindowWeighted,
 };
-use crate::DebugColor;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::Path;
 // use ::{warn, SlidingWindowAverage};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
-use tai_time::{TaiClock, TaiTime};
+use tai_time::TaiTime;
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -104,7 +101,7 @@ pub struct StatisticsManager {
     is_first_stats: bool,
 
     folder: String,
-    last_stats: GraphNetworkStatistics_csv,
+    last_stats: GraphNetworkStatisticsCsv,
 
     id_XR: IpAddr,
 }
@@ -196,7 +193,7 @@ impl StatisticsManager {
             is_first_stats: true,
 
             folder: folder.to_string(),
-            last_stats: GraphNetworkStatistics_csv::default(),
+            last_stats: GraphNetworkStatisticsCsv::default(),
 
             id_XR: ip_self,
         }
@@ -302,7 +299,7 @@ impl StatisticsManager {
         //     network_stats.frame_index
         // );
 
-        self.last_stats = GraphNetworkStatistics_csv {
+        self.last_stats = GraphNetworkStatisticsCsv {
             timestamp: now
                 .checked_duration_since(TaiTime::EPOCH)
                 .unwrap()

@@ -1,27 +1,19 @@
-use crate::{debug_bgprint, print_pretty, print_prettyy, print_red, print_yellow};
-use asynchronix::time;
-use core::net;
+use crate::{debug_bgprint, print_pretty, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
-use crossbeam::queue;
-use ffmpeg_next::codec::Debug;
 use rand::Rng;
 use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
-use std::f64::MAX;
 use std::future::Future;
-use std::result;
 
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
-use std::ops::Deref;
 use std::time::{Duration, Instant};
 
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::lib::ResultsFrameTXDelay;
 use crate::DebugColor;
 
-use std::mem::replace;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 
@@ -48,8 +40,11 @@ pub const UPLINK_QUEUE_SIZE: usize = 128 ;
 #[macro_export]
 macro_rules! debug_schedule {
     ($fmt:expr, $($arg:tt)*) => {
-        // let msg = format!($fmt, $($arg)*);
-        // println!("{}", DebugColor::Navy.to_background_fn()(msg));
+        if DEBUG_SCHEDULING == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", DebugColor::Navy.to_background_fn()(msg));
+        }
+
     };
 }
 
@@ -88,7 +83,6 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
 }
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
-pub const PLACEHOLDER_TODO_PACKET_LEN: f64 = 1400.0;
 // Steps of emulated bandwidth
 pub const STEP1_TBEGIN: f64 = 15.0;
 pub const STEP1_TEND: f64 = 25.0;
@@ -423,7 +417,7 @@ pub enum NetworkPattern {
         valid_until: TaiTime<0>,
     },
 }
-
+#[allow(unused)]
 impl NetworkPattern {
     /// Create a new `NetworkPattern` of type Bandwidth
     pub fn new_bandwidth(
@@ -519,12 +513,11 @@ pub struct QueueMechanism {
     queue: VecDeque<MpduPacket>,              // Packet queue
     network_emulator: NetworkPatternEmulator, // Bandwidth pattern
     max_queue_size: usize,
-    queue_delay_timer: Duration,
     bandwidth_limit_bps: f64,
 }
 
 impl QueueMechanism {
-    pub fn new(max_emulated_queue_packets: usize, now: TaiTime<0>, tests: (bool, bool, bool)) -> Self {
+    pub fn new(max_emulated_queue_packets: usize, _now: TaiTime<0>, tests: (bool, bool, bool)) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
         let valid_from: TaiTime<0> = TaiTime::EPOCH
@@ -608,7 +601,6 @@ impl QueueMechanism {
             queue: VecDeque::new(),
             network_emulator,
             max_queue_size: max_emulated_queue_packets,
-            queue_delay_timer: Duration::ZERO,
             // bandwidth_limit_bps: 1E9, //as if ethernet, 1gbps
             bandwidth_limit_bps: bandwidth_limit,
         }
@@ -650,8 +642,6 @@ impl QueueMechanism {
                 EnqueueResult::Transmitted(packet)
             }
             Some(delay) => {
-                // let delay_dependent_on_shard_index = Duration::from_micros(1).mul_f32(packet.header_alvr.shard_index.clone() as f32);                                        // TODO: not this :D
-                // let delay_dependent_on_shard_index  = Duration::from_secs_f64(PLACEHOLDER_TODO_PACKET_LEN * (self.queue.len() + 1) as f64 / self.bandwidth_limit_bps ) ; // TODO: still not this :D
 
                 debug_bgprint!(DebugColor::Chocolate, "[DBG Queue NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
                             self.queue.len(),
@@ -806,6 +796,7 @@ impl NetworkPatternEmulator {
         (any_active, just_ended)
     }
 
+    #[allow(unused_assignments)]
     pub fn should_transmit_with_delay(
         &mut self,
         packet: &mut MpduPacket,
@@ -828,7 +819,7 @@ impl NetworkPatternEmulator {
         self.last_update_only_DBG_NETEM = current_time;
         self.last_update_time = current_time;
 
-        let (has_active, just_ended) = self.check_active_patterns(current_time);
+        let (_has_active, just_ended) = self.check_active_patterns(current_time);
         // / If a pattern just ended, signal to purge the queue
         if just_ended {
             debug_bgprint!(
@@ -859,7 +850,7 @@ impl NetworkPatternEmulator {
                 } else if let NetworkPattern::ProbabilisticDrop {
                     valid_from,
                     valid_until,
-                    drop_probability,
+                    drop_probability: _,
                 } = pattern
                 {
                     if current_time >= *valid_from && current_time <= *valid_until {
@@ -868,13 +859,13 @@ impl NetworkPatternEmulator {
                         None
                     }
                 } else if let NetworkPattern::Jitter{
-                mean_delay,
-                distribution_type,
-                variance,         // Standard deviation for Gaussian, half-width for Uniform
-                correlation_pct,         // Correlation with previous delay (0-100%)
-                last_delay,         // Stores previous delay for correlation
-                valid_from,
-                valid_until      ,
+                    mean_delay:        _ ,
+                    distribution_type: _ ,
+                    variance:          _ ,         // Standard deviation for Gaussian, half-width for Uniform
+                    correlation_pct:   _ ,         // Correlation with previous delay (0-100%)
+                    last_delay:        _ ,         // Stores previous delay for correlation
+                    valid_from,
+                    valid_until ,
                 } = pattern
                 {
                     if current_time >= *valid_from && current_time <= *valid_until {
@@ -1055,6 +1046,7 @@ pub struct StatsUpdate {
     pub length_packet: usize,
 }
 
+#[allow(unused)]
 #[derive(Clone)]
 pub struct QueueModule {
     pub output_port_sta1: Output<AmpduPacket>,
@@ -1097,7 +1089,7 @@ pub struct QueueModule {
     pub queue_network_emulator: QueueMechanism,
     pub ul_capacity_queue_device: usize, 
 }
-
+#[allow(unused)]
 impl QueueModule {
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
         self.cumulative_stats_queue.clone()
@@ -1482,7 +1474,7 @@ impl QueueModule {
             if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
                 // print!("OK2,");
 
-                if let Ok(array_STAs_stats) = self.array_stas_stats.lock() {
+                if let Ok(_array_STAs_stats) = self.array_stas_stats.lock() {
                     // print!("OK3,");
 
                     while let Ok(stats_update) = stats_rx.try_recv() {
@@ -1495,28 +1487,6 @@ impl QueueModule {
                             stats_update.queue_length_when_out,
                         );
 
-                        if let Some(stats) = array_STAs_stats.get(&stats_update.sta_src_id) {
-                            // println!("OK PER STA");
-
-                            // if let Ok(mut stats_data) = stats.data.lock() {
-                            //     stats_data.update_stats_per_sta(
-                            //         stats_update.now,
-                            //         stats_update.packet_id as usize,
-                            //         stats_update.queue_length_when_out,
-                            //         stats_update.T_s,
-                            //         stats_update.T_q,
-                            //         stats_update.length_packet,
-                            //         stats_update.sta_src_id,
-                            //         stats_update.sta_dest_id,
-                            //     );
-                            // }
-                        } else {
-                            println!(
-                                "ERROR: No stats found for station {}. Total stations: {}",
-                                stats_update.sta_src_id,
-                                array_STAs_stats.len()
-                            );
-                        }
                         // println!("OK STATS");
                         self.csv_metrics.update_stats(
                             stats_update.now,
@@ -1770,12 +1740,12 @@ impl QueueModule {
                 let mut softmax_values: Vec<f64> = Vec::new();
                 let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
                 for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                    let is_ul = if sta_src > sta_dest {1} // if sta_src >> sta_dest, then it should be UL traffic
+                    let _is_ul = if sta_src > sta_dest {1} // if sta_src >> sta_dest, then it should be UL traffic
                         else{0};
 
                     debug_schedule!(
                         "IS_UL = {} | ( src: {}, dest: {} )",
-                        is_ul,
+                        _is_ul,
                         sta_src,
                         sta_dest
                     );
@@ -1875,11 +1845,11 @@ impl QueueModule {
             else{
 
                 let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
-                if let Some(packet) = packet_with_id {
+                if let Some(_packet) = packet_with_id {
                     debug_schedule!(
                         "QUEUE FRONT: SRC {}, DEST: {}",
-                        packet.sta_src_id,
-                        packet.sta_dest_id
+                        _packet.sta_src_id,
+                        _packet.sta_dest_id
                     );
                 }
                 if let Some(key) = selected_sta {

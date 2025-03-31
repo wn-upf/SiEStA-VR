@@ -1,48 +1,29 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 // use futures_util::stream::empty;
-use nix::fcntl;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
-use crate::lib::alvr_stream_socket::thread::JoinHandle;
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 // use tokio::io::{AsyncReadExt, BufReader};
 use crate::lib::HevcParser;
 use crate::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
-use lazy_static::lazy_static;
-use std::collections::hash_map::DefaultHasher;
-use std::fs;
-use std::hash::{Hash, Hasher};
-use std::io::BufRead;
 use std::io::BufReader;
-use std::io::BufWriter;
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::ChildStdout;
-use std::sync::atomic::AtomicBool;
-use std::thread;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader as tokBufReader}; // Import AsyncBufReadExt
-use tokio::sync::Mutex as tokMutex;
 use rand::seq::IteratorRandom;
 
-use std::sync::atomic::Ordering as AtOrdering;
 // lazy_static! {
 //     // Global static encoder instance
 //     static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
 // }
 
-use tokio::time::{sleep, Duration as Durtokio};
 
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
 
-use crate::{debug_bgprint, format_elapsed};
+use crate::debug_bgprint;
 
 use rand::Rng;
 use std::cell::RefCell;
@@ -57,24 +38,20 @@ use std::{
     time::Duration,
 };
 
-use crate::debug_print;
-use crate::lib::models_XR::{XRDevice, XRServer, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER};
+use crate::lib::models_XR::{XRDevice, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER};
 
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 // use crate::lib::DebugColor;
 use anyhow::{anyhow, Result};
-use glam::{Quat, Vec3};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::error::Error;
 // use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use std::result::Result::Ok;
 use tai_time::TaiTime;
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as atomOrdering};
-use tokio::sync::Semaphore;
 
 // use super::alvr_packets::NetworkStatisticsPacket;
 
@@ -118,7 +95,7 @@ pub struct ChunkedHevcEncoder {
     parser: HevcParser,
     encoder_str: String,
 }
-
+#[allow(unused)]
 impl ChunkedHevcEncoder {
     pub fn new(
         input: &str,
@@ -249,18 +226,9 @@ impl ChunkedHevcEncoder {
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
-        // print!("{} SPAWN CHUNK...", self.encoder_str,);
-        // let loop_limit = 1000000;
-        let mut i = 0;
-        // Read data from the process until it ends.
+
         loop {
-            // println!("loop {}", i);
-            // i += 1;
-            // if i > loop_limit {
-            //     i = 0;
-            //     print!("BREAK\n");
-            //     break;
-            // }
+   
             match reader.read(&mut buf) {
                 Ok(0) => break, // end of chunk
                 Ok(n) => {
@@ -329,11 +297,7 @@ impl ChunkedHevcEncoder {
     }
 }
 
-pub struct NalUnit {
-    pub nal_type: u8,
-    pub data: Vec<u8>,
-    pub is_keyframe: bool,
-}
+
 
 /// A parser for HEVC bitstreams to extract individual frames
 /// A parser for HEVC bitstreams to extract individual frames
@@ -507,10 +471,6 @@ pub struct InProgressPacket {
     deadline: Option<TaiTime<0>>,
     num_shards_expected: usize,
     id_frame: u32,
-}
-pub struct VideoPacket {
-    pub header: VideoPacketHeader,
-    pub payload: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -969,11 +929,8 @@ impl StreamSocket {
             frame_tracker: FrameTracker::new(),
             ffmpeg_encoder: None,
             ffmpeg_maxbitrate_encoder: None,
-            chunk_frames: VecDeque::new(),
-            is_initializing_encoder: Arc::new(AtomicBool::new(false)),
+            // chunk_frames: VecDeque::new(),
             time_since_last_update: t0,
-            last_buffer_size: 0,
-            static_buffer_count: 0,
         }
     }
 
@@ -1842,21 +1799,17 @@ pub struct StreamSender<H> {
     // encoder_hevc: Option<Arc<tokMutex<HevcEncoder>>>,
 
     // encoder_wrapper: Option<Arc<tokMutex<EncoderWrapper>>>,
-    chunk_frames: VecDeque<Vec<u8>>,
+    // chunk_frames: VecDeque<Vec<u8>>,
 
-    // is_initializing_encoder: Arc<AtomicBool>,
 
     // encoder_wrapper: Option<Arc<tokMutex<HevcEncoder>>>,
     pub ffmpeg_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
     pub ffmpeg_maxbitrate_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
 
     // Keep the initialization flag:
-    is_initializing_encoder: Arc<AtomicBool>,
 
     pub time_since_last_update: TaiTime<0>,
 
-    last_buffer_size: usize,
-    static_buffer_count: u32,
 }
 
 #[allow(unused)]
@@ -1943,7 +1896,7 @@ impl<H: Serialize> StreamSender<H> {
 
         let random_file_list = ["garp4k", "zoro", "furbo", "snow", "assemble", "cut_video" ]; 
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());        
-        let mut final_file = match choice_random {
+        let final_file = match choice_random {
             Some(file) => {file},
             None => {
                 "furbo"
@@ -1951,7 +1904,7 @@ impl<H: Serialize> StreamSender<H> {
             },
 
         }; 
-        let final_file = "assemble"; 
+        // final_file = "assemble"; 
         
         let input_path =
             &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4");
@@ -2180,7 +2133,7 @@ impl<H: Serialize> StreamSender<H> {
         })
     }
 
-    pub fn get_buffer_tracking(&mut self, header: &H, now: TaiTime<0>) -> Result<Buffer<H>> {
+    pub fn get_buffer_tracking(&mut self, header: &H, _now: TaiTime<0>) -> Result<Buffer<H>> {
         let mut buffer = vec![0; 1000];
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
@@ -2206,40 +2159,8 @@ impl<H: Serialize> StreamSender<H> {
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
 }
-pub fn contains_keyframe(frame: &[u8]) -> bool {
-    // Check for valid frame size
-    if frame.len() < 6 {
-        return false;
-    }
 
-    // Scan for HEVC NAL units with types 16-21 (keyframes)
-    for i in 0..frame.len().saturating_sub(5) {
-        // Look for start codes (0x000001 or 0x00000001)
-        if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
-            || (i + 3 < frame.len()
-                && frame[i] == 0
-                && frame[i + 1] == 0
-                && frame[i + 2] == 0
-                && frame[i + 3] == 1)
-        {
-            // Determine start code length
-            let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
 
-            // Check NAL header if there's enough data
-            let header_pos = i + start_code_len;
-            if header_pos < frame.len() {
-                let nal_header = frame[header_pos];
-                let nal_type = (nal_header >> 1) & 0x3F; // HEVC NAL type is bits 1-6
-
-                // HEVC keyframes are NAL types 16-21 (IRAP pictures)
-                if (16..=21).contains(&nal_type) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
 impl<T> HandleTryAgain<T> for io::Result<T> {
     fn handle_try_again(self) -> ConResult<T> {
         self.map_err(|e| {

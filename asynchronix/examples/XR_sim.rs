@@ -1,4 +1,3 @@
-use asynchronix::model::Context;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 #[allow(unused)]
@@ -10,8 +9,6 @@ use asynchronix::model::Context;
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
-use ffmpeg_next::packet::packet;
-use std::collections::HashMap;
 
 
 // use futures_util::Stream;
@@ -22,11 +19,10 @@ use std::collections::HashMap;
 use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 mod lib; // for calling m own local library
 
-use crate::lib::models_mm1k::{QueueModule, QueueStats};
+use crate::lib::models_mm1k::QueueModule;
 use crate::lib::{
     exponential,
     frametransmission_delay,
-    perStaLockStats,
     // AmpduPacket,
     Coords,
     DebugColor,
@@ -35,15 +31,12 @@ use crate::lib::{
     P_TX,
 };
 use std::fs;
-use std::path::Path;
 
-use lib::write_all_sta_csvs;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::lib::models_XR::{STA_extended, SinkVideo_XR, XRClient, XRServer};
+use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
 use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE; 
 
 
@@ -178,7 +171,7 @@ fn main() {
     let mean_length: f64 = args[2].parse().unwrap();
     let k_queue: usize = args[3].parse().unwrap();
     let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
-    let rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
+    let _rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
     let distance: f64 = args[6].parse().unwrap();
     let initial_bitrate: f64 = args[7].parse().unwrap();
     let pl_prob: f64 = args[8].parse().unwrap();
@@ -186,19 +179,6 @@ fn main() {
     let n_bg: usize = args[10].parse().unwrap(); // New parameter for background STAs
     let is_ul_bg_traffic: usize = args[11].parse().unwrap();
     let test_type: String = args[12].parse().unwrap();  // New test type parameter
-
-    let is_ul: bool = is_ul_bg_traffic == 1;
-
-    // let mut suffix : &str = "STD"; 
-    // if TEST_BANDWIDTH{
-    //     suffix = "BW"; 
-    // }
-    // else if TEST_JITTER{
-    //     suffix = "JI"; 
-    // }
-    // else if TEST_PL{
-    //     suffix = "PL";
-    // }
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl) = match test_type.as_str() {
@@ -314,8 +294,7 @@ fn main() {
 
     // Build simulation
     let mut sim_builder = SimInit::new()
-        .add_model(queue, mbox_queue, "Queue")
-        .add_model(SinkVideo_XR::new(), Mailbox::new(), "Video Sink");
+        .add_model(queue, mbox_queue, "Queue"); 
 
     // Add XR pairs to simulation
     for (i, vr) in vr_pairs.into_iter().enumerate() {
@@ -394,19 +373,7 @@ fn main() {
     // Run simulation
     simu.step_by(Duration::from_secs_f64(stoptime));
 
-    // Save results
-    // if let Ok(data) = csv_data.lock() {
-    //     if let Ok(data2) = data.write_to_csv(&name_folder, &output_path){
-    //         println!("CSV data saved correctly!!");
-    //     }
-    //     else{
-    //         println!("ERROOOOOOOOR SAVING CSV DATA!! ! ! ! \n\n");
-    //     }
-
-    // };
-    // if let Ok(stats) = sta_stats.lock() {
-    //     write_all_sta_csvs(&stats, &name_folder, &output_path).unwrap();
-    // };
+   
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
     };
