@@ -1,6 +1,4 @@
-use crate::lib::alvr_stream_socket::{
-    try_again, BufferedReceiver, ConResult, SocketReader, ToCon,
-};
+use crate::lib::alvr_stream_socket::{try_again, BufferedReceiver, ConResult, SocketReader, ToCon};
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{

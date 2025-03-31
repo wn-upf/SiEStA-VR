@@ -3,8 +3,7 @@ use crate::lib::alvr_packets::NetworkStatisticsPacket;
 use crate::lib::SlidingWindowAverage;
 
 use crate::lib::{
-    GraphNetworkStatisticsCsv, NominalBitrateStats,
-    SlidingWindowTimely, SlidingWindowWeighted,
+    GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted,
 };
 use std::fs::OpenOptions;
 use std::io::{self, Write};

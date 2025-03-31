@@ -55,7 +55,7 @@ pub mod alvr_control_socket;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool   = true;
+pub const USE_VMAF: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -99,10 +99,9 @@ macro_rules! print_prettyyyy {
 macro_rules! print_prettyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
-            // let msg = format!($fmt, $($arg)*);
-            // println!("{}", $color.to_background_fn()(msg));
-        }
-    // };
+        // let msg = format!($fmt, $($arg)*);
+        // println!("{}", $color.to_background_fn()(msg));
+    }; // };
 }
 
 #[macro_export]
@@ -287,17 +286,17 @@ impl DebugColor {
 // };
 #[allow(unused)] // to use for non-deterministic backoff
 pub fn time_of_BinaryExponentialBackoff(attempt: i32) -> i32 {
-        let max_beb_stages = 6;
-        let cw_min = 15;
-        
-        // Calculate the upper bound for the random range
-        let factor = (2_i32).pow(attempt.min(max_beb_stages) as u32);
-        let upper_bound = factor * (cw_min + 1);
-        
-        // Generate a random number in range [0, upper_bound)
-        let mut rng = rand::thread_rng();
-        rng.gen_range(0..upper_bound)
-    }
+    let max_beb_stages = 6;
+    let cw_min = 15;
+
+    // Calculate the upper bound for the random range
+    let factor = (2_i32).pow(attempt.min(max_beb_stages) as u32);
+    let upper_bound = factor * (cw_min + 1);
+
+    // Generate a random number in range [0, upper_bound)
+    let mut rng = rand::thread_rng();
+    rng.gen_range(0..upper_bound)
+}
 
 #[derive(Clone)]
 pub struct SlidingWindowWeighted<T> {
@@ -779,7 +778,6 @@ impl CsvData {
     }
 }
 
-    
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct CsvType {
@@ -1301,19 +1299,17 @@ impl MpduPacket {
             color,
             "SRC: {} DEST: {}|  Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
             self.sta_src_id,
-            self.sta_dest_id, 
+            self.sta_dest_id,
             self.packet_id,
             self.header_alvr.next_packet_index,
             self.header_alvr.shard_index,
             self.header_alvr.shards_count - 1,
             self.length_packet
-            
         );
         let a = format!(
             "SRC: {} DEST: {}| Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
-            
             self.sta_src_id,
-            self.sta_dest_id, 
+            self.sta_dest_id,
             self.packet_id,
             self.header_alvr.next_packet_index,
             self.header_alvr.shard_index,
@@ -1442,7 +1438,6 @@ impl ResultsFrameTXDelay {
             p_rx: 0.0,
         }
     }
-
 }
 
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
@@ -1458,14 +1453,13 @@ pub fn path_loss(d: f64) -> f64 {
     54.12 + 10.0 * gamma * (d).log10() + 5.25 * 0.1467 * d
 }
 
-
 pub fn collision_delay(
-    _total_bits_transmitted: f64, 
+    _total_bits_transmitted: f64,
     _n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
-    p_tx: f64,) -> f32 {
-
+    p_tx: f64,
+) -> f32 {
     let mut effPt = p_tx;
 
     let SU_spatial_streams = 2.0;
@@ -1509,11 +1503,10 @@ pub fn collision_delay(
         _ if Pr >= -57.0 && Pr < -55.0 => (6, 5.0 / 6.0),
         _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
         _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
-        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0),  // MCS 12, TODO: find a good reference for 802.11be SNR
-        _ if Pr >= -46.0               => (12, 5.0 / 6.0),  // MCS 13
-        _ => (1, 1.0 / 2.0), // Catch-all for Pr out of range
+        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
+        _ if Pr >= -46.0 => (12, 5.0 / 6.0),               // MCS 13
+        _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
     };
-
 
     let Subcarriers = match channel_width {
         // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
@@ -1540,19 +1533,14 @@ pub fn collision_delay(
     //     PHY_DURATION + ((SF + n_mpdus as f64 * (_MD + _MAC_H_size + _L) + TB) / _ORate).ceil() * 16E-6;
     // let _T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
-
-
     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
-    // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
+                                                                      // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
 
-    // let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;   
+    // let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
 
-
-    let T_collision = T_RTS + SIFS + T_CTS + DIFS + SLOT + T_DETERMINISTIC_BACKOFF; 
+    let T_collision = T_RTS + SIFS + T_CTS + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
     T_collision as f32
-
 }
-
 
 pub fn frametransmission_delay(
     total_bits_transmitted: f64,
@@ -1604,11 +1592,10 @@ pub fn frametransmission_delay(
         _ if Pr >= -57.0 && Pr < -55.0 => (6, 5.0 / 6.0),
         _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
         _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
-        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0),  // MCS 12, TODO: find a good reference for 802.11be SNR
-        _ if Pr >= -46.0               => (12, 5.0 / 6.0),  // MCS 13
-        _                              => (1, 1.0 / 2.0),   // Catch-all for Pr out of range
+        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
+        _ if Pr >= -46.0 => (12, 5.0 / 6.0),               // MCS 13
+        _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
     };
-
 
     let Subcarriers = match channel_width {
         // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
@@ -1636,9 +1623,10 @@ pub fn frametransmission_delay(
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
     let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
-    // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
+                                                                      // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
 
-    let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
+    let T =
+        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
 
     // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
 
@@ -1651,7 +1639,7 @@ pub fn frametransmission_delay(
     }
 }
 
-#[allow(unused)] // as it's shared with other sims than XR. 
+#[allow(unused)] // as it's shared with other sims than XR.
 pub fn write_all_sta_csvs(
     sta_stats_vec: &HashMap<usize, perStaLockStats>,
     folder: &str,

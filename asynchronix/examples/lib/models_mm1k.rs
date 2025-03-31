@@ -18,13 +18,13 @@ use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 
 use crate::lib::{
-    exponential, frametransmission_delay, collision_delay,  perStaLockStats, AmpduPacket, Coords, CsvType,
-    CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, P_TX,
+    collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
+    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE,
+    P_TX,
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
-
-pub const UPLINK_QUEUE_SIZE: usize = 128 ;
+pub const UPLINK_QUEUE_SIZE: usize = 128;
 
 //////////// CONST DEFINES ///////////
 
@@ -47,9 +47,6 @@ macro_rules! debug_schedule {
 
     };
 }
-
-
-
 
 pub const DEBUG_SCHEDULING: bool = false;
 
@@ -96,7 +93,6 @@ pub const STEP3_TEND: f64 = 65.0;
 pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
 pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
-
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -372,17 +368,12 @@ impl QueueStats {
     }
 }
 
-
 // First, let's add a new enum for distribution types
 #[derive(Clone, Debug)]
 pub enum JitterDistributionType {
     Gaussian,
     Uniform,
 }
-
-
-
-
 
 #[allow(unused)]
 #[derive(Clone, Debug)]
@@ -410,9 +401,9 @@ pub enum NetworkPattern {
     Jitter {
         mean_delay: Duration,
         distribution_type: JitterDistributionType,
-        variance: f64,                // Standard deviation for Gaussian, half-width for Uniform
-        correlation_pct: f64,         // Correlation with previous delay (0-100%)
-        last_delay: Duration,         // Stores previous delay for correlation
+        variance: f64,        // Standard deviation for Gaussian, half-width for Uniform
+        correlation_pct: f64, // Correlation with previous delay (0-100%)
+        last_delay: Duration, // Stores previous delay for correlation
         valid_from: TaiTime<0>,
         valid_until: TaiTime<0>,
     },
@@ -446,7 +437,7 @@ impl NetworkPattern {
         Self::Jitter {
             mean_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0),
             distribution_type: JitterDistributionType::Gaussian,
-            variance: std_dev_ms / 1000.0,  // Convert ms to seconds
+            variance: std_dev_ms / 1000.0, // Convert ms to seconds
             correlation_pct: correlation_pct.clamp(0.0, 100.0),
             last_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0), // Initialize with mean
             valid_from,
@@ -464,7 +455,7 @@ impl NetworkPattern {
         Self::Jitter {
             mean_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0),
             distribution_type: JitterDistributionType::Uniform,
-            variance: half_width_ms / 1000.0,  // Convert ms to seconds
+            variance: half_width_ms / 1000.0, // Convert ms to seconds
             correlation_pct: correlation_pct.clamp(0.0, 100.0),
             last_delay: Duration::from_secs_f64(mean_delay_ms / 1000.0), // Initialize with mean
             valid_from,
@@ -517,7 +508,11 @@ pub struct QueueMechanism {
 }
 
 impl QueueMechanism {
-    pub fn new(max_emulated_queue_packets: usize, _now: TaiTime<0>, tests: (bool, bool, bool)) -> Self {
+    pub fn new(
+        max_emulated_queue_packets: usize,
+        _now: TaiTime<0>,
+        tests: (bool, bool, bool),
+    ) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
         let valid_from: TaiTime<0> = TaiTime::EPOCH
@@ -541,59 +536,73 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
+        let (test_bw, test_jitter, test_pl) = tests;
 
-        let (test_bw, test_jitter, test_pl) = tests; 
-
-        if test_bw{
-            network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S1 / 10.0 , BANDWIDTH_LIMIT_S1, valid_from, valid_until));
-            network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S2 / 10.0 , BANDWIDTH_LIMIT_S2, valid_from2, valid_until2));
-            network_emulator.add_pattern(NetworkPattern::new_bandwidth(BANDWIDTH_LIMIT_S3 / 10.0 , BANDWIDTH_LIMIT_S3, valid_from3, valid_until3));
+        if test_bw {
+            network_emulator.add_pattern(NetworkPattern::new_bandwidth(
+                BANDWIDTH_LIMIT_S1 / 10.0,
+                BANDWIDTH_LIMIT_S1,
+                valid_from,
+                valid_until,
+            ));
+            network_emulator.add_pattern(NetworkPattern::new_bandwidth(
+                BANDWIDTH_LIMIT_S2 / 10.0,
+                BANDWIDTH_LIMIT_S2,
+                valid_from2,
+                valid_until2,
+            ));
+            network_emulator.add_pattern(NetworkPattern::new_bandwidth(
+                BANDWIDTH_LIMIT_S3 / 10.0,
+                BANDWIDTH_LIMIT_S3,
+                valid_from3,
+                valid_until3,
+            ));
         }
-        
-        if test_pl{
 
-            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.001), valid_from: valid_from, valid_until: valid_until });
-            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.005), valid_from: valid_from2, valid_until: valid_until2 });
-            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop { drop_probability: (0.01), valid_from: valid_from3, valid_until: valid_until3 });
+        if test_pl {
+            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
+                drop_probability: (0.001),
+                valid_from: valid_from,
+                valid_until: valid_until,
+            });
+            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
+                drop_probability: (0.005),
+                valid_from: valid_from2,
+                valid_until: valid_until2,
+            });
+            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
+                drop_probability: (0.01),
+                valid_from: valid_from3,
+                valid_until: valid_until3,
+            });
         }
-        if test_jitter{
+        if test_jitter {
+            network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
+                3.0, // mean delay in ms
+                3.0, // standard deviation in ms
+                0.0, // 20% correlation with previous packet delay
+                valid_from,
+                valid_until,
+            ));
 
-            network_emulator.add_pattern(
-                NetworkPattern::new_jitter_uniform(
-                    3.0,    // mean delay in ms
-                    3.0,     // standard deviation in ms
-                    0.0,    // 20% correlation with previous packet delay
-                    valid_from,
-                    valid_until
-                )
-            );
-            
             // Example 2: Uniform jitter with 15ms mean delay and 10ms half-width
-            network_emulator.add_pattern(
-                NetworkPattern::new_jitter_uniform(
-                    5.0,    // mean delay in ms
-                    5.0,    // half-width in ms
-                    0.0,     // no correlation with previous packet
-                    valid_from2,
-                    valid_until2
-                )
-            );
-            
+            network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
+                5.0, // mean delay in ms
+                5.0, // half-width in ms
+                0.0, // no correlation with previous packet
+                valid_from2,
+                valid_until2,
+            ));
+
             // Example 3: Highly correlated gaussian jitter (simulates slow fluctuations)
-            network_emulator.add_pattern(
-                NetworkPattern::new_jitter_uniform(
-                    10.0,    // mean delay in ms
-                    10.0,     // standard deviation in ms
-                    0.0,    // 80% correlation with previous packet delay
-                    valid_from3,
-                    valid_until3
-                )
-            );
-
+            network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
+                10.0, // mean delay in ms
+                10.0, // standard deviation in ms
+                0.0,  // 80% correlation with previous packet delay
+                valid_from3,
+                valid_until3,
+            ));
         }
-
-
-
 
         let bandwidth_limit = BANDWIDTH_LIMIT_S1;
 
@@ -642,7 +651,6 @@ impl QueueMechanism {
                 EnqueueResult::Transmitted(packet)
             }
             Some(delay) => {
-
                 debug_bgprint!(DebugColor::Chocolate, "[DBG Queue NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
                             self.queue.len(),
                             packet.packet_id,
@@ -858,14 +866,14 @@ impl NetworkPatternEmulator {
                     } else {
                         None
                     }
-                } else if let NetworkPattern::Jitter{
-                    mean_delay:        _ ,
-                    distribution_type: _ ,
-                    variance:          _ ,         // Standard deviation for Gaussian, half-width for Uniform
-                    correlation_pct:   _ ,         // Correlation with previous delay (0-100%)
-                    last_delay:        _ ,         // Stores previous delay for correlation
+                } else if let NetworkPattern::Jitter {
+                    mean_delay: _,
+                    distribution_type: _,
+                    variance: _, // Standard deviation for Gaussian, half-width for Uniform
+                    correlation_pct: _, // Correlation with previous delay (0-100%)
+                    last_delay: _, // Stores previous delay for correlation
                     valid_from,
-                    valid_until ,
+                    valid_until,
                 } = pattern
                 {
                     if current_time >= *valid_from && current_time <= *valid_until {
@@ -873,8 +881,7 @@ impl NetworkPatternEmulator {
                     } else {
                         None
                     }
-                }
-                 else {
+                } else {
                     None
                 }
             })
@@ -901,7 +908,7 @@ impl NetworkPatternEmulator {
                     if rand_value < *drop_probability {
                         print_red!(
                             "[{} | RANDOM LOSS ( {:.5} -> {:.5} )]  prob= {:.4}! {:?}",
-                            format_elapsed!(current_time), 
+                            format_elapsed!(current_time),
                             format_elapsed!(valid_from),
                             format_elapsed!(valid_until),
                             *drop_probability,
@@ -972,38 +979,39 @@ impl NetworkPatternEmulator {
                     valid_until,
                 } => {
                     let mut rng = rand::thread_rng();
-                    
+
                     // Calculate the new random delay
                     let random_component = match distribution_type {
                         JitterDistributionType::Gaussian => {
                             // Using a normal distribution
                             let normal = rand_distr::Normal::new(0.0, *variance).unwrap();
                             rng.sample(normal)
-                        },
+                        }
                         JitterDistributionType::Uniform => {
                             // Using a uniform distribution centered on 0 with width 2*variance
                             rng.gen_range(-*variance..*variance)
                         }
                     };
-                    
+
                     // Apply correlation with previous delay if correlation_pct > 0
                     let correlated_offset = if *correlation_pct > 0.0 {
                         // Calculate deviation from mean of last delay
                         let last_deviation = last_delay.as_secs_f64() - mean_delay.as_secs_f64();
-                        
+
                         // Apply correlation factor
                         let correlation_factor = *correlation_pct / 100.0;
                         last_deviation * correlation_factor
                     } else {
                         0.0
                     };
-                    
+
                     // Combine mean delay, random component, and correlation
-                    let new_delay_secs = mean_delay.as_secs_f64() + random_component + correlated_offset;
-                    
+                    let new_delay_secs =
+                        mean_delay.as_secs_f64() + random_component + correlated_offset;
+
                     // Ensure delay is not negative
                     let new_delay_secs = new_delay_secs.max(0.0);
-                    
+
                     // Update last_delay for next packet
                     *last_delay = Duration::from_secs_f64(new_delay_secs);
                     self.debug_counter += 1;
@@ -1022,7 +1030,7 @@ impl NetworkPatternEmulator {
                             alvr_header.shards_count - 1
                         );
                     }
-                    
+
                     return Some(Duration::from_secs_f64(new_delay_secs));
                 }
                 _ => return Some(Duration::ZERO),
@@ -1087,7 +1095,7 @@ pub struct QueueModule {
 
     pub network_emulator: NetworkPatternEmulator,
     pub queue_network_emulator: QueueMechanism,
-    pub ul_capacity_queue_device: usize, 
+    pub ul_capacity_queue_device: usize,
 }
 #[allow(unused)]
 impl QueueModule {
@@ -1105,8 +1113,8 @@ impl QueueModule {
         PL_prob: f64,
         vec_ids: Vec<i32>,
         folder_dir: String,
-        ul_size: usize, 
-        emulated_tests: Option<(bool, bool, bool )>  // BW, Jitter, PL
+        ul_size: usize,
+        emulated_tests: Option<(bool, bool, bool)>, // BW, Jitter, PL
     ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
@@ -1125,12 +1133,16 @@ impl QueueModule {
         let network_emulator = NetworkPatternEmulator::new();
 
         // println!("Scheduling EMU TX daemon in 1 second");
-        let queue_mechanism: QueueMechanism; 
-        if let Some(values_tests) = emulated_tests{
-            queue_mechanism = QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, values_tests);
-        }
-        else{
-            queue_mechanism = QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, (false,false,false));
+        let queue_mechanism: QueueMechanism;
+        if let Some(values_tests) = emulated_tests {
+            queue_mechanism =
+                QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, values_tests);
+        } else {
+            queue_mechanism = QueueMechanism::new(
+                MAX_EMULATED_QUEUE_PACKETS,
+                TaiTime::EPOCH,
+                (false, false, false),
+            );
         }
 
         Self {
@@ -1163,7 +1175,7 @@ impl QueueModule {
             PL_probability: PL_prob,
             network_emulator: network_emulator,
             queue_network_emulator: queue_mechanism,
-            ul_capacity_queue_device: ul_size, 
+            ul_capacity_queue_device: ul_size,
         }
     }
 
@@ -1586,7 +1598,6 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
             let mut lost_packets = Vec::new();
 
             let now = context.scheduler.time();
@@ -1597,30 +1608,29 @@ impl QueueModule {
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
             // Select the STA with the highest priority based on Lyapunov optimization
 
-            debug_schedule!("{} | ***************** SCHEDULING *******************", format_elapsed!(now));
+            debug_schedule!(
+                "{} | ***************** SCHEDULING *******************",
+                format_elapsed!(now)
+            );
 
+            let mut is_ul_count = 0;
+            let mut is_dl = 0;
 
-            let mut is_ul_count = 0; 
-            let mut is_dl = 0; 
-
-            const TAU_COLLISIONS: f32 = 2.0 / 9.0; 
+            const TAU_COLLISIONS: f32 = 2.0 / 9.0;
 
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
                 let is_ul = sta_src > sta_dest;
 
-                if is_ul{
+                if is_ul {
                     is_ul_count += 1; //count all UL devices for colisions
+                } else {
+                    is_dl = 1; // bool to count only one device for all DL flows.
                 }
-                else{
-                    is_dl = 1; // bool to count only one device for all DL flows. 
-                }
-
 
                 debug_schedule!("src: {}, dest: {} | UL_FLOW: {} |queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ", sta_src, sta_dest, is_ul,  packets.packet_count,packets.fullampdu_max_size, packets.total_transmission_delay_fullampdu * 1000.0, packets.weighted_rate_fullampdu * 1000.0);
 
                 // debug_schedule!("----> per-packet queue channel access efficiency: {:.5} ms. Time to deliver whole queue with current throughput {:.3} ms", packets.per_packet_channel_access_efficiency * 1000.0, packets.expected_queue_delivery_ms);
-           
-           
+
                 if is_ul && packets.packet_count > self.ul_capacity_queue_device {
                     // This STA has UL traffic exceeding capacity
                     debug_print!(
@@ -1635,22 +1645,22 @@ impl QueueModule {
                     let excess_count = packets.packet_count - self.ul_capacity_queue_device;
 
                     let mut packets_to_remove = excess_count;
-                    
+
                     let mut indices_to_remove = Vec::new();
-                        // Scan from the back of the queue (newest packets first)
+                    // Scan from the back of the queue (newest packets first)
                     for i in (0..self.queue.len()).rev() {
                         if let Some(packet) = self.queue.get(i) {
                             if packet.sta_src_id == *sta_src && packet.sta_dest_id == *sta_dest {
                                 indices_to_remove.push(i);
                                 packets_to_remove -= 1;
-                                
+
                                 if packets_to_remove == 0 {
                                     break;
                                 }
                             }
                         }
                     }
-                    
+
                     // Remove identified packets (from back to front to avoid index issues)
                     for idx in indices_to_remove {
                         if let Some(removed_packet) = self.queue.remove(idx) {
@@ -1667,25 +1677,30 @@ impl QueueModule {
                 }
             }
 
+            let n_devices_collisions = is_ul_count + is_dl;
 
-
-            let n_devices_collisions = is_ul_count + is_dl ; 
-            
-            let collision_probability = 1.0 - (1.0 - TAU_COLLISIONS).powf( n_devices_collisions as f32 - 1.0 );  
+            let collision_probability =
+                1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
 
             let mut rng = rand::thread_rng();
             let random_value: f32 = rng.gen(); // Generates a random uniform float in [0, 1)
 
-            let collision_now: bool = if random_value < collision_probability { // TODO: are collisions independent of scheduling?
-                    true
-                }
-                else{
-                    false
-                }; 
+            let collision_now: bool = if random_value < collision_probability {
+                // TODO: are collisions independent of scheduling?
+                true
+            } else {
+                false
+            };
 
-            debug_schedule!("Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}", is_ul_count, is_dl, n_devices_collisions, collision_probability, random_value, collision_now );
- 
-
+            debug_schedule!(
+                "Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}",
+                is_ul_count,
+                is_dl,
+                n_devices_collisions,
+                collision_probability,
+                random_value,
+                collision_now
+            );
 
             let mut selected_sta = None;
 
@@ -1774,11 +1789,9 @@ impl QueueModule {
             } else { // NORMAL POLICY: FIFO
             }
 
-
-            if collision_now{
+            if collision_now {
                 // Use the same STA selection logic from non-collision path
                 if let Some(key) = selected_sta {
-
                     // Use the selected STA from earlier logic
                     selected_sta = Some(key);
                 } else if !self.queue.is_empty() {
@@ -1786,64 +1799,61 @@ impl QueueModule {
                     let first = self.queue.front().unwrap();
                     selected_sta = Some((first.sta_src_id, first.sta_dest_id));
                 }
-                
+
                 if let Some(sta_key) = selected_sta {
                     // Find matching packets for this STA
                     let mut total_length = 0;
                     let mut mpdu_count = 0;
                     let mut sta_coords = Coords::default();
-                    
-                    // Count packets and total length for this STA, no need to remove packets because they're not transmitted on collision! 
+
+                    // Count packets and total length for this STA, no need to remove packets because they're not transmitted on collision!
                     for packet in self.queue.iter() {
                         if packet.sta_src_id == sta_key.0 && packet.sta_dest_id == sta_key.1 {
                             if mpdu_count == 0 {
                                 // Store coordinates from first matching packet
                                 sta_coords = packet.sta_src_coords.clone();
                             }
-                            
+
                             total_length += packet.length_packet;
                             mpdu_count += 1;
-                            
-                            
+
                             // Simulate calculation of aggregation delay limit
                             let test_result = frametransmission_delay(
                                 total_length as f64,
                                 mpdu_count,
                                 self.coords_queue,
                                 sta_coords,
-                                P_TX
+                                P_TX,
                             );
-                            
-                            if test_result.service_delay >= DEFAULT_TMAX_AGG || mpdu_count >= MAX_AMPDU_SIZE  {
+
+                            if test_result.service_delay >= DEFAULT_TMAX_AGG
+                                || mpdu_count >= MAX_AMPDU_SIZE
+                            {
                                 break;
                             }
                         }
                     }
-                    
+
                     // Now calculate collision delay with accurate parameters
                     let T_col = collision_delay(
                         total_length as f64,
                         mpdu_count,
                         self.coords_queue,
                         sta_coords,
-                        P_TX
+                        P_TX,
                     );
-                    
+
                     print_yellow!("COLLISION! Packets in potential A-MPDU: {}, Total length: {}, Waiting T = {} for next transmission", 
                               mpdu_count, total_length, T_col);
-                    
+
                     // Schedule event to retry queue processing after collision backoff
                     let collision_duration = Duration::from_secs_f64(T_col as f64);
-                    context.scheduler.schedule_event(
-                        collision_duration, 
-                        Self::deque_schedule_service, 
-                        ()
-                    ).unwrap();
+                    context
+                        .scheduler
+                        .schedule_event(collision_duration, Self::deque_schedule_service, ())
+                        .unwrap();
                 }
-            }
-
-            else{
-
+            } else {
                 let mut packet_with_id: Option<&MpduPacket> = self.queue.front(); //  FIFO ACTUALLY ENFORCED HERE
                 if let Some(_packet) = packet_with_id {
                     debug_schedule!(
@@ -1917,7 +1927,9 @@ impl QueueModule {
                             );
                             // println!("RESULTZ {} frame {} shard {}/{} ", resultz.service_delay, current_packet.header_alvr.next_packet_index, current_packet.header_alvr.shard_index, current_packet.header_alvr.shards_count - 1);
 
-                            if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+                            if resultz.service_delay >= DEFAULT_TMAX_AGG
+                                || new_size > MAX_AMPDU_SIZE
+                            {
                                 debug_print!(
                                     DebugColor::DarkRed,
                                     "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
@@ -1961,7 +1973,8 @@ impl QueueModule {
                                 self.aux_ampdu_serviced.mpdu_packets.push(packet_rmvd);
                                 self.aux_ampdu_serviced.total_length = new_total_length;
                                 self.aux_ampdu_serviced.size = new_size;
-                                last_service_duration = Duration::from_secs_f64(resultz.service_delay);
+                                last_service_duration =
+                                    Duration::from_secs_f64(resultz.service_delay);
                             }
                         }
                     }
@@ -2023,7 +2036,7 @@ impl QueueModule {
                                     "{:.6} [DBG QUEUE] -packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Probs: {:.3} (< {:.2})", 
                                     format_elapsed!(now),
                                     packet.sta_src_id,
-                                    packet.sta_dest_id, 
+                                    packet.sta_dest_id,
                                     packet.packet_id,
                                     packet.header_alvr.shard_index,
                                     packet.header_alvr.shards_count,
@@ -2048,21 +2061,20 @@ impl QueueModule {
                             .scheduler
                             .schedule_event(last_service_duration, Self::send_ampdu, ampdu_to_send)
                             .unwrap();
-                    }                  
+                    }
                 }
 
-                if !lost_packets.is_empty(){
-
-                    // print_red!("Queue previous to returning MAC lost packets. Length = {} \n", self.queue.len()); 
+                if !lost_packets.is_empty() {
+                    // print_red!("Queue previous to returning MAC lost packets. Length = {} \n", self.queue.len());
                     // Print front elements (first few elements)
                     // if !self.queue.is_empty() {
                     //     let front_count = 10.min(self.queue.len()); // Show elements from front
                     //     let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
-                        
-                    //     println!("queue front - prev:\n"); 
+
+                    //     println!("queue front - prev:\n");
 
                     //     for packet in a {
-                    //         packet.print(DebugColor::Chocolate); 
+                    //         packet.print(DebugColor::Chocolate);
                     //     }
                     // }
 
@@ -2070,17 +2082,16 @@ impl QueueModule {
                     // if !self.queue.is_empty() {
                     //     let back_count = 10.min(self.queue.len()); // Show elements from back
                     //     let b = self.queue.iter().rev().take(back_count).collect::<Vec<_>>();
-                        
-                    //     // println!("queue back - prev:"); 
+
+                    //     // println!("queue back - prev:");
 
                     //     // for packet in b {
-                    //     //     packet.print(DebugColor::Chocolate); 
-                    //     // }           
+                    //     //     packet.print(DebugColor::Chocolate);
+                    //     // }
                     // }
 
                     lost_packets.reverse();
                     for lost_packet in lost_packets {
-                    
                         self.queue.push_front(lost_packet);
                     }
                     // print_red!("Queue after re-putting packets. Length = {} \n", self.queue.len());
@@ -2089,22 +2100,14 @@ impl QueueModule {
                     // if !self.queue.is_empty() {
                     //     let front_count = 10.min(self.queue.len()); // Show elements from front
                     //     let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
-                    //     println!("NEW queue front:"); 
+                    //     println!("NEW queue front:");
                     //     for packet in a {
-                    //         packet.print(DebugColor::Chocolate); 
+                    //         packet.print(DebugColor::Chocolate);
                     //     }
                     // }
                 }
-            
             }
-
-
-
         }
-
-
-
-
     }
 }
 impl Model for QueueModule {}

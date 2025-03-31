@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::hash::Hash;
 
-use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE; 
+use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE;
 
 use std::time::Duration;
 
@@ -746,9 +746,8 @@ fn downlink_uplink_scenario_flexible(
     // Prepare queue
     let vec_ids_stas: Vec<i32> = sta_bg_models.iter().map(|sta| sta.sta_id).collect();
     let num_stas_mod = vec_ids_stas.len();
-    let name_folder = format!(
-        "sim_MM1K_DL_UL",); 
-        // stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
+    let name_folder = format!("sim_MM1K_DL_UL",);
+    // stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
 
     let mut queue = QueueModule::new(
         num_stas_mod,
@@ -756,7 +755,7 @@ fn downlink_uplink_scenario_flexible(
         0.0,
         vec_ids_stas.clone(),
         name_folder,
-        UPLINK_QUEUE_SIZE, 
+        UPLINK_QUEUE_SIZE,
     );
 
     // Setup coordinates
@@ -833,8 +832,6 @@ fn downlink_uplink_scenario_flexible(
         eprintln!("Failed to create directory: {}", e);
         return;
     }
-
-
 
     if let Ok(stats_vec) = stats_sta_data_handle.lock() {
         // Now stats_vec is a MutexGuard<Vec<perStaLockStats>>
@@ -1281,25 +1278,21 @@ fn downlink_uplink_scenario_1BG(
         vec_ids_stas.push(sta3_bg.sta_id);
         num_stas_mod += 1;
     }
-        // Create output directory
-    let name_folder = format!(
-        "sim_MM1K",); 
-        // stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
+    // Create output directory
+    let name_folder = format!("sim_MM1K",);
+    // stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
 
-    
     // let mut queue: QueueModule =
     //     QueueModule::new(num_stas_mod, k_queue - 1 as usize, 0.0,  vec_ids_stas, );
 
-        let mut queue = QueueModule::new(
-            num_stas_mod,
-            k_queue.saturating_sub(1),
-            0.0,
-            vec_ids_stas.clone(),
-            name_folder,
-            UPLINK_QUEUE_SIZE, 
-        );
-
-
+    let mut queue = QueueModule::new(
+        num_stas_mod,
+        k_queue.saturating_sub(1),
+        0.0,
+        vec_ids_stas.clone(),
+        name_folder,
+        UPLINK_QUEUE_SIZE,
+    );
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats
     println!("LEN BEFORE: {}", queue.STA_coords_grid.len());

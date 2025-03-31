@@ -10,7 +10,6 @@
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 
-
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
@@ -37,11 +36,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
-use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE; 
+use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE;
 
-
-pub const SIM_START_TIME: u64 = 13; 
-
+pub const SIM_START_TIME: u64 = 13;
 
 struct VRPair {
     xr_server: XRServer,
@@ -62,7 +59,7 @@ impl VRPair {
         initial_bitrate: f64,
         distance: f64,
         name_folder: &str,
-        test: &str, 
+        test: &str,
     ) -> Self {
         let server_id = 100 + pair_index as i32;
         let client_id = 200 + pair_index as i32;
@@ -178,22 +175,21 @@ fn main() {
     let n_xr: usize = args[9].parse().unwrap();
     let n_bg: usize = args[10].parse().unwrap(); // New parameter for background STAs
     let is_ul_bg_traffic: usize = args[11].parse().unwrap();
-    let test_type: String = args[12].parse().unwrap();  // New test type parameter
+    let test_type: String = args[12].parse().unwrap(); // New test type parameter
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl) = match test_type.as_str() {
         "BW" => (true, false, false),
         "JI" => (false, true, false),
         "PL" => (false, false, true),
-        _ => (false, false, false),  // Default/STD case
+        _ => (false, false, false), // Default/STD case
     };
-     // Use the test type from parameter as suffix directly
-     let suffix = if ["BW", "JI", "PL", "STD"].contains(&test_type.as_str()) {
+    // Use the test type from parameter as suffix directly
+    let suffix = if ["BW", "JI", "PL", "STD"].contains(&test_type.as_str()) {
         test_type.as_str()
     } else {
-        "STD"  // Default suffix if invalid test type provided
+        "STD" // Default suffix if invalid test type provided
     };
-
 
     // Create output directory
     let name_folder = format!(
@@ -215,7 +211,15 @@ fn main() {
 
     // Create XR pairs
     for i in 0..n_xr {
-        let vr = VRPair::new(i, t0, mean_length, initial_bitrate, distance, &name_folder, suffix);
+        let vr = VRPair::new(
+            i,
+            t0,
+            mean_length,
+            initial_bitrate,
+            distance,
+            &name_folder,
+            suffix,
+        );
         all_sta_ids.push(100 + i as i32);
         all_sta_ids.push(200 + i as i32);
         xr_client_addresses.push(vr.mbox_xr_client.address());
@@ -259,7 +263,7 @@ fn main() {
         pl_prob,
         all_sta_ids.clone(),
         name_folder,
-        UPLINK_QUEUE_SIZE, 
+        UPLINK_QUEUE_SIZE,
         Some((test_bandwidth, test_jitter, test_pl)),
     );
     let mbox_queue = Mailbox::new();
@@ -293,8 +297,7 @@ fn main() {
     }
 
     // Build simulation
-    let mut sim_builder = SimInit::new()
-        .add_model(queue, mbox_queue, "Queue"); 
+    let mut sim_builder = SimInit::new().add_model(queue, mbox_queue, "Queue");
 
     // Add XR pairs to simulation
     for (i, vr) in vr_pairs.into_iter().enumerate() {
@@ -336,7 +339,12 @@ fn main() {
             )
             .unwrap(); // Why pass packet_size? -> compiler complains if no other arg is found when context is needed:)
         scheduler
-            .schedule_event(Duration::from_secs(SIM_START_TIME) + epsilon, XRClient::vsync, (), addr)
+            .schedule_event(
+                Duration::from_secs(SIM_START_TIME) + epsilon,
+                XRClient::vsync,
+                (),
+                addr,
+            )
             .unwrap();
     }
 
@@ -373,7 +381,6 @@ fn main() {
     // Run simulation
     simu.step_by(Duration::from_secs_f64(stoptime));
 
-   
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
     };

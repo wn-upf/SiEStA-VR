@@ -24,7 +24,7 @@ IS_UL_BG=(0)
 
 
 N_XR=(1)
-initial_bitrate_mbps=(100.0)
+initial_bitrate_mbps=(1.0 5.0 10.0 100.0)
 
 TEST_TYPE=("BW" "JI" "PL")  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
 

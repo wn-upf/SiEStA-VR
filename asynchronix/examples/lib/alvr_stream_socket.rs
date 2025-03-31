@@ -12,14 +12,13 @@ use std::sync::{Arc, Mutex};
 use crate::lib::HevcParser;
 use crate::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
-use std::io::BufReader;
 use rand::seq::IteratorRandom;
+use std::io::BufReader;
 
 // lazy_static! {
 //     // Global static encoder instance
 //     static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
 // }
-
 
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
 
@@ -55,9 +54,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 // use super::alvr_packets::NetworkStatisticsPacket;
 
-
-
-pub const INTRAREFRESH_ENABLED :bool = false; 
+pub const INTRAREFRESH_ENABLED: bool = false;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
@@ -90,7 +87,7 @@ pub struct ChunkedHevcEncoder {
     current_offset: f64,
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
-    
+
     frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
@@ -123,7 +120,7 @@ impl ChunkedHevcEncoder {
             encoder_str: string.clone(),
         }
     }
-    
+
     pub fn clear_parser(&mut self) {
         self.parser.buffer.clear();
     }
@@ -132,8 +129,7 @@ impl ChunkedHevcEncoder {
     /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
-    
-    
+
     pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
         let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
@@ -146,69 +142,64 @@ impl ChunkedHevcEncoder {
         );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
-        if INTRAREFRESH_ENABLED{
+        if INTRAREFRESH_ENABLED {
             command
-            .hwaccel("cuda")
-            .args(&["-ss", &self.current_offset.to_string()])
-            .args(&["-t", &self.chunk_duration.to_string()])
-            .args(&["-re"]) // read at real-time speed
-            .input(&self.input)
-            .args(&[
-                "-vf",
-                &format!(
-                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
-                    self.width, self.height
-                ),
-            ])
-            .args(&["-c:v", "hevc_nvenc"])
-            .args(&["-preset", "fast"])
-            .args(&["-rc", "cbr"])
-            .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-            .args(&["-rc-lookahead", "0"])
-            .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
-            .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
-            .args(&["-movflags", "+frag_keyframe+empty_moov"])
-            .args(&["-flush_packets", "1"])
-            .args(&["-bsf:v", "hevc_mp4toannexb"])
-            .args(&["-an"])
-            .args(&["-f", "hevc", "-"]); // output raw HEVC
-
-        }
-        else{
+                .hwaccel("cuda")
+                .args(&["-ss", &self.current_offset.to_string()])
+                .args(&["-t", &self.chunk_duration.to_string()])
+                .args(&["-re"]) // read at real-time speed
+                .input(&self.input)
+                .args(&[
+                    "-vf",
+                    &format!(
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                        self.width, self.height
+                    ),
+                ])
+                .args(&["-c:v", "hevc_nvenc"])
+                .args(&["-preset", "fast"])
+                .args(&["-rc", "cbr"])
+                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-rc-lookahead", "0"])
+                .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
+                .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
+                .args(&["-movflags", "+frag_keyframe+empty_moov"])
+                .args(&["-flush_packets", "1"])
+                .args(&["-bsf:v", "hevc_mp4toannexb"])
+                .args(&["-an"])
+                .args(&["-f", "hevc", "-"]); // output raw HEVC
+        } else {
             command
-            .hwaccel("cuda")
-            .args(&["-ss", &self.current_offset.to_string()])
-            .args(&["-t", &self.chunk_duration.to_string()])
-            .args(&["-re"]) // read at realtime speed
-            .input(&self.input)
-            .args(&[
-                "-vf",
-                &format!(
-                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
-                    self.width, self.height
-                ),
-            ])
-            .args(&["-c:v", "hevc_nvenc"])
-            .args(&["-preset", "fast"])
-            .args(&["-rc", "cbr"])
-            .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-            .args(&["-rc-lookahead", "0"])
-            .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
-            .args(&["-movflags", "+frag_keyframe+empty_moov"])
-            .args(&["-flush_packets", "1"])
-            .args(&["-bsf:v", "hevc_mp4toannexb"])
-            .args(&["-an"])
-            .args(&["-f", "hevc", "-"]); // output raw HEVC
-
+                .hwaccel("cuda")
+                .args(&["-ss", &self.current_offset.to_string()])
+                .args(&["-t", &self.chunk_duration.to_string()])
+                .args(&["-re"]) // read at realtime speed
+                .input(&self.input)
+                .args(&[
+                    "-vf",
+                    &format!(
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                        self.width, self.height
+                    ),
+                ])
+                .args(&["-c:v", "hevc_nvenc"])
+                .args(&["-preset", "fast"])
+                .args(&["-rc", "cbr"])
+                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-rc-lookahead", "0"])
+                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
+                .args(&["-movflags", "+frag_keyframe+empty_moov"])
+                .args(&["-flush_packets", "1"])
+                .args(&["-bsf:v", "hevc_mp4toannexb"])
+                .args(&["-an"])
+                .args(&["-f", "hevc", "-"]); // output raw HEVC
         }
-        
 
         // Spawn the ffmpeg process for this chunk.
         let mut child = command.spawn().unwrap();
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
-        
-        
+
         // if let Some(stderr) = child.take_stderr() {
         //     let mut err_reader = std::io::BufReader::new(stderr);
         //     std::thread::spawn(move || {
@@ -222,13 +213,12 @@ impl ChunkedHevcEncoder {
         //             }
         //         }
         //     });
-        // }      
+        // }
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
 
         loop {
-   
             match reader.read(&mut buf) {
                 Ok(0) => break, // end of chunk
                 Ok(n) => {
@@ -273,16 +263,16 @@ impl ChunkedHevcEncoder {
                 extracted_frames.len(),
                 self.parser.buffer.len()
             );
-            
+
             // Store all but first frame for future use
             for frame in extracted_frames.iter().skip(1) {
                 self.frame_queue.push_back(frame.clone());
             }
-            
+
             // Return the first extracted frame immediately
             return Some(extracted_frames[0].clone());
         }
-        
+
         // Check queue next
         if let Some(frame) = self.frame_queue.pop_front() {
             return Some(frame);
@@ -296,8 +286,6 @@ impl ChunkedHevcEncoder {
         None
     }
 }
-
-
 
 /// A parser for HEVC bitstreams to extract individual frames
 /// A parser for HEVC bitstreams to extract individual frames
@@ -1801,15 +1789,12 @@ pub struct StreamSender<H> {
     // encoder_wrapper: Option<Arc<tokMutex<EncoderWrapper>>>,
     // chunk_frames: VecDeque<Vec<u8>>,
 
-
     // encoder_wrapper: Option<Arc<tokMutex<HevcEncoder>>>,
     pub ffmpeg_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
     pub ffmpeg_maxbitrate_encoder: Option<Arc<async_std::sync::Mutex<ChunkedHevcEncoder>>>,
 
     // Keep the initialization flag:
-
     pub time_since_last_update: TaiTime<0>,
-
 }
 
 #[allow(unused)]
@@ -1894,20 +1879,20 @@ impl<H: Serialize> StreamSender<H> {
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k", "zoro", "furbo", "snow", "assemble", "cut_video" ]; 
-        let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());        
+        let random_file_list = ["garp4k", "zoro", "furbo", "snow", "assemble", "cut_video"];
+        let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
         let final_file = match choice_random {
-            Some(file) => {file},
+            Some(file) => file,
             None => {
                 "furbo"
                 // println!("No files to choose from");
-            },
+            }
+        };
+        // final_file = "assemble";
 
-        }; 
-        // final_file = "assemble"; 
-        
-        let input_path =
-            &format!("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4");
+        let input_path = &format!(
+            "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
+        );
 
         let mut buffer: Vec<u8> = Vec::new();
         print_pretty!(
@@ -2159,7 +2144,6 @@ impl<H: Serialize> StreamSender<H> {
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
 }
-
 
 impl<T> HandleTryAgain<T> for io::Result<T> {
     fn handle_try_again(self) -> ConResult<T> {
