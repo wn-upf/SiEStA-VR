@@ -1,5 +1,6 @@
-use crate::{debug_bgprint, print_pretty, print_red, print_yellow};
+use crate::{debug_bgprint, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
+use ffmpeg_next::codec::Debug;
 use rand::Rng;
 use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
@@ -9,11 +10,11 @@ use std::future::Future;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
-
+use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::lib::ResultsFrameTXDelay;
 use crate::DebugColor;
-
+// use crate::lib::TESTS_RANDOM_PATTERNS;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 
@@ -511,7 +512,7 @@ impl QueueMechanism {
     pub fn new(
         max_emulated_queue_packets: usize,
         _now: TaiTime<0>,
-        tests: (bool, bool, bool),
+        tests: (bool, bool, bool, bool),
     ) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new();
 
@@ -536,7 +537,50 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        let (test_bw, test_jitter, test_pl) = tests;
+        let (test_bw, test_jitter, test_pl, tests_random) = tests;
+
+                // Assume these time values are defined appropriately:
+        let overall_start = _now.checked_add(Duration::from_secs(15)).unwrap();
+        let overall_end = _now.checked_add(Duration::from_secs(65)).unwrap();
+
+        if tests_random {
+            network_emulator.add_random_events(
+                10,                                  // count: add 5 events
+                RandomEventKind::Jitter,            // type of event
+                overall_start,                      // overall start time for events
+                overall_end,                        // overall end time for events
+                Duration::from_millis(50),         // min duration for each event
+                Duration::from_millis(500),         // max duration for each event
+                JitterDistributionType::Uniform,    // distribution for the event duration (and jitter)
+                8.0,                                // mean delay in ms
+                6.0,                                // half-width (for Uniform jitter) or std dev (if Gaussian)
+            );
+    
+            network_emulator.add_random_events(
+                10,                                  // Number of events
+                RandomEventKind::PacketLoss,        // Event type: Packet Loss
+                overall_start,                      // Overall window start time
+                overall_end,                        // Overall window end time
+                Duration::from_millis(50),          // Minimum duration per event
+                Duration::from_millis(500),         // Maximum duration per event
+                JitterDistributionType::Uniform,    // Distribution for event duration
+                0.01,                                // Drop probability (mean_value)
+                0.01,                                // Variance (not used for packet loss events)
+            );
+    
+            network_emulator.add_random_events(
+                10,                                  // Number of events
+                RandomEventKind::Bandwidth,         // Event type: Bandwidth limit
+                overall_start,                      // Overall window start time
+                overall_end,                        // Overall window end time
+                Duration::from_millis(50),         // Minimum duration per event
+                Duration::from_millis(500),        // Maximum duration per event
+                JitterDistributionType::Uniform,    // Distribution for event duration
+                50e6,                                // Maximum bps (1Mbps) as mean_value
+                0.0,                                // Variance (not used for bandwidth events)
+            );
+        }
+
 
         if test_bw {
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
@@ -754,6 +798,15 @@ impl QueueMechanism {
     }
 }
 
+
+#[derive(Clone, Debug)]
+pub enum RandomEventKind {
+    PacketLoss,
+    Jitter,
+    Bandwidth,
+}
+
+
 #[derive(Clone, Debug)]
 pub struct NetworkPatternEmulator {
     patterns: Vec<NetworkPattern>,
@@ -768,6 +821,110 @@ impl NetworkPatternEmulator {
             last_update_time: TaiTime::default(),
             last_update_only_DBG_NETEM: TaiTime::default(),
             debug_counter: 0,
+        }
+    }
+
+        
+        pub fn add_random_events(
+            &mut self,
+            count: usize,
+            event_type: RandomEventKind,
+            overall_start: TaiTime<0>,
+            overall_end: TaiTime<0>,
+            min_duration: Duration,
+            max_duration: Duration,
+            dist: JitterDistributionType,
+            mean_value: f64,
+            variance: f64,
+        ) {
+
+
+
+            let overall_duration = overall_end.duration_since(overall_start);
+            let max_offset_secs = overall_duration
+                .as_secs_f64()- (max_duration.as_secs_f64());
+
+            let mut rng = rand::thread_rng();
+
+            for _ in 0..count {
+                // Randomly choose a start time within the overall window, leaving room for a full event duration.
+                let offset_secs = rng.gen_range(0.0..max_offset_secs);
+                let event_start = overall_start
+                    .checked_add(Duration::from_secs_f64(offset_secs))
+                    .expect("Time addition failed");
+
+                // Determine event duration based on chosen distribution
+                let duration_secs = match dist {
+                    JitterDistributionType::Uniform => {
+                        let min = min_duration.as_secs_f64();
+                        let max = max_duration.as_secs_f64();
+                        rng.gen_range(min..max)
+                    }
+                    JitterDistributionType::Gaussian => {
+                        // For Gaussian, we use a Normal distribution centered at the midpoint.
+                        let center = (min_duration.as_secs_f64() + max_duration.as_secs_f64()) / 2.0;
+                        // Create a normal distribution; if variance <= 0, fallback to center.
+                        let normal = Normal::new(center, variance).unwrap_or_else(|_| Normal::new(center, 0.1).unwrap());
+                        // Sample and then clamp the duration between min and max.
+                        let sample = normal.sample(&mut rng);
+                        sample.max(min_duration.as_secs_f64()).min(max_duration.as_secs_f64())
+                    }
+                };
+                let event_duration = Duration::from_secs_f64(duration_secs);
+                let event_end = event_start
+                    .checked_add(event_duration)
+                    .expect("Time addition failed");
+                    // Debug log: print event details before creation.
+                print_prettyyyy!(
+                    DebugColor::Green, 
+                    "Creating event: {:?}, start: {:?}, duration: {:?}, intensity: {}",
+                    event_type, event_start, event_duration, mean_value
+                ); 
+
+                let std_dev = variance.sqrt();
+                let normal = Normal::new(mean_value, std_dev).expect("Invalid distribution parameters");
+                let mut drop_probability = normal.sample(&mut rng);
+                drop_probability = drop_probability.clamp(0.0, 1.0);
+                                
+                // Create the event based on its type.
+                let pattern = match event_type {
+                    RandomEventKind::PacketLoss => NetworkPattern::ProbabilisticDrop {
+                        drop_probability: drop_probability, // e.g. 0.8 for intense loss
+                        valid_from: event_start,
+                        valid_until: event_end,
+                    },
+                    RandomEventKind::Jitter => {
+                        // Use the distribution type to pick between jitter constructors.
+                        match dist {
+                            JitterDistributionType::Uniform => NetworkPattern::new_jitter_uniform(
+                                mean_value, // mean delay in ms
+                                variance,   // half-width in ms
+                                0.0,        // no correlation by default
+                                event_start,
+                                event_end,
+                            ),
+                            JitterDistributionType::Gaussian => NetworkPattern::new_jitter_gaussian(
+                                mean_value, // mean delay in ms
+                            variance,   // standard deviation in ms
+                            0.0,        // no correlation by default
+                            event_start,
+                            event_end,
+                        ),
+                    }
+                }
+                RandomEventKind::Bandwidth => {
+                    // For bandwidth events, mean_value represents the max_bps limit.
+                    NetworkPattern::new_bandwidth(
+                        mean_value, // max_bps for the event
+                        mean_value, // here we use the same value for the token refill rate
+                        event_start,
+                        event_end,
+                    )
+                }
+            };
+
+            // Finally, add the generated pattern to the emulator.
+            self.add_pattern(pattern);
         }
     }
 
@@ -1114,7 +1271,7 @@ impl QueueModule {
         vec_ids: Vec<i32>,
         folder_dir: String,
         ul_size: usize,
-        emulated_tests: Option<(bool, bool, bool)>, // BW, Jitter, PL
+        emulated_tests: Option<(bool, bool, bool, bool)>, // BW, Jitter, PL
     ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
@@ -1141,7 +1298,7 @@ impl QueueModule {
             queue_mechanism = QueueMechanism::new(
                 MAX_EMULATED_QUEUE_PACKETS,
                 TaiTime::EPOCH,
-                (false, false, false),
+                (false, false, false, false),
             );
         }
 
@@ -1598,8 +1755,7 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            let mut lost_packets = Vec::new();
-
+            let mut lost_packets: Vec<(usize, MpduPacket)> = Vec::new(); // tuple: (original_index, packet)
             let now = context.scheduler.time();
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, select first packet fairly to ensure channel access with reduced backlog for each user.
             // We need to consider the rate of each STA and the queue length of each STA to select the next packet to serve.
@@ -1943,8 +2099,14 @@ impl QueueModule {
 
                             // Remove packet and update AMPDU
                             if let Some(mut packet_rmvd) = self.queue.remove(packet_index) {
+                                // packet_rmvd.queue_length_when_out = self.queue.len();
+                                // packet_rmvd.queue_out_instant = now;
+                                
+                                packet_rmvd.original_index = packet_index; // (Assumes you add an `original_index: usize` field.)
                                 packet_rmvd.queue_length_when_out = self.queue.len();
                                 packet_rmvd.queue_out_instant = now;
+
+
 
                                 // Update stats before moving packet
                                 if let Some(stats_tx) = &self.stats_tx {
@@ -2026,32 +2188,56 @@ impl QueueModule {
                         // }
 
                         self.packet_being_served = true;
-
+                        let mut new_ampdu_packets = Vec::new();
                         let mut rng = rand::thread_rng();
-
-                        self.aux_ampdu_serviced.mpdu_packets.retain(|packet| {
+                        for packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
                             let random_value: f64 = rng.gen();
                             if random_value <= self.PL_probability {
                                 print_yellow!(
-                                    "{:.6} [DBG QUEUE] -packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Probs: {:.3} (< {:.2})", 
-                                    format_elapsed!(now),
-                                    packet.sta_src_id,
-                                    packet.sta_dest_id,
-                                    packet.packet_id,
-                                    packet.header_alvr.shard_index,
-                                    packet.header_alvr.shards_count,
-                                    packet.header_alvr.next_packet_index,
-                                    random_value,
-                                    self.PL_probability,
-                                );
+                                            "{:.6} [DBG QUEUE] -packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Index in Q: {}", 
+                                            format_elapsed!(now),
+                                            packet.sta_src_id,
+                                            packet.sta_dest_id,
+                                            packet.packet_id,
+                                            packet.header_alvr.shard_index,
+                                            packet.header_alvr.shards_count,
+                                            packet.header_alvr.next_packet_index,
+                                            packet.original_index
+                                        );          
                                 self.blocked_packet_counter += 1;
-                                lost_packets.push(packet.clone());
-
-                                false // Do not retain the packet
+                                // Instead of discarding, record the lost packet along with its original queue index.
+                                lost_packets.push((packet.original_index, packet));
+                                // Optionally, you could modify the packet here to set its data to null, if that is preferred.
                             } else {
-                                true // Retain the packet
+                                new_ampdu_packets.push(packet);
                             }
-                        });
+                        }
+                        self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
+
+
+                        // self.aux_ampdu_serviced.mpdu_packets.retain(|packet| {
+                        //     let random_value: f64 = rng.gen();
+                        //     if random_value <= self.PL_probability {
+                        //         print_yellow!(
+                        //             "{:.6} [DBG QUEUE] -packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Probs: {:.3} (< {:.2})", 
+                        //             format_elapsed!(now),
+                        //             packet.sta_src_id,
+                        //             packet.sta_dest_id,
+                        //             packet.packet_id,
+                        //             packet.header_alvr.shard_index,
+                        //             packet.header_alvr.shards_count,
+                        //             packet.header_alvr.next_packet_index,
+                        //             random_value,
+                        //             self.PL_probability,
+                        //         );
+                        //         self.blocked_packet_counter += 1;
+                        //         lost_packets.push(packet.clone());
+
+                        //         false // Do not retain the packet
+                        //     } else {
+                        //         true // Retain the packet
+                        //     }
+                        // });
 
                         // Move AMPDU to scheduled event instead of cloning
                         let ampdu_to_send =
@@ -2065,46 +2251,31 @@ impl QueueModule {
                 }
 
                 if !lost_packets.is_empty() {
-                    // print_red!("Queue previous to returning MAC lost packets. Length = {} \n", self.queue.len());
+
+                    // lost_packets.reverse();
+                    // for lost_packet in lost_packets {
+                    //     self.queue.push_front(lost_packet);
+                    // }
+
+
+                    lost_packets.sort_by_key(|(orig_idx, _)| std::cmp::Reverse(*orig_idx));
+                        for (orig_idx, lost_packet) in lost_packets {
+                            self.queue.insert(orig_idx, lost_packet);
+                        }
+
+
+
+                    print_red!("Queue after re-putting packets. Length = {} \n", self.queue.len());
+
                     // Print front elements (first few elements)
-                    // if !self.queue.is_empty() {
-                    //     let front_count = 10.min(self.queue.len()); // Show elements from front
-                    //     let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
-
-                    //     println!("queue front - prev:\n");
-
-                    //     for packet in a {
-                    //         packet.print(DebugColor::Chocolate);
-                    //     }
-                    // }
-
-                    // // Print back elements (last few elements)
-                    // if !self.queue.is_empty() {
-                    //     let back_count = 10.min(self.queue.len()); // Show elements from back
-                    //     let b = self.queue.iter().rev().take(back_count).collect::<Vec<_>>();
-
-                    //     // println!("queue back - prev:");
-
-                    //     // for packet in b {
-                    //     //     packet.print(DebugColor::Chocolate);
-                    //     // }
-                    // }
-
-                    lost_packets.reverse();
-                    for lost_packet in lost_packets {
-                        self.queue.push_front(lost_packet);
+                    if !self.queue.is_empty() {
+                        let front_count = 10.min(self.queue.len()); // Show elements from front
+                        let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
+                        println!("NEW queue front:");
+                        for packet in a {
+                            packet.print(DebugColor::Chocolate);
+                        }
                     }
-                    // print_red!("Queue after re-putting packets. Length = {} \n", self.queue.len());
-
-                    // Print front elements (first few elements)
-                    // if !self.queue.is_empty() {
-                    //     let front_count = 10.min(self.queue.len()); // Show elements from front
-                    //     let a = self.queue.iter().take(front_count).collect::<Vec<_>>();
-                    //     println!("NEW queue front:");
-                    //     for packet in a {
-                    //         packet.print(DebugColor::Chocolate);
-                    //     }
-                    // }
                 }
             }
         }

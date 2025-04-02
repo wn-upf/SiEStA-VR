@@ -756,6 +756,7 @@ fn downlink_uplink_scenario_flexible(
         vec_ids_stas.clone(),
         name_folder,
         UPLINK_QUEUE_SIZE,
+        None, 
     );
 
     // Setup coordinates
@@ -1292,6 +1293,7 @@ fn downlink_uplink_scenario_1BG(
         vec_ids_stas.clone(),
         name_folder,
         UPLINK_QUEUE_SIZE,
+        None, 
     );
 
     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats

@@ -63,7 +63,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 180.0;
+pub const OFFSET_VIDEO: f64 = 50.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -1881,14 +1881,14 @@ impl<H: Serialize> StreamSender<H> {
 
         let random_file_list = ["garp4k", "zoro", "furbo", "snow", "assemble", "cut_video"];
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
-        let final_file = match choice_random {
+        let mut final_file = match choice_random {
             Some(file) => file,
             None => {
                 "furbo"
                 // println!("No files to choose from");
             }
         };
-        // final_file = "assemble";
+        final_file = "assemble";
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
@@ -1914,8 +1914,8 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                // let random_offset = OFFSET_VIDEO;
+                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                let random_offset = OFFSET_VIDEO;
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,

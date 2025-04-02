@@ -84,7 +84,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.38;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.31;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -117,10 +117,10 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sy
 /// Value of 0.2 means frames are approximately 80% similar
 
 /// Number of consecutive good matches required to establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 3;
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 2;
 
 /// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 3.5) as u32;
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 0.5) as u32;
 
 /// Number of consecutive good matches required to re-establish synchronization
 pub const CONSECUTIVE_MATCHES_TO_RELOCK: u32 = 1;
@@ -613,7 +613,7 @@ impl SynchronizedDecoder {
 
     pub fn synchronize_frame_buffers(&mut self) {
         // Limit output queue buffering to prevent excessive memory use
-        const MAX_OUTPUT_QUEUE_LEN: usize = IDR_FRAME_SIZE_GOP * 3; // Adjust as needed
+        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.0) as usize; // Adjust as needed
 
         // Process pending decoded frames (read from ffmpeg stdout)
         self.regular_decoder.process_decoded_frames();
@@ -632,7 +632,7 @@ impl SynchronizedDecoder {
             // Look ahead slightly more in seeking/recovering states
             let peek_count = match self.sync_state {
                 SyncState::Seeking | SyncState::Recovering => MAX_OUTPUT_QUEUE_LEN,
-                SyncState::Locked => 15,
+                SyncState::Locked => 10,
             };
             let regular_candidates = self.peek_regular_frames(peek_count);
 
@@ -4349,7 +4349,7 @@ impl XRClient {
 
                     // Process each missing frame, attempting recovery
                     let mut next_frame_id = self.last_processed_frame_id + 1;
-                    let process_limit = id_f + 2;
+                    let process_limit = id_f ;
 
                     while next_frame_id < process_limit {
                         if let Some(frame_state) = self.missing_frames_buffer.get(&next_frame_id) {

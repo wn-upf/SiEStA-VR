@@ -52,10 +52,11 @@ pub mod alvr_control_socket;
 // }
 // pub static DEBUG_PRINT_ENABLED: bool = false;
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
 pub const USE_VMAF: bool = true;
+
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -89,18 +90,19 @@ macro_rules! print_prettyy {
 #[macro_export]
 macro_rules! print_prettyyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // if DEBUG_PRINT_ENABLED == true {
+        if DEBUG_PRINT_ENABLED == true {
             let msg = format!($fmt, $($arg)*);
             println!("{}", $color.to_background_fn()(msg));
-        // }
+        }
     };
 }
 #[macro_export]
 macro_rules! print_prettyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // if DEBUG_PRINT_ENABLED == true {
-        // let msg = format!($fmt, $($arg)*);
-        // println!("{}", $color.to_background_fn()(msg));
+        if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        };
     }; // };
 }
 
@@ -142,8 +144,8 @@ macro_rules! print_red {
 #[macro_export]
 macro_rules! print_yellow {
     ($fmt:expr, $($arg:tt)*) => {
-        // let msg = format!($fmt, $($arg)*);
-        // println!("{}", DebugColor::Yellow.to_background_fn()(msg));
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::Yellow.to_background_fn()(msg));
     };
 }
 
@@ -1268,6 +1270,8 @@ pub struct MpduPacket {
 
     pub has_consumed_emu_tokens: bool,
     pub emulated_added_delay_deadline: Option<TaiTime<0>>,
+
+    pub original_index: usize, 
     // pub is_alvr_control_packet: bool,
 }
 
@@ -1290,12 +1294,13 @@ impl MpduPacket {
             header_alvr: HeaderALVRStream::default(),
             has_consumed_emu_tokens: false,
             emulated_added_delay_deadline: None,
+            original_index: 0, 
             // is_alvr_control_packet: false,
         }
     }
 
     pub fn print(&self, color: DebugColor) -> String {
-        print_pretty!(
+        print_prettyyy!(
             color,
             "SRC: {} DEST: {}|  Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
             self.sta_src_id,
