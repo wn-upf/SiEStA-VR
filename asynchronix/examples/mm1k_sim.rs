@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::hash::Hash;
 
-use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE;
+use crate::lib::UPLINK_QUEUE_SIZE;
 
 use std::time::Duration;
 

@@ -34,6 +34,10 @@ pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
+pub const UPLINK_QUEUE_SIZE: usize = 128;
+pub const NUMBER_OF_RANDOM_EVENTS: usize = 20; 
+
+
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
 
 // Define a constant to control debugging

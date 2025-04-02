@@ -84,7 +84,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.5;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.45;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -3189,6 +3189,7 @@ pub struct XRClient {
 
 
     lost_ids_reference_buffer: VecDeque<u32>, 
+    lost_frames_buffer : LostFramesBuffer,
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
@@ -3267,6 +3268,7 @@ impl XRClient {
             test: test.to_string(),
 
             lost_ids_reference_buffer: VecDeque::new(), 
+            lost_frames_buffer : LostFramesBuffer::new(4),
             // visualize_decoder_window: None,
         }
     }
@@ -4312,6 +4314,7 @@ impl XRClient {
         async move {
             let now = context.scheduler.time();
             let mut T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
+            let mut lost_frames_aux = Vec::new(); 
 
             // Initialize synchronized decoder if needed
 
@@ -4334,6 +4337,7 @@ impl XRClient {
                     
                     // First pass: identify lost frames with IDs less than current
                     for (i, &lost_id) in self.lost_ids_reference_buffer.iter().enumerate() {
+                        lost_frames_aux.push(lost_id); 
                         if lost_id < id_f as u32 {
                             skip_count += 1;
                             to_remove.push(i);
@@ -4800,6 +4804,8 @@ impl XRClient {
                                                     now,
                                                     &self.test,
                                                     sync_decoder_guard.sync_state.clone(),
+                                                    lost_frames_aux, 
+                                                    &mut self.lost_frames_buffer, 
                                                 );
                                                 if display_result {
                                                     print_pretty!(DebugColor::Green,
@@ -4949,6 +4955,112 @@ impl XRClient {
 
 impl Model for XRClient {}
 
+// Enhanced struct to manage the text buffer with timing information
+#[derive(Clone)]
+struct LostFramesMessage {
+    text: String,
+    timestamp: Instant,
+    fade_duration: Duration, // Time after which the message starts fading
+}
+#[derive(Clone)]
+struct LostFramesBuffer {
+    messages: Vec<LostFramesMessage>,
+    max_size: usize,
+}
+
+impl LostFramesBuffer {
+    fn new(size: usize) -> Self {
+        LostFramesBuffer {
+            messages: Vec::with_capacity(size),
+            max_size: size,
+        }
+    }
+
+    fn get_messages(&self) -> Vec<LostFramesMessage> {
+        self.messages.clone()
+    }
+
+    fn add_message(&mut self, message: String) {
+        if self.messages.len() >= self.max_size {
+            // Remove the oldest message
+            self.messages.remove(0);
+        }
+        
+        // Add the new message with the current timestamp
+        self.messages.push(LostFramesMessage {
+            text: message,
+            timestamp: Instant::now(),
+            fade_duration: Duration::from_secs(2), // 2 seconds before fading begins
+        });
+    }
+    
+    // Clean up messages that are completely faded (optional)
+    fn clean_old_messages(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.messages.retain(|msg| now.duration_since(msg.timestamp) < max_age);
+    }
+}
+
+// Function to calculate alpha (opacity) based on message age
+fn calculate_opacity(message: &LostFramesMessage) -> u32 {
+    let now = Instant::now();
+    let age = now.duration_since(message.timestamp);
+    
+    // If message is newer than fade_duration, full opacity
+    if age <= message.fade_duration {
+        return 255;
+    }
+    
+    // Calculate fading over the next 2 seconds after fade_duration
+    let fade_time = Duration::from_secs(2);
+    let fade_age = age - message.fade_duration;
+    
+    if fade_age >= fade_time {
+        // Message is completely faded out
+        return 0;
+    }
+    
+    // Linear fade from 255 to 0 over fade_time
+    let fade_ratio = 1.0 - (fade_age.as_millis() as f64 / fade_time.as_millis() as f64);
+    (fade_ratio * 255.0) as u32
+}
+
+// Apply alpha value to a color
+fn apply_alpha(color: u32, alpha: u32) -> u32 {
+    // Extract RGB components
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    
+    // Apply alpha (simple linear blending with black background)
+    let r = (r * alpha) / 255;
+    let g = (g * alpha) / 255;
+    let b = (b * alpha) / 255;
+    
+    // Recompose color
+    (r << 16) | (g << 8) | b
+}
+
+// Modified render_text function to support alpha
+fn render_text_with_alpha(
+    buffer: &mut [u32],
+    text: &str,
+    x: usize,
+    y: usize,
+    stride: usize,
+    color: u32,
+    scale: usize,
+    alpha: u32,
+) {
+    // Apply alpha to the color
+    let alpha_color = apply_alpha(color, alpha);
+    
+    // Call the original render_text function with the modified color
+    render_text(buffer, text, x, y, stride, alpha_color, scale);
+}
+
+
+// Modified display_frame_pair_enhanced function
 fn display_frame_pair_enhanced(
     pair: &FramePair,
     server_ip: &IpAddr,
@@ -4960,6 +5072,8 @@ fn display_frame_pair_enhanced(
     now: TaiTime<0>,
     test: &str,
     state_machine_state: SyncState,
+    lost_frames: Vec<u32>,
+    lost_frames_buffer: &mut LostFramesBuffer, // New parameter
 ) -> bool {
     let decoded = match &pair.decoded {
         Some(frame) => frame,
@@ -5101,37 +5215,44 @@ fn display_frame_pair_enhanced(
 
     // Critical operation: Update the window buffer with our composite frame
     let sync_value = sync_quality.unwrap();
+    
+    // Check if there are new lost frames to report
+    if !lost_frames.is_empty() {
+        // Add the new lost frames message to the buffer
+        let message = format!("T: {} LOST FRAMES: {:?}", format_elapsed!(now), lost_frames);
+        lost_frames_buffer.add_message(message);
+    }
+    
+    // Always display the buffer of lost frames messages (up to 3)
+    let messages = lost_frames_buffer.get_messages();
+    for (i, message) in lost_frames_buffer.messages.iter().enumerate() {
+        // Calculate opacity based on message age
+        let opacity = calculate_opacity(message);
+        
+        // Skip rendering if completely transparent
+        if opacity == 0 {
+            continue;
+        }
+        
+        // Position messages one after another with appropriate spacing
+        let y_position = scaled_height as i32 - 130 - (i as i32 * 25);
+        
+        // Only render if y_position is still on screen
+        if y_position > 0 {
+            render_text_with_alpha(
+                &mut combined_buffer,
+                &message.text,
+                10,
+                y_position as usize,
+                window_width,
+                0xFF0000, // Red
+                3,
+                opacity,
+            );
+        }
+    }
+
     if sync_value > RGB_SIMILARITY_THRESHOLD {
-        // Add a red border to indicate high dissimilarity frames
-        let border_thickness = 4;
-        let border_color = 0xFF0000; // Red
-
-        // Create border around the entire frame
-        // for y in 0..scaled_height {
-        //     for x in 0..border_thickness {
-        //         // Left border
-        //         if y * window_width + x < combined_buffer.len() {
-        //             combined_buffer[y * window_width + x] = border_color;
-        //         }
-        //         // Right border
-        //         if y * window_width + window_width - x - 1 < combined_buffer.len() {
-        //             combined_buffer[y * window_width + window_width - x - 1] = border_color;
-        //         }
-        //     }
-        // }
-        // for x in 0..window_width {
-        //     for y in 0..border_thickness {
-        //         // Top border
-        //         if y * window_width + x < combined_buffer.len() {
-        //             combined_buffer[y * window_width + x] = border_color;
-        //         }
-        //         // Bottom border
-        //         if (scaled_height - y - 1) * window_width + x < combined_buffer.len() {
-        //             combined_buffer[(scaled_height - y - 1) * window_width + x] = border_color;
-        //         }
-        //     }
-        // }
-
         // Add text overlay indicating high dissimilarity
         render_text(
             &mut combined_buffer,
@@ -5174,6 +5295,7 @@ fn display_frame_pair_enhanced(
         }
     }
 }
+
 
 #[allow(unused)] //Looks useless, is mainly defined for type matching compatibility between XRServer/XRclient for StreamSocket
 pub trait XRDevice {

@@ -36,7 +36,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
-use crate::lib::models_mm1k::UPLINK_QUEUE_SIZE;
+use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 12;
 

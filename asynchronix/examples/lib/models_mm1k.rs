@@ -20,12 +20,11 @@ use tai_time::TaiTime;
 
 use crate::lib::{
     collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
-    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE,
+    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, UPLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS, 
     P_TX,
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
-pub const UPLINK_QUEUE_SIZE: usize = 128;
 
 //////////// CONST DEFINES ///////////
 
@@ -545,7 +544,7 @@ impl QueueMechanism {
 
         if tests_random {
             network_emulator.add_random_events(
-                10,                                  // count: add 5 events
+                NUMBER_OF_RANDOM_EVENTS,                                  // count: add 5 events
                 RandomEventKind::Jitter,            // type of event
                 overall_start,                      // overall start time for events
                 overall_end,                        // overall end time for events
@@ -557,7 +556,7 @@ impl QueueMechanism {
             );
     
             network_emulator.add_random_events(
-                10,                                  // Number of events
+                NUMBER_OF_RANDOM_EVENTS,                                  // Number of events
                 RandomEventKind::PacketLoss,        // Event type: Packet Loss
                 overall_start,                      // Overall window start time
                 overall_end,                        // Overall window end time
@@ -569,7 +568,7 @@ impl QueueMechanism {
             );
     
             network_emulator.add_random_events(
-                10,                                  // Number of events
+                NUMBER_OF_RANDOM_EVENTS,                                  // Number of events
                 RandomEventKind::Bandwidth,         // Event type: Bandwidth limit
                 overall_start,                      // Overall window start time
                 overall_end,                        // Overall window end time
@@ -605,7 +604,7 @@ impl QueueMechanism {
 
         if test_pl {
             network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-                drop_probability: (0.01),
+                drop_probability: (0.001),
                 valid_from: valid_from,
                 valid_until: valid_until,
             });
