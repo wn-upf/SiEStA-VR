@@ -83,10 +83,10 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 // Steps of emulated bandwidth
 pub const STEP1_TBEGIN: f64 = 15.0;
-pub const STEP1_TEND: f64 = 20.0;
+pub const STEP1_TEND: f64 = 17.0;
 
-pub const STEP2_TBEGIN: f64 = 22.0;
-pub const STEP2_TEND: f64 = 23.0;
+pub const STEP2_TBEGIN: f64 = 21.0;
+pub const STEP2_TEND: f64 = 22.0;
 
 pub const STEP3_TBEGIN: f64 = 24.0;
 pub const STEP3_TEND: f64 = 25.0;

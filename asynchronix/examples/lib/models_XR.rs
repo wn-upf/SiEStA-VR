@@ -111,13 +111,13 @@ pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 // pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
 
 // Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.33; // 80% similar to establish sync
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.35; // 80% similar to establish sync
 const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sync
 /// Threshold for considering a frame match "good" (lower value = more similar)
 /// Value of 0.2 means frames are approximately 80% similar
 
 /// Number of consecutive good matches required to establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 2;
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 
 /// Number of consecutive poor matches before considering sync lost
 pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 0.5) as u32;
@@ -663,7 +663,7 @@ impl SynchronizedDecoder {
 
     pub fn synchronize_frame_buffers(&mut self) {
         // Limit output queue buffering to prevent excessive memory use
-        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.0) as usize; // Adjust as needed
+        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 3.0) as usize; // Adjust as needed
 
         // Process pending decoded frames (read from ffmpeg stdout)
         self.regular_decoder.process_decoded_frames();
@@ -974,14 +974,14 @@ impl SynchronizedDecoder {
                     matched_regular_frame.map_or(false, |(raw, _, _)| self.is_keyframe(raw));
 
                 if reg_is_keyframe {
-                    println!(" K Keyframe pair matched (Max#{}, Reg#{}). Forcing SEEK state for robust resync.", max_id, matched_regular_frame.unwrap().2);
-                    self.sync_state = SyncState::Seeking;
-                    self.stable_offset = None;
-                    self.consecutive_good_matches = 0;
-                    self.consecutive_poor_matches = 0;
-                    // Optionally clear buffers more aggressively on keyframe match?
-                    // self.regular_decoder.decoded_frames.clear();
-                    // self.max_decoder.decoded_frames.clear(); // Careful: This violates "no reference loss" if done here *after* consuming
+                    // println!(" K Keyframe pair matched (Max#{}, Reg#{}). Forcing SEEK state for robust resync.", max_id, matched_regular_frame.unwrap().2);
+                    // self.sync_state = SyncState::Seeking;
+                    // self.stable_offset = None;
+                    // self.consecutive_good_matches = 0;
+                    // self.consecutive_poor_matches = 0;
+                    // // Optionally clear buffers more aggressively on keyframe match?
+                    // // self.regular_decoder.decoded_frames.clear();
+                    // // self.max_decoder.decoded_frames.clear(); // Careful: This violates "no reference loss" if done here *after* consuming
                 } else if self.sync_state != SyncState::Seeking {
                     // Reference is keyframe, regular isn't. Might indicate need to resync.
                     println!(
@@ -3481,8 +3481,9 @@ impl XRClient {
                                 if stream_id == TRACKING {
                                     debug_print!(
                                         DebugColor::ForestGreen,
-                                        "{} UL TRACKING -> Δt_tracking:{:.4} |length: {}| Stream ID: {}|",
+                                        "{} UL TRACKING [{}]-> Δt_tracking:{:.4} |length: {}| Stream ID: {}|",
                                         format_elapsed!(now),
+                                        self.server_ip, 
                                         elapsed_tracking,
                                         packet_length,
                                         str_id,
@@ -5018,10 +5019,8 @@ fn display_frame_pair_enhanced(
             if idx < combined_buffer.len() {
                 // Change separator color based on sync quality
                 let separator_color = match sync_quality {
-                    Some(q) if q < 0.1 => 0x00FF00,  // Green for excellent sync
-                    Some(q) if q < 0.3 => 0xFFFF00,  // Yellow for good sync
-                    Some(q) if q < 0.50 => 0xFF8000, // Orange for marginal sync
-                    Some(_) => 0xFF0000,             // Red for poor sync
+                    Some(q) => 0x00FF00,  // Green for excellent sync
+                    // Red for poor sync
                     None => 0x404040,                // Gray if no sync info
                 };
                 combined_buffer[idx] = separator_color;
@@ -5108,30 +5107,30 @@ fn display_frame_pair_enhanced(
         let border_color = 0xFF0000; // Red
 
         // Create border around the entire frame
-        for y in 0..scaled_height {
-            for x in 0..border_thickness {
-                // Left border
-                if y * window_width + x < combined_buffer.len() {
-                    combined_buffer[y * window_width + x] = border_color;
-                }
-                // Right border
-                if y * window_width + window_width - x - 1 < combined_buffer.len() {
-                    combined_buffer[y * window_width + window_width - x - 1] = border_color;
-                }
-            }
-        }
-        for x in 0..window_width {
-            for y in 0..border_thickness {
-                // Top border
-                if y * window_width + x < combined_buffer.len() {
-                    combined_buffer[y * window_width + x] = border_color;
-                }
-                // Bottom border
-                if (scaled_height - y - 1) * window_width + x < combined_buffer.len() {
-                    combined_buffer[(scaled_height - y - 1) * window_width + x] = border_color;
-                }
-            }
-        }
+        // for y in 0..scaled_height {
+        //     for x in 0..border_thickness {
+        //         // Left border
+        //         if y * window_width + x < combined_buffer.len() {
+        //             combined_buffer[y * window_width + x] = border_color;
+        //         }
+        //         // Right border
+        //         if y * window_width + window_width - x - 1 < combined_buffer.len() {
+        //             combined_buffer[y * window_width + window_width - x - 1] = border_color;
+        //         }
+        //     }
+        // }
+        // for x in 0..window_width {
+        //     for y in 0..border_thickness {
+        //         // Top border
+        //         if y * window_width + x < combined_buffer.len() {
+        //             combined_buffer[y * window_width + x] = border_color;
+        //         }
+        //         // Bottom border
+        //         if (scaled_height - y - 1) * window_width + x < combined_buffer.len() {
+        //             combined_buffer[(scaled_height - y - 1) * window_width + x] = border_color;
+        //         }
+        //     }
+        // }
 
         // Add text overlay indicating high dissimilarity
         render_text(

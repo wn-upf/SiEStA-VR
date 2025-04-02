@@ -52,7 +52,7 @@ pub mod alvr_control_socket;
 // }
 // pub static DEBUG_PRINT_ENABLED: bool = false;
 
-pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
 pub const USE_VMAF: bool = false;
@@ -72,8 +72,8 @@ macro_rules! debug_bgprint {
 macro_rules! print_pretty {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
         // if DEBUG_PRINT_ENABLED == true {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_color_fn()(msg));
+            // let msg = format!($fmt, $($arg)*);
+            // println!("{}", $color.to_color_fn()(msg));
         // }
     }
 }
