@@ -84,7 +84,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.31;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.5;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -587,6 +587,56 @@ impl SynchronizedDecoder {
         }
     }
 
+    pub fn skip_reference_frame(&mut self) -> Option<usize> {
+        // Do we have any reference frames to skip?
+        if self.max_decoder.decoded_frames.is_empty() {
+            println!("⚠️ skip_reference_frame called but no reference frames available to skip");
+            return None;
+        }
+
+        // Calculate base_id before consuming
+        let base_id = self
+            .max_decoder
+            .internal_frame_counter
+            .saturating_sub(self.max_decoder.decoded_frames.len());
+            
+        // Consume one frame from max decoder but don't output it
+        let frame = self.max_decoder.decoded_frames.pop_front().unwrap();
+        
+        // Increment internal counter properly
+        let skipped_frame_id = base_id;
+        self.max_decoder.internal_frame_counter = self
+            .max_decoder
+            .internal_frame_counter
+            .saturating_add(1)
+            .max(skipped_frame_id + 1); // Ensure counter advances
+            
+        println!("🔄 Manually skipped reference frame #{} to adjust synchronization", skipped_frame_id);
+        
+        // If we were in Locked state, adjust the stable offset to account for the skipped frame
+        if self.sync_state == SyncState::Locked {
+            if let Some(offset) = self.stable_offset {
+                // Adjust offset: regular_id = max_id + offset
+                // If we skip a max frame, regular_id should now match (max_id+1) + offset
+                // So offset needs to be adjusted by -1
+                self.stable_offset = Some(offset - 1);
+                println!("🔧 Adjusted stable offset to {:?} after skipping reference frame", self.stable_offset);
+            }
+        } else {
+            // If not in Locked state, reset synchronization state to force re-matching
+            println!("🔄 Reset synchronization state to RECOVERING after skipping reference frame");
+            self.sync_state = SyncState::Recovering;
+            self.stable_offset = None;
+            self.consecutive_good_matches = 0;
+            self.consecutive_poor_matches = 0;
+        }
+        
+        // Update tracking for last processed max frame
+        self.last_processed_max_frame_id = Some(skipped_frame_id);
+        
+        Some(skipped_frame_id)
+    }
+
     // Helper method to check if a frame contains a keyframe
     fn is_keyframe(&self, frame: &[u8]) -> bool {
         // Check for start code
@@ -935,13 +985,13 @@ impl SynchronizedDecoder {
                 } else if self.sync_state != SyncState::Seeking {
                     // Reference is keyframe, regular isn't. Might indicate need to resync.
                     println!(
-                        " K Max#{} is Keyframe, but matched Reg#{} is not. Forcing SEEK state.",
+                        " K Max#{} is Keyframe, but matched Reg#{} is not. Forcing RECOVERING state.",
                         max_id,
                         matched_regular_frame
                             .map(|f| f.2.to_string())
                             .unwrap_or("N/A".to_string())
                     );
-                    self.sync_state = SyncState::Seeking;
+                    self.sync_state = SyncState::Recovering;
                     self.stable_offset = None;
                     self.consecutive_good_matches = 0;
                     self.consecutive_poor_matches = 0;
@@ -1129,10 +1179,7 @@ pub struct HevcDecoder {
     pub expected_frame_size: usize, // Expected size of decoded RGB frames
 
     max_buffered_frames: usize, // Maximum number of frames to buffer
-
     decoder_string: String,
-
-    // New fields for synchronization
     // shared_params: Option<Arc<SharedParameterSetManager>>,
     last_sync_generation: u64,
     force_keyframe_sync: bool,
@@ -3128,7 +3175,6 @@ pub struct XRClient {
     frame_pairs: HashMap<usize, FramePair>,
     ref_max_pairs: HashMap<usize, FramePair>,
     last_displayed_pair_id: usize,
-    display_queue: VecDeque<usize>, // Queue of frame IDs ready to display
 
     last_keyframe_id: usize,
 
@@ -3140,6 +3186,9 @@ pub struct XRClient {
     channel_tx_vmaf: Sender<(Vec<u8>, Vec<u8>, usize)>,
     channel_rx_vmaf: Receiver<(Vec<u8>, Vec<u8>, usize)>,
     test: String,
+
+
+    lost_ids_reference_buffer: VecDeque<u32>, 
     // pub visualize_decoder_window: Option<Window>,
 }
 #[allow(unused)]
@@ -3206,7 +3255,6 @@ impl XRClient {
             frame_pairs: HashMap::new(),
             ref_max_pairs: HashMap::new(),
             last_displayed_pair_id: 0,
-            display_queue: VecDeque::new(),
             last_keyframe_id: 0,
             name_folder: name_folder.to_string(),
 
@@ -3217,6 +3265,8 @@ impl XRClient {
             channel_tx_vmaf: vmaf_tx,
             channel_rx_vmaf: vmaf_rx,
             test: test.to_string(),
+
+            lost_ids_reference_buffer: VecDeque::new(), 
             // visualize_decoder_window: None,
         }
     }
@@ -3556,6 +3606,7 @@ impl XRClient {
     }
 
     pub fn report_frame_lost(
+        &mut self, 
         mut frames: Vec<u32>,
         mut shards_lost: Vec<usize>,
         context: &Context<Self>,
@@ -3565,9 +3616,16 @@ impl XRClient {
 
         // println!("REPORT FRAME LOSt");
         let net = DeadlineShardlossStatPacket {
-            frame_indexes: frames,
+            frame_indexes: frames.clone(),
             shards_lost: shards_lost,
         };
+
+        for frame in frames{
+            println!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame); 
+            self.lost_ids_reference_buffer.push_back(frame); 
+        }        
+        
+
         context
             .scheduler
             .schedule_event(
@@ -3576,7 +3634,9 @@ impl XRClient {
                 ClientControlPacket::DeadlineShardLossStat(net),
             )
             .unwrap();
+        
     }
+    
     pub fn video_receive_thread<'a>(
         &'a mut self,
         _: (),
@@ -3599,7 +3659,7 @@ impl XRClient {
                             //     &frames_lost[..],
                             //     &shards_lost[..]
                             // );
-                            XRClient::report_frame_lost(frames_lost, shards_lost, context);
+                            self.report_frame_lost(frames_lost, shards_lost, context);
                         }
                     }
 
@@ -4265,6 +4325,55 @@ impl XRClient {
 
             // Process the next frame if available
             if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
+
+                
+                let frames_to_skip = {
+                    let mut skip_count = 0;
+                    let mut to_remove = Vec::new();
+                    
+                    // First pass: identify lost frames with IDs less than current
+                    for (i, &lost_id) in self.lost_ids_reference_buffer.iter().enumerate() {
+                        if lost_id < id_f as u32 {
+                            skip_count += 1;
+                            to_remove.push(i);
+                            println!("[DBGGGY] Found lost frame {} < current frame {}, will skip reference", lost_id, id_f);
+                        }
+                    }
+                    
+                    // Second pass: remove the identified frames (in reverse order to maintain indexes)
+                    for &index in to_remove.iter().rev() {
+                        if index < self.lost_ids_reference_buffer.len() {
+                            if let Some(removed_id) = self.lost_ids_reference_buffer.remove(index){
+                                println!("[DBGGGY] Removed lost frame {} from buffer", removed_id);
+                            }
+                        }
+                    }
+                    
+                    skip_count
+                };
+                
+                // Skip the required number of reference frames
+                if frames_to_skip > 0 {
+                    if let Some(sync_decoder) = &self.synchronized_decoder {
+                        let mut sync_decoder_guard = sync_decoder.lock().unwrap();
+                        
+                        println!("[DBGGGY] Skipping {} reference frames to compensate for lost frames before {}", 
+                                 frames_to_skip, id_f);
+                                 
+                        // Skip reference frames for each lost frame
+                        for _ in 0..frames_to_skip {
+                            if let Some(skipped_id) = sync_decoder_guard.skip_reference_frame() {
+                                println!("[DBGGGY] Skipped reference frame #{}", skipped_id);
+                            } else {
+                                println!("[DBGGGY] Unable to skip more reference frames, decoder buffer empty");
+                                break;
+                            }
+                        }
+                    }
+                }
+
+
+
                 let mut ip_client = self.server_ip.clone();
                 let mut is_frame_lost = false;
                 let mut difference = 0;

@@ -36,9 +36,7 @@ use std::{
     // net::{TcpListener, UdpSocket},
     time::Duration,
 };
-
 use crate::lib::models_XR::{XRDevice, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER};
-
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 // use crate::lib::DebugColor;
 use anyhow::{anyhow, Result};
@@ -63,7 +61,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 50.0;
+pub const OFFSET_VIDEO: f64 = 200.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -1884,7 +1882,7 @@ impl<H: Serialize> StreamSender<H> {
         let mut final_file = match choice_random {
             Some(file) => file,
             None => {
-                "furbo"
+                "snow"
                 // println!("No files to choose from");
             }
         };
@@ -1914,8 +1912,8 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                let random_offset = OFFSET_VIDEO;
+                let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                // let random_offset = OFFSET_VIDEO;
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,
