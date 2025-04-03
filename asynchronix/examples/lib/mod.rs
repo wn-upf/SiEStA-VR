@@ -56,10 +56,10 @@ pub mod alvr_control_socket;
 // }
 // pub static DEBUG_PRINT_ENABLED: bool = false;
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
-pub const USE_VMAF: bool = false;
+pub const USE_VMAF: bool = true;
 
 
 #[macro_export]
@@ -75,10 +75,10 @@ macro_rules! debug_bgprint {
 #[macro_export]
 macro_rules! print_pretty {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // if DEBUG_PRINT_ENABLED == true {
-            // let msg = format!($fmt, $($arg)*);
-            // println!("{}", $color.to_color_fn()(msg));
-        // }
+        if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_color_fn()(msg));
+        }
     }
 }
 
@@ -794,12 +794,7 @@ pub struct CsvType {
 impl CsvType {
     pub fn new(folder_name: &str) -> Self {
         Self {
-            // v_timestamp: Vec::new(),
-            // v_packet_id: Vec::new(),
-            // v_queue_size: Vec::new(),
-            // v_queue_ts: Vec::new(),
-            // v_queue_tq: Vec::new(),
-            // v_packet_l: Vec::new(),
+ 
             csv_data: Arc::new(Mutex::new(CsvData::new())),
             folder: folder_name.to_string(),
         }
@@ -821,19 +816,19 @@ impl CsvType {
         id_dest: usize,
     ) {
         let formatted_timestamp = format_timestamp!(now);
-        // debug_print!(
-        //     DebugColor::Purple,
-        //     "{} [DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-        //     format_elapsed!(now),
-        //     formatted_timestamp,
-        //     id_packet,
-        //     queue_size,
-        //     Ts,
-        //     Tq,
-        //     length_packet,
-        //     id_src,
-        //     id_dest
-        // );
+        debug_print!(
+            DebugColor::Purple,
+            "{} [DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
+            format_elapsed!(now),
+            formatted_timestamp,
+            id_packet,
+            queue_size,
+            Ts,
+            Tq,
+            length_packet,
+            id_src,
+            id_dest
+        );
         if let Ok(mut data) = self.csv_data.lock() {
             data.v_timestamp.push(formatted_timestamp);
             data.v_packet_id.push(id_packet);

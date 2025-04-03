@@ -111,7 +111,7 @@ pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 // pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
 
 // Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.35; // 80% similar to establish sync
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.3; // 80% similar to establish sync
 const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sync
 /// Threshold for considering a frame match "good" (lower value = more similar)
 /// Value of 0.2 means frames are approximately 80% similar
@@ -1568,18 +1568,18 @@ impl HevcDecoder {
         let (vps, sps, pps) = self.extract_complete_parameter_sets(&packet);
         let has_param_sets = vps.is_some() || sps.is_some() || pps.is_some();
 
-        if has_param_sets {
-            has_parameter_update = true;
+        // if has_param_sets {
+        //     has_parameter_update = true;
 
-            print_prettyy!(
-                DebugColor::Cyan,
-                "{} - Parameter sets found in packet: VPS: {}, SPS: {}, PPS: {}",
-                self.decoder_string,
-                vps.as_ref().map_or(0, |v| v.len()),
-                sps.as_ref().map_or(0, |v| v.len()),
-                pps.as_ref().map_or(0, |v| v.len()),
-            );
-        }
+        //     print_prettyy!(
+        //         DebugColor::Cyan,
+        //         "{} - Parameter sets found in packet: VPS: {}, SPS: {}, PPS: {}",
+        //         self.decoder_string,
+        //         vps.as_ref().map_or(0, |v| v.len()),
+        //         sps.as_ref().map_or(0, |v| v.len()),
+        //         pps.as_ref().map_or(0, |v| v.len()),
+        //     );
+        // }
 
         // Record frame metrics
         let frame_size = packet.len() as f64;
@@ -1663,16 +1663,16 @@ impl HevcDecoder {
             }
         }
 
-        // After parameter update, enter recovery mode if not already there
-        if has_parameter_update && self.recovery_frames == 0 && !is_keyframe {
-            self.recovery_frames = 30; // Skip ~30 frames or until next keyframe
-            print_prettyy!(
-                DebugColor::Yellow,
-                "{} - Parameter update detected, entering recovery mode for {} frames",
-                self.decoder_string,
-                self.recovery_frames,
-            );
-        }
+        // // After parameter update, enter recovery mode if not already there
+        // if has_parameter_update && self.recovery_frames == 0 && !is_keyframe {
+        //     self.recovery_frames = 30; // Skip ~30 frames or until next keyframe
+        //     print_prettyy!(
+        //         DebugColor::Yellow,
+        //         "{} - Parameter update detected, entering recovery mode for {} frames",
+        //         self.decoder_string,
+        //         self.recovery_frames,
+        //     );
+        // }
 
         // Check for decoder priming completion
         if !self.priming_complete && self.keyframes_seen >= 2 && self.frames_processed >= 60 {
@@ -5246,7 +5246,7 @@ fn display_frame_pair_enhanced(
                 y_position as usize,
                 window_width,
                 0xFF0000, // Red
-                3,
+                2,
                 opacity,
             );
         }
