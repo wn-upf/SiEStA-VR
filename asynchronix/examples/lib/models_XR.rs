@@ -29,7 +29,7 @@ use tokio::sync::Semaphore;
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread};
 
-use crate::format_elapsed;
+use crate::{format_elapsed, print_green};
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
 use crate::print_pretty;
 use crate::{debug_bgprint, print_prettyy};
@@ -117,13 +117,12 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sy
 /// Value of 0.2 means frames are approximately 80% similar
 
 /// Number of consecutive good matches required to establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 3;
 
 /// Number of consecutive poor matches before considering sync lost
 pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 0.5) as u32;
 
 /// Number of consecutive good matches required to re-establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_RELOCK: u32 = 1;
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
 
@@ -826,6 +825,20 @@ impl SynchronizedDecoder {
 
                             if let Some((idx, sim, reg_id)) = best_match_info {
                                 if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+
+                                    let new_offset = reg_id as i64 - max_id as i64;  
+                                    if new_offset != offset{
+                                        println!("🔧 Adjusting stable_offset from {} to {} based on match (Reg#{} <-> Max#{})", 
+                                        offset, new_offset, reg_id, max_id);
+                                        self.stable_offset = Some(new_offset);
+                                        // Require reconfirmation of the new offset
+                                        self.consecutive_good_matches = 1; // Reset counter
+                                    }
+                                    else{
+                                        self.consecutive_good_matches += 1;
+                                    }
+
+
                                     println!(" K Locked: Using best sim match Reg#{} (Sim={:.3}). Consuming {} regular.", reg_id, sim, idx + 1);
                                     _consume_count = idx + 1;
                                     self.consecutive_poor_matches = 0; // Found an acceptable match
@@ -895,7 +908,7 @@ impl SynchronizedDecoder {
                             self.consecutive_poor_matches = 0; // Reset poor match counter
 
                             // Check if we can re-lock
-                            if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_RELOCK {
+                            if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK {
                                 println!(
                                     " K Synchronization Re-Locked! Offset: {:?}",
                                     self.stable_offset
@@ -3068,9 +3081,9 @@ impl MetricsLogger {
         }
 
         // Print debug info
-        print_prettyyyy!(
-            DebugColor::ForestGreen,
-            "Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+        print_green!(
+            "T: {:.3} | Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+            timestamp_ms, 
             frame_number,
             vmaf_score,
             psnr_avg,

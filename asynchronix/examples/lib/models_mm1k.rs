@@ -2052,7 +2052,8 @@ impl QueueModule {
                     for packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
                         let random_value: f64 = rng.gen();
                         if random_value <= self.PL_probability {
-                            print_yellow!(
+
+                            debug_bgprint!( DebugColor::SaddleBrown, 
                                 "{:.6} [DBG QUEUE] - packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Index in Q: {}",
                                 format_elapsed!(now),
                                 packet.sta_src_id,
@@ -2073,17 +2074,6 @@ impl QueueModule {
                     }
                     self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
 
-
-                    // Debug print: show remaining queue after removals.
-                    print_yellow!(
-                        "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                        format_elapsed!(now),
-                        format_elapsed!(now + last_service_duration)
-                    );
-                    if DEBUG_PRINT_ENABLED {
-                        self.aux_ampdu_serviced.print();
-                    }
-                    self.packet_being_served = true;
     
                     // Now remove from the main queue the packets that were transmitted successfully.
                     // Gather all original indices from the AMPDU (successful ones).
@@ -2100,19 +2090,20 @@ impl QueueModule {
                     }
     
                     // Debug print: show remaining queue after removals.
-                    print_yellow!(
-                        "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                        format_elapsed!(now),
-                        format_elapsed!(now + last_service_duration)
-                    );
+                
                     if DEBUG_PRINT_ENABLED {
+                        print_yellow!(
+                            "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
+                            format_elapsed!(now),
+                            format_elapsed!(now + last_service_duration)
+                        );
                         self.aux_ampdu_serviced.print();
                     }
                     self.packet_being_served = true;
                     let ampdu_to_send =
                         std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
 
-                        
+
                     context
                         .scheduler
                         .schedule_event(last_service_duration, Self::send_ampdu, ampdu_to_send)
