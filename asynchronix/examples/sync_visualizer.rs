@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     println!("Frame Sync Visualizer with Fine-Grained Controls");
 
     // Parse the CSV file with frame pairs
-    let csv_content = std::fs::read_to_string("Video_Sink/synced_frames.csv")?;
+    let csv_content = std::fs::read_to_string("Sink_for_video/synced_frames.csv")?;
     let mut frame_pairs = Vec::new();
 
     for line in csv_content.lines().skip(1) {

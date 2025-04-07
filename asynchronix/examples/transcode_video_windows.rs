@@ -166,7 +166,7 @@ fn main() -> Result<(), ffmpeg::Error> {
 
 fn save_file(frame: &Video, index: usize) -> std::result::Result<(), std::io::Error> {
     let mut file = File::create(format!(
-        "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/frame{}.ppm",
+        "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/frame{}.ppm",
         index
     ))?;
     file.write_all(format!("P6\n{} {}\n255\n", frame.width(), frame.height()).as_bytes())?;

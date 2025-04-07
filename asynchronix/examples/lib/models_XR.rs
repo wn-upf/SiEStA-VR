@@ -84,7 +84,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.45;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.34;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -117,7 +117,7 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sy
 /// Value of 0.2 means frames are approximately 80% similar
 
 /// Number of consecutive good matches required to establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 3;
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 
 /// Number of consecutive poor matches before considering sync lost
 pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 0.5) as u32;
@@ -662,7 +662,7 @@ impl SynchronizedDecoder {
 
     pub fn synchronize_frame_buffers(&mut self) {
         // Limit output queue buffering to prevent excessive memory use
-        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 3.0) as usize; // Adjust as needed
+        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 1.25) as usize; // Adjust as needed
 
         // Process pending decoded frames (read from ffmpeg stdout)
         self.regular_decoder.process_decoded_frames();
@@ -978,38 +978,7 @@ impl SynchronizedDecoder {
 
             self.output_queue.push_back(sync_pair);
 
-            // --- Keyframe Check (Optional but Recommended) ---
-            // If the *reference* frame is a keyframe, consider forcing a SEEK state
-            // This helps resync quickly if the reference stream had a discontinuity (e.g., stream restart)
-            if self.is_keyframe(&max_raw) {
-                // AND maybe check if the matched regular frame is also a keyframe?
-                let reg_is_keyframe =
-                    matched_regular_frame.map_or(false, |(raw, _, _)| self.is_keyframe(raw));
-
-                if reg_is_keyframe {
-                    // println!(" K Keyframe pair matched (Max#{}, Reg#{}). Forcing SEEK state for robust resync.", max_id, matched_regular_frame.unwrap().2);
-                    // self.sync_state = SyncState::Seeking;
-                    // self.stable_offset = None;
-                    // self.consecutive_good_matches = 0;
-                    // self.consecutive_poor_matches = 0;
-                    // // Optionally clear buffers more aggressively on keyframe match?
-                    // // self.regular_decoder.decoded_frames.clear();
-                    // // self.max_decoder.decoded_frames.clear(); // Careful: This violates "no reference loss" if done here *after* consuming
-                } else if self.sync_state != SyncState::Seeking {
-                    // Reference is keyframe, regular isn't. Might indicate need to resync.
-                    println!(
-                        " K Max#{} is Keyframe, but matched Reg#{} is not. Forcing RECOVERING state.",
-                        max_id,
-                        matched_regular_frame
-                            .map(|f| f.2.to_string())
-                            .unwrap_or("N/A".to_string())
-                    );
-                    self.sync_state = SyncState::Recovering;
-                    self.stable_offset = None;
-                    self.consecutive_good_matches = 0;
-                    self.consecutive_poor_matches = 0;
-                }
-            }
+         
         } // End while loop (processing max frames)
 
         // If the loop finished because the output queue is full, log it
@@ -2925,6 +2894,7 @@ impl MetricsLogger {
         timestamp_ms: f64,
         ref_path: &str,
         lossy_path: &str,
+        ip_client: IpAddr, 
     ) -> Result<()> {
         // Create a temporary directory for processing
         let temp_dir = TempDir::new()?;
@@ -2993,8 +2963,8 @@ impl MetricsLogger {
             return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
         }
 
-        // Create the Video_Sink directory within the temp directory
-        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Video_Sink");
+        // Create the Sink_for_video directory within the temp directory
+        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
         std::fs::create_dir_all(&video_sink_dir)?;
 
         // Set up paths correctly
@@ -3082,8 +3052,9 @@ impl MetricsLogger {
 
         // Print debug info
         print_green!(
-            "T: {:.3} | Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
-            timestamp_ms, 
+            "T: {:.3} [{}]| Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+            timestamp_ms,
+            ip_client,
             frame_number,
             vmaf_score,
             psnr_avg,
@@ -3842,7 +3813,7 @@ impl XRClient {
         }
 
         let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
-        let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+        let base_dir = &format!("Sink_for_video/{}", &self.name_folder);
 
         // Define paths to reference and lossy directories
         let ref_dir = format!("{}/{}/reference_rgb", base_dir, ip);
@@ -3927,7 +3898,7 @@ impl XRClient {
         // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis? ", );
 
         // Create directories for temporary storage if they don't exist
-        let base_dir = &format!("Video_Sink/{}", &self.name_folder);
+        let base_dir = &format!("Sink_for_video/{}", &self.name_folder);
         if let Err(e) = std::fs::create_dir_all(base_dir) {
             eprintln!("Failed to create directory {}: {}", base_dir, e);
             return Ok(());
@@ -3974,6 +3945,7 @@ impl XRClient {
                     timestamp_ms, // This is now f64 as expected
                     &ref_path,
                     &lossy_path,
+                    ip, 
                 )
                 .await
             {
@@ -4029,7 +4001,7 @@ impl XRClient {
 
         let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
         let base_dir = &format!(
-            "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}",
+            "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}",
             &self.name_folder
         );
 
@@ -4417,17 +4389,17 @@ impl XRClient {
 
                 // Path definitions for reference frames
                 let max_rgb_write_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.rgb",
+                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.rgb",
                     self.name_folder, ip_client, id_f
                 );
                 let ref_rgb_write_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb",
+                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.rgb",
                     self.name_folder, ip_client, id_f
                 );
-                let maxb_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc", 
+                let maxb_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc", 
                     self.name_folder, ip_client, id_f);
                 let currentb_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc",
+                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc",
                     self.name_folder, ip_client, id_f
                 );
 
@@ -4493,13 +4465,13 @@ impl XRClient {
                         }
 
                         // Construct file paths for missing frame
-                        let missing_max_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc", 
+                        let missing_max_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc", 
                             self.name_folder, ip_client, next_frame_id);
-                        let missing_reg_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc", 
+                        let missing_reg_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc", 
                             self.name_folder, ip_client, next_frame_id);
-                        let missing_max_rgb_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.rgb", 
+                        let missing_max_rgb_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.rgb", 
                             self.name_folder, ip_client, next_frame_id);
-                        let missing_ref_rgb_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.rgb", 
+                        let missing_ref_rgb_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.rgb", 
                             self.name_folder, ip_client, next_frame_id);
 
                         // Try to recover max bitrate reference frame

@@ -61,7 +61,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 200.0;
+pub const OFFSET_VIDEO: f64 = 100.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -1886,7 +1886,7 @@ impl<H: Serialize> StreamSender<H> {
                 // println!("No files to choose from");
             }
         };
-        final_file = "snow";
+        // final_file = "garp4k";
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
@@ -1965,12 +1965,12 @@ impl<H: Serialize> StreamSender<H> {
                         buffer = frame;
 
                         let hevc_file_path: String = format!(
-                            "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",
+                            "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref",
                             name_folder, ip
                         );
 
                         std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref);
+                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref);
                         print_pretty!(
                             DebugColor::ForestGreen,
                             "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY",
@@ -1998,10 +1998,10 @@ impl<H: Serialize> StreamSender<H> {
                         // Try again after waiting
                         match encoder.next_frame().await {
                             Some(frame) => {
-                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref",name_folder ,ip);
+                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref",name_folder ,ip);
 
                                 std::fs::create_dir_all(hevc_file_path).unwrap();
-                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
                                 print_pretty!(
                                     DebugColor::Peach,
                                     "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}",
@@ -2034,12 +2034,12 @@ impl<H: Serialize> StreamSender<H> {
                         // buffer = frame;
                         // println!("Storing original frame as .hevc in Sink_Video");
                         let hevc_file_path: String = format!(
-                            "/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max",
+                            "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max",
                             name_folder, ip
                         );
 
                         std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc",name_folder,ip, id_frame_files_ref);
+                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc",name_folder,ip, id_frame_files_ref);
                         print_pretty!(
                             DebugColor::ForestGreen,
                             "[Encoder XRServer] REF MAX FRAME  {} SAVED TO MEMORY",
@@ -2067,10 +2067,10 @@ impl<H: Serialize> StreamSender<H> {
                         // Try again after waiting
                         match maxencoder.next_frame().await {
                             Some(frame) => {
-                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max",name_folder ,ip);
+                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max",name_folder ,ip);
 
                                 std::fs::create_dir_all(hevc_file_path).unwrap();
-                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Video_Sink/{}/{}/hevc_max/{}_max.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
                                 print_pretty!(
                                     DebugColor::ForestGreen,
                                     "[Encoder XRServer] REF FRAME MAX {} SAVED TO MEMORY",
