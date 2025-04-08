@@ -32,7 +32,7 @@ use std::{fs::File, thread};
 use crate::{format_elapsed, print_green};
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
 use crate::print_pretty;
-use crate::{debug_bgprint, print_prettyy};
+use crate::{debug_bgprint, print_prettyy, print_red};
 use crate::{debug_print, print_prettyyyy, print_yellow, print_pink};
 use core::f64;
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -541,14 +541,20 @@ pub struct SynchronizedDecoder {
     output_queue: VecDeque<FramePair>, // all synchronized pairs are pushed here
     throttle_semaphore: Arc<Semaphore>,
     next_frame_id: Arc<AtomicUsize>,
-    toggle_output: bool, // new field to alternate between queues
+    // toggle_output: bool, // new field to alternate between queues
 
     // New fields for maintaining synchronization state
     sync_state: SyncState,
     stable_offset: Option<i64>, // Offset between stream frame IDs once sync is established
     consecutive_good_matches: u32, // Counter for stability confirmation
     consecutive_poor_matches: u32, // Counter for detecting sync loss
+    consecutive_offset_matches: u32, 
     last_processed_max_frame_id: Option<usize>, // Track the ID of the last reference frame outputted
+
+    recovery_buffer: Vec<(Vec<u8>, usize)>, // (max_raw, max_id)
+    recovery_buffer_threshold: usize, // Adjust as needed
+
+
 }
 #[derive(Debug, Clone, PartialEq)]
 enum SyncState {
@@ -558,6 +564,11 @@ enum SyncState {
 }
 
 impl SynchronizedDecoder {
+
+    const MAX_OFFSET_CHANGE: i64 = 2; // Adjust as needed
+    const OFFSET_CONFIRMATION_WINDOW: u32 = 3; 
+
+
     pub fn new(client_ip: IpAddr, throttle_semaphore: Arc<Semaphore>) -> Self {
         Self {
             regular_decoder: HevcDecoder::new(
@@ -576,13 +587,18 @@ impl SynchronizedDecoder {
             output_queue: VecDeque::new(),
             throttle_semaphore,
             next_frame_id: Arc::new(AtomicUsize::new(0)),
-            toggle_output: false, // start with false
+            // toggle_output: false, // start with false
 
             sync_state: SyncState::Seeking,
             stable_offset: None,
             consecutive_good_matches: 0,
             consecutive_poor_matches: 0,
+            consecutive_offset_matches: 0, 
             last_processed_max_frame_id: None,
+
+            recovery_buffer: Vec::new(), 
+            recovery_buffer_threshold: 2, 
+
         }
     }
 
@@ -656,10 +672,9 @@ impl SynchronizedDecoder {
         }
         false
     }
-
     pub fn synchronize_frame_buffers(&mut self) {
         // Limit output queue buffering to prevent excessive memory use
-        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 1.5) as usize; // Adjust as needed
+        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.5) as usize; // Adjust as needed
 
         // Process pending decoded frames (read from ffmpeg stdout)
         self.regular_decoder.process_decoded_frames();
@@ -677,7 +692,7 @@ impl SynchronizedDecoder {
             // *** STEP 2: Peek at available regular frames ***
             // Look ahead slightly more in seeking/recovering states
             let peek_count = match self.sync_state {
-                SyncState::Seeking => MAX_OUTPUT_QUEUE_LEN / 4, 
+                SyncState::Seeking => MAX_OUTPUT_QUEUE_LEN / 2,
                 SyncState::Recovering => MAX_OUTPUT_QUEUE_LEN,
                 SyncState::Locked => 3,
             };
@@ -685,7 +700,10 @@ impl SynchronizedDecoder {
 
             // Handle case where regular stream has no frames available yet
             if regular_candidates.is_empty() {
-                println!("⚠️ Max frame #{} processed, but no regular frames available yet. Outputting max only.", max_id);
+                println!(
+                    "⚠️ Max frame #{} processed, but no regular frames available yet. Outputting max only.",
+                    max_id
+                );
                 // Output max frame with empty regular frame
                 let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
                 let sync_pair = FramePair {
@@ -737,7 +755,7 @@ impl SynchronizedDecoder {
                         }
                     }
 
-                    print_pink!("Number of candidates: {}", regular_candidates.len() ); 
+                    print_pink!("Number of candidates: {}", regular_candidates.len());
 
                     if let Some((best_idx, best_sim, best_reg_id)) = best_match_info {
                         if best_sim <= GOOD_SIMILARITY_THRESHOLD {
@@ -770,46 +788,43 @@ impl SynchronizedDecoder {
                 SyncState::Locked => {
                     if let Some(offset) = self.stable_offset {
                         let expected_reg_id = (max_id as i64 + offset) as usize;
-                        let mut exact_match_idx: Option<usize> = None;
                         let mut best_sim = f64::MAX;
+                        let mut best_match_info: Option<(usize, f64, usize)> = None;
+                        let mut _consume_count = 0; // Initialize to 0, only consume if a good match is found
+                        let mut found_good_match = false; // Flag to indicate if a good match was found
 
-                        // Look for exact ID match first, then best similarity
+                        // Look for exact ID match first
                         for (idx, (_reg_raw, _, reg_id)) in regular_candidates.iter().enumerate() {
                             if *reg_id == expected_reg_id {
-                                exact_match_idx = Some(idx);
-                                break; // Found the expected frame
+                                let (reg_raw, _, reg_id) = &regular_candidates[idx];
+                                let sim = compute_enhanced_frame_similarity(
+                                    reg_raw,
+                                    &max_raw,
+                                    WIDTH_ENCODER,
+                                    HEIGHT_ENCODER,
+                                );
+                                if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                                    println!("✅ Locked: Found expected Reg#{} (Sim={:.3}). Consuming {} regular.", reg_id, sim, idx + 1);
+                                    _consume_count = idx + 1;
+                                    best_match_info = Some((idx, sim, *reg_id));
+                                    self.consecutive_poor_matches = 0;
+                                    found_good_match = true;
+                                    break; // Found a good match, exit loop
+                                } else {
+                                    println!(" K Locked: Expected Reg#{} found, but high diff (Sim={:.3}). Likely sync issue! Not Consuming.", reg_id, sim);
+                                    self.consecutive_poor_matches += 1;
+                                    // Found the expected ID, but poor match, don't consume frame
+                                    found_good_match = false;
+                                    break; // Exit loop, don't search for other matches
+                                }
                             }
                         }
 
-                        if let Some(idx) = exact_match_idx {
-                            // Found exact ID, check similarity
-                            let (reg_raw, _, reg_id) = &regular_candidates[idx];
-                            let sim = compute_enhanced_frame_similarity(
-                                reg_raw,
-                                &max_raw,
-                                WIDTH_ENCODER,
-                                HEIGHT_ENCODER,
-                            );
-                            if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                                println!("✅ Locked: Found expected Reg#{} (Sim={:.3}). Consuming {} regular.", reg_id, sim, idx + 1);
-                                _consume_count = idx + 1;
-                                best_match_info = Some((idx, sim, *reg_id));
-                                self.consecutive_poor_matches = 0; // Good match, reset counter
-                            } else {
-                                // Exact ID found, but content differs significantly - indicates potential problem
-                                println!(" K Locked: Expected Reg#{} found, but high diff (Sim={:.3}). Likely sync issue! Consuming {} regular.", reg_id, sim, idx + 1);
-                                _consume_count = 1;
-                                best_match_info = Some((idx, sim, *reg_id));
-                                self.consecutive_poor_matches += 1;
-                            }
-                        } else {
-                            // Exact ID not found, find best similarity match instead
-                            println!(
-                                " K Locked: Expected Reg#{} not found. Searching by similarity.",
-                                expected_reg_id
-                            );
-                            for (idx, (reg_raw, _, reg_id)) in regular_candidates.iter().enumerate()
-                            {
+                        if !found_good_match {
+                            // Exact ID not found or poor match, find best similarity match instead
+                            println!(" K Locked: Expected Reg#{} not found or poor match. Searching by similarity.", expected_reg_id);
+
+                            for (idx, (reg_raw, _, reg_id)) in regular_candidates.iter().enumerate() {
                                 let sim = compute_enhanced_frame_similarity(
                                     reg_raw,
                                     &max_raw,
@@ -819,66 +834,61 @@ impl SynchronizedDecoder {
                                 if sim < best_sim {
                                     best_sim = sim;
                                     best_match_info = Some((idx, sim, *reg_id));
-                                    // Store best found so far
                                 }
                             }
 
                             if let Some((idx, sim, reg_id)) = best_match_info {
                                 if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-
-                                    let new_offset = reg_id as i64 - max_id as i64;  
-                                    if new_offset != offset{
-                                        println!("🔧 Adjusting stable_offset from {} to {} based on match (Reg#{} <-> Max#{})", 
-                                        offset, new_offset, reg_id, max_id);
-                                        self.stable_offset = Some(new_offset);
-                                        // Require reconfirmation of the new offset
-                                        self.consecutive_good_matches = 1; // Reset counter
+                                    let new_offset = reg_id as i64 - max_id as i64;
+                                    if new_offset != offset {
+                                        if (new_offset - offset).abs() <= Self::MAX_OFFSET_CHANGE{
+                                            self.consecutive_offset_matches += 1;
+                                            if self.consecutive_offset_matches >= Self::OFFSET_CONFIRMATION_WINDOW {
+                                                println!("🔧 Adjusting stable_offset from {} to {} based on match (Reg#{} <-> Max#{})", offset, new_offset, reg_id, max_id);
+                                                self.stable_offset = Some(new_offset);
+                                                _consume_count = idx + 1;
+                                                self.consecutive_offset_matches = 0;
+                                            }
+                                            else{
+                                                println!(" K Locked: new offset found, waiting for confirmation ({} of {})", self.consecutive_offset_matches, Self::OFFSET_CONFIRMATION_WINDOW);
+                                            }
+                                        }
+                                        else{
+                                            println!("K Locked: offset change too large, not adjusting.");
+                                        }
+                                    } else {
+                                        println!("✅ Locked: Good match (Reg#{} <-> Max#{}). Consuming {} regular.", reg_id, max_id, idx + 1);
+                                        _consume_count = idx + 1;
+                                        self.consecutive_offset_matches = 0;
                                     }
-                                    else{
-                                        self.consecutive_good_matches += 1;
-                                    }
 
-
-                                    println!(" K Locked: Using best sim match Reg#{} (Sim={:.3}). Consuming {} regular.", reg_id, sim, idx + 1);
-                                    _consume_count = idx + 1;
-                                    self.consecutive_poor_matches = 0; // Found an acceptable match
                                 } else {
-                                    println!(" K Locked: Best sim match Reg#{} still poor (Sim={:.3}). Consuming 1 regular.", reg_id, sim);
-                                    _consume_count = 1; // Consume only the oldest
-                                    best_match_info = Some((0, sim, regular_candidates[0].2)); // Update info to reflect consuming frame 0
+                                    println!(" K Locked: Best sim match Reg#{} still poor (Sim={:.3}). Not Consuming.", reg_id, sim);
                                     self.consecutive_poor_matches += 1;
+                                    // Do not consume a frame
                                 }
                             } else {
                                 // Should not happen
-                                println!(
-                                    " K Locked: No similarity match found? Consuming 1 regular."
-                                );
-                                _consume_count = 1;
+                                println!(" K Locked: No similarity match found? Not Consuming.");
                                 self.consecutive_poor_matches += 1;
+                                // Do not consume a frame
                             }
                         }
 
                         // Check if we lost sync
                         if self.consecutive_poor_matches >= CONSECUTIVE_MISMATCHES_TO_RECOVER {
-                            println!(
-                                "🔄 Sync lost ({} poor matches). State: Locked -> Recovering",
-                                self.consecutive_poor_matches
-                            );
+                            println!("🔄 Sync lost ({} poor matches). State: Locked -> Recovering", self.consecutive_poor_matches);
                             self.sync_state = SyncState::Recovering;
-                            self.stable_offset = None; // Offset might be invalid now
-                            self.consecutive_good_matches = 0; // Reset good counter
+                            self.stable_offset = None;
+                            self.consecutive_good_matches = 0;
+                            self.consecutive_offset_matches = 0;
                         }
                     } else {
-                        // Should not be in Locked state without an offset
                         println!(" K Error: Locked state reached without stable_offset! Transitioning to Seeking.");
                         self.sync_state = SyncState::Seeking;
                         self.consecutive_good_matches = 0;
                         self.consecutive_poor_matches = 0;
-                        // Retry processing this max_frame in Seeking state in the next iteration (or handle differently)
-                        // For simplicity here, we'll just consume 1 regular frame and proceed
-                        _consume_count = 1;
-                        best_match_info = Some((0, 1.0, regular_candidates[0].2));
-                        // Dummy high similarity
+                        self.consecutive_offset_matches = 0;
                     }
                 }
 
@@ -900,14 +910,12 @@ impl SynchronizedDecoder {
 
                     if let Some((best_idx, best_sim, best_reg_id)) = best_match_info {
                         if best_sim <= GOOD_SIMILARITY_THRESHOLD {
-                            // Found a good match during recovery!
                             println!("✅ Recovering: Found good match (Reg#{} <-> Max#{}) Sim={:.3}. Consuming {} regular.", best_reg_id, max_id, best_sim, best_idx + 1);
                             _consume_count = best_idx + 1;
-                            self.stable_offset = Some(best_reg_id as i64 - max_id as i64); // Re-establish offset
+                            self.stable_offset = Some(best_reg_id as i64 - max_id as i64);
                             self.consecutive_good_matches += 1;
-                            self.consecutive_poor_matches = 0; // Reset poor match counter
+                            self.consecutive_poor_matches = 0;
 
-                            // Check if we can re-lock
                             if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK {
                                 println!(
                                     " K Synchronization Re-Locked! Offset: {:?}",
@@ -916,15 +924,14 @@ impl SynchronizedDecoder {
                                 self.sync_state = SyncState::Locked;
                             }
                         } else {
-                            // Still recovering, best match isn't good enough. Consume oldest regular.
                             println!(" K Recovering: Best match (Reg#{} <-> Max#{}) not good enough (Sim={:.3}). Consuming 1 regular.", best_reg_id, max_id, best_sim);
                             _consume_count = 1;
-                            self.consecutive_good_matches = 0; // Reset good counter as match wasn't good
-                            best_match_info = Some((0, best_sim, regular_candidates[0].2));
-                            // Reflect that we are consuming frame 0
+                            self.consecutive_good_matches = 0;
                         }
                     } else {
-                        println!(" K Recovering: No regular candidates found for comparison? Consuming 1 regular.");
+                        print_pink!(
+                            " K Recovering: No regular candidates found for comparison? Consuming 1 regular.",
+                        );
                         _consume_count = 1;
                         self.consecutive_good_matches = 0;
                     }
@@ -943,9 +950,9 @@ impl SynchronizedDecoder {
                 // Log the pairing decision
                 if let Some((_, sim, _)) = best_match_info {
                     println!(
-                         "   Pairing Output #{}: Max#{} <-> Reg#{} (Sim: {:.3}, State: {:?}, Consumed Reg: {})",
-                         frame_id, max_id, reg_id, sim, self.sync_state, _consume_count
-                     );
+                        "   Pairing Output #{}: Max#{} <-> Reg#{} (Sim: {:.3}, State: {:?}, Consumed Reg: {})",
+                        frame_id, max_id, reg_id, sim, self.sync_state, _consume_count
+                    );
                 } else {
                     println!(
                         "   Pairing Output #{}: Max#{} <-> Reg#{} (State: {:?}, Consumed Reg: {})",
@@ -977,8 +984,6 @@ impl SynchronizedDecoder {
             };
 
             self.output_queue.push_back(sync_pair);
-
-         
         } // End while loop (processing max frames)
 
         // If the loop finished because the output queue is full, log it
@@ -991,6 +996,7 @@ impl SynchronizedDecoder {
             );
         }
     }
+
 
     /// Non-destructively peek at frames in the regular decoder buffer
     fn peek_regular_frames(&mut self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
@@ -1083,34 +1089,15 @@ impl SynchronizedDecoder {
 
     pub fn next_frame_pair(&mut self) -> Option<FramePair> {
         // If both queues have frames, alternate which one you return.
-        if !self.frame_queue.is_empty() && !self.output_queue.is_empty() {
-            let pair = if self.toggle_output {
-                self.toggle_output = false;
-                self.frame_queue.pop_front()
-            } else {
-                self.toggle_output = true;
-                self.output_queue.pop_front()
-            };
-            if pair.is_some() {
-                self.throttle_semaphore.add_permits(1);
-            }
-            return pair;
-        }
-        // Otherwise, if one of the queues is non-empty, return from that.
-        if !self.frame_queue.is_empty() {
-            let pair = self.frame_queue.pop_front();
-            if pair.is_some() {
-                self.throttle_semaphore.add_permits(1);
-            }
-            return pair;
-        }
         if !self.output_queue.is_empty() {
             let pair = self.output_queue.pop_front();
             if pair.is_some() {
+              // Assuming throttle semaphore logic is still desired when a synchronized pair is yielded.
                 self.throttle_semaphore.add_permits(1);
             }
             return pair;
         }
+
         None
     }
 }
@@ -5241,6 +5228,7 @@ fn display_frame_pair_enhanced(
             0xFF0000, // Red
             2,
         );
+        print_red!("T:{} , HIGH ARTIFACTS!! ", format_elapsed!(now)); 
 
         println!(
             "[{}] - Low similarity ({:.2}%) for frame #{} but displaying anyway",
