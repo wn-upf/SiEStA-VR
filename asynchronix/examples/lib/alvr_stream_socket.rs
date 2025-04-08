@@ -1877,7 +1877,7 @@ impl<H: Serialize> StreamSender<H> {
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k", "zoro", "furbo", "snow", "assemble", "cut_video"];
+        let random_file_list = ["garp4k", "furbo", "snow", "assemble", "cut_video"];
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
         let mut final_file = match choice_random {
             Some(file) => file,
@@ -1886,7 +1886,7 @@ impl<H: Serialize> StreamSender<H> {
                 // println!("No files to choose from");
             }
         };
-        // final_file = "garp4k";
+        // final_file = "snow";
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"

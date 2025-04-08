@@ -33,7 +33,7 @@ use crate::{format_elapsed, print_green};
 use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
 use crate::print_pretty;
 use crate::{debug_bgprint, print_prettyy};
-use crate::{debug_print, print_prettyyyy, print_yellow};
+use crate::{debug_print, print_prettyyyy, print_yellow, print_pink};
 use core::f64;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use glam::{Quat, Vec3};
@@ -84,7 +84,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.34;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.37;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -111,8 +111,8 @@ pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 // pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
 
 // Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.3; // 80% similar to establish sync
-const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sync
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.33; // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.48; // 60% similar to maintain sync
 /// Threshold for considering a frame match "good" (lower value = more similar)
 /// Value of 0.2 means frames are approximately 80% similar
 
@@ -120,7 +120,7 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.45; // 60% similar to maintain sy
 pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 
 /// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = (IDR_FRAME_SIZE_GOP as f32 * 0.5) as u32;
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 5;
 
 /// Number of consecutive good matches required to re-establish synchronization
 
@@ -604,11 +604,8 @@ impl SynchronizedDecoder {
         
         // Increment internal counter properly
         let skipped_frame_id = base_id;
-        self.max_decoder.internal_frame_counter = self
-            .max_decoder
-            .internal_frame_counter
-            .saturating_add(1)
-            .max(skipped_frame_id + 1); // Ensure counter advances
+        self.max_decoder.internal_frame_counter = self.max_decoder.internal_frame_counter.saturating_add(1);
+
             
         println!("🔄 Manually skipped reference frame #{} to adjust synchronization", skipped_frame_id);
         
@@ -662,7 +659,7 @@ impl SynchronizedDecoder {
 
     pub fn synchronize_frame_buffers(&mut self) {
         // Limit output queue buffering to prevent excessive memory use
-        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 1.25) as usize; // Adjust as needed
+        const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 1.5) as usize; // Adjust as needed
 
         // Process pending decoded frames (read from ffmpeg stdout)
         self.regular_decoder.process_decoded_frames();
@@ -680,8 +677,9 @@ impl SynchronizedDecoder {
             // *** STEP 2: Peek at available regular frames ***
             // Look ahead slightly more in seeking/recovering states
             let peek_count = match self.sync_state {
-                SyncState::Seeking | SyncState::Recovering => MAX_OUTPUT_QUEUE_LEN,
-                SyncState::Locked => 10,
+                SyncState::Seeking => MAX_OUTPUT_QUEUE_LEN / 4, 
+                SyncState::Recovering => MAX_OUTPUT_QUEUE_LEN,
+                SyncState::Locked => 3,
             };
             let regular_candidates = self.peek_regular_frames(peek_count);
 
@@ -739,6 +737,8 @@ impl SynchronizedDecoder {
                         }
                     }
 
+                    print_pink!("Number of candidates: {}", regular_candidates.len() ); 
+
                     if let Some((best_idx, best_sim, best_reg_id)) = best_match_info {
                         if best_sim <= GOOD_SIMILARITY_THRESHOLD {
                             println!("✅ Seeking: Found good match (Reg#{} <-> Max#{}) Sim={:.3}. Consuming {} regular.", best_reg_id, max_id, best_sim, best_idx + 1);
@@ -761,8 +761,8 @@ impl SynchronizedDecoder {
                         }
                     } else {
                         // Should not happen if regular_candidates is not empty, but handle defensively
-                        println!(" K Seeking: No regular candidates found comparison? Consuming 1 regular.");
-                        _consume_count = 1;
+                        println!(" K Seeking: No regular candidates found comparison? Not consuming 1 regular.");
+                        _consume_count = 0;
                         self.consecutive_good_matches = 0;
                     }
                 }
@@ -798,7 +798,7 @@ impl SynchronizedDecoder {
                             } else {
                                 // Exact ID found, but content differs significantly - indicates potential problem
                                 println!(" K Locked: Expected Reg#{} found, but high diff (Sim={:.3}). Likely sync issue! Consuming {} regular.", reg_id, sim, idx + 1);
-                                _consume_count = idx + 1; // Consume up to the mismatch
+                                _consume_count = 1;
                                 best_match_info = Some((idx, sim, *reg_id));
                                 self.consecutive_poor_matches += 1;
                             }
@@ -1017,22 +1017,15 @@ impl SynchronizedDecoder {
     /// Returns Vec<(raw_frame, pixel_frame, frame_id)>
     fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
         let mut frames = Vec::with_capacity(count);
-        // Calculate base_id before consuming
-        let base_id = self
-            .regular_decoder
-            .internal_frame_counter
-            .saturating_sub(self.regular_decoder.decoded_frames.len());
-
+        // Use the same base_id computation as in peek_regular_frames
+        let base_id = self.regular_decoder.frames_processed.saturating_sub(self.regular_decoder.decoded_frames.len());
+    
         for idx in 0..count {
             if let Some(frame) = self.regular_decoder.decoded_frames.pop_front() {
-                // IMPORTANT: Increment internal counter *after* popping
-                let current_frame_id = base_id + idx; // ID associated with the frame *being* popped
-                self.regular_decoder.internal_frame_counter = self
-                    .regular_decoder
-                    .internal_frame_counter
-                    .saturating_add(1)
-                    .max(current_frame_id + 1); // Ensure counter advances
-
+                let current_frame_id = base_id + idx; // Use the same logic here
+                // Increment frames_processed instead of internal_frame_counter
+                self.regular_decoder.frames_processed = self.regular_decoder.frames_processed.saturating_add(1);
+    
                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     frames.push((frame, pixels, current_frame_id));
                 } else {
@@ -1040,14 +1033,14 @@ impl SynchronizedDecoder {
                         "Regular frame conversion failed during consume for frame ID {}",
                         current_frame_id
                     );
-                    // Still push a placeholder or handle error appropriately if needed
                 }
             } else {
-                break; // Stop if decoder buffer becomes empty
+                break;
             }
         }
         frames
     }
+    
 
     /// Consume exactly ONE frame from max decoder. Panics if empty.
     /// Returns (raw_frame, pixel_frame, frame_id)
@@ -1068,8 +1061,8 @@ impl SynchronizedDecoder {
         self.max_decoder.internal_frame_counter = self
             .max_decoder
             .internal_frame_counter
-            .saturating_add(1)
-            .max(current_frame_id + 1); // Ensure counter advances
+            .saturating_add(1); 
+            // .max(current_frame_id + 1); // Ensure counter advances
 
         let pixels = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER)
             .expect("Max frame conversion failed during consume"); // Should ideally not fail for reference
@@ -4848,17 +4841,17 @@ impl XRClient {
                 );
             }
 
-            // Adjust vsync timing based on queue length
-            if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-                T_vsync = T_vsync.mul_f64(2.0);
-                print_pretty!(
-                    DebugColor::Violet,
-                    "[DBG VSYNC] Doubling time ({:.4}s) due to queue length ({}) under target ({})",
-                    T_vsync.as_secs_f32(),
-                    self.decoder_queue.len(),
-                    TARGET_FRAMES_DECODER_QUEUE,
-                );
-            }
+            // // Adjust vsync timing based on queue length
+            // if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
+            //     T_vsync = T_vsync.mul_f64(2.0);
+            //     print_pretty!(
+            //         DebugColor::Violet,
+            //         "[DBG VSYNC] Doubling time ({:.4}s) due to queue length ({}) under target ({})",
+            //         T_vsync.as_secs_f32(),
+            //         self.decoder_queue.len(),
+            //         TARGET_FRAMES_DECODER_QUEUE,
+            //     );
+            // }
 
             // Schedule next vsync
             context
@@ -4975,7 +4968,7 @@ impl LostFramesBuffer {
         self.messages.push(LostFramesMessage {
             text: message,
             timestamp: Instant::now(),
-            fade_duration: Duration::from_secs(2), // 2 seconds before fading begins
+            fade_duration: Duration::from_secs(5), // 2 seconds before fading begins
         });
     }
     

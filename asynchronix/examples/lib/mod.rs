@@ -35,7 +35,7 @@ pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
 pub const UPLINK_QUEUE_SIZE: usize = 128;
-pub const NUMBER_OF_RANDOM_EVENTS: usize = 20; 
+pub const NUMBER_OF_RANDOM_EVENTS: usize = 40; 
 
 
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
@@ -100,6 +100,10 @@ macro_rules! print_prettyyyy {
         }
     };
 }
+
+
+
+
 #[macro_export]
 macro_rules! print_prettyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
@@ -159,6 +163,18 @@ macro_rules! print_green {
         println!("{}", DebugColor::ForestGreen.to_background_fn()(msg));
     };
 }
+
+
+#[macro_export]
+macro_rules! print_pink {
+    ($fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::Rose.to_background_fn()(msg));
+    };
+}
+
+
+
 // use crate::lib::alvr_stream_socket::ConResult;
 #[allow(unused)]
 pub enum DebugColor {
