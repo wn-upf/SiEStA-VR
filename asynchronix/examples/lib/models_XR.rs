@@ -631,7 +631,7 @@ impl SynchronizedDecoder {
                 // Adjust offset: regular_id = max_id + offset
                 // If we skip a max frame, regular_id should now match (max_id+1) + offset
                 // So offset needs to be adjusted by -1
-                self.stable_offset = Some(offset - 1);
+                self.stable_offset = Some(offset);
                 println!("🔧 Adjusted stable offset to {:?} after skipping reference frame", self.stable_offset);
             }
         } else {
@@ -1001,44 +1001,29 @@ impl SynchronizedDecoder {
     /// Non-destructively peek at frames in the regular decoder buffer
     fn peek_regular_frames(&mut self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
         let mut frames = Vec::with_capacity(max_count);
-        let base_id =
-            self.regular_decoder.frames_processed - self.regular_decoder.decoded_frames.len();
-
-        // Create clone of frames without removing them
-        for (idx, frame) in self
-            .regular_decoder
-            .decoded_frames
-            .iter()
-            .take(max_count)
-            .enumerate()
-        {
+        let base_id = self.regular_decoder.frames_processed;
+    
+        for (idx, frame) in self.regular_decoder.decoded_frames.iter().take(max_count).enumerate() {
             if let Some(pixels) = convert_rgb_to_u32(frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                 frames.push((frame.clone(), pixels, base_id + idx));
             }
         }
-
         frames
     }
+    
 
     /// Returns Vec<(raw_frame, pixel_frame, frame_id)>
     fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
         let mut frames = Vec::with_capacity(count);
-        // Use the same base_id computation as in peek_regular_frames
-        let base_id = self.regular_decoder.frames_processed.saturating_sub(self.regular_decoder.decoded_frames.len());
-    
-        for idx in 0..count {
+        
+        for _ in 0..count {
             if let Some(frame) = self.regular_decoder.decoded_frames.pop_front() {
-                let current_frame_id = base_id + idx; // Use the same logic here
-                // Increment frames_processed instead of internal_frame_counter
+                let current_frame_id = self.regular_decoder.frames_processed;
                 self.regular_decoder.frames_processed = self.regular_decoder.frames_processed.saturating_add(1);
-    
                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     frames.push((frame, pixels, current_frame_id));
                 } else {
-                    eprintln!(
-                        "Regular frame conversion failed during consume for frame ID {}",
-                        current_frame_id
-                    );
+                    eprintln!("Regular frame conversion failed during consume for frame ID {}", current_frame_id);
                 }
             } else {
                 break;
