@@ -1886,7 +1886,7 @@ impl<H: Serialize> StreamSender<H> {
                 // println!("No files to choose from");
             }
         };
-        // final_file = "snow";
+        final_file = "snow";
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
@@ -1912,8 +1912,8 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                // let random_offset = OFFSET_VIDEO;
+                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                let random_offset = OFFSET_VIDEO;
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,

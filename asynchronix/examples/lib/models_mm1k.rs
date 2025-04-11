@@ -621,8 +621,8 @@ impl QueueMechanism {
         }
         if test_jitter {
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
-                3.0, // mean delay in ms
-                3.0, // standard deviation in ms
+                8.0, // mean delay in ms
+                8.0, // standard deviation in ms
                 0.0, // 20% correlation with previous packet delay
                 valid_from,
                 valid_until,
@@ -630,8 +630,8 @@ impl QueueMechanism {
 
             // Example 2: Uniform jitter with 15ms mean delay and 10ms half-width
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
-                5.0, // mean delay in ms
-                5.0, // half-width in ms
+                10.0, // mean delay in ms
+                10.0, // half-width in ms
                 0.0, // no correlation with previous packet
                 valid_from2,
                 valid_until2,
@@ -639,8 +639,8 @@ impl QueueMechanism {
 
             // Example 3: Highly correlated gaussian jitter (simulates slow fluctuations)
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
-                10.0, // mean delay in ms
-                10.0, // standard deviation in ms
+                13.0, // mean delay in ms
+                13.0, // standard deviation in ms
                 0.0,  // 80% correlation with previous packet delay
                 valid_from3,
                 valid_until3,
@@ -1924,7 +1924,8 @@ impl QueueModule {
                         P_TX,
                     );
                     print_yellow!(
-                        "COLLISION! Scheduling backoff for T_col = {} seconds",
+                        "COLLISION! for {:?} | Scheduling backoff for T_col = {} seconds",
+                        selected_sta.unwrap(),
                         T_col
                     );
                     let collision_duration = Duration::from_secs_f64(T_col as f64);
