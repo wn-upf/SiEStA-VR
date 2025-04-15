@@ -111,8 +111,8 @@ pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 // pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
 
 // Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.13; // 80% similar to establish sync
-const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.48; // 60% similar to maintain sync
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.25; // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.4; // 60% similar to maintain sync
 /// Threshold for considering a frame match "good" (lower value = more similar)
 /// Value of 0.2 means frames are approximately 80% similar
 
@@ -2816,16 +2816,35 @@ impl<T> DroppingVecDeque<T> {
     }
 }
 
+// #[derive(Debug, Clone)]
+// struct FrameData {
+//     _ref_rgb: Vec<u8>,
+//     _lossy_rgb: Vec<u8>,
+//     _timestamp_ms: f64,
+//     _frame_number: u64,
+// }
+// struct FrameGroup {
+//     _frames: Vec<FrameData>,
+// }
+// #[derive(serde::Serialize)]
+// struct FrameMetrics {
+//     frame_number: u64,
+//     timestamp_ms: f64,
+//     vmaf: f64,
+//     psnr: f64,
+//     ssim: f64,
+// }
 #[derive(Debug, Clone)]
 struct FrameData {
-    _ref_rgb: Vec<u8>,
-    _lossy_rgb: Vec<u8>,
-    _timestamp_ms: f64,
-    _frame_number: u64,
+    path: String,
+    timestamp_ms: f64,
+    frame_number: u64,
 }
+
 struct FrameGroup {
     _frames: Vec<FrameData>,
 }
+
 #[derive(serde::Serialize)]
 struct FrameMetrics {
     frame_number: u64,
@@ -2834,11 +2853,15 @@ struct FrameMetrics {
     psnr: f64,
     ssim: f64,
 }
+
+
+
 #[derive(Clone)]
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
     name_folder: String,
 }
+
 impl MetricsLogger {
     fn new(ip: IpAddr, name_folder: &str) -> Result<Self> {
         let mut value = 99;
@@ -2858,16 +2881,16 @@ impl MetricsLogger {
         })
     }
 
-    pub async fn process_frame_metrics(
+    pub fn process_frame_metrics(
         &self,
         frame_number: u64,
         timestamp_ms: f64,
         ref_path: &str,
         lossy_path: &str,
         ip_client: IpAddr, 
-    ) -> Result<()> {
+    )  {
         // Create a temporary directory for processing
-        let temp_dir = TempDir::new()?;
+        let temp_dir = TempDir::new().unwrap();
 
         // Convert RGB frames to Y4M format (better for VMAF processing)
         let ref_y4m = temp_dir
@@ -2901,11 +2924,11 @@ impl MetricsLogger {
                 "yuv420p",
                 &ref_y4m,
             ])
-            .status()?;
+            .status().unwrap();
 
-        if !ref_status.success() {
-            return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
-        }
+        // if !ref_status.success() {
+        //     return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
+        // }
 
         // Convert lossy frame to Y4M
         let lossy_status = Command::new("ffmpeg")
@@ -2927,15 +2950,15 @@ impl MetricsLogger {
                 "yuv420p",
                 &lossy_y4m,
             ])
-            .status()?;
+            .status().unwrap();
 
-        if !lossy_status.success() {
-            return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
-        }
+        // if !lossy_status.success() {
+        //     return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
+        // }
 
         // Create the Sink_for_video directory within the temp directory
         let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
-        std::fs::create_dir_all(&video_sink_dir)?;
+        std::fs::create_dir_all(&video_sink_dir).unwrap();
 
         // Set up paths correctly
         let vmaf_json = video_sink_dir
@@ -2972,11 +2995,11 @@ impl MetricsLogger {
                 "null",
                 "-",
             ])
-            .status()?;
+            .status().unwrap();
 
-        if !metrics_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate video metrics"));
-        }
+        // if !metrics_status.success() {
+        //     return Err(anyhow::anyhow!("Failed to calculate video metrics"));
+        // }
 
         // Parse VMAF score
         let mut vmaf_score = 0.0;
@@ -3040,12 +3063,258 @@ impl MetricsLogger {
         };
 
         // Log the metrics
-        self.log_metrics(&metrics).await?;
+        self.log_metrics(&metrics).unwrap();
+
+        // Ok(())
+    }
+
+    pub async fn process_frame_group_metrics(
+        &self,
+        frame_group: FrameGroup,
+        ref_path_base: &str, // Base path for reference frames (if needed)
+        ip_client: IpAddr,
+    ) -> Result<()> {
+        if frame_group._frames.is_empty() {
+            return Ok(());
+        }
+
+        // Create a temporary directory for processing the batch
+        let temp_dir = TempDir::new()?;
+
+        let mut ref_y4m_paths = Vec::new();
+        let mut lossy_y4m_paths = Vec::new();
+        let mut frame_numbers = Vec::new();
+        let mut timestamps = Vec::new();
+
+        // Convert all frames in the batch to Y4M
+        for frame_data in &frame_group._frames {
+            let frame_number = frame_data.frame_number;
+            let timestamp_ms = frame_data.timestamp_ms;
+            let lossy_path = &frame_data.path;
+
+            let ref_path = if ref_path_base.is_empty() {
+                lossy_path.clone() // Assuming reference is the first frame if no base is provided
+            } else {
+                format!("{}_{}.rgb24", ref_path_base, frame_number) // Adjust naming as needed
+            };
+
+            let ref_y4m = temp_dir
+                .path()
+                .join(format!("reference_{}.y4m", frame_number))
+                .to_string_lossy()
+                .to_string();
+            let lossy_y4m = temp_dir
+                .path()
+                .join(format!("lossy_{}.y4m", frame_number))
+                .to_string_lossy()
+                .to_string();
+
+            // Convert reference frame to Y4M
+            let ref_status = Command::new("ffmpeg")
+                .args(&[
+                    "-hwaccel",
+                    "cuda",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    "rgb24",
+                    "-video_size",
+                    &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                    "-i",
+                    &ref_path,
+                    "-pix_fmt",
+                    "yuv420p",
+                    &ref_y4m,
+                ])
+                .status()?;
+
+            if !ref_status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to convert reference frame {} to Y4M",
+                    frame_number
+                ));
+            }
+            ref_y4m_paths.push(ref_y4m);
+
+            // Convert lossy frame to Y4M
+            let lossy_status = Command::new("ffmpeg")
+                .args(&[
+                    "-hwaccel",
+                    "cuda",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    "rgb24",
+                    "-video_size",
+                    &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                    "-i",
+                    lossy_path,
+                    "-pix_fmt",
+                    "yuv420p",
+                    &lossy_y4m,
+                ])
+                .status()?;
+
+            if !lossy_status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to convert lossy frame {} to Y4M",
+                    frame_number
+                ));
+            }
+            lossy_y4m_paths.push(lossy_y4m);
+            frame_numbers.push(frame_number);
+            timestamps.push(timestamp_ms);
+        }
+
+        // Create the Sink_for_video directory within the temp directory
+        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
+        std::fs::create_dir_all(&video_sink_dir)?;
+
+        let vmaf_json = video_sink_dir.join("vmaf.json").to_string_lossy().to_string();
+        let psnr_log = video_sink_dir.join("psnr.log").to_string_lossy().to_string();
+        let ssim_log = video_sink_dir.join("ssim.log").to_string_lossy().to_string();
+
+        // Construct filter complex for batch processing
+        let mut filter_complex = String::new();
+        for i in 0..frame_numbers.len() {
+            filter_complex.push_str(&format!(
+                "[{}:v][{}:v]libvmaf=log_fmt=json:log_path={}:n_subsample=1:enable='eq(n,{})',",
+                i * 2,
+                i * 2 + 1,
+                vmaf_json,
+                i
+            ));
+            filter_complex.push_str(&format!(
+                "[{}:v][{}:v]psnr=stats_file={}:frame_num={}:enable='eq(n,{})',",
+                i * 2,
+                i * 2 + 1,
+                psnr_log,
+                frame_numbers[i],
+                i
+            ));
+            filter_complex.push_str(&format!(
+                "[{}:v][{}:v]ssim=stats_file={}:frame_num={}:enable='eq(n,{})',",
+                i * 2,
+                i * 2 + 1,
+                ssim_log,
+                frame_numbers[i],
+                i
+            ));
+        }
+        filter_complex.pop(); // Remove the trailing comma
+
+        let mut ffmpeg_args = vec![
+            "-hwaccel",
+            "cuda",
+            "-loglevel",
+            "error",
+            "-filter_complex",
+            &filter_complex,
+            "-f",
+            "null",
+            "-",
+        ];
+
+        for path in &ref_y4m_paths {
+            ffmpeg_args.push("-i");
+            ffmpeg_args.push(path);
+        }
+        for path in &lossy_y4m_paths {
+            ffmpeg_args.push("-i");
+            ffmpeg_args.push(path);
+        }
+
+        let metrics_status = Command::new("ffmpeg")
+            .args(&ffmpeg_args)
+            .status()?;
+
+        if !metrics_status.success() {
+            return Err(anyhow::anyhow!("Failed to calculate video metrics for the batch"));
+        }
+
+        // Parse the log files to extract metrics for each frame
+        if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
+            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
+                if let Some(frames) = json_value["frames"].as_array() {
+                    for (i, frame_data) in frame_group._frames.iter().enumerate() {
+                        let mut vmaf_score = 0.0;
+                        let mut psnr_avg = 0.0;
+                        let mut ssim_score = 0.0;
+
+                        if let Some(frame_info) = frames.get(i) {
+                            if let Some(metrics) = frame_info["metrics"].as_object() {
+                                if let Some(score) = metrics.get("vmaf").and_then(|v| v.as_f64()) {
+                                    vmaf_score = score;
+                                }
+                            }
+                        }
+
+                        // Parse PSNR score from log
+                        if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
+                            if let Some(line) = psnr_content.lines().find(|line| {
+                                line.contains(&format!("frame:{}", frame_data.frame_number))
+                            }) {
+                                if let Some(avg_idx) = line.find("psnr_avg:") {
+                                    let remaining = &line[avg_idx + 9..];
+                                    let end_idx = remaining.find(" ").unwrap_or(10);
+                                    let avg_str = &remaining[..end_idx];
+                                    if let Ok(value) = avg_str.trim().parse::<f64>() {
+                                        psnr_avg = value;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Parse SSIM score from log
+                        if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
+                            if let Some(line) = ssim_content.lines().find(|line| {
+                                line.contains(&format!("frame:{}", frame_data.frame_number))
+                            }) {
+                                if let Some(all_idx) = line.find("All:") {
+                                    let remaining = &line[all_idx + 4..];
+                                    let end_idx = remaining.find(" ").unwrap_or(10);
+                                    let all_str = &remaining[..end_idx];
+                                    if let Ok(value) = all_str.trim().parse::<f64>() {
+                                        ssim_score = value;
+                                    }
+                                }
+                            }
+                        }
+
+                        print_green!(
+                            "T: {:.3} [{}]| Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+                            frame_data.timestamp_ms,
+                            ip_client,
+                            frame_data.frame_number,
+                            vmaf_score,
+                            psnr_avg,
+                            ssim_score
+                        );
+
+                        let metrics = FrameMetrics {
+                            frame_number: frame_data.frame_number,
+                            timestamp_ms: frame_data.timestamp_ms,
+                            vmaf: vmaf_score,
+                            psnr: psnr_avg,
+                            ssim: ssim_score,
+                        };
+
+                        self.log_metrics(&metrics)?;
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
 
-    async fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
+    fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
         // Get a single mutex guard and use it for both operations
         let mut guard = self.writer.lock().unwrap();
 
@@ -3145,7 +3414,16 @@ pub struct XRClient {
     lost_ids_reference_buffer: VecDeque<u32>, 
     lost_frames_buffer : LostFramesBuffer,
     // pub visualize_decoder_window: Option<Window>,
+
+
+    vmaf_frame_buffer: VecDeque<(Vec<u8>, Vec<u8>, TaiTime<0>, usize, IpAddr)>, // (sample, ref_sample, timestamp, frame_id, ip)
+    vmaf_batch_size: usize,      
 }
+struct VmafTask {
+    frames: Vec<(Vec<u8>, Vec<u8>, f64, usize, IpAddr)>, // (sample, ref_sample, timestamp, frame_id, ip)
+    name_folder: String,
+}
+
 #[allow(unused)]
 impl XRClient {
     pub fn new(
@@ -3223,6 +3501,10 @@ impl XRClient {
 
             lost_ids_reference_buffer: VecDeque::new(), 
             lost_frames_buffer : LostFramesBuffer::new(4),
+            vmaf_frame_buffer: VecDeque::new(),
+            vmaf_batch_size: 2, // Default batch size of 5
+
+        
             // visualize_decoder_window: None,
         }
     }
@@ -3776,7 +4058,7 @@ impl XRClient {
         }
     }
 
-    fn cleanup_old_frames_vmaf(&self, current_frame_id: usize, ip: IpAddr) -> Result<()> {
+    async fn cleanup_old_frames_vmaf(&mut self, now: TaiTime<0>, current_frame_id: usize, ip: IpAddr) -> Result<()> {
         // Only clean up frames that are at least 100 frames behind
         if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
             return Ok(());
@@ -3788,6 +4070,9 @@ impl XRClient {
         // Define paths to reference and lossy directories
         let ref_dir = format!("{}/{}/reference_rgb", base_dir, ip);
         let lossy_dir = format!("{}/{}/lossy_rgb", base_dir, ip);
+
+        self.flush_vmaf_buffer(now).await?;
+
 
         // Function to remove older frames from a directory
         let remove_old_frames = |dir: &str| -> Result<()> {
@@ -3829,6 +4114,8 @@ impl XRClient {
         Ok(())
     }
 
+
+    
     pub async fn vmaf_analysis(
         &mut self,
         sample: Vec<u8>,
@@ -3838,7 +4125,6 @@ impl XRClient {
         ip: IpAddr,
     ) -> Result<()> {
         // Skip if either sample is empty
-
         if sample.is_empty() || ref_sample.is_empty() {
             println!(
                 "Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}",
@@ -3846,9 +4132,20 @@ impl XRClient {
                 sample.len(),
                 ref_sample.len()
             );
-            return Ok(()); // Return early, don't try to process empty frames
+            return Ok(());
         }
 
+        // Add current frame to buffer
+        self.vmaf_frame_buffer.push_back((sample, ref_sample, now, frame_id, ip));
+        
+        // Only process if we have enough frames
+        if self.vmaf_frame_buffer.len() < self.vmaf_batch_size {
+            return Ok(());
+        }
+        
+        // Process the accumulated frames
+        println!("Processing batch of {} frames for VMAF analysis", self.vmaf_frame_buffer.len());
+        
         // Ensure metrics logger is initialized
         if self.metrics_logger.is_none() {
             println!("INITIALIZING LOGGER IN FOLDER: {}", self.name_folder);
@@ -3860,82 +4157,69 @@ impl XRClient {
                 }
                 Err(e) => {
                     eprintln!("Failed to initialize metrics logger: {}", e);
+                    self.vmaf_frame_buffer.clear(); // Clear buffer on error
                     return Ok(());
                 }
             }
         }
-
-        // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis? ", );
-
-        // Create directories for temporary storage if they don't exist
-        let base_dir = &format!("Sink_for_video/{}", &self.name_folder);
-        if let Err(e) = std::fs::create_dir_all(base_dir) {
-            eprintln!("Failed to create directory {}: {}", base_dir, e);
-            return Ok(());
-        }
-
-        // Save frames to temporary files
-        let ref_path = format!(
-            "{}/{}/reference_rgb/frame_{:04}.rgb",
-            base_dir, ip, frame_id
-        );
-        let lossy_path = format!("{}/{}/lossy_rgb/frame_{:04}.rgb", base_dir, ip, frame_id);
-        // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis - Writing frames to disk", );
-
-        // Create parent directories
-        if let Err(e) = std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, ip)) {
-            eprintln!("Failed to create reference directory: {}", e);
-            return Ok(());
-        }
-        if let Err(e) = std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, ip)) {
-            eprintln!("Failed to create lossy directory: {}", e);
-            return Ok(());
-        }
-
-        // Write frames to disk
-        if let Err(e) = std::fs::write(&ref_path, &ref_sample) {
-            eprintln!("Failed to write reference frame: {}", e);
-            return Ok(());
-        }
-        if let Err(e) = std::fs::write(&lossy_path, &sample) {
-            eprintln!("Failed to write lossy frame: {}", e);
-            return Ok(());
-        }
-        // print_prettyy!(DebugColor::ForestGreen, "Inside VMAF analysis - Frame files written", );
-
-        // convert to f64 as required by process_frame_metrics
-        let timestamp_ms = now.duration_since(self.t_0).as_secs_f64();
-        // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 2222 ? ", );
-
-        // Process frame metrics
-        if let Some(logger) = &self.metrics_logger {
-            match logger
-                .process_frame_metrics(
-                    frame_id as u64,
-                    timestamp_ms, // This is now f64 as expected
-                    &ref_path,
-                    &lossy_path,
-                    ip, 
-                )
-                .await
-            {
-                Ok(_) => {
-                    // if frame_id % 10 == 0 {
-                    //     println!("Processed VMAF analysis for frame {}", frame_id);
-                    // }
+        
+        // Process all frames in buffer
+        while !self.vmaf_frame_buffer.is_empty() {
+            // Take one frame from the buffer
+            if let Some((frame_sample, frame_ref, frame_time, frame_id, frame_ip)) = self.vmaf_frame_buffer.pop_front() {
+                // Create directories for temporary storage if they don't exist
+                let base_dir = format!("Sink_for_video/{}", &self.name_folder);
+                if let Err(e) = std::fs::create_dir_all(&base_dir) {
+                    eprintln!("Failed to create directory {}: {}", base_dir, e);
+                    continue;
                 }
-                Err(e) => {
-                    eprintln!("Error in VMAF analysis for frame {}: {}", frame_id, e);
+
+                // Save frames to temporary files
+                let ref_path = format!(
+                    "{}/{}/reference_rgb/frame_{:04}.rgb",
+                    base_dir, frame_ip, frame_id
+                );
+                let lossy_path = format!(
+                    "{}/{}/lossy_rgb/frame_{:04}.rgb", 
+                    base_dir, frame_ip, frame_id
+                );
+                
+                // Create parent directories
+                if let Err(e) = std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, frame_ip)) {
+                    eprintln!("Failed to create reference directory: {}", e);
+                    continue;
+                }
+                if let Err(e) = std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, frame_ip)) {
+                    eprintln!("Failed to create lossy directory: {}", e);
+                    continue;
+                }
+
+                // Write frames to disk
+                if let Err(e) = std::fs::write(&ref_path, &frame_ref) {
+                    eprintln!("Failed to write reference frame: {}", e);
+                    continue;
+                }
+                if let Err(e) = std::fs::write(&lossy_path, &frame_sample) {
+                    eprintln!("Failed to write lossy frame: {}", e);
+                    continue;
+                }
+
+                let timestamp_ms = frame_time.duration_since(self.t_0).as_secs_f64();
+
+                // Process frame metrics
+                if let Some(logger) = &self.metrics_logger {
+                    logger
+                        .process_frame_metrics(
+                            frame_id as u64,
+                            timestamp_ms,
+                            &ref_path,
+                            &lossy_path,
+                            frame_ip,
+                        ); 
                 }
             }
         }
-
-        // Add to frame group for batch processing if enabled
-
-        // print_pretty!(DebugColor::ForestGreen, "Inside VMAF analysis 33333333333333 ? ", );
-
-        // Update clean-up timer
-
+        
         Ok(())
     }
 
@@ -4238,6 +4522,24 @@ impl XRClient {
     //     // Return the decoded frame, rendered pixels, and timing information
     //     result
     // }
+
+    pub async fn flush_vmaf_buffer(&mut self, now: TaiTime<0>) -> Result<()> {
+        // If there are any frames left in the buffer, process them
+        if !self.vmaf_frame_buffer.is_empty() {
+            println!("Flushing {} remaining frames in VMAF buffer", self.vmaf_frame_buffer.len());
+            
+            // Get IP from the first frame in buffer (or use a default)
+            let default_ip = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+            let ip = self.vmaf_frame_buffer.front().map(|f| f.4).unwrap_or(default_ip);
+            
+            // Call vmaf_analysis with empty frames to trigger processing of buffer
+            self.vmaf_analysis(Vec::new(), Vec::new(), now , 0, ip).await?;
+        }
+        
+        Ok(())
+    }
+
+
     pub fn vsync<'a>(
         &'a mut self,
         _: (),
@@ -4318,7 +4620,7 @@ impl XRClient {
 
                 if id_f % 10 == 0 {
                     if USE_VMAF {
-                        if let Err(e) = self.cleanup_old_frames_vmaf(id_f, ip_client) {
+                        if let Err(e) = self.cleanup_old_frames_vmaf(now, id_f, ip_client).await {
                             eprintln!("Error during frame cleanup: {}", e);
                         }
                     }
@@ -4623,8 +4925,8 @@ impl XRClient {
                                                         if let (Some(raw_decoded), Some(raw_maxb)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw)  {
                                                             let _ = self.channel_tx_vmaf.try_send((raw_decoded.clone(), raw_maxb.clone(), frame_pair.frame_id));
                                                             if similarity > RGB_SIMILARITY_THRESHOLD {
-                                                                // Log VMAF trigger based on similarity threshold
-                                                                print_yellow!("High artifact frame #{} (Sim: {:.2}%) - queuing for VMAF", frame_pair.frame_id, (1.0 - similarity) * 100.0);
+                                                                print_yellow!("High artifact frame #{} (Sim: {:.2}%) - added to VMAF queue", 
+                                                                          frame_pair.frame_id, (1.0 - similarity) * 100.0);
                                                             }
                                                         }
                                                     }
@@ -4682,6 +4984,7 @@ impl XRClient {
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
+
     
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
         let packet_vec = frame.vec;
