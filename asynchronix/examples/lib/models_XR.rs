@@ -84,7 +84,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.37;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.45;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -121,7 +121,7 @@ pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 
 /// Number of consecutive poor matches before considering sync lost
 pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 3;
-pub const RECOVERY_DELAY_FRAMES_UNTIL_MATCH :usize = IDR_FRAME_SIZE_GOP / 2; 
+pub const RECOVERY_DELAY_FRAMES_UNTIL_MATCH :usize = IDR_FRAME_SIZE_GOP * 2 / 3; 
 
 /// Number of consecutive good matches required to re-establish synchronization
 
@@ -582,7 +582,15 @@ pub struct SynchronizedDecoder {
     consecutive_timing_matches: u32,
 
     counter_recovery: usize, // counter to start trying to find better similarity on recovery, if we tried during artifacts then we cause more artifacts; so adding some delay through this variable. 
+
+    frames_in_seeking: usize,
+    safe_mode_active: bool,
+
 }
+
+const FRAMES_BEFORE_SAFE_MODE: usize = 60; // Trigger safe mode after this many frames in Seeking
+const SAFE_MODE_PEEK_COUNT: usize = 240;   // How far t
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SyncState {
@@ -591,11 +599,11 @@ enum SyncState {
     Recovering, // Lost sync, searching again for a good match (like Seeking)
 }
 // Queue/Buffer Limits
-const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 1.5) as usize; // Max synchronized pairs buffered
-const MAX_REGULAR_PEEK_COUNT: usize = 30; // How far to look ahead in the regular stream buffer (adjust based on expected latency/jitter)
+const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.5) as usize; // Max synchronized pairs buffered
+const MAX_REGULAR_PEEK_COUNT: usize = 15; // How far to look ahead in the regular stream buffer (adjust based on expected latency/jitter)
 
 // Offset Adjustment Parameters (Locked State) - Tune these
-const MAX_OFFSET_CHANGE: i64 = 5; // Max allowed drift per frame before needing confirmation
+const MAX_OFFSET_CHANGE: i64 = 10; // Max allowed drift per frame before needing confirmation
 const OFFSET_CONFIRMATION_WINDOW: u32 = 2; // Consecutive frames needed to confirm a new offset
 
 const OFFSET_TOLERANCE: i64 = 2; // Tolerance for small drifts
@@ -633,6 +641,8 @@ impl SynchronizedDecoder {
             consecutive_timing_matches: 0,
 
             counter_recovery: 0, 
+            frames_in_seeking: 0,
+            safe_mode_active: false,
         }
     }
 
@@ -659,20 +669,43 @@ impl SynchronizedDecoder {
 
         // 2. Main Synchronization Loop
         while self.can_synchronize() {
+
+            if self.sync_state == SyncState::Seeking {
+                self.frames_in_seeking += 1;
+                
+                if self.frames_in_seeking >= FRAMES_BEFORE_SAFE_MODE && !self.safe_mode_active {
+                    self.safe_mode_active = true;
+                    println!("🔍 Entering safe mode after {} frames in Seeking state. Using extended search window.", self.frames_in_seeking);
+                }
+            } else {
+                // Reset counters when not in Seeking
+                self.frames_in_seeking = 0;
+                self.safe_mode_active = false;
+            }
+
+
             // Consume exactly ONE reference frame. This drives the process.
             // Panics if max_decoder buffer is empty, but can_synchronize should prevent this.
             let (max_raw, max_pixels, max_id) = self.consume_max_frame().expect("Consume max frame failed despite check");
             self.last_processed_max_frame_id = Some(max_id);
 
+
+            let peek_count = if self.safe_mode_active {
+                SAFE_MODE_PEEK_COUNT
+            } else {
+                MAX_REGULAR_PEEK_COUNT
+            };
+
+
             // Peek at available regular frames without consuming yet
-            let regular_candidates = self.peek_regular_frames(MAX_REGULAR_PEEK_COUNT);
+            let regular_candidates = self.peek_regular_frames(peek_count);
 
             if regular_candidates.is_empty() {
                 // // Max frame exists, but no regular frames are ready *at all*.
                 // // Output the max frame only. This is a clear mismatch.
                 // println!("⚠️ Sync: Max #{} present, but no regular frames decoded yet. Outputting max only.", max_id);
                 // self.output_pair(None, Some((max_raw, max_pixels, max_id)));
-                self.handle_mismatch(max_id); // Update state machine for mismatch
+                // self.handle_mismatch(max_id); // Update state machine for mismatch
                 continue; // Process next max frame
             }
 
@@ -992,6 +1025,9 @@ impl SynchronizedDecoder {
                     self.consecutive_good_matches = 0; // Reset for next state
                     self.consecutive_offset_matches = 0;
                     self.counter_recovery = 0; 
+
+                    self.frames_in_seeking = 0;
+                    self.safe_mode_active = false;
                 } else {
                     // Still seeking/recovering, update potential offset if it's the first good match
                     if self.consecutive_good_matches == 1 {
@@ -3607,7 +3643,7 @@ impl XRClient {
             test: test.to_string(),
 
             lost_ids_reference_buffer: VecDeque::new(), 
-            lost_frames_buffer : LostFramesBuffer::new(4),
+            lost_frames_buffer : LostFramesBuffer::new(5),
             vmaf_frame_buffer: VecDeque::new(),
             vmaf_batch_size: 2, // Default batch size of 5
 
@@ -3967,7 +4003,7 @@ impl XRClient {
         };
 
         for frame in frames{
-            println!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame); 
+            print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame); 
             self.lost_ids_reference_buffer.push_back(frame); 
         }        
         
@@ -4000,11 +4036,11 @@ impl XRClient {
                             StreamSocket::flush_shards_lost_deadline(&mut ssocket);
 
                         if !frames_lost.is_empty() {
-                            // println!(
-                            //     "FRAMES LOST {:?}, SHARDS LOST {:?}",
-                            //     &frames_lost[..],
-                            //     &shards_lost[..]
-                            // );
+                            println!(
+                                "FRAMES LOST {:?}, SHARDS LOST {:?}",
+                                &frames_lost[..],
+                                &shards_lost[..]
+                            );
                             self.report_frame_lost(frames_lost, shards_lost, context);
                         }
                     }
@@ -4655,7 +4691,7 @@ impl XRClient {
         async move {
             let now = context.scheduler.time();
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-            let mut lost_frames_aux = Vec::new(); // Keep for passing to display, but its population logic might need review
+            let mut lost_frames_aux =self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
             // Initialize synchronized decoder if needed
             if self.synchronized_decoder.is_none() {
@@ -4671,15 +4707,13 @@ impl XRClient {
                 !processed || id.saturating_sub(current_last_processed) <= 100 // Avoid underflow
             });
 
-            // --- REMOVED Manual Frame Skipping Logic ---
-            // The old block calculating `frames_to_skip` and calling `skip_reference_frame`
-            // is removed entirely. The new decoder handles loss internally.
-            // Keep `lost_ids_reference_buffer` related logic if needed elsewhere,
-            // but it should NOT drive manual skipping here.
+
+            
+
 
             // Process the next frame if available from the regular stream queue
             if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
-
+                
                 let mut ip_client = self.server_ip; // Use clone() if necessary depending on self.server_ip type
                 // Normalize IP address if needed
                 if let IpAddr::V4(ip4) = ip_client {
@@ -4846,9 +4880,6 @@ impl XRClient {
                          }
                     }
                 }
-                 // Note: Reading `ref_frame` from `currentb_path` seems redundant if `video_frame`
-                 // from the queue is the actual regular frame data. We'll use `video_frame`.
-                 // If `ref_frame` was intended for something else, that logic needs clarification.
 
                 // Keyframe detection (keep as is)
                 if is_keyframe(&video_frame) {
@@ -4871,7 +4902,6 @@ impl XRClient {
                 // if !max_frame.is_empty() && self.is_keyframe(&max_frame) { /* ... log ... */ }
 
 
-                // --- Modified Decoder Initialization ---
                 if !self.is_decoder_ready && USE_FFMPEG { // Check USE_FFMPEG here too
                      // Buffer frames (keep buffering logic)
                      if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
@@ -5007,6 +5037,8 @@ impl XRClient {
                                             // Pass the current SyncState to the display function
                                             let current_sync_state = sync_decoder_guard.get_sync_state();
 
+                                            self.lost_ids_reference_buffer = VecDeque::new(); 
+
                                             let display_result = display_frame_pair_enhanced(
                                                 &frame_pair,
                                                 &ip_client,
@@ -5021,6 +5053,7 @@ impl XRClient {
                                                 lost_frames_aux.clone(), // Pass auxiliary lost frames info if needed
                                                 &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
                                             );
+                                            lost_frames_aux = VecDeque::new(); 
 
                                              if display_result {      
                                                     print_pretty!(DebugColor::Green,
@@ -5200,7 +5233,7 @@ impl LostFramesBuffer {
         self.messages.push(LostFramesMessage {
             text: message,
             timestamp: Instant::now(),
-            fade_duration: Duration::from_secs(5), // 2 seconds before fading begins
+            fade_duration: Duration::from_secs(30), // 2 seconds before fading begins
         });
     }
     
@@ -5282,7 +5315,7 @@ fn display_frame_pair_enhanced(
     now: TaiTime<0>,
     test: &str,
     state_machine_state: SyncState,
-    lost_frames: Vec<u32>,
+    lost_frames: VecDeque<u32>,
     lost_frames_buffer: &mut LostFramesBuffer, // New parameter
 ) -> bool {
     let decoded = match &pair.decoded {
@@ -5434,7 +5467,6 @@ fn display_frame_pair_enhanced(
     }
     
     // Always display the buffer of lost frames messages (up to 3)
-    let messages = lost_frames_buffer.get_messages();
     for (i, message) in lost_frames_buffer.messages.iter().enumerate() {
         // Calculate opacity based on message age
         let opacity = calculate_opacity(message);
@@ -5445,14 +5477,15 @@ fn display_frame_pair_enhanced(
         }
         
         // Position messages one after another with appropriate spacing
-        let y_position = scaled_height as i32 - 130 - (i as i32 * 25);
+        let y_position = scaled_height as i32 - 120 - (i as i32 * 25);
         
+        // print_red!("LOSST: {:?}", message.text);  
         // Only render if y_position is still on screen
         if y_position > 0 {
             render_text_with_alpha(
                 &mut combined_buffer,
                 &message.text,
-                10,
+                30,
                 y_position as usize,
                 window_width,
                 0xFF0000, // Red
