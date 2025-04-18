@@ -1923,11 +1923,11 @@ impl QueueModule {
                         Coords::default(),
                         P_TX,
                     );
-                    print_yellow!(
-                        "COLLISION! for {:?} | Scheduling backoff for T_col = {} seconds",
-                        selected_sta.unwrap(),
-                        T_col
-                    );
+                    // print_yellow!(
+                    //     "COLLISION! for {:?} | Scheduling backoff for T_col = {} seconds",
+                    //     selected_sta.unwrap(),
+                    //     T_col
+                    // );
                     let collision_duration = Duration::from_secs_f64(T_col as f64);
                     context
                         .scheduler
