@@ -111,8 +111,8 @@ pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 // pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
 
 // Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.27; // 80% similar to establish sync
-const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.5; // 60% similar to maintain sync
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.15; // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.35; // 60% similar to maintain sync
 /// Threshold for considering a frame match "good" (lower value = more similar)
 /// Value of 0.2 means frames are approximately 80% similar
 
@@ -120,8 +120,8 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.5; // 60% similar to maintain syn
 pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 
 /// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 6;
-pub const RECOVERY_DELAY_FRAMES_UNTIL_MATCH :usize = IDR_FRAME_SIZE_GOP * 1 / 2; 
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 15;
+pub const RECOVERY_DELAY_FRAMES_UNTIL_MATCH :usize = IDR_FRAME_SIZE_GOP; 
 
 pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30; 
 const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to wait for buffer
@@ -599,8 +599,13 @@ pub struct SynchronizedDecoder {
 
     client_ip: IpAddr, 
 
+    transition_source_offset: f64, 
+    transition_target_offset: i64,
+    transition_progress: usize,
+    transition_total_frames: usize,
+
 }
-const EWMA_ALPHA: f64 = 0.25; // Adjust based on desired smoothing
+const EWMA_ALPHA: f64 = 1.0 ; // Adjust based on desired smoothing
 
 const FRAMES_BEFORE_SAFE_MODE: usize = 30; // Trigger safe mode after this many frames in Seeking
 const SAFE_MODE_PEEK_COUNT: usize = 240;   // How far to check, has effect on ram
@@ -611,16 +616,17 @@ enum SyncState {
     Seeking,    // Initial state, searching for the first good match
     Locked,     // Stable synchronization established, expecting specific offset
     Recovering, // Lost sync, searching again for a good match (like Seeking)
+    Transition, 
 }
 // Queue/Buffer Limits
 const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.5) as usize; // Max synchronized pairs buffered
-const MAX_REGULAR_PEEK_COUNT: usize = 15; // How far to look ahead in the regular stream buffer (adjust based on expected latency/jitter)
+const MAX_REGULAR_PEEK_COUNT: usize = 20; // How far to look ahead in the regular stream buffer (adjust based on expected latency/jitter)
 
 // Offset Adjustment Parameters (Locked State) - Tune these
 const MAX_OFFSET_CHANGE: i64 = 10; // Max allowed drift per frame before needing confirmation
-const OFFSET_CONFIRMATION_WINDOW: u32 = 5; // Consecutive frames needed to confirm a new offset
+const OFFSET_CONFIRMATION_WINDOW: u32 = 3; // Consecutive frames needed to confirm a new offset
 
-const OFFSET_TOLERANCE: i64 = 4; // Tolerance for small drifts
+const OFFSET_TOLERANCE: i64 = 20; // Tolerance for small drifts
 const RECOVERY_TIMING_MATCHES_NEEDED: u32 = 3; // Number of consecutive matching offsets to exit recovery
 
 
@@ -666,6 +672,11 @@ impl SynchronizedDecoder {
 
             client_ip, 
 
+            transition_source_offset: 0.0, 
+            transition_target_offset: 0,
+            transition_progress: 0,
+            transition_total_frames: 0,
+
             
         }
     }
@@ -699,18 +710,18 @@ impl SynchronizedDecoder {
         true
     }
 
-    fn update_offset_ewma(&mut self, new_offset: i64) {
-        let offset_f64 = new_offset as f64;
-        self.offset_ewma = Some(match self.offset_ewma {
-            Some(ewma) => ewma * (1.0 - EWMA_ALPHA) + offset_f64 * EWMA_ALPHA,
-            None => offset_f64
-        });
-    }
+    // fn update_offset_ewma(&mut self, new_offset: i64) {
+    //     let offset_f64 = new_offset as f64;
+    //     self.offset_ewma = Some(match self.offset_ewma {
+    //         Some(ewma) => ewma * (1.0 - EWMA_ALPHA) + offset_f64 * EWMA_ALPHA,
+    //         None => offset_f64
+    //     });
+    // }
 
-    fn get_smoothed_offset(&self) -> i64 {
-        self.offset_ewma.map(|x| x.round() as i64)
-            .unwrap_or(self.stable_offset.unwrap_or(0))
-    }
+    // fn get_smoothed_offset(&self) -> i64 {
+    //     self.offset_ewma.map(|x| x.round() as i64)
+    //         .unwrap_or(self.stable_offset.unwrap_or(0))
+    // }
 
     /// Processes incoming raw frame data for both streams.
     /// This should be called whenever new packets arrive.
@@ -868,6 +879,10 @@ impl SynchronizedDecoder {
                 }
             }
 
+            SyncState::Transition => {
+                // println!("TODO??? "); 
+            }
+
             SyncState::Locked => {
                 let offset = self.stable_offset.expect("Locked state must have stable offset");
                 let expected_reg_id = (max_id as i64 + offset) as usize;
@@ -877,14 +892,15 @@ impl SynchronizedDecoder {
 
                 // First, look for the *exact* expected ID
                 for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
+                    let sim: f64 = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+
                      if *reg_id == expected_reg_id {
-                         let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        //  let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
                          println!(" K Locked: Found expected Reg #{} for Max #{}. Sim: {:.4}", reg_id, max_id, sim);
                          exact_match_found = Some((idx, sim, *reg_id));
                          break; // Found the expected ID, stop searching
                      }
                       // While iterating, also track the overall best similarity just in case
-                     let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
                      if sim < best_sim {
                          best_sim = sim;
                          best_sim_match = Some((idx, sim, *reg_id));
@@ -964,6 +980,50 @@ impl SynchronizedDecoder {
                 }
             }
 
+            SyncState::Transition => {
+                // Calculate interpolated offset for this frame
+                let progress_ratio = self.transition_progress as f64 / self.transition_total_frames as f64;
+                let interpolated_offset = self.transition_source_offset as f64 + 
+                    (self.transition_target_offset as f64 - self.transition_source_offset) * progress_ratio;
+                
+                // Round to nearest integer
+                let current_offset = interpolated_offset.round() as i64;
+                self.stable_offset = Some(current_offset);
+                
+                // Find the frame that matches this interpolated offset
+                let expected_reg_id = (max_id as i64 + current_offset) as usize;
+                
+                // Look for the expected frame ID
+                let mut found_expected = false;
+                if let Some((best_idx, best_sim, best_reg_id)) = match_result {
+                    if best_reg_id == expected_reg_id && best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                        // Found the expected frame with good similarity
+                        consume_count = best_idx + 1;
+                        found_expected = true;
+                        println!("🔄 Transition progress: {}/{}. Using offset: {}", 
+                               self.transition_progress, self.transition_total_frames, current_offset);
+                    } else {
+                        // Best match isn't what we expected
+                        consume_count = 1; // Just consume oldest frame
+                        println!("🟡 Transition: Expected Reg #{} not found. Using oldest frame.", expected_reg_id);
+                    }
+                } else {
+                    // No match found
+                    consume_count = 0;
+                    println!("⚠️ Transition: No suitable frames found for offset {}", current_offset);
+                }
+                
+                // Increment transition progress
+                self.transition_progress += 1;
+                if self.transition_progress >= self.transition_total_frames {
+                    // Transition complete
+                    println!("✅ Transition complete. New offset: {}", self.transition_target_offset);
+                    self.sync_state = SyncState::Locked;
+                    self.stable_offset = Some(self.transition_target_offset);
+                }
+            }
+        
+
             SyncState::Recovering => {
                 // MODIFIED: Special handling for recovery state
                 if self.counter_recovery <= RECOVERY_DELAY_FRAMES_UNTIL_MATCH{
@@ -1032,70 +1092,31 @@ impl SynchronizedDecoder {
                 let current_offset = self.stable_offset.expect("Locked state must have offset");
                 if let Some((best_idx, best_sim, best_reg_id)) = match_result {
                     let observed_offset = best_reg_id as i64 - max_id as i64;
-                    let smoothed_offset: i64 = self.get_smoothed_offset();
-
-                    let instant_diff = (observed_offset - current_offset).abs();
-                    let smoothed_diff = (observed_offset as f64 - smoothed_offset as f64).abs();
-
-
+            
                     if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                        // Match is good enough similarity-wise
-                        self.update_offset_ewma(observed_offset);
-
-
-                        if instant_diff.abs() <= OFFSET_TOLERANCE {
-                            // Within tolerance: Consider it a perfect match
-                            println!("✅ Locked: Confirmed match (within tolerance). Max #{} <-> Reg #{} (Offset: {}, Sim: {:.4}). Consuming {} regular.", max_id, best_reg_id, current_offset, best_sim, best_idx + 1);
+                        // Simple difference check
+                        if (observed_offset - current_offset).abs() <= OFFSET_TOLERANCE {
+                            // Within tolerance - maintain synchronization
+                            println!("✅ Locked: Confirmed match. Max #{} <-> Reg #{} (Offset: {})", 
+                                max_id, best_reg_id, current_offset);
                             consume_count = best_idx + 1;
                             self.handle_good_match(max_id, best_reg_id);
-                            self.consecutive_offset_matches = 0; //reset confirmation counter because it was within tolerance.
                         } else {
-                            if smoothed_diff.abs() <= MAX_OFFSET_CHANGE as f64 {
-                                // Small drift, potentially adjust offset after confirmation
-                                self.consecutive_offset_matches += 1;
-                                println!(" K Locked: Gradual offset drift. Max #{} <-> Reg #{} (Sim: {:.4}). Observed: {}, Smoothed: {:.2}, Current: {}. Confirmation {}/{}",
-                                max_id, best_reg_id, best_sim, observed_offset, smoothed_offset, current_offset, 
-                                self.consecutive_offset_matches, OFFSET_CONFIRMATION_WINDOW);
-
-                                if self.consecutive_offset_matches >= OFFSET_CONFIRMATION_WINDOW {
-                                    println!("🔧 Locked: Adjusting stable offset from {} to {} based on consistent drift.", current_offset, smoothed_offset);
-                                    self.stable_offset = Some(smoothed_offset);
-                                    consume_count = best_idx + 1; // Consume the matched frame
-                                    self.handle_good_match(max_id, best_reg_id); // Resets poor matches etc.
-                                    self.consecutive_offset_matches = 0; // Reset confirmation counter
-
-                                    print_yellow!("[DBG {} ]: Output queue: {} |Sync state: {:?} |  Regular decoded: {} | Max decoded: {}  ",  ip, self.output_queue.len(),self.get_sync_state(), self.regular_decoder.decoded_frames.len(), self.max_decoder.decoded_frames.len()); 
-
-                                } else {
-                                    // Waiting for more confirmation - *consume the matched frame anyway* to keep streams moving
-                                    consume_count = best_idx + 1;
-                                    self.handle_good_match(max_id, best_reg_id); // Still a good match, reset poor counter
-                                }
-
-                            } else {
-                                // Large drift, even with good similarity. Likely a jump/loss event. Treat as mismatch.
-                                println!(" K Locked: Large offset drift detected! Max #{} <-> Reg #{} (Sim: {:.4}). Observed offset {}, expected {}. Likely desync.", max_id, best_reg_id, best_sim, observed_offset, current_offset);
-                                consume_count = 0; // Don't consume, let mismatch logic handle state change
-                                self.handle_mismatch(max_id);
-                                print_yellow!("[DBG {} ]: Output queue: {} |Sync state: {:?} |  Regular decoded: {} | Max decoded: {}  ",  ip, self.output_queue.len(),self.get_sync_state(), self.regular_decoder.decoded_frames.len(), self.max_decoder.decoded_frames.len()); 
-
-                            }
+                            // Outside tolerance - treat as mismatch
+                            println!("Locked: Offset mismatch ({} vs {})", observed_offset, current_offset);
+                            consume_count = 0;
+                            self.handle_mismatch(max_id);
                         }
                     } else {
-                        // Similarity is too poor, even if it was the best candidate. Treat as mismatch.
-                        println!(" K Locked: Best match Reg #{} for Max #{} has poor similarity ({:.4}). Treating as mismatch.", best_reg_id, max_id, best_sim);
-                        consume_count = 0; // Don't consume the poorly matching frame
+                        // Poor similarity - treat as mismatch
+                        println!("Locked: Poor similarity ({:.4})", best_sim);
+                        consume_count = 0;
                         self.handle_mismatch(max_id);
-                        print_yellow!("[DBG {} ]: Output queue: {} |Sync state: {:?} |  Regular decoded: {} | Max decoded: {}  ",  ip, self.output_queue.len(),self.get_sync_state(), self.regular_decoder.decoded_frames.len(), self.max_decoder.decoded_frames.len()); 
                     }
-
                 } else {
-                    // No acceptable match found at all in Locked state. Clear mismatch.
-                    println!(" K Locked: No acceptable match found for Max #{}. Mismatch.", max_id);
-                    consume_count = 0; // Don't consume anything
+                    // No match found - clear mismatch
+                    consume_count = 0;
                     self.handle_mismatch(max_id);
-                    print_yellow!("[DBG {} ]: Output queue: {} |Sync state: {:?} |  Regular decoded: {} | Max decoded: {}  ",  ip, self.output_queue.len(),self.get_sync_state(), self.regular_decoder.decoded_frames.len(), self.max_decoder.decoded_frames.len()); 
-
                 }
             }
         }
@@ -1121,6 +1142,27 @@ impl SynchronizedDecoder {
                 if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK {
                     let new_offset = reg_id as i64 - max_id as i64;
                     println!("🔒 Synchronization Locked! Offset: {}. (Based on Max #{} <-> Reg #{})", new_offset, max_id, reg_id);
+                    
+                        // If we have a previous offset that's significantly different
+                    if let Some(prev_offset) = self.stable_offset {
+                        if (prev_offset - new_offset).abs() > 2 { // If offset change is significant
+                            // Enter transition state
+                            println!("🔄 Starting gradual transition from offset {} to {}", 
+                                    prev_offset, new_offset);
+                            
+                            self.sync_state = SyncState::Transition;
+                            self.transition_source_offset = prev_offset as f64;
+                            self.transition_target_offset = new_offset as i64;
+                            self.transition_progress = 0;
+                            self.transition_total_frames = 30; // Adjust based on desired transition time
+                            
+                            // Keep using old offset for now
+                            self.stable_offset = Some(prev_offset);
+                            return;
+                        }
+                    }
+                    
+                    
                     self.sync_state = SyncState::Locked;
                     self.stable_offset = Some(new_offset);
                     self.consecutive_good_matches = 0; // Reset for next state
@@ -1129,6 +1171,10 @@ impl SynchronizedDecoder {
 
                     self.frames_in_seeking = 0;
                     self.safe_mode_active = false;
+
+
+
+
                 } else {
                     // Still seeking/recovering, update potential offset if it's the first good match
                     if self.consecutive_good_matches == 1 {
@@ -1136,7 +1182,11 @@ impl SynchronizedDecoder {
                     }
                 }
             }
-            SyncState::Locked => {
+            SyncState::Transition => {
+
+            }
+
+            SyncState::Locked  => {
                 // Already locked, a good match just confirms it.
                 // Reset the offset drift confirmation counter unless it was just adjusted.
                 // Note: The adjustment logic in process_match_result handles resetting consecutive_offset_matches upon successful adjustment.
@@ -1166,6 +1216,7 @@ impl SynchronizedDecoder {
                  // Still seeking, just continue. No state change.
                  println!(" K Seeking: Mismatch for Max #{}. Continuing search.", max_id);
              }
+             SyncState::Transition => {println!("K Transitioning. Max #{}", max_id); }
              SyncState::Locked => {
                  self.consecutive_poor_matches += 1;
                  println!(" K Locked: Mismatch #{} for Max #{}. {}/{} consecutive poor matches.", self.consecutive_poor_matches, max_id, self.consecutive_poor_matches, CONSECUTIVE_MISMATCHES_TO_RECOVER);
@@ -1396,6 +1447,8 @@ pub struct HevcDecoder {
     pending_frames: VecDeque<(Vec<u8>, Vec<u32>)>, // (raw, converted pixels)
 
     pub internal_frame_counter: usize, // Counter for frames successfully decoded *by* ffmpeg
+
+    processing_semaphore: Arc<Semaphore>,
 }
 #[allow(non_camel_case_types, unused)]
 impl HevcDecoder {
@@ -1547,6 +1600,10 @@ impl HevcDecoder {
             initialization_phase: false, // Flag for the decoder's initialization phase
             pending_frames: VecDeque::new(),
             internal_frame_counter: 0,
+            // frame_rate_target: FRAMERATE_WINDOWS as f32, 
+            // last_frame_time: Instant::now(),
+            // frame_interval: Duration::from_secs_f64(1.0 / FRAMERATE_WINDOWS as f64), 
+            processing_semaphore: Arc::new(Semaphore::new(3)),  
         }
     }
 
@@ -1819,6 +1876,8 @@ impl HevcDecoder {
         let alpha = 0.1; // Use a fixed alpha for simplicity
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
 
+        let _permit = self.processing_semaphore.acquire();
+        
         // Add data to the parser
         self.parser.add_data(&packet);
 

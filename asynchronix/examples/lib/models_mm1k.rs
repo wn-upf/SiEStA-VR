@@ -81,8 +81,8 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: f64 = 15.0;
-pub const STEP1_TEND: f64 = 16.0;
+pub const STEP1_TBEGIN: f64 = 14.0;
+pub const STEP1_TEND: f64 = 21.0;
 
 pub const STEP2_TBEGIN: f64 = 18.0;
 pub const STEP2_TEND: f64 = 19.0;
@@ -604,20 +604,20 @@ impl QueueMechanism {
 
         if test_pl {
             network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-                drop_probability: (0.005),
+                drop_probability: (0.0003),
                 valid_from: valid_from,
                 valid_until: valid_until,
             });
-            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-                drop_probability: (0.01),
-                valid_from: valid_from2,
-                valid_until: valid_until2,
-            });
-            network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-                drop_probability: (0.02),
-                valid_from: valid_from3,
-                valid_until: valid_until3,
-            });
+            // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
+            //     drop_probability: (0.01),
+            //     valid_from: valid_from2,
+            //     valid_until: valid_until2,
+            // });
+            // network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
+            //     drop_probability: (0.02),
+            //     valid_from: valid_from3,
+            //     valid_until: valid_until3,
+            // });
         }
         if test_jitter {
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
