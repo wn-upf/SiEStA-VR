@@ -1,6 +1,8 @@
-NUMBER_OF_JOBS=5
-SERIAL_EXECUTION=0
-
+NUMBER_OF_JOBS=3
+SERIAL_EXECUTION=1
+N_XR=( 1 )
+initial_bitrate_mbps=(40.0 )
+TEST_TYPE=("STD" )  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
 
 
 simTime=70.0
@@ -22,11 +24,6 @@ IS_UL_BG=(0)
 # N_XR=(1 2 3 4 5)
 # initial_bitrate_mbps=(0.1 1 2 3 5 10 20 40 60 80 100)
 
-
-N_XR=(1)
-initial_bitrate_mbps=(1.0 5.0 10.0 100.0)
-
-TEST_TYPE=("BW" "JI" "PL")  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
 
 # Define the function to execute on Ctrl+C
 handle_interrupt() {

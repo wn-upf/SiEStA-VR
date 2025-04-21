@@ -61,7 +61,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 100.0;
+pub const OFFSET_VIDEO: f64 = 140.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -1886,7 +1886,7 @@ impl<H: Serialize> StreamSender<H> {
                 // println!("No files to choose from");
             }
         };
-        final_file = "cut_video";
+        final_file = "snow";
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
@@ -1912,8 +1912,8 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                // let random_offset = OFFSET_VIDEO;
+                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                let random_offset = OFFSET_VIDEO;
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,

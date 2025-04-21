@@ -967,7 +967,7 @@ impl SynchronizedDecoder {
                     // No candidates were available (should have been handled earlier) or no match found at all.
                     // This implies a significant gap in the regular stream. Output max only.
                     println!(" K {:?}: No match found for Max #{}. Outputting max only.", self.sync_state, max_id);
-                     consume_count = 0; // Don't consume regular frames if none match
+                     consume_count = 1; // Don't consume regular frames if none match
                     self.handle_mismatch(max_id);
                 }
             }
@@ -1052,7 +1052,7 @@ impl SynchronizedDecoder {
                         } else {
                             // Outside tolerance - treat as mismatch
                             println!("Locked: Offset mismatch ({} vs {})", observed_offset, current_offset);
-                            const NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC: usize = 5; 
+                            const NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC: usize = 3; 
                             if observed_offset  != self.offset_candidate{
                                 self.offset_candidate = observed_offset ; 
                                 self.offset_consecutive_mismatches = 0; 
@@ -1236,7 +1236,7 @@ impl SynchronizedDecoder {
             let current_frame_id = self.regular_decoder.frames_processed; // Get ID *before* popping
             if let Some(frame_raw) = self.regular_decoder.decoded_frames.pop_front() {
                 // Increment processed count *after* successfully popping
-                // self.regular_decoder.frames_processed = self.regular_decoder.frames_processed.saturating_add(1);
+                self.regular_decoder.frames_processed = self.regular_decoder.frames_processed.saturating_add(1);
 
                 if let Some(pixels) = convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                     frames.push((frame_raw, pixels, current_frame_id));
@@ -1334,6 +1334,11 @@ impl SynchronizedDecoder {
      pub fn get_stable_offset(&self) -> Option<i64> {
         self.stable_offset
      }
+
+     pub fn change_stable_offset(&mut self, new: i64) {
+        self.stable_offset = Some(new); 
+     }
+
 }
 
 /// Standalone function for finding the next NAL start code in a buffer
@@ -4933,6 +4938,14 @@ impl XRClient {
                             // and Some(data) for the max frame if found.
                             print_yellow!("Processing missing regular frame {} (Max frame present: {})", missing_id, max_frame_data.is_some());
                             sync_decoder_guard.process_packets(None, max_frame_data);
+                            
+                            if let Some(prev_offset) = sync_decoder_guard.stable_offset {
+                                let new_offset = prev_offset - 2; 
+                                sync_decoder_guard.change_stable_offset(new_offset); 
+                                print_yellow!("[CHANGE OFFSET] Reducing offset from {} to {} due to loss", prev_offset, new_offset); 
+                            } 
+
+                            
 
                              // Mark as processed in the tracking buffer *after* attempting to process
                              self.missing_frames_buffer.insert(missing_id, true);
