@@ -126,6 +126,13 @@ pub const RECOVERY_DELAY_FRAMES_UNTIL_MATCH :usize = IDR_FRAME_SIZE_GOP;
 pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30; 
 const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to wait for buffer
 
+const RECOVERY_GRACE_PERIOD: usize = 30;      // Frames to wait before trying to find new similarity matches
+const RECOVERY_MATCH_THRESHOLD: f64 = 0.35;   // More lenient similarity threshold during recovery
+const RECOVERY_MAX_ATTEMPTS: usize = 3;       // How many consecutive frames to check before accepting new offset
+
+
+
+
 
 
 /// Number of consecutive good matches required to re-establish synchronization
@@ -566,67 +573,46 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
     Some(pixels)
 }
 
-
-
 pub struct SynchronizedDecoder {
     regular_decoder: HevcDecoder,
     max_decoder: HevcDecoder,
-    output_queue: VecDeque<FramePair>, // Holds synchronized pairs ready for consumption
+    output_queue: VecDeque<FramePair>,
     throttle_semaphore: Arc<Semaphore>,
-    next_frame_id: Arc<AtomicUsize>, // Sequential ID for output FramePairs
-
-    // Synchronization State
-    sync_state: SyncState,
-    stable_offset: Option<i64>, // Locked state: regular_id = max_id + offset
-    consecutive_good_matches: u32,
-    consecutive_poor_matches: u32,
-    consecutive_offset_matches: u32, // Counter for gradual offset adjustments
-    last_processed_max_frame_id: Option<usize>, // Debugging/tracking
-
-    recovery_potential_offset: Option<i64>,
-    consecutive_timing_matches: u32,
-
-    counter_recovery: usize, // counter to start trying to find better similarity on recovery, if we tried during artifacts then we cause more artifacts; so adding some delay through this variable. 
-
-    frames_in_seeking: usize,
-    safe_mode_active: bool,
-
-    offset_ewma: Option<f64>,
-    ewma_alpha: f64, // Smoothing factor
-
+    next_frame_id: Arc<AtomicUsize>,
+    
+    // Sync state
+    state: SyncState,
+    offset: Option<i64>,
+    
+    // Counters for state transitions
+    match_counter: usize,
+    mismatch_counter: usize,
+    
+    // Buffering
     buffering_active: bool,
-    buffering_start_time: Option<Instant>, 
+    buffering_start_time: Option<Instant>,
+    
+    client_ip: IpAddr,
 
-    client_ip: IpAddr, 
-
-    offset_candidate: i64,
-    offset_consecutive_mismatches: usize, 
-
+    recovery_frame_counter: usize,             // Counts frames processed in recovery mode
+    recovery_last_offset: Option<i64>,         // Stores the offset when entering recovery mode
+    recovery_consecutive_matches: usize,       // Counts consecutive good matches with a new offset
+    recovery_candidate_offset: Option<i64>,    // Potential new offset during recovery
 }
-const EWMA_ALPHA: f64 = 1.0 ; // Adjust based on desired smoothing
-
-const FRAMES_BEFORE_SAFE_MODE: usize = 30; // Trigger safe mode after this many frames in Seeking
-const SAFE_MODE_PEEK_COUNT: usize = 240;   // How far to check, has effect on ram
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SyncState {
-    Seeking,    // Initial state, searching for the first good match
-    Locked,     // Stable synchronization established, expecting specific offset
-    Recovering, // Lost sync, searching again for a good match (like Seeking)
+    Seeking,    // Looking for initial synchronization
+    Locked,     // Stable synchronization with known offset
+    Recovering, // Lost sync, trying to find it again
 }
-// Queue/Buffer Limits
-const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.5) as usize; // Max synchronized pairs buffered
-const MAX_REGULAR_PEEK_COUNT: usize = 20; // How far to look ahead in the regular stream buffer (adjust based on expected latency/jitter)
 
-// Offset Adjustment Parameters (Locked State) - Tune these
-const MAX_OFFSET_CHANGE: i64 = 10; // Max allowed drift per frame before needing confirmation
-const OFFSET_CONFIRMATION_WINDOW: u32 = 3; // Consecutive frames needed to confirm a new offset
-
-const OFFSET_TOLERANCE: i64 = 20; // Tolerance for small drifts
-const RECOVERY_TIMING_MATCHES_NEEDED: u32 = 3; // Number of consecutive matching offsets to exit recovery
-
-
+// Configuration constants
+const MAX_OUTPUT_QUEUE_LEN: usize = 60;
+const MATCHES_NEEDED_TO_LOCK: usize = 3;
+const MISMATCHES_TO_RECOVERY: usize = 5;
+const MAX_PEEK_COUNT: usize = 20;
+const BUFFERING_THRESHOLD: usize = 30;
 
 impl SynchronizedDecoder {
     pub fn new(client_ip: IpAddr, throttle_semaphore: Arc<Semaphore>) -> Self {
@@ -646,556 +632,441 @@ impl SynchronizedDecoder {
             output_queue: VecDeque::with_capacity(MAX_OUTPUT_QUEUE_LEN),
             throttle_semaphore,
             next_frame_id: Arc::new(AtomicUsize::new(0)),
-
-            sync_state: SyncState::Seeking,
-            stable_offset: None,
-            consecutive_good_matches: 0,
-            consecutive_poor_matches: 0,
-            consecutive_offset_matches: 0,
-            last_processed_max_frame_id: None,
-            
-            recovery_potential_offset: None,
-            consecutive_timing_matches: 0,
-
-            counter_recovery: 0, 
-            frames_in_seeking: 0,
-            safe_mode_active: false,
-
-            offset_ewma: None,
-            ewma_alpha: EWMA_ALPHA, // Smoothing factor
-
+            state: SyncState::Seeking,
+            offset: None,
+            match_counter: 0,
+            mismatch_counter: 0,
             buffering_active: true,
-            buffering_start_time: Some(Instant::now()), 
+            buffering_start_time: Some(Instant::now()),
+            client_ip,
 
-            client_ip, 
-
-            offset_candidate: 0,
-            offset_consecutive_mismatches: 0, 
-
+            recovery_candidate_offset: None,
+            recovery_frame_counter: 0,
+            recovery_last_offset: None, 
+            recovery_consecutive_matches: 0 , 
         }
     }
-
-    fn check_buffering_status(&mut self) -> bool {
-        if !self.buffering_active {
-            return false;
-        }
     
-        let buffer_size = self.output_queue.len();
-        let elapsed = self.buffering_start_time
-            .map(|t| t.elapsed())
-            .unwrap_or(Duration::ZERO);
-    
-        if buffer_size >= BUFFERING_START_FRAMES_UNTIL_PLAYBACK || elapsed >= MAX_BUFFERING_TIME {
-            print_green!("✅ Buffer ready! Size: {}/{}, Time elapsed: {:.2}s", 
-                    buffer_size, BUFFERING_START_FRAMES_UNTIL_PLAYBACK, elapsed.as_secs_f32());
-            self.buffering_active = false;
-            return false;
-        }
-    
-        // More frequent and detailed status updates
-        if buffer_size % 2 == 0 || buffer_size == 1 {
-            println!("🔄 Buffering... Size: {}/{}, Time: {:.2}s, Decoders: reg={}, max={}", 
-                    buffer_size, 
-                    BUFFERING_START_FRAMES_UNTIL_PLAYBACK, 
-                    elapsed.as_secs_f32(),
-                    self.regular_decoder.decoded_frames.len(),
-                    self.max_decoder.decoded_frames.len());
-        }
-        true
-    }
-
-    // fn update_offset_ewma(&mut self, new_offset: i64) {
-    //     let offset_f64 = new_offset as f64;
-    //     self.offset_ewma = Some(match self.offset_ewma {
-    //         Some(ewma) => ewma * (1.0 - EWMA_ALPHA) + offset_f64 * EWMA_ALPHA,
-    //         None => offset_f64
-    //     });
-    // }
-
-    // fn get_smoothed_offset(&self) -> i64 {
-    //     self.offset_ewma.map(|x| x.round() as i64)
-    //         .unwrap_or(self.stable_offset.unwrap_or(0))
-    // }
-
-    /// Processes incoming raw frame data for both streams.
-    /// This should be called whenever new packets arrive.
     pub fn process_packets(&mut self, regular_frame: Option<Vec<u8>>, max_frame: Option<Vec<u8>>) {
+        // Process incoming packets
         if let Some(reg_data) = regular_frame {
             self.regular_decoder.process_packet(reg_data);
         }
         if let Some(max_data) = max_frame {
-             self.max_decoder.process_packet(max_data);
+            self.max_decoder.process_packet(max_data);
         }
 
-        // After potentially adding new data, attempt to synchronize
+        // Try to synchronize frames
         self.synchronize_frame_buffers();
     }
-
-    /// The core synchronization logic. Attempts to pair frames from the
-    /// max_decoder buffer with frames from the regular_decoder buffer.
+    
+    fn check_buffering_status(&mut self) -> bool {
+        if !self.buffering_active {
+            return false;
+        }
+        
+        let buffer_size = self.output_queue.len();
+        let elapsed = self.buffering_start_time
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO);
+            
+        if buffer_size >= BUFFERING_THRESHOLD || elapsed >= MAX_BUFFERING_TIME {
+            println!("✅ Buffer ready! Size: {}/{}, Time elapsed: {:.2}s", 
+                buffer_size, BUFFERING_THRESHOLD, elapsed.as_secs_f32());
+            self.buffering_active = false;
+            return false;
+        }
+        
+        return true;
+    }
+    
+    fn can_synchronize(&self) -> bool {
+        // Need sufficient frames in both decoders and space in output queue
+        return self.regular_decoder.available_frames() >= 2 &&
+               self.max_decoder.available_frames() >= 1 &&
+               self.output_queue.len() < MAX_OUTPUT_QUEUE_LEN;
+    }
+    
     fn synchronize_frame_buffers(&mut self) {
-        // 1. Ensure internal decoders process any stdout data
+        // Process any decoded frames
         self.regular_decoder.process_decoded_frames();
         self.max_decoder.process_decoded_frames();
-
-        // 2. Main Synchronization Loop
+        
+        // Main synchronization loop
         while self.can_synchronize() {
-
-            if self.sync_state == SyncState::Seeking {
-                self.frames_in_seeking += 1;
-                
-                if self.frames_in_seeking >= FRAMES_BEFORE_SAFE_MODE && !self.safe_mode_active {
-                    self.safe_mode_active = true;
-                    println!("🔍 Entering safe mode after {} frames in Seeking state. Using extended search window.", self.frames_in_seeking);
+            // Get the next max frame
+            if let Some((max_raw, max_pixels, max_id)) = self.consume_max_frame() {
+                // Peek at regular frames to find matches
+                let regular_candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                if regular_candidates.is_empty() {
+                    continue; // No regular frames available
                 }
+                
+                // Find best match based on current state
+                let match_result = self.find_best_match(&max_raw, max_id, &regular_candidates);
+                
+                // Handle the match result
+                self.process_match(match_result, max_id, max_raw, max_pixels);
             } else {
-                // Reset counters when not in Seeking
-                self.frames_in_seeking = 0;
-                self.safe_mode_active = false;
+                break; // No more max frames
             }
-
-
-            // Consume exactly ONE reference frame. This drives the process.
-            // Panics if max_decoder buffer is empty, but can_synchronize should prevent this.
-            let (max_raw, max_pixels, max_id) = self.consume_max_frame().expect("Consume max frame failed despite check");
-            self.last_processed_max_frame_id = Some(max_id);
-
-
-            let peek_count = if self.safe_mode_active {
-                SAFE_MODE_PEEK_COUNT
-            } else {
-                MAX_REGULAR_PEEK_COUNT
-            };
-
-
-            // Peek at available regular frames without consuming yet
-            let regular_candidates = self.peek_regular_frames(peek_count);
-
-            if regular_candidates.is_empty() {
-                // // Max frame exists, but no regular frames are ready *at all*.
-                // // Output the max frame only. This is a clear mismatch.
-                // println!("⚠️ Sync: Max #{} present, but no regular frames decoded yet. Outputting max only.", max_id);
-                // self.output_pair(None, Some((max_raw, max_pixels, max_id)));
-                // self.handle_mismatch(max_id); // Update state machine for mismatch
-                continue; // Process next max frame
-            }
-
-            // Find the best candidate based on current state
-            let match_result = self.find_best_match(&max_raw, max_id, &regular_candidates);
-
-            // Process the result: Update state, consume regular frames, output pair
-            self.process_match_result(match_result, max_id, max_raw, max_pixels);
-
-        } // End while self.can_synchronize()
-
-        // Log if loop stopped due to output queue being full
-        if !self.max_decoder.decoded_frames.is_empty() && self.output_queue.len() >= MAX_OUTPUT_QUEUE_LEN {
-             println!(" K Sync: Output queue full ({} items). Pausing sync.", self.output_queue.len());
         }
     }
-
-    /// Determines if synchronization can proceed.
-    // /// Requires reference frames and space in the output queue.
-    // fn can_synchronize(&self) -> bool {
-    //     !self.max_decoder.decoded_frames.is_empty() && self.output_queue.len() < MAX_OUTPUT_QUEUE_LEN
-    // }
-
-    fn can_synchronize(&self) -> bool {
-
-
-        const MAX_QUEUE_IMBALANCE: usize = 8; // Allowed difference between queues
-
-        let reg_frames = self.regular_decoder.available_frames();
-        let max_frames = self.max_decoder.available_frames();
-
-        
-        // Require at least 2 frames from each decoder before synchronizing
-        self.regular_decoder.available_frames() >= 4 &&
-        self.max_decoder.available_frames() >= 4 &&
-        self.output_queue.len() < MAX_OUTPUT_QUEUE_LEN
-    }
-
-    /// Finds the best matching regular frame candidate for the given max frame.
-    /// Returns Option<(candidate_index, similarity, regular_id)>
+    
     fn find_best_match(
-        &mut self,
+        &self,
         max_raw: &[u8],
         max_id: usize,
-        candidates: &[(Vec<u8>, Vec<u32>, usize)], // (raw, pixels, id)
-    ) -> Option<(usize, f64, usize)> { // (index, similarity, reg_id)
-        let mut best_match: Option<(usize, f64, usize)> = None;
-
-        match self.sync_state {
-            SyncState::Seeking => {
-                // Find the single best similarity match across all candidates
+        candidates: &[(Vec<u8>, Vec<u32>, usize)]
+    ) -> Option<(usize, f64, usize)> {
+        match self.state {
+            SyncState::Seeking | SyncState::Recovering => {
+                // Find the best similarity match across all candidates
+                let mut best_idx = 0;
                 let mut best_sim = f64::MAX;
+                let mut best_reg_id = 0;
+                
                 for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
                     let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
                     if sim < best_sim {
                         best_sim = sim;
-                        best_match = Some((idx, sim, *reg_id));
+                        best_idx = idx;
+                        best_reg_id = *reg_id;
                     }
                 }
-                if let Some((_, sim, reg_id)) = best_match {
-                     println!(" K {:?}: Best similarity for Max #{} is Reg #{} (Sim: {:.4})", self.sync_state, max_id, reg_id, sim);
-                } else {
-                    println!(" K {:?}: No candidates to compare for Max #{}", self.sync_state, max_id); // Should not happen if candidates isn't empty
+                
+                if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                    return Some((best_idx, best_sim, best_reg_id));
                 }
-            }
-            SyncState::Recovering => {
-                self.counter_recovery += 1; 
-
-                let mut oldest_idx = 0; // 
-                if !candidates.is_empty() && self.counter_recovery <  RECOVERY_DELAY_FRAMES_UNTIL_MATCH {
-                    let (_, _, oldest_reg_id) = &candidates[oldest_idx];
+            },
+            SyncState::Locked => {
+                // In locked state, use the expected offset
+                if let Some(offset) = self.offset {
+                    let expected_reg_id = (max_id as i64 + offset) as usize;
                     
-                    oldest_idx += 1; 
-                    // Assign a dummy similarity score
-                    let dummy_sim = 1.0; // High value to indicate it's not a similarity-based decision
-                    best_match = Some((oldest_idx, dummy_sim, *oldest_reg_id));
-                    println!(" K Recovering: Using time-based match. Taking oldest Reg #{} for Max #{} (avoiding similarity check)", oldest_reg_id, max_id);
-                }
-                else if self.counter_recovery >= RECOVERY_DELAY_FRAMES_UNTIL_MATCH {
-
+                    // First try to find exact match
+                    for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
+                        if *reg_id == expected_reg_id {
+                            let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                            if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                                return Some((idx, sim, *reg_id));
+                            }
+                        }
+                    }
+                    
+                    // If exact match not found, find best similarity
+                    let mut best_idx = 0;
                     let mut best_sim = f64::MAX;
+                    let mut best_reg_id = 0;
+                    
                     for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
                         let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
                         if sim < best_sim {
                             best_sim = sim;
-                            best_match = Some((idx, sim, *reg_id));
+                            best_idx = idx;
+                            best_reg_id = *reg_id;
                         }
                     }
-                    if let Some((_, sim, reg_id)) = best_match {
-                        println!(" K {:?}: Best similarity for Max #{} is Reg #{} (Sim: {:.4})", self.sync_state, max_id, reg_id, sim);
-                    } else {
-                        println!(" K {:?}: No candidates to compare for Max #{}", self.sync_state, max_id); // Should not happen if candidates isn't empty
+                    
+                    if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                        return Some((best_idx, best_sim, best_reg_id));
                     }
                 }
-            }
-
-
-
-            SyncState::Locked => {
-                let offset = self.stable_offset.expect("Locked state must have stable offset");
-                let expected_reg_id = (max_id as i64 + offset) as usize;
-                let mut exact_match_found: Option<(usize, f64, usize)> = None;
-                let mut best_sim_match: Option<(usize, f64, usize)> = None;
-                let mut best_sim = f64::MAX;
-
-                // First, look for the *exact* expected ID
-                for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
-                    let sim: f64 = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
-
-                     if *reg_id == expected_reg_id {
-                        //  let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
-                         println!(" K Locked: Found expected Reg #{} for Max #{}. Sim: {:.4}", reg_id, max_id, sim);
-                         exact_match_found = Some((idx, sim, *reg_id));
-                         break; // Found the expected ID, stop searching
-                     }
-                      // While iterating, also track the overall best similarity just in case
-                     if sim < best_sim {
-                         best_sim = sim;
-                         best_sim_match = Some((idx, sim, *reg_id));
-                     }
-                }
-
-                // If exact ID wasn't found, find best sim among others (if not already done)
-                if exact_match_found.is_none() && best_sim_match.is_none() {
-                     for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
-                        let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
-                        if sim < best_sim {
-                            best_sim = sim;
-                            best_sim_match = Some((idx, sim, *reg_id));
-                        }
-                     }
-                }
-
-
-                // Prioritize the exact match if found and acceptable
-                if let Some((idx, sim, reg_id)) = exact_match_found {
-                    if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                        best_match = Some((idx, sim, reg_id)); // Good exact match
-                    } else {
-                        println!(" K Locked: Expected Reg #{} found, but similarity {:.4} is too high. Potential desync.", reg_id, sim);
-                        // Don't consider it a valid match, let mismatch logic handle it
-                        best_match = None;
-                    }
-                
-
-                } else if let Some((idx, sim, reg_id)) = best_sim_match {
-                     // Exact ID not found (or bad sim), consider best similarity match
-                     println!(" K Locked: Expected Reg #{} not found/unsuitable for Max #{}. Best alternative is Reg #{} (Sim: {:.4})", expected_reg_id, max_id, reg_id, sim);
-                     best_match = Some((idx, sim, reg_id)); // Use the best similarity found
-                 } else {
-                    println!(" K Locked: No suitable match found for Max #{}", max_id);
-                    best_match = None; // No good match found at all
-                 }
             }
         }
-        best_match
+        
+        None // No good match found
     }
-
-     /// Processes the result of find_best_match, updates state, consumes frames, and outputs.
-    fn process_match_result(
-        &mut self,
-        match_result: Option<(usize, f64, usize)>, // (index, similarity, reg_id)
+    
+    fn process_match(
+        &mut self, 
+        match_result: Option<(usize, f64, usize)>,
         max_id: usize,
         max_raw: Vec<u8>,
-        max_pixels: Vec<u32>,
+        max_pixels: Vec<u32>
     ) {
-
-        let ip = self.client_ip; 
-
-        let mut consume_count = 0; // How many regular frames to consume
-        let mut matched_regular: Option<(Vec<u8>, Vec<u32>, usize)> = None;
-
-        match self.sync_state {
-            SyncState::Seeking => {
-                if let Some((best_idx, best_sim, best_reg_id)) = match_result {
-                    if best_sim <= GOOD_SIMILARITY_THRESHOLD {
-                        // Found a good match!
-                        println!("✅ {:?}: Good match! Max #{} <-> Reg #{} (Sim: {:.4}). Consuming {} regular frames.", self.sync_state, max_id, best_reg_id, best_sim, best_idx + 1);
-                        consume_count = best_idx + 1;
-                        self.handle_good_match(max_id, best_reg_id);
+        let mut matched_regular = None;
+        
+        if self.state == SyncState::Recovering {
+            self.recovery_frame_counter += 1;
+            
+            // During initial recovery period, just use the previous offset and don't check similarity
+            if self.recovery_frame_counter < RECOVERY_GRACE_PERIOD {
+                if let Some(old_offset) = self.recovery_last_offset {
+                    // Calculate where the regular frame should be based on the old offset
+                    let expected_reg_id = (max_id as i64 + old_offset) as usize;
+                    
+                    // Find and consume the regular frame closest to the expected ID
+                    let mut closest_idx = 0;
+                    let mut closest_distance = usize::MAX;
+                    
+                    let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                    for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
+                        let distance = reg_id.abs_diff(expected_reg_id);
+                        if distance < closest_distance {
+                            closest_distance = distance;
+                            closest_idx = idx;
+                        }
+                    }
+                    
+                    // Consume frames up to and including the closest match
+                    if !candidates.is_empty() {
+                        let consumed_frames = self.consume_regular_frames(closest_idx + 1);
+                        matched_regular = consumed_frames.last().cloned();
+                        
+                        println!("🔄 Recovery: Using old offset {}. Expected: {}, Actual: {:?}, Distance: {}",
+                                 old_offset, expected_reg_id, 
+                                 matched_regular.as_ref().map(|(_, _, id)| id), 
+                                 closest_distance);
                     } else {
-                        // Best match isn't good enough. Consume only the oldest regular frame to advance.
-                        println!("🟡 {:?}: Best match Reg #{} for Max #{} not good enough (Sim: {:.4}). Consuming 1 regular frame.", self.sync_state, best_reg_id, max_id, best_sim);
-                        consume_count = 1; // Consume the oldest frame
-                        self.handle_mismatch(max_id);
+                        // No regular frames available, just output the max frame
+                        println!("🔄 Recovery: No regular frames available for Max #{}", max_id);
+                    }
+                }
+            } else {
+                // After grace period, start looking for good similarity matches again
+                if let Some((best_idx, best_sim, best_reg_id)) = match_result {
+                    let new_offset = best_reg_id as i64 - max_id as i64;
+                    
+                    // Check if this is a genuinely good match
+                    if best_sim <= RECOVERY_MATCH_THRESHOLD {
+                        if self.recovery_candidate_offset == Some(new_offset) {
+                            // This offset matches our previous candidate
+                            self.recovery_consecutive_matches += 1;
+                            
+                            // If we've seen enough consecutive matches with this offset
+                            if self.recovery_consecutive_matches >= RECOVERY_MAX_ATTEMPTS {
+                                // We have confidence in this new offset
+                                if self.recovery_last_offset == Some(new_offset) {
+                                    // It's the same as our original offset - return to locked state
+                                    println!("✅ Recovery complete: Returning to locked state with original offset {}", new_offset);
+                                    self.state = SyncState::Locked;
+                                    self.offset = Some(new_offset);
+                                } else {
+                                    // It's a new offset - we need to update
+                                    println!("✅ Recovery complete: Re-synchronized with new offset {} (was {})",
+                                             new_offset, self.recovery_last_offset.unwrap_or(0));
+                                    self.state = SyncState::Locked;
+                                    self.offset = Some(new_offset);
+                                }
+                                self.recovery_consecutive_matches = 0;
+                                self.recovery_candidate_offset = None;
+                            }
+                        } else {
+                            // New candidate offset
+                            println!("🔄 Recovery: Found potential new offset {} (sim: {:.4})", new_offset, best_sim);
+                            self.recovery_candidate_offset = Some(new_offset);
+                            self.recovery_consecutive_matches = 1;
+                        }
+                        
+                        // Consume the matched regular frame
+                        let consumed_frames = self.consume_regular_frames(best_idx + 1);
+                        matched_regular = consumed_frames.last().cloned();
+                    } else {
+                        // Not a good match - keep using the old offset
+                        if let Some(old_offset) = self.recovery_last_offset {
+                            // Use time-based matching like in the grace period
+                            let expected_reg_id = (max_id as i64 + old_offset) as usize;
+                            
+                            // Find closest regular frame (similar to grace period logic)
+                            let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                            if !candidates.is_empty() {
+                                let mut closest_idx = 0;
+                                let mut closest_distance = usize::MAX;
+                                
+                                for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
+                                    let distance = reg_id.abs_diff(expected_reg_id);
+                                    if distance < closest_distance {
+                                        closest_distance = distance;
+                                        closest_idx = idx;
+                                    }
+                                }
+                                
+                                // Consume frames up to and including the closest match
+                                let consumed_frames = self.consume_regular_frames(closest_idx + 1);
+                                matched_regular = consumed_frames.last().cloned();
+                                
+                                println!("🔄 Recovery: Using old offset {}. Expected: {}, Actual: {:?} (poor sim: {:.4})",
+                                         old_offset, expected_reg_id, 
+                                         matched_regular.as_ref().map(|(_, _, id)| id), 
+                                         best_sim);
+                            }
+                        } else {
+                            // Fallback - consume just the oldest frame
+                            let consumed_frames = self.consume_regular_frames(1);
+                            matched_regular = consumed_frames.last().cloned();
+                        }
                     }
                 } else {
-                    // No candidates were available (should have been handled earlier) or no match found at all.
-                    // This implies a significant gap in the regular stream. Output max only.
-                    println!(" K {:?}: No match found for Max #{}. Outputting max only.", self.sync_state, max_id);
-                     consume_count = 1; // Don't consume regular frames if none match
-                    self.handle_mismatch(max_id);
-                }
-            }
-
-            SyncState::Recovering => {
-                // MODIFIED: Special handling for recovery state
-                if self.counter_recovery <= RECOVERY_DELAY_FRAMES_UNTIL_MATCH{
-                    if let Some((_, _, best_reg_id)) = match_result {
-                        // Always take the oldest frame in recovery mode
-                        consume_count = 1;
-                        println!("🔄 Recovering: Using time-based approach. Taking Reg #{} for Max #{}| potential offset: {:?} | Stable offset: {:?} , ", best_reg_id, max_id, self.recovery_potential_offset, self.stable_offset);
+                    // No match found - use old offset if available
+                    if let Some(old_offset) = self.recovery_last_offset {
+                        // Use time-based matching as fallback
+                        let expected_reg_id = (max_id as i64 + old_offset) as usize;
+                        println!("🔄 Recovery: No match found. Using old offset {} for Max #{} (expecting Reg #{})",
+                                 old_offset, max_id, expected_reg_id);
                         
-                        // Count consecutive frames with stable timing
-                        let potential_offset = best_reg_id as i64 - max_id as i64;
-                        
-                        // Check if we've found a consistent offset pattern
-                        if let Some(prev_offset) = self.recovery_potential_offset {
-                            if prev_offset == potential_offset {
-                                self.consecutive_timing_matches += 1;
-                                println!(" +++ K Recovering: Consistent timing offset {} seen ({}/{})", potential_offset, self.consecutive_timing_matches, RECOVERY_TIMING_MATCHES_NEEDED);
-                                
-                                // If we've seen enough consistent offsets, try to lock
-                                if self.consecutive_timing_matches >= RECOVERY_TIMING_MATCHES_NEEDED && !self.buffering_active {
-                                    println!("🔒 Recovering -> Locked: Based on consistent timing with offset {}", potential_offset);
-                                    self.sync_state = SyncState::Locked;
-                                    self.stable_offset = Some(potential_offset);
-                                    self.consecutive_timing_matches = 0;
-                                }
-                            } else {
-                                // Reset counter if offset changes
-                                self.consecutive_timing_matches = 0;
-                                self.recovery_potential_offset = Some(potential_offset);
-                            }
-                        } else {
-                            // First potential offset
-                            self.recovery_potential_offset = Some(potential_offset);
-                            self.consecutive_timing_matches = 1;
-                        }
-                    } else {
-                        // No match found, don't consume anything
-                        consume_count = 0;
-                        self.handle_mismatch(max_id);
-                    }
-                }
-                else{
-                    if let Some((best_idx, best_sim, best_reg_id)) = match_result {
-                        if best_sim <= GOOD_SIMILARITY_THRESHOLD {
-                            // Found a good match!
-                            println!("✅ {:?}: Good match! Max #{} <-> Reg #{} (Sim: {:.4}). Consuming {} regular frames.", self.sync_state, max_id, best_reg_id, best_sim, best_idx + 1);
-                            consume_count = best_idx + 1;
-                            self.handle_good_match(max_id, best_reg_id);
-                        } else {
-                            // Best match isn't good enough. Consume only the oldest regular frame to advance.
-                            println!("🟡 {:?}: Best match Reg #{} for Max #{} not good enough (Sim: {:.4}). Consuming 1 regular frame.", self.sync_state, best_reg_id, max_id, best_sim);
-                            consume_count = 1; // Consume the oldest frame
-                            self.handle_mismatch(max_id);
-                        }
-                    } else {
-                        // No candidates were available (should have been handled earlier) or no match found at all.
-                        // This implies a significant gap in the regular stream. Output max only.
-                        println!(" K {:?}: No match found for Max #{}. Outputting max only.", self.sync_state, max_id);
-                         consume_count = 0; // Don't consume regular frames if none match
-                        self.handle_mismatch(max_id);
-                    }
-                }
-            }
-
-                        
-            SyncState::Locked => {
-                let current_offset = self.stable_offset.expect("Locked state must have offset");
-                if let Some((best_idx, best_sim, best_reg_id)) = match_result {
-                    let observed_offset = best_reg_id as i64 - max_id as i64;
-            
-                    if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                        // Simple difference check
-                        if (observed_offset - current_offset).abs() <= OFFSET_TOLERANCE {
-                            // Within tolerance - maintain synchronization
-                            println!("✅ Locked: Confirmed match. Max #{} <-> Reg #{} (Offset: {})", 
-                                max_id, best_reg_id, current_offset);
-                            consume_count = best_idx + 1;
-                            self.handle_good_match(max_id, best_reg_id);
-                        } else {
-                            // Outside tolerance - treat as mismatch
-                            println!("Locked: Offset mismatch ({} vs {})", observed_offset, current_offset);
-                            const NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC: usize = 3; 
-                            if observed_offset  != self.offset_candidate{
-                                self.offset_candidate = observed_offset ; 
-                                self.offset_consecutive_mismatches = 0; 
-                            }
-                            else{
-                                self.offset_consecutive_mismatches += 1;
-                                if self.offset_consecutive_mismatches >= NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC {
-                                    self.stable_offset = Some(self.offset_candidate); 
-                                    print_green!("Adjusted offset after {} mismatches from {} to {}", NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC, current_offset, self.offset_candidate); 
+                        // Try to find a frame close to the expected ID
+                        let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                        if !candidates.is_empty() {
+                            let mut closest_idx = 0;
+                            let mut closest_distance = usize::MAX;
+                            
+                            for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
+                                let distance = reg_id.abs_diff(expected_reg_id);
+                                if distance < closest_distance {
+                                    closest_distance = distance;
+                                    closest_idx = idx;
                                 }
                             }
                             
-                            consume_count = 0;
-                            self.handle_mismatch(max_id);
+                            // Consume frames up to and including the closest match
+                            let consumed_frames = self.consume_regular_frames(closest_idx + 1);
+                            matched_regular = consumed_frames.last().cloned();
                         }
-                    } else {
-                        // Poor similarity - treat as mismatch
-                        println!("Locked: Poor similarity ({:.4})", best_sim);
-                        consume_count = 0;
-                        self.handle_mismatch(max_id);
                     }
-                } else {
-                    // No match found - clear mismatch
-                    consume_count = 0;
-                    self.handle_mismatch(max_id);
                 }
             }
+        } else {
+            // Process non-recovery states as before
+            if let Some((best_idx, best_sim, best_reg_id)) = match_result {
+                // We found a good match
+                if best_sim <= GOOD_SIMILARITY_THRESHOLD {
+                    // Very good match - update state
+                    self.mismatch_counter = 0;
+                    
+                    match self.state {
+                        SyncState::Seeking => {
+                            self.match_counter += 1;
+                            
+                            // Calculate offset between streams
+                            let new_offset = best_reg_id as i64 - max_id as i64;
+                            
+                            if self.match_counter >= MATCHES_NEEDED_TO_LOCK && !self.buffering_active {
+                                // We've found enough consecutive good matches to lock
+                                println!("🔒 Synchronization Locked! Offset: {}", new_offset);
+                                self.state = SyncState::Locked;
+                                self.offset = Some(new_offset);
+                                self.match_counter = 0;
+                            } else {
+                                // Not enough matches yet, but update the potential offset
+                                self.offset = Some(new_offset);
+                            }
+                        },
+                        SyncState::Locked => {
+                            // Already locked, just confirm current offset
+                        }
+                        SyncState::Recovering => {} // Handled in the above logic
+                    }
+                    
+                    // Consume regular frames up to and including the matched one
+                    let consumed_frames = self.consume_regular_frames(best_idx + 1);
+                    matched_regular = consumed_frames.last().cloned();
+                } else {
+                    // Match isn't good enough
+                    self.handle_mismatch(max_id);
+
+                    
+                    // Consume just one regular frame to advance
+                    let consumed_frames = self.consume_regular_frames(1);
+                    matched_regular = consumed_frames.last().cloned();
+                }
+            } else {
+                // No match found
+                self.handle_mismatch(max_id); 
+                // Don't consume any regular frames
+            }
         }
-
-        // Consume the determined number of regular frames
-        let consumed_regular = self.consume_regular_frames(consume_count);
-
-        // The matched frame is the *last* one consumed (if any)
-        matched_regular = consumed_regular.last().cloned(); // Clone necessary data
-
+        
         // Output the pair
         self.output_pair(matched_regular, Some((max_raw, max_pixels, max_id)));
     }
-
-
-    /// Handles the state updates when a good match is confirmed.
-    fn handle_good_match(&mut self, max_id: usize, reg_id: usize) {
-        self.consecutive_poor_matches = 0; // Reset poor match counter
-
-         match self.sync_state {
-            SyncState::Seeking | SyncState::Recovering => {
-                self.consecutive_good_matches += 1;
-                if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK && !self.buffering_active{
-                    let new_offset = reg_id as i64 - max_id as i64;
-                    println!("🔒 Synchronization Locked! Offset: {}. (Based on Max #{} <-> Reg #{})", new_offset, max_id, reg_id);
-                    
-                    self.sync_state = SyncState::Locked;
-                    self.stable_offset = Some(new_offset);
-                    self.consecutive_good_matches = 0; // Reset for next state
-                    self.consecutive_offset_matches = 0;
-                    self.counter_recovery = 0; 
-
-                    self.frames_in_seeking = 0;
-                    self.safe_mode_active = false;
-
-
-
-
-                } else {
-                    // Still seeking/recovering, update potential offset if it's the first good match
-                    if self.consecutive_good_matches == 1 {
-                         self.stable_offset = Some(reg_id as i64 - max_id as i64);
-                    }
-                }
-            }
-
-            SyncState::Locked  => {
-                // Already locked, a good match just confirms it.
-                // Reset the offset drift confirmation counter unless it was just adjusted.
-                // Note: The adjustment logic in process_match_result handles resetting consecutive_offset_matches upon successful adjustment.
-                // If it was a perfect offset match, we can reset the counter here.
-                 let current_offset = self.stable_offset.expect("Locked state must have offset");
-                 let observed_offset = reg_id as i64 - max_id as i64;
-                 if observed_offset == current_offset {
-                    self.consecutive_offset_matches = 0;
-                 }
-                 // No state change needed, just continue
-            }
-        }
-    }
-
-    /// Handles the state updates when a mismatch occurs.
+    
     fn handle_mismatch(&mut self, max_id: usize) {
-        self.consecutive_good_matches = 0; // Reset good match counter
-        self.consecutive_offset_matches = 0; // Reset offset confirmation counter
-        // Reset recovery timing fields
-        if self.sync_state == SyncState::Recovering {
-            self.consecutive_timing_matches = 0;
+        self.match_counter = 0;
+        
+        if self.state == SyncState::Locked {
+            self.mismatch_counter += 1;
+            if self.mismatch_counter >=2{
+                print_yellow!("Locked-> Mismatch {} / {}" , self.mismatch_counter, MISMATCHES_TO_RECOVERY); 
+
+            }
+            
+            if self.mismatch_counter >= MISMATCHES_TO_RECOVERY {
+                println!("🔄 Sync lost ({}). Entering recovery mode with preserved offset: {:?}", 
+                         self.mismatch_counter, self.offset);
+                
+                // Store the current offset when entering recovery mode
+                self.recovery_last_offset = self.offset;
+                self.state = SyncState::Recovering;
+                self.mismatch_counter = 0;
+                self.recovery_frame_counter = 0;
+                self.recovery_consecutive_matches = 0;
+                self.recovery_candidate_offset = None;
+            }
         }
-
-
-        match self.sync_state {
-             SyncState::Seeking => {
-                 // Still seeking, just continue. No state change.
-                 println!(" K Seeking: Mismatch for Max #{}. Continuing search.", max_id);
-             }
-             SyncState::Locked => {
-
-
-
-                 self.consecutive_poor_matches += 1;
-                 println!(" K Locked: Mismatch #{} for Max #{}. {}/{} consecutive poor matches.", self.consecutive_poor_matches, max_id, self.consecutive_poor_matches, CONSECUTIVE_MISMATCHES_TO_RECOVER);
-                 if self.consecutive_poor_matches >= CONSECUTIVE_MISMATCHES_TO_RECOVER {
-                     println!("🔄 Sync lost ({} poor matches). State: Locked -> Recovering", self.consecutive_poor_matches);
-                     self.sync_state = SyncState::Recovering;
-                    //  self.stable_offset = None; // Lost the offset
-                     self.consecutive_poor_matches = 0; // Reset for next state
-                 }
-             }
-             SyncState::Recovering => {
-                 // Still recovering, just continue. No state change.
-                 println!(" K Recovering: Mismatch for Max #{}. Continuing search.", max_id);
-             }
-         }
     }
-
-    /// Creates a FramePair and adds it to the output queue.
+    
+    fn consume_max_frame(&mut self) -> Option<(Vec<u8>, Vec<u32>, usize)> {
+        let current_frame_id = self.max_decoder.internal_frame_counter;
+        
+        self.max_decoder.decoded_frames.pop_front().and_then(|frame_raw| {
+            self.max_decoder.internal_frame_counter += 1;
+            
+            convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
+                .map(|pixels| (frame_raw, pixels, current_frame_id))
+        })
+    }
+    
+    fn peek_regular_frames(&self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(max_count);
+        let base_id = self.regular_decoder.frames_processed;
+        
+        for (idx, frame_raw) in self.regular_decoder.decoded_frames.iter().take(max_count).enumerate() {
+            if let Some(pixels) = convert_rgb_to_u32(frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                frames.push((frame_raw.clone(), pixels, base_id + idx));
+            }
+        }
+        
+        frames
+    }
+    
+    fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(count);
+        
+        for _ in 0..count {
+            let current_frame_id = self.regular_decoder.frames_processed;
+            
+            if let Some(frame_raw) = self.regular_decoder.decoded_frames.pop_front() {
+                self.regular_decoder.frames_processed += 1;
+                
+                if let Some(pixels) = convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                    frames.push((frame_raw, pixels, current_frame_id));
+                }
+            } else {
+                break;
+            }
+        }
+        
+        frames
+    }
+    
     fn output_pair(
         &mut self,
-        regular: Option<(Vec<u8>, Vec<u32>, usize)>, // (raw, pixels, id)
-        reference: Option<(Vec<u8>, Vec<u32>, usize)>, // (raw, pixels, id)
+        regular: Option<(Vec<u8>, Vec<u32>, usize)>,
+        reference: Option<(Vec<u8>, Vec<u32>, usize)>
     ) {
         let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
-        let (decoded, decoded_raw, _reg_id) = match regular {
+        
+        let (decoded, decoded_raw, _) = match regular {
             Some((raw, pixels, id)) => (Some(pixels), Some(raw), Some(id)),
             None => (None, None, None),
         };
-        let (reference_pixels, reference_raw, _max_id) = match reference {
+        
+        let (reference_pixels, reference_raw, _) = match reference {
             Some((raw, pixels, id)) => (Some(pixels), Some(raw), Some(id)),
-             None => (None, None, None), // Should not happen as reference drives the process
+            None => (None, None, None),
         };
-
-        // Optional: Log the actual pairing decision
-        // print_pink!(
-        //     "   Output Pair #{}: Max {:?} <-> Reg {:?} (State: {:?})",
-        //     frame_id, _max_id, _reg_id, self.sync_state
-        // );
-
+        
         let sync_pair = FramePair {
             decoded,
             reference: reference_pixels,
@@ -1203,96 +1074,23 @@ impl SynchronizedDecoder {
             reference_raw,
             frame_id,
         };
+        
         self.output_queue.push_back(sync_pair);
     }
-
-
-    /// Non-destructively peeks at frames in the regular decoder buffer.
-    /// Returns Vec<(raw_frame, pixel_frame, frame_id)>
-    fn peek_regular_frames(&mut self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
-        let mut frames = Vec::with_capacity(max_count);
-        // Frame ID calculation needs to be accurate based on HevcDecoder internal logic
-        // Assuming `frames_processed` tracks the ID of the *next* frame to be popped.
-        let base_id = self.regular_decoder.frames_processed; // ID of the frame at the front of the queue
-
-        for (idx, frame_raw) in self.regular_decoder.decoded_frames.iter().take(max_count).enumerate() {
-            // We need both raw and decoded pixels for output, potentially raw for similarity
-             if let Some(pixels) = convert_rgb_to_u32(frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                 frames.push((frame_raw.clone(), pixels, base_id + idx));
-             } else {
-                 eprintln!(" K Regular frame conversion failed during peek for potential frame ID {}", base_id + idx);
-                 // Optionally skip this frame or handle differently
-             }
-        }
-        frames
-    }
-
-
-    /// Consumes a specified number of frames from the regular decoder buffer.
-    /// Returns Vec<(raw_frame, pixel_frame, frame_id)> of consumed frames.
-    fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
-        let mut frames = Vec::with_capacity(count);
-        for _ in 0..count {
-            let current_frame_id = self.regular_decoder.frames_processed; // Get ID *before* popping
-            if let Some(frame_raw) = self.regular_decoder.decoded_frames.pop_front() {
-                // Increment processed count *after* successfully popping
-                self.regular_decoder.frames_processed = self.regular_decoder.frames_processed.saturating_add(1);
-
-                if let Some(pixels) = convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
-                    frames.push((frame_raw, pixels, current_frame_id));
-                } else {
-                    eprintln!(" K Regular frame conversion failed during consume for frame ID {}", current_frame_id);
-                    // Frame is consumed but not added to the output list
-                }
-            } else {
-                break; // Stop if buffer becomes empty
-            }
-        }
-        frames
-    }
-
-
-    /// Consumes exactly ONE frame from the max decoder buffer.
-    /// Returns Option<(raw_frame, pixel_frame, frame_id)>.
-    /// Returns None if buffer is empty.
-    fn consume_max_frame(&mut self) -> Option<(Vec<u8>, Vec<u32>, usize)> {
-        // Use the decoder's internal counter logic. Assuming internal_frame_counter tracks
-        // the ID of the *next* frame that *would* be output if no frames were skipped internally.
-        // The actual ID corresponds to the position relative to the start.
-        // Let's assume `internal_frame_counter` correctly represents the ID of the frame *at the front*
-        // if the buffer wasn't empty. Let's refine ID calculation:
-        // If `internal_frame_counter` is the ID of the *next* frame to be produced/popped:
-        let current_frame_id = self.max_decoder.internal_frame_counter;
-
-        self.max_decoder.decoded_frames.pop_front().and_then(|frame_raw| {
-            // Increment counter *after* popping
-            self.max_decoder.internal_frame_counter = self.max_decoder.internal_frame_counter.saturating_add(1);
-
-            convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
-                .map(|pixels| (frame_raw, pixels, current_frame_id))
-                .or_else(|| {
-                    eprintln!(" K Max frame conversion failed during consume for frame ID {}", current_frame_id);
-                    None // Conversion failed
-                })
-        })
-    }
-
-
+    
     pub fn next_frame_pair(&mut self) -> Option<FramePair> {
-        // If still buffering, don't output any frames yet
+        // Check if we're still buffering
         if self.check_buffering_status() {
             return None;
         }
-    
-        // Check if queue is running low and try to rebuild buffer
-        if self.output_queue.len() < BUFFERING_START_FRAMES_UNTIL_PLAYBACK / 2 {
-            // print_yellow!("Buffer running low ({} frames), attempting to refill...", 
-            //     self.output_queue.len());
+        
+        // Make sure we have enough buffer before returning frames
+        if self.output_queue.len() <= BUFFERING_THRESHOLD / 3 {
             self.synchronize_frame_buffers();
         }
-    
-        // Only pop a frame if we have enough buffer
-        if self.output_queue.len() > BUFFERING_START_FRAMES_UNTIL_PLAYBACK / 3 {
+        
+        // Only return a frame if we have sufficient buffer
+        if self.output_queue.len() > BUFFERING_THRESHOLD / 3 {
             if let Some(pair) = self.output_queue.pop_front() {
                 self.throttle_semaphore.add_permits(1);
                 Some(pair)
@@ -1300,46 +1098,25 @@ impl SynchronizedDecoder {
                 None
             }
         } else {
-            // Buffer too low, return None to allow refilling
             None
         }
     }
-    /// Manually consumes and discards the oldest reference frame.
-    /// This forces the synchronizer into the Recovering state.
-    /// Returns the ID of the skipped frame if successful.
-    pub fn skip_reference_frame(&mut self) -> Option<usize> {
-        println!(" K --- Manual Reference Frame Skip Requested ---");
-        if let Some((_raw, _pixels, skipped_id)) = self.consume_max_frame() {
-            println!(" K Manually skipped reference frame #{}. Forcing recovery.", skipped_id);
-            self.last_processed_max_frame_id = Some(skipped_id);
-            // Force re-synchronization
-            self.sync_state = SyncState::Recovering;
-            self.stable_offset = None;
-            self.consecutive_good_matches = 0;
-            self.consecutive_poor_matches = 0;
-            self.consecutive_offset_matches = 0;
-            Some(skipped_id)
-        } else {
-            println!(" K Manual skip requested, but no reference frames available.");
-            None
-        }
+    
+    // Public API methods
+    pub fn get_sync_state(&self) -> SyncState {
+        self.state.clone()
     }
-
-     // Helper to get current sync state, useful for external monitoring
-     pub fn get_sync_state(&self) -> SyncState {
-        self.sync_state.clone()
-     }
-
-     // Helper to get current stable offset, useful for external monitoring
-     pub fn get_stable_offset(&self) -> Option<i64> {
-        self.stable_offset
-     }
-
-     pub fn change_stable_offset(&mut self, new: i64) {
-        self.stable_offset = Some(new); 
-     }
-
+    
+    pub fn get_stable_offset(&self) -> Option<i64> {
+        self.offset
+    }
+    
+    pub fn change_stable_offset(&mut self, new: i64) {
+        self.offset = Some(new);
+    }
 }
+
+
 
 /// Standalone function for finding the next NAL start code in a buffer
 pub fn find_next_start_code(buffer: &[u8], start_pos: usize) -> Option<usize> {
@@ -4935,17 +4712,16 @@ impl XRClient {
                             };
 
                             // Process with the synchronized decoder: Provide None for the missing regular frame
-                            // and Some(data) for the max frame if found.
+                            // // and Some(data) for the max frame if found.
                             print_yellow!("Processing missing regular frame {} (Max frame present: {})", missing_id, max_frame_data.is_some());
                             sync_decoder_guard.process_packets(None, max_frame_data);
-                            
-                            if let Some(prev_offset) = sync_decoder_guard.stable_offset {
-                                let new_offset = prev_offset - 2; 
-                                sync_decoder_guard.change_stable_offset(new_offset); 
-                                print_yellow!("[CHANGE OFFSET] Reducing offset from {} to {} due to loss", prev_offset, new_offset); 
-                            } 
 
-                            
+
+                            // if let Some(offset) = sync_decoder_guard.get_stable_offset(){
+                            //     let new_offset = offset - 1 ; 
+                            //     sync_decoder_guard.change_stable_offset( new_offset );
+                            //     print_pink!("[Loss] Adjust offset from {} to {}", offset, new_offset ); 
+                            // }
 
                              // Mark as processed in the tracking buffer *after* attempting to process
                              self.missing_frames_buffer.insert(missing_id, true);
