@@ -120,7 +120,7 @@ const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.35; // 60% similar to maintain sy
 pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 
 /// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 15;
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 30;
 pub const RECOVERY_DELAY_FRAMES_UNTIL_MATCH :usize = IDR_FRAME_SIZE_GOP; 
 
 pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30; 
@@ -599,10 +599,8 @@ pub struct SynchronizedDecoder {
 
     client_ip: IpAddr, 
 
-    transition_source_offset: f64, 
-    transition_target_offset: i64,
-    transition_progress: usize,
-    transition_total_frames: usize,
+    offset_candidate: i64,
+    offset_consecutive_mismatches: usize, 
 
 }
 const EWMA_ALPHA: f64 = 1.0 ; // Adjust based on desired smoothing
@@ -616,7 +614,6 @@ enum SyncState {
     Seeking,    // Initial state, searching for the first good match
     Locked,     // Stable synchronization established, expecting specific offset
     Recovering, // Lost sync, searching again for a good match (like Seeking)
-    Transition, 
 }
 // Queue/Buffer Limits
 const MAX_OUTPUT_QUEUE_LEN: usize = (IDR_FRAME_SIZE_GOP as f32 * 2.5) as usize; // Max synchronized pairs buffered
@@ -672,12 +669,9 @@ impl SynchronizedDecoder {
 
             client_ip, 
 
-            transition_source_offset: 0.0, 
-            transition_target_offset: 0,
-            transition_progress: 0,
-            transition_total_frames: 0,
+            offset_candidate: 0,
+            offset_consecutive_mismatches: 0, 
 
-            
         }
     }
 
@@ -851,11 +845,11 @@ impl SynchronizedDecoder {
             SyncState::Recovering => {
                 self.counter_recovery += 1; 
 
-
+                let mut oldest_idx = 0; // 
                 if !candidates.is_empty() && self.counter_recovery <  RECOVERY_DELAY_FRAMES_UNTIL_MATCH {
-                    let oldest_idx = 0; // Always use the oldest frame
                     let (_, _, oldest_reg_id) = &candidates[oldest_idx];
                     
+                    oldest_idx += 1; 
                     // Assign a dummy similarity score
                     let dummy_sim = 1.0; // High value to indicate it's not a similarity-based decision
                     best_match = Some((oldest_idx, dummy_sim, *oldest_reg_id));
@@ -879,9 +873,7 @@ impl SynchronizedDecoder {
                 }
             }
 
-            SyncState::Transition => {
-                // println!("TODO??? "); 
-            }
+
 
             SyncState::Locked => {
                 let offset = self.stable_offset.expect("Locked state must have stable offset");
@@ -980,57 +972,13 @@ impl SynchronizedDecoder {
                 }
             }
 
-            SyncState::Transition => {
-                // Calculate interpolated offset for this frame
-                let progress_ratio = self.transition_progress as f64 / self.transition_total_frames as f64;
-                let interpolated_offset = self.transition_source_offset as f64 + 
-                    (self.transition_target_offset as f64 - self.transition_source_offset) * progress_ratio;
-                
-                // Round to nearest integer
-                let current_offset = interpolated_offset.round() as i64;
-                self.stable_offset = Some(current_offset);
-                
-                // Find the frame that matches this interpolated offset
-                let expected_reg_id = (max_id as i64 + current_offset) as usize;
-                
-                // Look for the expected frame ID
-                let mut found_expected = false;
-                if let Some((best_idx, best_sim, best_reg_id)) = match_result {
-                    if best_reg_id == expected_reg_id && best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                        // Found the expected frame with good similarity
-                        consume_count = best_idx + 1;
-                        found_expected = true;
-                        println!("🔄 Transition progress: {}/{}. Using offset: {}", 
-                               self.transition_progress, self.transition_total_frames, current_offset);
-                    } else {
-                        // Best match isn't what we expected
-                        consume_count = 1; // Just consume oldest frame
-                        println!("🟡 Transition: Expected Reg #{} not found. Using oldest frame.", expected_reg_id);
-                    }
-                } else {
-                    // No match found
-                    consume_count = 0;
-                    println!("⚠️ Transition: No suitable frames found for offset {}", current_offset);
-                }
-                
-                // Increment transition progress
-                self.transition_progress += 1;
-                if self.transition_progress >= self.transition_total_frames {
-                    // Transition complete
-                    println!("✅ Transition complete. New offset: {}", self.transition_target_offset);
-                    self.sync_state = SyncState::Locked;
-                    self.stable_offset = Some(self.transition_target_offset);
-                }
-            }
-        
-
             SyncState::Recovering => {
                 // MODIFIED: Special handling for recovery state
                 if self.counter_recovery <= RECOVERY_DELAY_FRAMES_UNTIL_MATCH{
                     if let Some((_, _, best_reg_id)) = match_result {
                         // Always take the oldest frame in recovery mode
                         consume_count = 1;
-                        println!("🔄 Recovering: Using time-based approach. Taking Reg #{} for Max #{} regardless of similarity", best_reg_id, max_id);
+                        println!("🔄 Recovering: Using time-based approach. Taking Reg #{} for Max #{}| potential offset: {:?} | Stable offset: {:?} , ", best_reg_id, max_id, self.recovery_potential_offset, self.stable_offset);
                         
                         // Count consecutive frames with stable timing
                         let potential_offset = best_reg_id as i64 - max_id as i64;
@@ -1039,10 +987,10 @@ impl SynchronizedDecoder {
                         if let Some(prev_offset) = self.recovery_potential_offset {
                             if prev_offset == potential_offset {
                                 self.consecutive_timing_matches += 1;
-                                println!(" K Recovering: Consistent timing offset {} seen ({}/{})", potential_offset, self.consecutive_timing_matches, RECOVERY_TIMING_MATCHES_NEEDED);
+                                println!(" +++ K Recovering: Consistent timing offset {} seen ({}/{})", potential_offset, self.consecutive_timing_matches, RECOVERY_TIMING_MATCHES_NEEDED);
                                 
                                 // If we've seen enough consistent offsets, try to lock
-                                if self.consecutive_timing_matches >= RECOVERY_TIMING_MATCHES_NEEDED {
+                                if self.consecutive_timing_matches >= RECOVERY_TIMING_MATCHES_NEEDED && !self.buffering_active {
                                     println!("🔒 Recovering -> Locked: Based on consistent timing with offset {}", potential_offset);
                                     self.sync_state = SyncState::Locked;
                                     self.stable_offset = Some(potential_offset);
@@ -1104,6 +1052,19 @@ impl SynchronizedDecoder {
                         } else {
                             // Outside tolerance - treat as mismatch
                             println!("Locked: Offset mismatch ({} vs {})", observed_offset, current_offset);
+                            const NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC: usize = 5; 
+                            if observed_offset  != self.offset_candidate{
+                                self.offset_candidate = observed_offset ; 
+                                self.offset_consecutive_mismatches = 0; 
+                            }
+                            else{
+                                self.offset_consecutive_mismatches += 1;
+                                if self.offset_consecutive_mismatches >= NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC {
+                                    self.stable_offset = Some(self.offset_candidate); 
+                                    print_green!("Adjusted offset after {} mismatches from {} to {}", NUM_OF_CONSECUTIVE_OFFSET_MISMATCHES_FOR_RESYNC, current_offset, self.offset_candidate); 
+                                }
+                            }
+                            
                             consume_count = 0;
                             self.handle_mismatch(max_id);
                         }
@@ -1139,29 +1100,9 @@ impl SynchronizedDecoder {
          match self.sync_state {
             SyncState::Seeking | SyncState::Recovering => {
                 self.consecutive_good_matches += 1;
-                if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK {
+                if self.consecutive_good_matches >= CONSECUTIVE_MATCHES_TO_LOCK && !self.buffering_active{
                     let new_offset = reg_id as i64 - max_id as i64;
                     println!("🔒 Synchronization Locked! Offset: {}. (Based on Max #{} <-> Reg #{})", new_offset, max_id, reg_id);
-                    
-                        // If we have a previous offset that's significantly different
-                    if let Some(prev_offset) = self.stable_offset {
-                        if (prev_offset - new_offset).abs() > 2 { // If offset change is significant
-                            // Enter transition state
-                            println!("🔄 Starting gradual transition from offset {} to {}", 
-                                    prev_offset, new_offset);
-                            
-                            self.sync_state = SyncState::Transition;
-                            self.transition_source_offset = prev_offset as f64;
-                            self.transition_target_offset = new_offset as i64;
-                            self.transition_progress = 0;
-                            self.transition_total_frames = 30; // Adjust based on desired transition time
-                            
-                            // Keep using old offset for now
-                            self.stable_offset = Some(prev_offset);
-                            return;
-                        }
-                    }
-                    
                     
                     self.sync_state = SyncState::Locked;
                     self.stable_offset = Some(new_offset);
@@ -1181,9 +1122,6 @@ impl SynchronizedDecoder {
                          self.stable_offset = Some(reg_id as i64 - max_id as i64);
                     }
                 }
-            }
-            SyncState::Transition => {
-
             }
 
             SyncState::Locked  => {
@@ -1216,14 +1154,16 @@ impl SynchronizedDecoder {
                  // Still seeking, just continue. No state change.
                  println!(" K Seeking: Mismatch for Max #{}. Continuing search.", max_id);
              }
-             SyncState::Transition => {println!("K Transitioning. Max #{}", max_id); }
              SyncState::Locked => {
+
+
+
                  self.consecutive_poor_matches += 1;
                  println!(" K Locked: Mismatch #{} for Max #{}. {}/{} consecutive poor matches.", self.consecutive_poor_matches, max_id, self.consecutive_poor_matches, CONSECUTIVE_MISMATCHES_TO_RECOVER);
                  if self.consecutive_poor_matches >= CONSECUTIVE_MISMATCHES_TO_RECOVER {
                      println!("🔄 Sync lost ({} poor matches). State: Locked -> Recovering", self.consecutive_poor_matches);
                      self.sync_state = SyncState::Recovering;
-                     self.stable_offset = None; // Lost the offset
+                    //  self.stable_offset = None; // Lost the offset
                      self.consecutive_poor_matches = 0; // Reset for next state
                  }
              }
@@ -4176,7 +4116,7 @@ impl XRClient {
         };
 
         for frame in frames{
-            print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame); 
+            // print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame); 
             self.lost_ids_reference_buffer.push_back(frame); 
         }        
         
@@ -4878,11 +4818,7 @@ impl XRClient {
             let current_last_processed = self.last_processed_frame_id;
             self.missing_frames_buffer.retain(|&id, &mut processed| {
                 !processed || id.saturating_sub(current_last_processed) <= 100 // Avoid underflow
-            });
-
-
-            
-
+            });         
 
             // Process the next frame if available from the regular stream queue
             if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
@@ -4995,7 +4931,7 @@ impl XRClient {
 
                             // Process with the synchronized decoder: Provide None for the missing regular frame
                             // and Some(data) for the max frame if found.
-                            print_pretty!(DebugColor::Lime, "Processing missing regular frame {} (Max frame present: {})", missing_id, max_frame_data.is_some());
+                            print_yellow!("Processing missing regular frame {} (Max frame present: {})", missing_id, max_frame_data.is_some());
                             sync_decoder_guard.process_packets(None, max_frame_data);
 
                              // Mark as processed in the tracking buffer *after* attempting to process

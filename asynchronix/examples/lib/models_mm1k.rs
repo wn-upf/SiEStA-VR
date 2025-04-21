@@ -604,7 +604,7 @@ impl QueueMechanism {
 
         if test_pl {
             network_emulator.add_pattern(NetworkPattern::ProbabilisticDrop {
-                drop_probability: (0.0003),
+                drop_probability: (0.0008),
                 valid_from: valid_from,
                 valid_until: valid_until,
             });

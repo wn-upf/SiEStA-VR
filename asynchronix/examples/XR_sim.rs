@@ -38,7 +38,7 @@ use std::time::Duration;
 use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
-pub const SIM_START_TIME: u64 = 11;
+pub const SIM_START_TIME: u64 = 13;
 
 struct VRPair {
     xr_server: XRServer,
