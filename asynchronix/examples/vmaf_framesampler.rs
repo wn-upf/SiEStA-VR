@@ -32,7 +32,7 @@ pub const WINDOW_SCALE_FACTOR: f64 = 0.7;
 
 pub const IDR_FRAME_SIZE_GOP: usize = 120;
 
-pub const PACKET_LOSS_PROBABILITY: f64 = 0.01;
+pub const PACKET_LOSS_PROBABILITY: f64 = 0.04;
 
 pub const CHUNK_SIZE_ENCODER_S: f64 = 3.0;
 pub const FRAME_CUTOFF_LIMIT: usize = 1200;
