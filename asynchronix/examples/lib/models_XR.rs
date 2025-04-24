@@ -722,7 +722,7 @@ impl SynchronizedDecoder {
                     self.peek_regular_frames(MAX_PEEK_COUNT)
                 };
 
-                print_yellow!("[{}] Peeked {} regular frames, {} available ", self.client_ip,  regular_candidates.len(), self.regular_decoder.decoded_frames.len()); 
+                // print_yellow!("[{}] Peeked {} regular frames, {} available ", self.client_ip,  regular_candidates.len(), self.regular_decoder.decoded_frames.len()); 
                 if regular_candidates.is_empty() {
                     continue; // No regular frames available
                 }
@@ -762,7 +762,7 @@ impl SynchronizedDecoder {
                 // println!("[{:?}] best_sim {:.3}", self.state, best_sim);
                 
                 if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                    print_green!("[{:?}] {} has best_sim  ({:.3}), better than threshold {}", self.state, best_idx,best_sim, ACCEPTABLE_SIMILARITY_THRESHOLD);
+                    // print_green!("[{:?}] {} has best_sim  ({:.3}), better than threshold {}", self.state, best_idx,best_sim, ACCEPTABLE_SIMILARITY_THRESHOLD);
 
                     return Some((best_idx, best_sim, best_reg_id));
                 }
@@ -773,7 +773,7 @@ impl SynchronizedDecoder {
             SyncState::Locked => {
                 // In locked state, use the expected offset
                 if let Some(offset) = self.offset {
-                    println!("LOCKED: Offset -> {}", offset); 
+                    // println!("LOCKED: Offset -> {}", offset); 
 
                     let expected_reg_id = (max_id as i64 + offset) as usize;
                     
@@ -4424,10 +4424,10 @@ impl XRClient {
     
                 // skip any sample that wasn't a full‐sized frame
                 if dec_bytes.len() != expected {
-                    print_yellow!(
-                    "Skipping buffer sample #{} (id {}) because its size ({}) ≠ expected ({})",
-                        idx, net_id, dec_bytes.len(), expected,
-                    );
+                    // print_yellow!(
+                    // "Skipping buffer sample #{} (id {}) because its size ({}) ≠ expected ({})",
+                    //     idx, net_id, dec_bytes.len(), expected,
+                    // );
                     continue 'outer;
                 }
     
@@ -4836,8 +4836,8 @@ impl XRClient {
                     if !video_frame.is_empty() && !max_frame.is_empty() {
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            print_pink!(
-                                // DebugColor::Violet,
+                            print_pretty!(
+                                DebugColor::Violet,
                                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                                 format_elapsed!(now),
                                 ip_client,
