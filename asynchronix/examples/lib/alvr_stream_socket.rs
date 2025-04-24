@@ -1953,17 +1953,21 @@ impl<H: Serialize> StreamSender<H> {
                     wtr.write_record(&[
                         "OFFSET_VIDEO",
                         "PATH_VIDEO",
+                        "IDR_FREQUENCY", 
                         "timestamp",
                         "ID_frame",
                         "Lost", 
+                        "Throughput(avg)",
                     ])?; 
 
                     wtr.write_record(&[
                         format!("{random_offset:.4}"),     // offset used for this run
                         input_path.to_owned(),             // source clip
+                        format!("{}", IDR_FRAME_SIZE_GOP), 
                         "".to_string(),                                // placeholder timestamp
                         "".to_string(),                                // placeholder id_f
                         "".to_string(),                                // placeholder lost
+                        "".to_string(), 
                     ])?;
 
                     wtr.flush()?;

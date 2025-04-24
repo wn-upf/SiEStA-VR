@@ -133,7 +133,7 @@ const RECOVERY_GRACE_PERIOD: usize = 5;      // Frames to wait before trying to 
 const RECOVERY_MATCH_THRESHOLD: f64 = 0.35;   // More lenient similarity threshold during recovery
 const RECOVERY_MAX_ATTEMPTS: usize = 1;       // How many consecutive frames to check before accepting new offset
 
-
+pub const ALPHA_THROUGHPUT: f32 = 0.1; 
 /// Number of consecutive good matches required to re-establish synchronization
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -612,7 +612,7 @@ enum SyncState {
 const MAX_OUTPUT_QUEUE_LEN: usize = 20;
 const MATCHES_NEEDED_TO_LOCK: usize = 1;
 const MISMATCHES_TO_RECOVERY: usize = 5;
-const MAX_PEEK_COUNT: usize = 50;
+const MAX_PEEK_COUNT: usize = 5;
 const BUFFERING_THRESHOLD: usize = 50;
 
 impl SynchronizedDecoder {
@@ -3153,251 +3153,7 @@ impl MetricsLogger {
         // Ok(())
     }
 
-    pub async fn process_frame_group_metrics(
-        &self,
-        frame_group: FrameGroup,
-        ref_path_base: &str, // Base path for reference frames (if needed)
-        ip_client: IpAddr,
-    ) -> Result<()> {
-        if frame_group._frames.is_empty() {
-            return Ok(());
-        }
-
-        // Create a temporary directory for processing the batch
-        let temp_dir = TempDir::new()?;
-
-        let mut ref_y4m_paths = Vec::new();
-        let mut lossy_y4m_paths = Vec::new();
-        let mut frame_numbers = Vec::new();
-        let mut timestamps = Vec::new();
-
-        // Convert all frames in the batch to Y4M
-        for frame_data in &frame_group._frames {
-            let frame_number = frame_data.frame_number;
-            let timestamp_ms = frame_data.timestamp_ms;
-            let lossy_path = &frame_data.path;
-
-            let ref_path = if ref_path_base.is_empty() {
-                lossy_path.clone() // Assuming reference is the first frame if no base is provided
-            } else {
-                format!("{}_{}.rgb24", ref_path_base, frame_number) // Adjust naming as needed
-            };
-
-            let ref_y4m = temp_dir
-                .path()
-                .join(format!("reference_{}.y4m", frame_number))
-                .to_string_lossy()
-                .to_string();
-            let lossy_y4m = temp_dir
-                .path()
-                .join(format!("lossy_{}.y4m", frame_number))
-                .to_string_lossy()
-                .to_string();
-
-            // Convert reference frame to Y4M
-            let ref_status = Command::new("ffmpeg")
-                .args(&[
-                    "-hwaccel",
-                    "cuda",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "rawvideo",
-                    "-pixel_format",
-                    "rgb24",
-                    "-video_size",
-                    &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                    "-i",
-                    &ref_path,
-                    "-pix_fmt",
-                    "yuv420p",
-                    &ref_y4m,
-                ])
-                .status()?;
-
-            if !ref_status.success() {
-                return Err(anyhow::anyhow!(
-                    "Failed to convert reference frame {} to Y4M",
-                    frame_number
-                ));
-            }
-            ref_y4m_paths.push(ref_y4m);
-
-            // Convert lossy frame to Y4M
-            let lossy_status = Command::new("ffmpeg")
-                .args(&[
-                    "-hwaccel",
-                    "cuda",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "rawvideo",
-                    "-pixel_format",
-                    "rgb24",
-                    "-video_size",
-                    &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                    "-i",
-                    lossy_path,
-                    "-pix_fmt",
-                    "yuv420p",
-                    &lossy_y4m,
-                ])
-                .status()?;
-
-            if !lossy_status.success() {
-                return Err(anyhow::anyhow!(
-                    "Failed to convert lossy frame {} to Y4M",
-                    frame_number
-                ));
-            }
-            lossy_y4m_paths.push(lossy_y4m);
-            frame_numbers.push(frame_number);
-            timestamps.push(timestamp_ms);
-        }
-
-        // Create the Sink_for_video directory within the temp directory
-        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
-        std::fs::create_dir_all(&video_sink_dir)?;
-
-        let vmaf_json = video_sink_dir.join("vmaf.json").to_string_lossy().to_string();
-        let psnr_log = video_sink_dir.join("psnr.log").to_string_lossy().to_string();
-        let ssim_log = video_sink_dir.join("ssim.log").to_string_lossy().to_string();
-
-        // Construct filter complex for batch processing
-        let mut filter_complex = String::new();
-        for i in 0..frame_numbers.len() {
-            filter_complex.push_str(&format!(
-                "[{}:v][{}:v]libvmaf=log_fmt=json:log_path={}:n_subsample=1:enable='eq(n,{})',",
-                i * 2,
-                i * 2 + 1,
-                vmaf_json,
-                i
-            ));
-            filter_complex.push_str(&format!(
-                "[{}:v][{}:v]psnr=stats_file={}:frame_num={}:enable='eq(n,{})',",
-                i * 2,
-                i * 2 + 1,
-                psnr_log,
-                frame_numbers[i],
-                i
-            ));
-            filter_complex.push_str(&format!(
-                "[{}:v][{}:v]ssim=stats_file={}:frame_num={}:enable='eq(n,{})',",
-                i * 2,
-                i * 2 + 1,
-                ssim_log,
-                frame_numbers[i],
-                i
-            ));
-        }
-        filter_complex.pop(); // Remove the trailing comma
-
-        let mut ffmpeg_args = vec![
-            "-hwaccel",
-            "cuda",
-            "-loglevel",
-            "error",
-            "-filter_complex",
-            &filter_complex,
-            "-f",
-            "null",
-            "-",
-        ];
-
-        for path in &ref_y4m_paths {
-            ffmpeg_args.push("-i");
-            ffmpeg_args.push(path);
-        }
-        for path in &lossy_y4m_paths {
-            ffmpeg_args.push("-i");
-            ffmpeg_args.push(path);
-        }
-
-        let metrics_status = Command::new("ffmpeg")
-            .args(&ffmpeg_args)
-            .status()?;
-
-        if !metrics_status.success() {
-            return Err(anyhow::anyhow!("Failed to calculate video metrics for the batch"));
-        }
-
-        // Parse the log files to extract metrics for each frame
-        if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
-                if let Some(frames) = json_value["frames"].as_array() {
-                    for (i, frame_data) in frame_group._frames.iter().enumerate() {
-                        let mut vmaf_score = 0.0;
-                        let mut psnr_avg = 0.0;
-                        let mut ssim_score = 0.0;
-
-                        if let Some(frame_info) = frames.get(i) {
-                            if let Some(metrics) = frame_info["metrics"].as_object() {
-                                if let Some(score) = metrics.get("vmaf").and_then(|v| v.as_f64()) {
-                                    vmaf_score = score;
-                                }
-                            }
-                        }
-
-                        // Parse PSNR score from log
-                        if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
-                            if let Some(line) = psnr_content.lines().find(|line| {
-                                line.contains(&format!("frame:{}", frame_data.frame_number))
-                            }) {
-                                if let Some(avg_idx) = line.find("psnr_avg:") {
-                                    let remaining = &line[avg_idx + 9..];
-                                    let end_idx = remaining.find(" ").unwrap_or(10);
-                                    let avg_str = &remaining[..end_idx];
-                                    if let Ok(value) = avg_str.trim().parse::<f64>() {
-                                        psnr_avg = value;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Parse SSIM score from log
-                        if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
-                            if let Some(line) = ssim_content.lines().find(|line| {
-                                line.contains(&format!("frame:{}", frame_data.frame_number))
-                            }) {
-                                if let Some(all_idx) = line.find("All:") {
-                                    let remaining = &line[all_idx + 4..];
-                                    let end_idx = remaining.find(" ").unwrap_or(10);
-                                    let all_str = &remaining[..end_idx];
-                                    if let Ok(value) = all_str.trim().parse::<f64>() {
-                                        ssim_score = value;
-                                    }
-                                }
-                            }
-                        }
-
-                        print_green!(
-                            "T: {:.3} [{}]| Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
-                            frame_data.timestamp_ms,
-                            ip_client,
-                            frame_data.frame_number,
-                            vmaf_score,
-                            psnr_avg,
-                            ssim_score
-                        );
-
-                        let metrics = FrameMetrics {
-                            frame_number: frame_data.frame_number,
-                            timestamp_ms: frame_data.timestamp_ms,
-                            vmaf: vmaf_score,
-                            psnr: psnr_avg,
-                            ssim: ssim_score,
-                        };
-
-                        self.log_metrics(&metrics)?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
+    
 
     fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
         // Get a single mutex guard and use it for both operations
@@ -3516,6 +3272,8 @@ pub struct XRClient {
 
     offline_csv_trace: CsvTrace, 
     last_seen_id: usize, 
+
+    last_throughput_avg: f32, 
 }
 struct VmafTask {
     frames: Vec<(Vec<u8>, Vec<u8>, f64, usize, IpAddr)>, // (sample, ref_sample, timestamp, frame_id, ip)
@@ -3609,6 +3367,7 @@ impl XRClient {
 
             offline_csv_trace: CsvTrace::default(), 
             last_seen_id: 0, 
+            last_throughput_avg: 0.0, 
         
         }
     }
@@ -4043,6 +3802,13 @@ impl XRClient {
                         lost_shards_deadline: packets_lost_deadline,
                         // tx_instant: data.get_tx_instant(),
                     };
+                    if self.last_throughput_avg == 0.0 {
+                        self.last_throughput_avg = net.bytes_in_frame as f32 / net.frame_interarrival;  
+                    }
+                    else{
+                        let throughput_now = net.bytes_in_frame as f32 / net.frame_interarrival;  
+                        self.last_throughput_avg = ALPHA_THROUGHPUT * throughput_now + ( 1.0  - ALPHA_THROUGHPUT ) * self.last_throughput_avg;
+                    } 
                     // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
@@ -4787,9 +4553,11 @@ impl XRClient {
                     csv_writer.write_record(&[
                         "",                     // offset column (only first row uses it)
                         "",                     // source column (only first row uses it)
+                        "",                     // IDR_freq
                         &format!("{:.6}", timestamp),
                         &id_f.to_string(),
                         &lost.to_string(),
+                        &format!("{:.3}", self.last_throughput_avg), 
                     ]).unwrap();         // propagate or log the error as you prefer
                     csv_writer.flush().unwrap();        // or buffer: up to you
     
@@ -5364,7 +5132,7 @@ fn calculate_opacity(message: &LostFramesMessage) -> u32 {
     }
     
     // Calculate fading over the next 2 seconds after fade_duration
-    let fade_time = Duration::from_secs(5);
+    let fade_time = Duration::from_secs(40);
     let fade_age = age - message.fade_duration;
     
     if fade_age >= fade_time {

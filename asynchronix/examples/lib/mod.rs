@@ -35,7 +35,7 @@ pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 
 pub const UPLINK_QUEUE_SIZE: usize = 128;
-pub const NUMBER_OF_RANDOM_EVENTS: usize = 40; 
+pub const NUMBER_OF_RANDOM_EVENTS: usize = 20; 
 
 
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
