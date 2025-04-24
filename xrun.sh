@@ -1,8 +1,8 @@
 NUMBER_OF_JOBS=3
 SERIAL_EXECUTION=1
 N_XR=( 1 )
-initial_bitrate_mbps=(40.0 )
-TEST_TYPE=("STD" )  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
+initial_bitrate_mbps=(20.0 40.0 60.0 )
+TEST_TYPE=("PL" )  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
 
 
 simTime=70.0

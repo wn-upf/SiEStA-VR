@@ -16,7 +16,7 @@ use crate::lib::HevcParser;
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
-use std::fs;
+use std::fs::{OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::net::Ipv4Addr;
 use std::process::Command;
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread_local;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
-
+use std::path::Path;
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread};
 
@@ -68,6 +68,8 @@ use std::f64::consts::PI;
 use std::future::Future;
 use std::sync::RwLock;
 
+
+use crate::lib::CsvTrace;
 use crate::lib::alvr_statistics::StatisticsManager;
 use crate::lib::{exponential, AmpduPacket, Coords, DebugColor, MpduPacket, SlidingWindowAverage};
 // use crate::lib::INITIAL_BITRATE_MBPS_SIM;
@@ -76,6 +78,7 @@ use super::alvr_stream_socket::{
     SocketWriter, StreamSocket, IDR_FRAME_SIZE_GOP, MAX_PACKET_SIZE_RECV,
 };
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
+use super::get_third_octet;
 // use async_process::Child;
 use lazy_static::lazy_static;
 
@@ -129,10 +132,6 @@ const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to
 const RECOVERY_GRACE_PERIOD: usize = 5;      // Frames to wait before trying to find new similarity matches
 const RECOVERY_MATCH_THRESHOLD: f64 = 0.35;   // More lenient similarity threshold during recovery
 const RECOVERY_MAX_ATTEMPTS: usize = 1;       // How many consecutive frames to check before accepting new offset
-
-
-
-
 
 
 /// Number of consecutive good matches required to re-establish synchronization
@@ -610,7 +609,7 @@ enum SyncState {
 }
 
 // Configuration constants
-const MAX_OUTPUT_QUEUE_LEN: usize = 60;
+const MAX_OUTPUT_QUEUE_LEN: usize = 20;
 const MATCHES_NEEDED_TO_LOCK: usize = 1;
 const MISMATCHES_TO_RECOVERY: usize = 5;
 const MAX_PEEK_COUNT: usize = 50;
@@ -723,7 +722,7 @@ impl SynchronizedDecoder {
                     self.peek_regular_frames(MAX_PEEK_COUNT)
                 };
 
-                print_yellow!("Peeked {} regular frames, {} available ", regular_candidates.len(), self.regular_decoder.decoded_frames.len()); 
+                print_yellow!("[{}] Peeked {} regular frames, {} available ", self.client_ip,  regular_candidates.len(), self.regular_decoder.decoded_frames.len()); 
                 if regular_candidates.is_empty() {
                     continue; // No regular frames available
                 }
@@ -3513,6 +3512,10 @@ pub struct XRClient {
     /// During init we collect a few (id, frame_data) pairs for calibration
     init_buffer_ids:       Vec<usize>,
     init_buffer_frames:    Vec<Vec<u8>>,
+
+
+    offline_csv_trace: CsvTrace, 
+    last_seen_id: usize, 
 }
 struct VmafTask {
     frames: Vec<(Vec<u8>, Vec<u8>, f64, usize, IpAddr)>, // (sample, ref_sample, timestamp, frame_id, ip)
@@ -3604,8 +3607,9 @@ impl XRClient {
             init_buffer_ids:       Vec::new(),
             init_buffer_frames:    Vec::new(),
 
+            offline_csv_trace: CsvTrace::default(), 
+            last_seen_id: 0, 
         
-            // visualize_decoder_window: None,
         }
     }
 
@@ -4715,6 +4719,45 @@ impl XRClient {
                 self.initialize_synchronized_decoder();
             }
 
+            let third_octet = get_third_octet(self.server_ip).unwrap();                 
+            let csv_path = format!(
+                "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_offline_video{}.csv",
+                self.name_folder,
+                third_octet,
+                // format_elapsed!(now), 
+            );
+
+            // --------------Initialize offline CSV tracker for frames ------------- 
+            if self.offline_csv_trace.writer.is_none() {
+                if !Path::new(&csv_path).exists() {
+                    // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
+                    print_yellow!("waiting until offline CSV created {}", csv_path ); 
+                }
+                else{
+                    print_green!("Read from: {}", csv_path); 
+                
+                    self.offline_csv_trace.path = csv_path.clone().into();
+
+                    
+
+
+                    // open for *append* so we keep the first row
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .append(true)
+                        .open(&self.offline_csv_trace.path)
+                        .expect("CSV trace created by encoder is missing!");
+                    self.offline_csv_trace.writer = Some(
+                        csv::WriterBuilder::new()
+                            .has_headers(false)
+                            .from_writer(file),
+                    );
+
+                }
+                
+            }
+       
+
             // Get a mutable reference to the decoder Option
             let sync_decoder_option = &mut self.synchronized_decoder.clone();
 
@@ -4726,6 +4769,34 @@ impl XRClient {
 
             // Process the next frame if available from the regular stream queue
             if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
+
+
+                let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
+                self.last_seen_id = id_f;
+
+                let timestamp = now.duration_since(self.t_0).as_secs_f64();           // TaiTime -> f64 seconds
+
+                
+                if !Path::new(&csv_path).exists() {
+                    // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
+                    print_yellow!("waiting until offline CSV created", ); 
+                }
+                else{
+                    let csv_writer = self.offline_csv_trace.writer.as_mut().unwrap();
+                
+                    csv_writer.write_record(&[
+                        "",                     // offset column (only first row uses it)
+                        "",                     // source column (only first row uses it)
+                        &format!("{:.6}", timestamp),
+                        &id_f.to_string(),
+                        &lost.to_string(),
+                    ]).unwrap();         // propagate or log the error as you prefer
+                    csv_writer.flush().unwrap();        // or buffer: up to you
+    
+                }
+
+     
+
                 
                 let mut ip_client = self.server_ip; // Use clone() if necessary depending on self.server_ip type
                 // Normalize IP address if needed
@@ -4821,7 +4892,7 @@ impl XRClient {
                             let missing_max_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc",
                                 self.name_folder, ip_client, missing_id);
 
-                            let max_frame_data = match fs::read(&missing_max_path) {
+                            let max_frame_data = match std::fs::read(&missing_max_path) {
                                 Ok(data) if !data.is_empty() => Some(data),
                                 Ok(_) => {
                                     print_pretty!(DebugColor::Yellow, "Found empty MAX file for missing frame {}", missing_id);
@@ -4866,7 +4937,7 @@ impl XRClient {
                 if USE_FFMPEG { // Assuming reading max frame only needed if FFMPEG/Sync is used
                     // Try reading max bitrate reference with retry logic (keep as is)
                     for attempt in 1..=5 {
-                        match fs::read(&maxb_file_path) {
+                        match std::fs::read(&maxb_file_path) {
                             Ok(data) if !data.is_empty() => { max_frame = data; break; }
                             Ok(_) => {
                                 print_pretty!(
@@ -4997,8 +5068,8 @@ impl XRClient {
                     if !video_frame.is_empty() && !max_frame.is_empty() {
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            print_pretty!(
-                                DebugColor::Violet,
+                            print_pink!(
+                                // DebugColor::Violet,
                                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                                 format_elapsed!(now),
                                 ip_client,

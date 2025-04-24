@@ -9,12 +9,14 @@ use std::process::{Child, Command, Stdio};
 
 use std::sync::{Arc, Mutex};
 // use tokio::io::{AsyncReadExt, BufReader};
-use crate::lib::HevcParser;
+use crate::lib::{get_third_octet, HevcParser};
 use crate::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use rand::seq::IteratorRandom;
 use std::io::BufReader;
-
+use crate::format_elapsed;
+use crate::lib::CsvTrace;
+use crate::print_green;
 // lazy_static! {
 //     // Global static encoder instance
 //     static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
@@ -47,6 +49,13 @@ use std::net::IpAddr;
 
 use std::result::Result::Ok;
 use tai_time::TaiTime;
+
+
+use std::{
+    fs::{File, OpenOptions},
+    path::PathBuf,
+};
+use csv::Writer;
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
@@ -917,6 +926,7 @@ impl StreamSocket {
             ffmpeg_maxbitrate_encoder: None,
             // chunk_frames: VecDeque::new(),
             time_since_last_update: t0,
+            csv_trace: CsvTrace::default(), 
         }
     }
 
@@ -1767,6 +1777,8 @@ pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &
     ))
 }
 
+
+
 #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
@@ -1793,6 +1805,8 @@ pub struct StreamSender<H> {
 
     // Keep the initialization flag:
     pub time_since_last_update: TaiTime<0>,
+
+    csv_trace: CsvTrace, 
 }
 
 #[allow(unused)]
@@ -1898,6 +1912,9 @@ impl<H: Serialize> StreamSender<H> {
             "[BUFFEREMU] SENDING FRAME {} from SERVER",
             id_frame_files_ref
         );
+
+
+
         if USE_FFMPEG {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
@@ -1912,8 +1929,47 @@ impl<H: Serialize> StreamSender<H> {
                     self.ffmpeg_maxbitrate_encoder.is_some()
                 );
 
-                // let random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                let random_offset = OFFSET_VIDEO;
+                let mut random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
+                // random_offset = (random_offset * 10.0).round() / 10.0;
+                // let random_offset = OFFSET_VIDEO;
+
+                let third_octet = get_third_octet(ip).unwrap(); 
+
+                if self.csv_trace.path.as_os_str().is_empty() {
+                    // one CSV per run – put it next to the hevc files, but anywhere is fine
+                    let csv_path = format!(
+                        "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_offline_video{}.csv",
+                        name_folder,
+                        third_octet,
+                        // format_elapsed!(now), 
+                    );
+
+                    print_green!("Creating OFFLINE CSV at: {csv_path}", ); 
+
+                    let mut wtr = Writer::from_path(&csv_path)?;
+                    // no header row – the very first record is the offset & source
+                    
+
+                    wtr.write_record(&[
+                        "OFFSET_VIDEO",
+                        "PATH_VIDEO",
+                        "timestamp",
+                        "ID_frame",
+                        "Lost", 
+                    ])?; 
+
+                    wtr.write_record(&[
+                        format!("{random_offset:.4}"),     // offset used for this run
+                        input_path.to_owned(),             // source clip
+                        "".to_string(),                                // placeholder timestamp
+                        "".to_string(),                                // placeholder id_f
+                        "".to_string(),                                // placeholder lost
+                    ])?;
+
+                    wtr.flush()?;
+                    self.csv_trace.path = csv_path.into();
+                }
+    
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     input_path,

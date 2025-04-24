@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const CW_MIN: i32 = 8;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -1882,6 +1882,34 @@ pub struct GraphStatistics {
     pub nominal_bitrate: NominalBitrateStats,
     pub actual_bitrate_bps: f32,
 }
+use std::net::IpAddr;
+
+fn get_third_octet(ip: IpAddr) -> Option<u8> {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets(); // returns [u8; 4]
+            Some(octets[2]) // third octet (0-based index)
+        }
+        _ => { None }
+        // IpAddr::V6(_) => None, // IPv6 doesn't have octets in the same sense
+    }
+}
+
+#[derive(Default)]
+struct CsvTrace {
+    path:   PathBuf,
+    writer: Option<csv::Writer<std::fs::File>>,
+}
+
+impl Clone for CsvTrace {
+    fn clone(&self) -> Self {
+        CsvTrace {
+            path:   self.path.clone(),
+            writer: None,
+        }
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
 pub struct HeuristicStats {
