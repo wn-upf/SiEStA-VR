@@ -1992,7 +1992,7 @@ fn make_encoder_task(
         while produced < trace.len() {
             // (re)fill the encoder’s internal queue
             enc.start_chunking(bitrate_mbps).await;
-            std::thread::sleep(Duration::from_millis(10000)); 
+            async_std::task::sleep(Duration::from_millis(6000)).await;
             // drain all frames this chunk produced (but never overrun our trace)
             while produced < trace.len() {
                 // try to grab the next packet
@@ -2000,8 +2000,7 @@ fn make_encoder_task(
                     let info = &trace[produced];
                     produced += 1;
 
-                    std::thread::sleep(Duration::from_millis(600)); 
-
+                    async_std::task::sleep(Duration::from_millis(600)).await;
 
                     // simulate loss only on the “low” path
                     if !simulate_loss || !info.lost {
@@ -2120,6 +2119,7 @@ pub async fn process_trace(
     trace_csv: PathBuf,
     ip: IpAddr,
 ) -> Result<()> {
+
     // 1) extract the “scenario” folder name and the trace index
     let file_name = trace_csv.file_name().unwrap().to_string_lossy();
     let caps = Regex::new(r"trace_offline_video(\d+)\.csv$")?
@@ -2127,10 +2127,13 @@ pub async fn process_trace(
         .expect("filename didn’t match");
     let trace_idx: usize = caps[1].parse()?;
 
+
+
     let scenario = trace_csv.parent()
         .and_then(|p| p.file_name())
         .unwrap()
         .to_string_lossy();
+    print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario ); 
 
     // 2) build a logger that writes to Results/<scenario>/VMAF_metrics_<idx>.csv
     let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
@@ -2337,93 +2340,140 @@ pub async fn process_trace(
 
         
         while window.is_open() {
-
-            while let Ok((tag, id, pkt)) = rx.try_recv() {
-                match tag {
-                    0 => dec_low.process_packet(pkt, id),
-                    1 => dec_ref.process_packet(pkt, id),
-                    _ => {}
+            // BLOCK up to 50 ms for the next packet
+            match rx.recv_timeout(Duration::from_millis(10000)) {
+                Ok((tag, id, pkt)) => {
+                    match tag {
+                        0 => dec_low.process_packet(pkt, id),
+                        1 => dec_ref.process_packet(pkt, id),
+                        _ => unreachable!(),
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // no packet arrived in 50 ms → fall through to decode/draw
+                    break; 
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    // the channel is closed forever → we know
+                    // no more packets will ever arrive
+                    break;
                 }
             }
-            // — non‐blocking receive & decode for low
-            if let Some((rgb_l, id_l, _ts)) = dec_low.next_decoded_frame() {
-                if let Some(rgb_r) = ref_buf.remove(&id_l) {
-                    // we already have the matching ref frame
-                    let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                     // compute timestamp relative to program start
-                    // let timestamp_ms = start.elapsed().as_secs_f64();
-                    let ts_ms = ts_map.get(&id_l).unwrap_or(&0.0);
-
-
-                    // log VMAF/PSNR/SSIM into CSV
-                    metric.process_frame_buffers(
-                        id_l as u64,
-                        *ts_ms,
-                        &rgb_r,
-                        &rgb_l,
-                        ip,
-                    ).await?;
-                    // metric.clone().spawn_metrics(id_l as u64, timestamp_ms, rgb_r.clone(), rgb_l.clone(), ip);
-
-                    draw_pair(&mut window, &rgb_l, &rgb_r, id_l, sim)?;
-                    seen_pairs += 1;
+        
+            // — now decode *all* available frames and draw them —
+            loop {
+                if let Some((rgb_l, id_l, _ts)) = dec_low.next_decoded_frame() {
+                    if let Some(rgb_r) = ref_buf.remove(&id_l) {
+                        let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
+                        metric
+                            .process_frame_buffers(id_l as u64, *ts_map.get(&id_l).unwrap_or(&0.0), &rgb_r, &rgb_l, ip)
+                            .await?;
+                        draw_pair(&mut window, &rgb_l, &rgb_r, id_l, sim)?;
+                        seen_pairs += 1;
+                    } else {
+                        low_buf.insert(id_l, rgb_l);
+                    }
                 } else {
-                    // stash low until its ref arrives
-                    low_buf.insert(id_l, rgb_l);
+                    break;
                 }
             }
-
-            // — non‐blocking receive & decode for ref
-            if let Some((rgb_r, id_r, _ts)) = dec_ref.next_decoded_frame() {
-                if let Some(rgb_l) = low_buf.remove(&id_r) {
-                    // we already have the matching low frame
-                    let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                    draw_pair(&mut window, &rgb_l, &rgb_r, id_r, sim)?;
+        
+            loop {
+                if let Some((rgb_r, id_r, _ts)) = dec_ref.next_decoded_frame() {
+                    if let Some(rgb_l) = low_buf.remove(&id_r) {
+                        let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
+                        draw_pair(&mut window, &rgb_l, &rgb_r, id_r, sim)?;
+                        seen_pairs += 1;
+                    } else {
+                        ref_buf.insert(id_r, rgb_r);
+                    }
                 } else {
-                    // stash ref until its low arrives
-                    ref_buf.insert(id_r, rgb_r);
+                    break;
                 }
             }
+        
             if seen_pairs >= expected {
                 break;
-              }
-
-            // ALWAYS update the window so it stays responsive
+            }
             window.update();
         }
+        
 
 
     Ok(())
 }
 
 use walkdir::WalkDir;
+use tokio::join;
+use tokio::spawn;
 
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 1) Prepare your IP (or however you choose it)
+fn main() -> Result<()> {
+    // 1) Your IP
     let ip: IpAddr = "192.168.0.1".parse().unwrap();
 
-    // 2) Regex for matching “trace_offline_video<idx>.csv”
+    // 2) Trace‐filename regex
     let trace_re = Regex::new(r"^trace_offline_video\d+\.csv$")?;
 
-    // 3) Recurse under “Results/”
-    for entry in WalkDir::new("Results/").into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
+    // 3) Group CSVs by their parent folder
+    let mut scenarios: Vec<(PathBuf, Vec<PathBuf>)> = {
+        let mut map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for entry in WalkDir::new("Results/")
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path().to_path_buf();
             if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
                 if trace_re.is_match(fname) {
-                    println!("→ scheduling {:?}", path);
-                    // clone the path for the async task
-                    let trace_path = PathBuf::from(path);
-                    let ip_clone   = ip.clone();
-                    // run them *sequentially* or `tokio::spawn` if you want them in parallel
-                    process_trace(trace_path, ip_clone).await?;
+                    map.entry(path.parent().unwrap().to_path_buf())
+                       .or_default()
+                       .push(path);
                 }
             }
         }
+        let mut v: Vec<_> = map.into_iter().collect();
+        v.sort_by(|(a, _), (b, _)| a.cmp(b));
+        v
+    };
+
+    // 4) Split into two groups by even/odd index
+    let mut g1 = Vec::new();
+    let mut g2 = Vec::new();
+    for (i, scenario) in scenarios.drain(..).enumerate() {
+        if i % 2 == 0 {
+            g1.push(scenario);
+        } else {
+            g2.push(scenario);
+        }
     }
-    
+
+    // 5) Worker that builds its own current-thread runtime and runs all its traces
+    let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
+        thread::spawn(move || -> Result<()> {
+            // build a single-threaded Tokio runtime
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+
+            rt.block_on(async {
+                for (_folder, traces) in group {
+                    for trace_csv in traces {
+                        // this is your async fn that creates Window, etc.
+                        process_trace(trace_csv, ip.clone()).await?;
+                    }
+                }
+                Ok(())
+            })
+        })
+    };
+
+    // 6) Spawn both workers
+    let h1 = make_worker(g1, ip.clone());
+    let h2 = make_worker(g2, ip.clone());
+
+    // 7) Wait for them
+    h1.join().expect("worker 1 panicked")?;
+    h2.join().expect("worker 2 panicked")?;
 
     Ok(())
 }
