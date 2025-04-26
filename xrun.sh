@@ -1,9 +1,9 @@
-NUMBER_OF_JOBS=3
+NUMBER_OF_JOBS=4
 SERIAL_EXECUTION=1
-N_XR=( 1 )
-initial_bitrate_mbps=(20.0 40.0 60.0 )
-TEST_TYPE=("PL" )  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
-
+N_XR=( 1 2 3 4 )
+initial_bitrate_mbps=(20.0 40.0 60.0 80.0 )
+TEST_TYPE=("STD" "PL" "BW")  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
+ ## "TEST_TYPE = "RANDOM" ## for random PL BW and JI effects spread over the whole simulation
 
 simTime=70.0
 k_queue=10000

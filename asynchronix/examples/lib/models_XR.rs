@@ -1914,7 +1914,7 @@ impl HevcDecoder {
                     return None;
                 }
             }
-
+            self.decoded_frame_counter += 1; 
             // Frame is good
             Some((frame, inst))
         } else {
@@ -2742,12 +2742,12 @@ impl XRServer {
                     self.video_app_sender.as_mut().unwrap().ffmpeg_encoder = Some(encoder_init);
                     // println!("ENCODER INITIALIZED");
                 }
-                if let Some(maxencoder_init) = send_socket.clone().ffmpeg_maxbitrate_encoder {
-                    self.video_app_sender
-                        .as_mut()
-                        .unwrap()
-                        .ffmpeg_maxbitrate_encoder = Some(maxencoder_init); // ACTUALLY CONSERVE THE COPY, CRITICAL!
-                }
+                // if let Some(maxencoder_init) = send_socket.clone().ffmpeg_maxbitrate_encoder {
+                //     self.video_app_sender
+                //         .as_mut()
+                //         .unwrap()
+                //         .ffmpeg_maxbitrate_encoder = Some(maxencoder_init); // ACTUALLY CONSERVE THE COPY, CRITICAL!
+                // }
 
                 // Use DashMap's thread-safe `insert` API instead of write locks
                 let frame_tracker_map = send_socket.get_frame_tracker_map();
@@ -3204,15 +3204,12 @@ pub struct XRClient {
     // pub decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
 
     // pub ref_decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
-    synchronized_decoder: Option<Arc<Mutex<SynchronizedDecoder>>>,
-    synchronized_throttle: Option<Arc<Semaphore>>,
+    original_decoder: Option<Arc<Mutex<HevcDecoder>>>,
 
     pub is_decoder_ready: bool,
     pub is_ref_decoder_ready: bool,
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>, // Buffer to hold initial frames
-    initialization_buffer_ref: Vec<Vec<u8>>,
-    initialization_buffer_max: Vec<Vec<u8>>,
 
     min_buffered_frames: usize, // Minimum frames to buffer before decoding
     dec_saw_keyframe: bool,
@@ -3263,8 +3260,6 @@ pub struct XRClient {
 
 
     file_id_offset: i64,
-    /// Have we already run the one‑time offset calibration?
-    file_id_offset_locked: bool,
     /// During init we collect a few (id, frame_data) pairs for calibration
     init_buffer_ids:       Vec<usize>,
     init_buffer_frames:    Vec<Vec<u8>>,
@@ -3313,13 +3308,9 @@ impl XRClient {
             decoded_frame_index: 0,
             t_0: now,
             last_tracking_time: now,
-            synchronized_decoder: None,
-            synchronized_throttle: Some(synchronized_throttle),
 
             // Add these new fields:
             initialization_buffer: Vec::new(), // Buffer to hold initial frames
-            initialization_buffer_ref: Vec::new(),
-            initialization_buffer_max: Vec::new(),
             is_decoder_ready: false, // Flag to track if decoder is ready
             is_ref_decoder_ready: false,
             min_buffered_frames: 20, // Minimum frames to buffer before decoding
@@ -3361,38 +3352,19 @@ impl XRClient {
             vmaf_batch_size: 2, // Default batch size
 
             file_id_offset:      0,
-            file_id_offset_locked: false,
             init_buffer_ids:       Vec::new(),
             init_buffer_frames:    Vec::new(),
 
             offline_csv_trace: CsvTrace::default(), 
             last_seen_id: 0, 
             last_throughput_avg: 0.0, 
+
+            original_decoder: None, 
         
         }
     }
 
-    pub fn initialize_synchronized_decoder(&mut self) {
-        // Create or retrieve the semaphore
-        let throttle_semaphore = match &self.synchronized_throttle {
-            Some(semaphore) => Arc::clone(semaphore),
-            None => {
-                let sem = Arc::new(Semaphore::new(0));
-                self.synchronized_throttle = Some(Arc::clone(&sem));
-                sem
-            }
-        };
 
-        // Initialize a new synchronized decoder
-        let synchronized_decoder = SynchronizedDecoder::new(self.server_ip, throttle_semaphore);
-        self.synchronized_decoder = Some(Arc::new(Mutex::new(synchronized_decoder)));
-
-        print_pretty!(
-            DebugColor::Green,
-            "Initialized synchronized decoder for {} with throttle semaphore",
-            self.server_ip
-        );
-    }
 
     pub async fn configure_streams(&mut self, packet_size: usize, context: &Context<Self>) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
@@ -4408,66 +4380,7 @@ impl XRClient {
         
         Ok(())
     }
-        /// Look in reference RGB dumps around each network ID,
-        /// pick the best‐matching disk ID by pixel‐similarity, then take the mode.
-        fn calibrate_file_id_offset(&self, ip: &IpAddr) -> i64 {
-            const RADIUS:    i64 = 30;  // how far left/right to search
-            let width      = WIDTH_ENCODER as usize;
-            let height     = HEIGHT_ENCODER as usize;
-            let expected   = width * height * 3;        // rgb24
-            let base_dir   = format!("Sink_for_video/{}/{}", &self.name_folder, ip);
-    
-            let mut votes = std::collections::HashMap::<i64,usize>::new();
-    
-            'outer: for (idx, &net_id) in self.init_buffer_ids.iter().enumerate() {
-                let dec_bytes = &self.init_buffer_frames[idx];
-    
-                // skip any sample that wasn't a full‐sized frame
-                if dec_bytes.len() != expected {
-                    // print_yellow!(
-                    // "Skipping buffer sample #{} (id {}) because its size ({}) ≠ expected ({})",
-                    //     idx, net_id, dec_bytes.len(), expected,
-                    // );
-                    continue 'outer;
-                }
-    
-                let mut best_off = 0;
-                let mut best_sim = f64::MAX;
-    
-                for off in -RADIUS..=RADIUS {
-                    let disk_id = (net_id as i64 + off) as usize;
-                    let rgb_path = format!("{}/reference_rgb/frame_{:04}.rgb", base_dir, disk_id);
-    
-                    // read file, but skip if it doesn't exist or has wrong length
-                    let rgb_bytes = match std::fs::read(&rgb_path) {
-                        Ok(b) if b.len() == expected => b,
-                        _ => continue,  // missing or malformed: skip
-                    };
-    
-                    // compute similarity
-                    let sim = compute_enhanced_frame_similarity(
-                        dec_bytes, &rgb_bytes, width, height
-                    );
-    
-                    if sim < best_sim {
-                        best_sim = sim;
-                        best_off = off;
-                    }
-                }
-    
-                // if we never found a single valid candidate (all were missing), skip this sample
-                if best_sim.is_finite() {
-                    *votes.entry(best_off).or_insert(0) += 1;
-                }
-            }
-    
-            // pick the offset seen most often, or default to 0
-            votes.into_iter()
-                 .max_by_key(|&(_, count)| count)
-                 .map(|(off,_)| off)
-                 .unwrap_or(0)
-        }
-    
+
     
 
     pub fn vsync<'a>(
@@ -4480,9 +4393,14 @@ impl XRClient {
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
             let mut lost_frames_aux =self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
-            // Initialize synchronized decoder if needed
-            if self.synchronized_decoder.is_none() {
-                self.initialize_synchronized_decoder();
+            if self.original_decoder.is_none(){
+                self.original_decoder = Some(
+                    Arc::new( Mutex::new( HevcDecoder::new(
+                        self.framerate as u32,
+                        WIDTH_ENCODER as u32,
+                        HEIGHT_ENCODER as u32,
+                        &format!("[SINGLE DECODER {}]", self.server_ip), 
+                    )))); 
             }
 
             let third_octet = get_third_octet(self.server_ip).unwrap();                 
@@ -4497,15 +4415,12 @@ impl XRClient {
             if self.offline_csv_trace.writer.is_none() {
                 if !Path::new(&csv_path).exists() {
                     // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                    print_yellow!("waiting until offline CSV created {}", csv_path ); 
+                    println!("waiting until offline CSV created {}", csv_path ); 
                 }
                 else{
                     print_green!("Read from: {}", csv_path); 
                 
                     self.offline_csv_trace.path = csv_path.clone().into();
-
-                    
-
 
                     // open for *append* so we keep the first row
                     let file = OpenOptions::new()
@@ -4522,10 +4437,6 @@ impl XRClient {
                 }
                 
             }
-       
-
-            // Get a mutable reference to the decoder Option
-            let sync_decoder_option = &mut self.synchronized_decoder.clone();
 
             // Clean up older processed frames from tracking buffer
             let current_last_processed = self.last_processed_frame_id;
@@ -4536,7 +4447,6 @@ impl XRClient {
             // Process the next frame if available from the regular stream queue
             if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
 
-
                 let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
                 self.last_seen_id = id_f;
 
@@ -4545,7 +4455,7 @@ impl XRClient {
                 
                 if !Path::new(&csv_path).exists() {
                     // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                    print_yellow!("waiting until offline CSV created", ); 
+                    println!("waiting until offline CSV created", ); 
                 }
                 else{
                     let csv_writer = self.offline_csv_trace.writer.as_mut().unwrap();
@@ -4562,12 +4472,7 @@ impl XRClient {
                     csv_writer.flush().unwrap();        // or buffer: up to you
     
                 }
-
-     
-
-                
-                let mut ip_client = self.server_ip; // Use clone() if necessary depending on self.server_ip type
-                // Normalize IP address if needed
+                let mut ip_client = self.server_ip; 
                 if let IpAddr::V4(ip4) = ip_client {
                      let mut octets = ip4.octets();
                      if octets[3] == 2 {
@@ -4575,48 +4480,14 @@ impl XRClient {
                          ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
                      }
                  }
-
-                // Process any pending VMAF analysis tasks
-                if USE_VMAF {
-                    if let Ok((refe, maxbe, id)) = self.channel_rx_vmaf.try_recv() {
-                        self.vmaf_analysis(refe, maxbe, now, id, ip_client)
-                            .await
-                            .unwrap_or_else(|e| {
-                                print_pretty!(DebugColor::Red, "VMAF analysis error: {}", e,);
-                            });
-                    }
-                }
-                let disk_id = (id_f as i64 + self.file_id_offset) as usize;
-                // Define file paths (keep as is)
-                let maxb_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc",
-                    self.name_folder, ip_client, disk_id);
-                let currentb_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc",
-                    self.name_folder, ip_client, id_f
-                );
-                // RGB paths might be needed later for VMAF or cleanup, keep if used
-                let max_rgb_write_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.rgb",
-                    self.name_folder, ip_client, id_f
-                );
-                let ref_rgb_write_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.rgb",
-                    self.name_folder, ip_client, id_f
-                );
-                let maxb_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc", 
-                    self.name_folder, ip_client, id_f);
-                let currentb_path = format!(
-                    "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc",
-                    self.name_folder, ip_client, id_f
-                );
-
+               
 
                 if id_f % 10 == 0 {
-                    if USE_VMAF {
-                        if let Err(e) = self.cleanup_old_frames_vmaf(now, id_f, ip_client).await {
-                            eprintln!("Error during frame cleanup: {}", e);
-                        }
-                    }
+                    // if USE_VMAF {
+                    //     if let Err(e) = self.cleanup_old_frames_vmaf(now, id_f, ip_client).await {
+                    //         eprintln!("Error during frame cleanup: {}", e);
+                    //     }
+                    // }
 
                     if USE_FFMPEG {
                         if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client) {
@@ -4625,7 +4496,6 @@ impl XRClient {
                     }
                 }
 
-                // --- Modified Missing Frame Detection & Recovery ---
                 if id_f > self.last_processed_frame_id + 1 {
                     let missing_start = self.last_processed_frame_id + 1;
                     let missing_end = id_f - 1; // Inclusive end
@@ -4636,111 +4506,29 @@ impl XRClient {
                         ip_client, missing_start, missing_end,
                     );
 
-                    // Lock the decoder ONCE before the loop if possible
-                    if let Some(sync_decoder_arc) = sync_decoder_option {
-                         let mut sync_decoder_guard = sync_decoder_arc.lock().unwrap();
-
-                        for missing_id in missing_start..=missing_end { // Iterate inclusive
-                            if !self.missing_frames_buffer.contains_key(&missing_id) {
-                                print_pretty!(
-                                    DebugColor::DarkOrange,
-                                    "{} Added missing frame {} to tracking system",
-                                    ip_client, missing_id,
-                                );
-                                self.missing_frames_buffer.insert(missing_id, false); // Mark as not processed yet
-                            }
-
-                            // Check if already processed (e.g., by a previous recovery attempt)
-                             if *self.missing_frames_buffer.get(&missing_id).unwrap_or(&false) {
-                                print_pretty!(DebugColor::Purple, "Missing frame {} already processed, skipping", missing_id);
-                                continue;
-                             }
-
-                            // Construct file path for the corresponding *max* frame for this missing regular frame
-                            let missing_max_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_max/{}_max.hevc",
-                                self.name_folder, ip_client, missing_id);
-
-                            let max_frame_data = match std::fs::read(&missing_max_path) {
-                                Ok(data) if !data.is_empty() => Some(data),
-                                Ok(_) => {
-                                    print_pretty!(DebugColor::Yellow, "Found empty MAX file for missing frame {}", missing_id);
-                                    None
-                                }
-                                Err(_) => {
-                                    print_pretty!(DebugColor::Yellow, "MAX file not found for missing frame {}", missing_id);
-                                    None
-                                }
-                            };
-
-                            // Process with the synchronized decoder: Provide None for the missing regular frame
-                            // // and Some(data) for the max frame if found.
-                            print_yellow!("Processing missing regular frame {} (Max frame present: {})", missing_id, max_frame_data.is_some());
-                            sync_decoder_guard.process_packets(None, max_frame_data);
-
-                            sync_decoder_guard.notify_regular_loss(1);
-
-
-                            // if let Some(offset) = sync_decoder_guard.get_stable_offset(){
-                            //     let new_offset = offset - 1 ; 
-                            //     sync_decoder_guard.change_stable_offset( new_offset );
-                            //     print_pink!("[Loss] Adjust offset from {} to {}", offset, new_offset ); 
-                            // }
-
-                             // Mark as processed in the tracking buffer *after* attempting to process
-                             self.missing_frames_buffer.insert(missing_id, true);
+                    for missing_id in missing_start..=missing_end { // Iterate inclusive
+                        if !self.missing_frames_buffer.contains_key(&missing_id) {
+                            print_pretty!(
+                                DebugColor::DarkOrange,
+                                "{} Added missing frame {} to tracking system",
+                                ip_client, missing_id,
+                            );
+                            self.missing_frames_buffer.insert(missing_id, false); // Mark as not processed yet
                         }
-                        // Drop the lock after the loop
-                        drop(sync_decoder_guard);
-                     } else {
-                         print_pretty!(DebugColor::Red, "Synchronized decoder not available for missing frame recovery!", );
-                     }
+
+                        // Check if already processed (e.g., by a previous recovery attempt)
+                            if *self.missing_frames_buffer.get(&missing_id).unwrap_or(&false) {
+                            print_pretty!(DebugColor::Purple, "Missing frame {} already processed, skipping", missing_id);
+                            continue;
+                            }
+                            // Mark as processed in the tracking buffer *after* attempting to process
+                            self.missing_frames_buffer.insert(missing_id, true);
+                    }
                 } // End of missing frame recovery
 
 
                 // Update last processed frame ID for the *regular* stream continuity check
                 self.last_processed_frame_id = id_f;
-
-                // Read corresponding max frame for the *current* regular frame `id_f`
-                let mut max_frame = Vec::new();
-                if USE_FFMPEG { // Assuming reading max frame only needed if FFMPEG/Sync is used
-                    // Try reading max bitrate reference with retry logic (keep as is)
-                    for attempt in 1..=5 {
-                        match std::fs::read(&maxb_file_path) {
-                            Ok(data) if !data.is_empty() => { max_frame = data; break; }
-                            Ok(_) => {
-                                print_pretty!(
-                                    DebugColor::Yellow,
-                                    "MAX file for frame #{} exists but is empty (attempt {}/5)",
-                                    id_f,
-                                    attempt,
-                                );
-                                if id_f < 10 {
-                                    continue;
-                                } else {
-                                    thread::sleep(Duration::from_millis(10));
-                                }
-                            }
-                            Err(e) => {
-                                if attempt < 5 {
-                                    print_pretty!(DebugColor::Yellow,
-                                        "Error reading MAX HEVC file for frame #{} (attempt {}/5): {}", 
-                                        id_f, attempt, e,);
-                                    if id_f < 10 {
-                                        continue;
-                                    }
-                                    thread::sleep(Duration::from_millis(10));
-                                } else {
-                                    print_pretty!(DebugColor::Red,
-                                        "Failed to read MAX HEVC file for frame #{} after 5 attempts", 
-                                        id_f,);
-                                }
-                            }
-                        }
-                         if attempt == 5 && max_frame.is_empty() {
-                            print_pretty!(DebugColor::Red, "Failed to read MAX HEVC file for frame #{} after 5 attempts", id_f);
-                         }
-                    }
-                }
 
                 // Keyframe detection (keep as is)
                 if is_keyframe(&video_frame) {
@@ -4751,80 +4539,22 @@ impl XRClient {
                         video_frame.len(),
                     );
                     self.dec_saw_keyframe_last_t = now;
-                    if is_keyframe(&max_frame) {
-                        print_pretty!(
-                            DebugColor::Magenta,
-                            "*** KEYFRAME DETECTED IN MAX BITRATE STREAM *** Size: {} bytes",
-                            max_frame.len(),
-                        );
-                    }
                 }
 
-                // if !max_frame.is_empty() && self.is_keyframe(&max_frame) { /* ... log ... */ }
+                if !self.is_decoder_ready && USE_FFMPEG { 
 
-
-                if !self.is_decoder_ready && USE_FFMPEG { // Check USE_FFMPEG here too
-                     // Buffer frames (keep buffering logic)
                     if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
-                     // if !ref_frame.is_empty() { self.initialization_buffer_ref.push(ref_frame.clone()); } // Keep if ref_frame has a purpose
-                    if !max_frame.is_empty() { self.initialization_buffer_max.push(max_frame.clone()); }
-
-
-                    if !self.file_id_offset_locked {
-                        self.init_buffer_ids.push(id_f);
-                        self.init_buffer_frames.push(video_frame.clone());
-                    }
-
-                                        // After `has_enough_frames && self.dec_saw_keyframe`
-                    if !self.file_id_offset_locked && self.init_buffer_frames.len() >= self.min_buffered_frames {
-                        let offset = self.calibrate_file_id_offset(&ip_client);
-                        self.file_id_offset       = offset;
-                        self.file_id_offset_locked = true;
-                        print_pretty!(DebugColor::Green, "Calibrated file‐ID offset = {}", offset);
-                    }
-
                     
-
                      let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
-                     let saw_keyframe_now = is_keyframe(&video_frame);
-                     if saw_keyframe_now { self.dec_saw_keyframe = true; self.dec_saw_keyframe_last_t = now; }
+                     if is_keyframe(&video_frame) { self.dec_saw_keyframe = true; self.dec_saw_keyframe_last_t = now; }
 
                      if has_enough_frames && self.dec_saw_keyframe {
                         print_pretty!(DebugColor::Cyan, "Decoder initialization criteria met! Buffered {} frames", self.initialization_buffer.len());
 
-                        // Ensure decoder is initialized (already done at the start)
-                        if let Some(sync_decoder_arc) = sync_decoder_option {
-                            let mut sync_decoder_guard = sync_decoder_arc.lock().unwrap();
-
-                            // Process all buffered frames using process_packets
-                            let count = self.initialization_buffer.len().min(self.initialization_buffer_max.len());
-                             print_pretty!(DebugColor::Cyan, "Processing {} buffered pairs for initialization...", count);
-                            for i in 0..count {
-                                let dec_frame = &self.initialization_buffer[i];
-                                let max_init_frame = &self.initialization_buffer_max[i];
-
-                                if !dec_frame.is_empty() && !max_init_frame.is_empty() {
-                                    // Use process_packets
-                                    sync_decoder_guard.process_packets(Some(dec_frame.clone()), Some(max_init_frame.clone()));
-                                    // Minimal logging here to avoid spam
-                                    if i % 10 == 0 || i == count - 1 {
-                                        print_pretty!(DebugColor::Green,"Processed init pair #{}", i);
-                                    }
-                                }
-                            }
-                            drop(sync_decoder_guard); // Release lock before clearing buffers
-
-                            // Mark decoder as ready and clear buffers
-                             print_pretty!(DebugColor::Cyan, "Initialization processing complete.", );
-                            self.is_decoder_ready = true;
-                            // self.is_ref_decoder_ready = true; // Still needed?
-                            self.initialization_buffer.clear();
-                            // self.initialization_buffer_ref.clear();
-                            self.initialization_buffer_max.clear();
-
-                        } else {
-                            print_pretty!(DebugColor::Red, "Synchronized decoder not available during initialization!", );
-                        }
+                        print_pretty!(DebugColor::Cyan, "Initialization processing complete.", );
+                        self.is_decoder_ready = true;
+                        // self.is_ref_decoder_ready = true; // Still needed?
+                        self.initialization_buffer.clear();
 
                     } else { /* ... log buffering status ... */ }
 
@@ -4833,11 +4563,12 @@ impl XRClient {
                 // --- Modified Normal Processing ---
                 // Process current frame if decoder is ready
                 if self.is_decoder_ready && USE_FFMPEG {
-                    if !video_frame.is_empty() && !max_frame.is_empty() {
+                    if !video_frame.is_empty() {
+                         
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            print_pretty!(
-                                DebugColor::Violet,
+                            print_pink!(
+                                // DebugColor::Violet,
                                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                                 format_elapsed!(now),
                                 ip_client,
@@ -4848,23 +4579,21 @@ impl XRClient {
                             );
                         }
 
-                        if let Some(sync_decoder_arc) = sync_decoder_option {
-                            let mut sync_decoder_guard = sync_decoder_arc.lock().unwrap();
+                        if let Some(decoder_arc) = self.original_decoder.clone(){
+                            let mut decoder = decoder_arc.lock().unwrap();
 
                             // Process the current frame pair using process_packets
-                             print_pretty!(DebugColor::Cyan, "Processing frame #{} pair...", id_f);
-                             sync_decoder_guard.process_packets(Some(video_frame.clone()), Some(max_frame.clone()));
+                            print_pretty!(DebugColor::Cyan, "Processing frame #{} ", id_f);
+                            decoder.process_packet(video_frame.clone());
 
 
                             // Try to get a synchronized frame pair immediately after processing
                             // This might yield 0, 1 or more pairs depending on internal buffering and state
-                             while let Some(frame_pair) = sync_decoder_guard.next_frame_pair() {
+                             while let Some((frame, _)) = decoder.next_decoded_frame() {
                                 print_pretty!(
                                     DebugColor::Green,
-                                    "Retrieved synchronized frame pair #{} (SyncState: {:?}, Offset: {:?})",
-                                    frame_pair.frame_id,
-                                    sync_decoder_guard.get_sync_state(), // Get current state
-                                    sync_decoder_guard.get_stable_offset(), // Get current offset
+                                    "Retrieved frame #{}",
+                                    decoder.decoded_frame_counter,
                                 );
 
                                 // Display synchronized frame pair (keep display logic)
@@ -4877,9 +4606,8 @@ impl XRClient {
                                      // Ensure window exists (keep window creation logic)
                                      if !windows.contains_key(&self.server_ip) { 
                                         
-                                            let window_title = format!("{} - Frame Compare {}", 
-                                            format_elapsed!(now), self.server_ip);
-                                            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW * 2.0 + 10.0) as usize;
+                                            let window_title = format!("{} - Frame Display [{}]", format_elapsed!(now), self.server_ip);
+                                            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW ) as usize;
                                             let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
                                             match Window::new(
                                                 &window_title,
@@ -4902,78 +4630,46 @@ impl XRClient {
                                         }
 
                                     if let Some(window) = windows.get_mut(&self.server_ip) {
-                                        if frame_pair.decoded.is_some() && frame_pair.reference.is_some() {
-                                            // Calculate similarity (keep calculation)
-                                            let similarity = if let (Some(raw1), Some(raw2)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw) {
-                                                 compute_enhanced_frame_similarity(raw1, raw2, WIDTH_ENCODER, HEIGHT_ENCODER)
-                                            } else { 0.1 }; // Default or handle error
+                                        // Calculate similarity (keep calculation)
+                                       
+                                        let bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap_or(0.0);
 
-                                            let max_bitrate = 100.0; // Example
-                                            let bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap_or(0.0);
+                                        // Pass the current SyncState to the display function
+                                        self.lost_ids_reference_buffer = VecDeque::new(); 
+                                        
+                                        let slice: &[u32] = lost_frames_aux.make_contiguous();
+                                        let display_result = display_single_frame_with_info(
+                                            &frame,
+                                            &self.server_ip,
+                                            decoder.decoded_frame_counter,
+                                            window,
+                                            now,
+                                            bitrate_sample_mbps,
+                                            &slice,
+                                        );
+                                    
+                                        lost_frames_aux = VecDeque::new(); 
 
-                                            // Pass the current SyncState to the display function
-                                            let current_sync_state = sync_decoder_guard.get_sync_state();
-
-                                            self.lost_ids_reference_buffer = VecDeque::new(); 
-
-                                            let display_result = display_frame_pair_enhanced(
-                                                &frame_pair,
-                                                &ip_client,
-                                                frame_pair.frame_id,
-                                                window,
-                                                Some(similarity),
-                                                max_bitrate,
-                                                bitrate_sample_mbps,
-                                                now,
-                                                &self.test, // Pass test data if needed
-                                                current_sync_state, // Pass the correct state
-                                                lost_frames_aux.clone(), // Pass auxiliary lost frames info if needed
-                                                &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
-                                            );
-                                            lost_frames_aux = VecDeque::new(); 
-
-                                             if display_result {      
-                                                    print_pretty!(DebugColor::Green,
-                                                    "Successfully displayed frame pair #{} (similarity: {:.2}%)", 
-                                                    frame_pair.frame_id, (1.0 - similarity) * 100.0,); 
-                                                
-                                                         // Offload VMAF analysis (keep VMAF logic)
-                                                    if USE_VMAF {
-                                                        if let (Some(raw_decoded), Some(raw_maxb)) = (&frame_pair.decoded_raw, &frame_pair.reference_raw)  {
-                                                            let _ = self.channel_tx_vmaf.try_send((raw_decoded.clone(), raw_maxb.clone(), frame_pair.frame_id));
-                                                            if similarity > RGB_SIMILARITY_THRESHOLD {
-                                                                print_yellow!("High artifact frame #{} (Sim: {:.2}%) - added to VMAF queue", 
-                                                                          frame_pair.frame_id, (1.0 - similarity) * 100.0);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                             else {
-                                                print_pretty!(DebugColor::Red,
-                                                "Failed to display frame pair #{}", 
-                                                frame_pair.frame_id,);
+                                        if display_result {      
+                                            print_pretty!(DebugColor::Green,
+                                            "Successfully displayed frame #{}", 
+                                            decoder.decoded_frame_counter);                             
                                         }
-
-                                           
-                                        } else {            
-                                            print_pretty!(DebugColor::Yellow,
-                                                "Frame pair #{} missing decoded or reference frame", 
-                                                frame_pair.frame_id,); 
-                                        }
-                                            
+                                        else {
+                                            print_pretty!(DebugColor::Red,
+                                            "Failed to display frame #{}", 
+                                            decoder.decoded_frame_counter,);
+                                    }                                            
                                     } // End if let Some(window)
                                 }); // End DISPLAY_WINDOWS.with
                             } // End while let Some(frame_pair)
 
-                            // Drop lock after processing and attempting retrieval
-                            drop(sync_decoder_guard);
                         } else {
                              print_pretty!(DebugColor::Red, "Synchronized decoder not initialized!", );
                         }
                     } else {
                         // Log cases where frames might be empty if unexpected
                         if video_frame.is_empty() { print_pretty!(DebugColor::Yellow, "Received empty regular frame #{}", id_f); }
-                        if max_frame.is_empty() && USE_FFMPEG { print_pretty!(DebugColor::Yellow, "Max frame for #{} is empty or failed to read", id_f); }
                     }
                 } // End if self.is_decoder_ready
 
@@ -4986,18 +4682,9 @@ impl XRClient {
                     DebugColor::Yellow,
                     "Decoder queue empty. T_VSYNC: {:.3} ms", T_vsync.as_secs_f32() * 1000.0
                 );
-                 // Optional: If queue is empty, maybe try processing packets with None, None
-                 // to allow the synchronizer to process any remaining internal frames?
-                 // if let Some(sync_decoder_arc) = sync_decoder_option {
-                 //     sync_decoder_arc.lock().unwrap().process_packets(None, None);
-                 // }
+
             } // End if let Some((id_f, video_frame))
 
-
-            // Adjust vsync timing (keep if needed)
-            // if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE { T_vsync = T_vsync.mul_f64(1.1); /* ... log ... */ }
-
-            // Schedule next vsync (keep as is)
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
@@ -5178,7 +4865,102 @@ fn render_text_with_alpha(
     // Call the original render_text function with the modified color
     render_text(buffer, text, x, y, stride, alpha_color, scale);
 }
+/// Display exactly one decoded RGB frame (no sync/state info, just the index).
+///
+/// - `raw_frame`: the contiguous RGB byte buffer from `HevcDecoder`
+/// - `server_ip`: used for title bar
+/// - `frame_id`: index you want to show
+/// - `window`: your pre-created `minifb::Window`
+/// - `now`: timestamp, if you need it in the title (optional)
+/// Display one decoded RGB frame, plus bitrate and lost-packets info.
+pub fn display_single_frame_with_info(
+    raw_frame: &[u8],
+    server_ip: &IpAddr,
+    frame_id: usize,
+    window: &mut Window,
+    now: TaiTime<0>,
+    bitrate_mbps: f32,
+    lost_packets: &[u32],
+) -> bool {
+    // 1) Convert raw RGB bytes → u32 pixel buffer
+    let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+        Some(p) => p,
+        None => {
+            eprintln!("ERROR: Failed to convert RGB for frame #{}", frame_id);
+            return false;
+        }
+    };
 
+    // 2) Compute scaled dimensions
+    let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+
+    // 3) Allocate window buffer
+    let mut buffer = vec![0u32; scaled_w * scaled_h];
+
+    // 4) Nearest-neighbor resize
+    let src_w = WIDTH_ENCODER as usize;
+    let src_h = HEIGHT_ENCODER as usize;
+    for y in 0..scaled_h {
+        for x in 0..scaled_w {
+            let sx = x * src_w / scaled_w;
+            let sy = y * src_h / scaled_h;
+            buffer[y * scaled_w + x] = pixels[sy * src_w + sx];
+        }
+    }
+
+    // 5) Draw text overlays
+    let margin = 10;
+    let line_h = 20; // vertical spacing between lines
+
+    //   a) Frame index
+    let label = format!("FRAME #{}", frame_id);
+    render_text(&mut buffer, &label, margin, margin, scaled_w, 0x00FF00, 2);
+
+    //   b) Bitrate
+    let br_label = format!("Bitrate: {:.2} Mbps", bitrate_mbps);
+    render_text(
+        &mut buffer,
+        &br_label,
+        margin,
+        margin + line_h,
+        scaled_w,
+        0x00FF00,
+        2,
+    );
+
+    //   c) Lost packets (if any)
+    if !lost_packets.is_empty() {
+        let lost_label = format!("Lost: {:?}", lost_packets);
+        render_text(
+            &mut buffer,
+            &lost_label,
+            margin,
+            margin + 2 * line_h,
+            scaled_w,
+            0xFF0000,
+            2,
+        );
+    }
+
+    // 6) Update title with timestamp (optional)
+    let title = format!(
+        "{} -- Frame #{} @ {:.2}s",
+        server_ip,
+        frame_id,
+        now.duration_since(TaiTime::EPOCH).as_secs_f64()
+    );
+    window.set_title(&title);
+
+    // 7) Blit to screen
+    match window.update_with_buffer(&buffer, scaled_w, scaled_h) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("Window update failed for frame #{}: {}", frame_id, e);
+            false
+        }
+    }
+}
 
 // Modified display_frame_pair_enhanced function
 fn display_frame_pair_enhanced(
