@@ -87,7 +87,7 @@ pub const HEIGHT_ENCODER: usize = 1080;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.28;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.37;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -4448,7 +4448,7 @@ impl XRClient {
                                         // Pass the current SyncState to the display function
                                         self.lost_ids_reference_buffer = VecDeque::new(); 
                                         
-                                        let slice: &[u32] = lost_frames_aux.make_contiguous();
+                                        // let slice: &[u32] = lost_frames_aux.make_contiguous();
                                         let display_result = display_single_frame_with_info(
                                             &frame,
                                             &self.server_ip,
@@ -4456,7 +4456,10 @@ impl XRClient {
                                             window,
                                             now,
                                             bitrate_sample_mbps,
-                                            &slice,
+                                            lost_frames_aux.clone(),
+                                            &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
+                                            &self.test, 
+
                                         );
                                     
                                         lost_frames_aux = VecDeque::new(); 
@@ -4581,7 +4584,7 @@ struct LostFramesMessage {
     fade_duration: Duration, // Time after which the message starts fading
 }
 #[derive(Clone)]
-struct LostFramesBuffer {
+pub struct LostFramesBuffer {
     messages: Vec<LostFramesMessage>,
     max_size: usize,
 }
@@ -4684,6 +4687,7 @@ fn render_text_with_alpha(
 /// - `window`: your pre-created `minifb::Window`
 /// - `now`: timestamp, if you need it in the title (optional)
 /// Display one decoded RGB frame, plus bitrate and lost-packets info.
+/// Display exactly one decoded RGB frame (with sync/state info, bitrate, and lost-frames overlay)
 pub fn display_single_frame_with_info(
     raw_frame: &[u8],
     server_ip: &IpAddr,
@@ -4691,7 +4695,9 @@ pub fn display_single_frame_with_info(
     window: &mut Window,
     now: TaiTime<0>,
     bitrate_mbps: f32,
-    lost_packets: &[u32],
+    lost_frames: VecDeque<u32>,
+    lost_frames_buffer: &mut LostFramesBuffer,
+    test: &str,
 ) -> bool {
     // 1) Convert raw RGB bytes → u32 pixel buffer
     let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
@@ -4710,29 +4716,21 @@ pub fn display_single_frame_with_info(
     let mut buffer = vec![0u32; scaled_w * scaled_h];
 
     // 4) Nearest-neighbor resize
-    let src_w = WIDTH_ENCODER as usize;
-    let src_h = HEIGHT_ENCODER as usize;
     for y in 0..scaled_h {
         for x in 0..scaled_w {
-            let sx = x * src_w / scaled_w;
-            let sy = y * src_h / scaled_h;
-            buffer[y * scaled_w + x] = pixels[sy * src_w + sx];
+            let sx = x * WIDTH_ENCODER as usize / scaled_w;
+            let sy = y * HEIGHT_ENCODER as usize / scaled_h;
+            buffer[y * scaled_w + x] = pixels[sy * WIDTH_ENCODER as usize + sx];
         }
     }
 
-    // 5) Draw text overlays
+    // 5) Draw text overlays (frame index and bitrate)
     let margin = 10;
-    let line_h = 20; // vertical spacing between lines
-
-    //   a) Frame index
-    let label = format!("FRAME #{}", frame_id);
-    render_text(&mut buffer, &label, margin, margin, scaled_w, 0x00FF00, 2);
-
-    //   b) Bitrate
-    let br_label = format!("Bitrate: {:.2} Mbps", bitrate_mbps);
+    let line_h = 20;
+    render_text(&mut buffer, &format!("FRAME #{}", frame_id), margin, margin, scaled_w, 0x00FF00, 2);
     render_text(
         &mut buffer,
-        &br_label,
+        &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
         margin,
         margin + line_h,
         scaled_w,
@@ -4740,30 +4738,45 @@ pub fn display_single_frame_with_info(
         2,
     );
 
-    //   c) Lost packets (if any)
-    if !lost_packets.is_empty() {
-        let lost_label = format!("Lost: {:?}", lost_packets);
-        render_text(
-            &mut buffer,
-            &lost_label,
-            margin,
-            margin + 2 * line_h,
-            scaled_w,
-            0xFF0000,
-            2,
-        );
+    // 6) Handle new lost-frames and add to buffer
+    if !lost_frames.is_empty() {
+        let msg = format!("T: {} LOST FRAMES: {:?}", format_elapsed!(now), lost_frames);
+        lost_frames_buffer.add_message(msg);
     }
 
-    // 6) Update title with timestamp (optional)
+    // 7) Render the rolling lost-frames messages (up to 3) with fading
+    for (i, entry) in lost_frames_buffer.messages.iter().rev().enumerate() {
+        let opacity = calculate_opacity(entry);
+        if opacity == 0 {
+            continue;
+        }
+        // stack from bottom
+        let y_pos = scaled_h as i32 - 80 + (i as i32 * 22);
+        if y_pos > 0 {
+            render_text_with_alpha(
+                &mut buffer,
+                &entry.text,
+                margin,
+                y_pos as usize,
+                scaled_w,
+                0xFF0000,
+                2,
+                opacity,
+            );
+        }
+    }
+
+    // 8) Update title with timestamp and test identifier
     let title = format!(
-        "{} -- Frame #{} @ {:.2}s",
+        "{} -- Frame #{} @ {:.2}s - Test: {}",
         server_ip,
         frame_id,
-        now.duration_since(TaiTime::EPOCH).as_secs_f64()
+        now.duration_since(TaiTime::EPOCH).as_secs_f64(),
+        test,
     );
     window.set_title(&title);
 
-    // 7) Blit to screen
+    // 9) Blit to screen
     match window.update_with_buffer(&buffer, scaled_w, scaled_h) {
         Ok(_) => true,
         Err(e) => {
