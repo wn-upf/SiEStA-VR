@@ -30,7 +30,7 @@ use minifb::{Window, WindowOptions};
 use std::{fs::File, thread};
 
 use crate::{format_elapsed, print_green};
-use crate::lib::{HeaderALVRStream, USE_FFMPEG, USE_VMAF};
+use crate::lib::{HeaderALVRStream, USE_FFMPEG};
 use crate::print_pretty;
 use crate::{debug_bgprint, print_prettyy, print_red};
 use crate::{debug_print, print_prettyyyy, print_yellow, print_pink};
@@ -4180,191 +4180,7 @@ impl XRClient {
 
         Ok(())
     }
-    // pub async fn decode_hevc_to_rgb2(
-    //     &mut self,
-    //     encoded_buffer: Vec<u8>,
-    //     frame_index: usize,
-    //     client_ip: IpAddr,
-    //     is_max_bitrate: bool
-    // ) -> (Vec<u8>, Vec<u32>, Option<Instant>) {
-    //     // Generate the appropriate decoder key based on client IP and stream type
-    //     let decoder_key = self.get_decoder_key(client_ip, is_max_bitrate);
-
-    //     // Create descriptive decoder identifier for diagnostic logging
-    //     let decoder_id = if is_max_bitrate {
-    //         format!("[MAXB_DECODER {}]", decoder_key)
-    //     } else {
-    //         format!("[REFB_DECODER {}]", decoder_key)
-    //     };
-
-    //     // Perform early buffer validation to prevent downstream processing errors
-    //     let encoded_length = encoded_buffer.len();
-    //     if encoded_buffer.is_empty() {
-    //         print_pretty!(DebugColor::Yellow,
-    //             "{} - WARNING: Empty encoded buffer received!", decoder_id,);
-    //         return (Vec::new(), Vec::new(), None);
-    //     }
-
-    //     // Initialize shared parameter set manager if not already established
-    //     if self.shared_params.is_none() {
-    //         // Designate the main client decoder as the primary parameter set source
-    //         let primary_decoder = format!("[CLIENT_DECODER {}]", client_ip);
-    //         let shared = Arc::new(SharedParameterSetManager::new(&primary_decoder));
-    //         self.shared_params = Some(Arc::clone(&shared));
-
-    //         print_pretty!(DebugColor::Green,
-    //             "Initialized shared parameter set manager with primary decoder: {}",
-    //             primary_decoder,);
-
-    //         // Immediately populate parameter sets from main decoder if available
-    //         // This accelerates initialization for subsequent decoders
-    //         if let Some(decoder_arc) = &self.decoder_arc {
-    //             if let Ok(decoder_guard) = decoder_arc.try_lock() {
-    //                 let (vps, sps, pps) = decoder_guard.get_parameter_sets();
-    //                 if vps.is_some() || sps.is_some() || pps.is_some() {
-    //                     shared.update_from_decoder(&primary_decoder, vps, sps, pps);
-
-    //                     print_pretty!(DebugColor::Magenta,
-    //                         "Populated shared parameter sets from main decoder",);
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     // Obtain a cloned reference to the shared parameter manager for thread safety
-    //     let shared_params = self.shared_params.clone();
-
-    //     // Actual frame decoding operation within a mutex-protected scope
-    //     let result = {
-    //         // Acquire exclusive access to the global decoder registry
-    //         let mut decoders = REFERENCE_DECODERS.lock().unwrap();
-
-    //         // Create new decoder instance if one doesn't exist for this decoder key
-    //         if !decoders.contains_key(&decoder_key) {
-    //             print_pretty!(DebugColor::Cyan,
-    //                 "Initializing {} decoder for client {}",
-    //                 if is_max_bitrate { "max bitrate" } else { "reference" },
-    //                 decoder_key,);
-
-    //             // Instantiate decoder with appropriate frame parameters
-    //             let mut new_decoder = HevcDecoder::new(
-    //                 FRAMERATE_WINDOWS as u32,
-    //                 WIDTH_ENCODER as u32,
-    //                 HEIGHT_ENCODER as u32,
-    //                 &decoder_id,
-    //             );
-
-    //             // Apply parameter set synchronization if available
-    //             if let Some(shared) = &shared_params {
-    //                 let (vps, sps, pps) = shared.get_parameter_sets();
-
-    //                 // Progressive parameter set application reduces initialization artifacts
-    //                 // Apply VPS, SPS, and PPS in sequence with brief inter-application delays
-    //                 if vps.is_some() {
-    //                     print_pretty!(DebugColor::Magenta,
-    //                         "{} - Initializing with VPS ({} bytes)",
-    //                         decoder_id, vps.as_ref().unwrap().len(),);
-
-    //                     new_decoder.inject_parameter_sets(vps.clone(), None, None);
-    //                     std::thread::sleep(Duration::from_millis(2));
-    //                 }
-
-    //                 if sps.is_some() {
-    //                     print_pretty!(DebugColor::Magenta,
-    //                         "{} - Initializing with SPS ({} bytes)",
-    //                         decoder_id, sps.as_ref().unwrap().len(),);
-
-    //                     new_decoder.inject_parameter_sets(None, sps.clone(), None);
-    //                     std::thread::sleep(Duration::from_millis(2));
-    //                 }
-
-    //                 if pps.is_some() {
-    //                     print_pretty!(DebugColor::Magenta,
-    //                         "{} - Initializing with PPS ({} bytes)",
-    //                         decoder_id, pps.as_ref().unwrap().len(),);
-
-    //                     new_decoder.inject_parameter_sets(None, None, pps.clone());
-    //                 }
-
-    //                 // Apply consolidated parameter set after individual injections
-    //                 // This ensures full decoder configuration before processing frames
-    //                 if vps.is_some() || sps.is_some() || pps.is_some() {
-    //                     new_decoder.inject_parameter_sets(vps, sps, pps);
-
-    //                     print_pretty!(DebugColor::Magenta,
-    //                         "{} - Initialized with all parameter sets", decoder_id,);
-    //                 } else {
-    //                     print_pretty!(DebugColor::Yellow,
-    //                         "{} - No shared parameter sets available yet", decoder_id,);
-    //                 }
-    //             }
-
-    //             // Mark decoder as being in initialization phase for special handling
-    //             new_decoder.initialization_phase = true;
-
-    //             // Register the new decoder in the global registry
-    //             decoders.insert(decoder_key.clone(), new_decoder);
-    //         }
-
-    //         // Keyframe detection and parameter set synchronization
-    //         let is_keyframe = self.is_keyframe(&encoded_buffer);
-    //         if is_keyframe {
-    //             print_pretty!(DebugColor::Magenta,
-    //                 "{} - Processing keyframe (size: {} bytes)", decoder_id, encoded_buffer.len(),);
-
-    //             // Synchronize parameter sets on keyframes when shared manager is available
-    //             if let Some(shared) = &shared_params {
-    //                 if let Some(decoder) = decoders.get_mut(&decoder_key) {
-    //                     // Determine if synchronization is required
-    //                     // Force sync during initialization, early frames, or when new params are available
-    //                     let generation = shared.get_generation();
-
-    //                 }
-    //             }
-    //         }
-
-    //         // Process the frame through the appropriate decoder
-    //         if let Some(decoder) = decoders.get_mut(&decoder_key) {
-    //             // Submit packet to decoder's processing pipeline
-    //             decoder.process_packet(encoded_buffer);
-
-    //             // Process any available decoded frames
-    //             let frames_count = decoder.process_decoded_frames();
-
-    //             // Attempt to retrieve a decoded frame
-    //             if let Some((frame, inst)) = decoder.next_decoded_frame() {
-    //                 // Convert raw RGB buffer to u32 pixels for display rendering
-    //                 if let Some(pixels) = convert_rgb_to_u32(&frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-    //                     (frame, pixels, Some(inst))
-    //                 } else {
-    //                     print_pretty!(DebugColor::Red,
-    //                         "{} - Failed to convert frame to RGB", decoder_id,);
-    //                     (Vec::new(), Vec::new(), None)
-    //                 }
-    //             } else {
-    //                 // Special handling for decoders still in priming phase
-    //                 if !decoder.priming_complete {
-    //                     print_pretty!(DebugColor::Yellow,
-    //                         "{} - Decoder still priming ({}/{} frames processed)",
-    //                         decoder_id, decoder.frames_processed, decoder.keyframes_seen,);
-    //                 } else {
-    //                     print_pretty!(DebugColor::Yellow,
-    //                         "{} - No decoded frame available yet", decoder_id,);
-    //                 }
-    //                 (Vec::new(), Vec::new(), None)
-    //             }
-    //         } else {
-    //             // This condition should never occur due to our earlier creation logic
-    //             print_pretty!(DebugColor::Red,
-    //                 "{} - ERROR: Decoder initialization failed", decoder_id,);
-    //             (Vec::new(), Vec::new(), None)
-    //         }
-    //     };
-
-    //     // Return the decoded frame, rendered pixels, and timing information
-    //     result
-    // }
-
+    
     pub async fn flush_vmaf_buffer(&mut self, now: TaiTime<0>) -> Result<()> {
         // If there are any frames left in the buffer, process them
         if !self.vmaf_frame_buffer.is_empty() {
@@ -4483,11 +4299,6 @@ impl XRClient {
                
 
                 if id_f % 10 == 0 {
-                    // if USE_VMAF {
-                    //     if let Err(e) = self.cleanup_old_frames_vmaf(now, id_f, ip_client).await {
-                    //         eprintln!("Error during frame cleanup: {}", e);
-                    //     }
-                    // }
 
                     if USE_FFMPEG {
                         if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client) {
