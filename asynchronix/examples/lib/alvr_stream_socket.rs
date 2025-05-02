@@ -427,38 +427,7 @@ impl std::fmt::Display for ConError {
     }
 }
 
-// impl From<mpsc::TryRecvError> for ConError {
-//     fn from(err: mpsc::TryRecvError) -> Self {
-//         match err {
-//             mpsc::TryRecvError::Empty => ConError::WouldBlock,
-//             mpsc::TryRecvError::Disconnected => ConError::Disconnected,
-//         }
-//     }
-// }
 
-// impl SocketReader for mpsc::Receiver<Vec<u8>> {
-//     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
-//         match self.try_recv() {
-//             Ok(data) => {
-//                 let data_len = data.len();
-//                 if data_len <= buffer.len() {
-//                     buffer[..data_len].copy_from_slice(&data);
-//                     Ok(data_len)
-//                 } else {
-//                     Err(ConnectionError::Other(anyhow!("Buffer too small")))
-//                 }
-//             }
-//             Err(mpsc::TryRecvError::Empty) => try_again(),
-//             Err(mpsc::TryRecvError::Disconnected) => {
-//                 Err(ConnectionError::Other(anyhow!("Channel disconnected")))
-//             }
-//         }
-//     }
-
-//     fn peek(&self, _buffer: &mut [u8]) -> ConResult<usize> {
-//         Err(ConnectionError::Other(anyhow!("Unsupported operation")))
-//     }
-// }
 #[derive(Clone)]
 pub struct InProgressPacket {
     buffer: Vec<u8>,

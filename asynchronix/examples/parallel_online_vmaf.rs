@@ -10,6 +10,17 @@ pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080; 
 use tokio::sync::Semaphore;
 
+use std::io::BufRead;
+
+// const MAX_PARALLEL_VMAF: usize = 4;            // <= 16 GB box safe
+// static VMAF_SLOTS: Lazy<Semaphore> = Lazy::new(|| {
+//     Semaphore::const_new(MAX_PARALLEL_VMAF)
+// });
+
+
+
+
+
 // static METRIC_SLOTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::const_new(30)); // ≤4 frames in flight
 use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -193,193 +204,293 @@ impl MetricsLogger {
         Ok(())
     }
 
-    pub fn process_frame_metrics(
-        &self,
-        frame_number: u64,
-        timestamp_ms: f64,
-        ref_path: &str,
-        lossy_path: &str,
-        ip_client: IpAddr, 
-    )  {
-        // Create a temporary directory for processing
-        let temp_dir = TempDir::new().unwrap();
+pub fn process_frame_metrics(
+    &self,
+    frame_number: u64,
+    timestamp_ms: f64,
+    ref_path: &str,
+    lossy_path: &str,
+    ip_client: IpAddr,
+) {
+    // ───────────────────── scratch dir ─────────────────────
+    let tmp      = TempDir::new().expect("create TempDir");
+    let metrics  = tmp.path().join(&self.name_folder).join("Sink_for_video");
+    std::fs::create_dir_all(&metrics).unwrap();
 
-        // Convert RGB frames to Y4M format (better for VMAF processing)
-        let ref_y4m = temp_dir
-            .path()
-            .join("reference.y4m")
-            .to_string_lossy()
-            .to_string();
-        let lossy_y4m = temp_dir
-            .path()
-            .join("lossy.y4m")
-            .to_string_lossy()
-            .to_string();
+    let vmaf_json = metrics.join("vmaf.json");
+    let psnr_log  = metrics.join("psnr.log");
+    let ssim_log  = metrics.join("ssim.log");
 
-        // Convert reference frame to Y4M
-        let ref_status = Command::new("ffmpeg")
-            .args(&[
-                "-hwaccel",
-                "cuda",
-                "-loglevel",
-                "error", // Add this line to reduce verbosity
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "rgb24",
-                "-video_size",
-                &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-i",
-                ref_path,
-                "-pix_fmt",
-                "yuv420p",
-                &ref_y4m,
-            ])
-            .status().unwrap();
+    // ───────────────────── one FFmpeg call ─────────────────
+    let status = Command::new("ffmpeg")
+    .args([
+        "-hwaccel", "cuda",
+        "-loglevel", "error",
 
-        // if !ref_status.success() {
-        //     return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
-        // }
+        /* distorted frame (must be first for libvmaf) */
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+        "-i", lossy_path,
 
-        // Convert lossy frame to Y4M
-        let lossy_status = Command::new("ffmpeg")
-            .args(&[
-                "-hwaccel",
-                "cuda",
-                "-loglevel",
-                "error", // Add this line to reduce verbosity
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "rgb24",
-                "-video_size",
-                &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-                "-i",
-                lossy_path,
-                "-pix_fmt",
-                "yuv420p",
-                &lossy_y4m,
-            ])
-            .status().unwrap();
+        /* reference frame */
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+        "-i", ref_path,
 
-        // if !lossy_status.success() {
-        //     return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
-        // }
+        /* one filter_complex with three parallel chains           *
+         * semicolons (;) separate chains, commas (,) continue     *
+         * a single chain. Here every chain gets      [dist][ref]. */
+        "-filter_complex",
+        &format!(
+            "[0:v]format=yuv420p[dist]; \
+             [1:v]format=yuv420p[ref];  \
+             [dist][ref]libvmaf=log_fmt=json:log_path={vmaf}; \
+             [dist][ref]psnr=stats_file={psnr};               \
+             [dist][ref]ssim=stats_file={ssim}",
+            vmaf=vmaf_json.display(),
+            psnr=psnr_log.display(),
+            ssim=ssim_log.display(),
+        ),
 
-        // Create the Sink_for_video directory within the temp directory
-        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
-        std::fs::create_dir_all(&video_sink_dir).unwrap();
+        "-frames:v", "1",
+        "-f", "null", "-"
+    ])
+    .status()
+    .expect("spawn ffmpeg");
 
-        // Set up paths correctly
-        let vmaf_json = video_sink_dir
-            .join("vmaf.json")
-            .to_string_lossy()
-            .to_string();
-        let psnr_log = video_sink_dir
-            .join("psnr.log")
-            .to_string_lossy()
-            .to_string();
-        let ssim_log = video_sink_dir
-            .join("ssim.log")
-            .to_string_lossy()
-            .to_string();
-
-        // Calculate all metrics in a single ffmpeg call
-        let metrics_status = Command::new("ffmpeg")
-            .args(&[
-                "-hwaccel",
-                "cuda",
-                "-loglevel",
-                "error", // Add this line to reduce verbosity
-                "-i",
-                &ref_y4m,
-                "-i",
-                &lossy_y4m,
-                "-filter_complex",
-                &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
-                "-filter_complex",
-                &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-                "-filter_complex",
-                &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
-                "-f",
-                "null",
-                "-",
-            ])
-            .status().unwrap();
-
-        // if !metrics_status.success() {
-        //     return Err(anyhow::anyhow!("Failed to calculate video metrics"));
-        // }
-
-        // Parse VMAF score
-        let mut vmaf_score = 0.0;
-        if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
-                if let Some(score) = json_value["pooled_metrics"]["vmaf"]["mean"].as_f64() {
-                    vmaf_score = score;
-                } else if let Some(frames) = json_value["frames"].as_array() {
-                    if let Some(first_frame) = frames.first() {
-                        if let Some(score) = first_frame["metrics"]["vmaf"].as_f64() {
-                            vmaf_score = score;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Parse PSNR score
-        let mut psnr_avg = 0.0;
-        if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
-            if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
-                let remaining = &psnr_content[avg_idx + 9..];
-                let end_idx = remaining.find(" ").unwrap_or(10);
-                let avg_str = &remaining[..end_idx];
-                if let Ok(value) = avg_str.trim().parse::<f64>() {
-                    psnr_avg = value;
-                }
-            }
-        }
-
-        // Parse SSIM score
-        let mut ssim_score = 0.0;
-        if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
-            if let Some(all_idx) = ssim_content.find("All:") {
-                let remaining = &ssim_content[all_idx + 4..];
-                let end_idx = remaining.find(" ").unwrap_or(10);
-                let all_str = &remaining[..end_idx];
-                if let Ok(value) = all_str.trim().parse::<f64>() {
-                    ssim_score = value;
-                }
-            }
-        }
-
-        // Print debug info
-        print_greennn!( 
-            // DebugColor::Green, 
-            "T: {:.3} [{}]| Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
-            timestamp_ms,
-            ip_client,
-            frame_number,
-            vmaf_score,
-            psnr_avg,
-            ssim_score
-        );
-
-        let metrics = FrameMetrics {
-            frame_number: frame_number,
-            timestamp_ms: timestamp_ms,
-            vmaf: vmaf_score,
-            psnr: psnr_avg,
-            ssim: ssim_score,
-        };
-
-        // Log the metrics
-        self.log_metrics(&metrics).unwrap();
-
-        // Ok(())
+    if !status.success() {
+        eprintln!("ffmpeg failed on frame #{frame_number}");
+        return;
     }
+
+    // ───────────────────── parse VMAF (JSON) ───────────────
+    let vmaf_score = std::fs::read_to_string(&vmaf_json)
+        .ok()
+        .and_then(|s| {
+            // Fast path: pooled mean present
+            serde_json::from_str::<serde_json::Value>(&s).ok()
+        })
+        .and_then(|j| j["pooled_metrics"]["vmaf"]["mean"].as_f64())
+        .unwrap_or(0.0);
+
+    // ───────────────────── parse PSNR / SSIM ───────────────
+    fn last_number(path: &std::path::Path, key: &str) -> f64 {
+        std::fs::File::open(path)
+            .ok()
+            .and_then(|f| {
+                std::io::BufReader::new(f).lines().flatten().last()
+            })
+            .and_then(|l| {
+                l.split(key).nth(1)?.split_whitespace().next()?.parse().ok()
+            })
+            .unwrap_or(0.0)
+    }
+    let psnr_avg = last_number(&psnr_log,  "psnr_avg:");
+    let ssim_all = last_number(&ssim_log,  "All:");
+
+    // ───────────────────── emit & log ──────────────────────
+    print_greennn!(
+        "T:{:.3} [{}] | Frame {} : VMAF {:.2}  PSNR {:.2}  SSIM {:.4}",
+        timestamp_ms, ip_client, frame_number, vmaf_score, psnr_avg, ssim_all
+    );
+
+    let fm = FrameMetrics {
+        frame_number,
+        timestamp_ms,
+        vmaf: vmaf_score,
+        psnr: psnr_avg,
+        ssim: ssim_all,
+    };
+    self.log_metrics(&fm).unwrap();
+}   // ← tmp dir + files drop here
+
+    // pub fn process_frame_metrics(
+    //     &self,
+    //     frame_number: u64,
+    //     timestamp_ms: f64,
+    //     ref_path: &str,
+    //     lossy_path: &str,
+    //     ip_client: IpAddr, 
+    // )  {
+    //     // Create a temporary directory for processing
+    //     let temp_dir = TempDir::new().unwrap();
+
+    //     // Convert RGB frames to Y4M format (better for VMAF processing)
+    //     let ref_y4m = temp_dir
+    //         .path()
+    //         .join("reference.y4m")
+    //         .to_string_lossy()
+    //         .to_string();
+    //     let lossy_y4m = temp_dir
+    //         .path()
+    //         .join("lossy.y4m")
+    //         .to_string_lossy()
+    //         .to_string();
+
+    //     // Convert reference frame to Y4M
+    //     let ref_status = Command::new("ffmpeg")
+    //         .args(&[
+    //             "-hwaccel",
+    //             "cuda",
+    //             "-loglevel",
+    //             "error", // Add this line to reduce verbosity
+    //             "-y",
+    //             "-f",
+    //             "rawvideo",
+    //             "-pixel_format",
+    //             "rgb24",
+    //             "-video_size",
+    //             &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+    //             "-i",
+    //             ref_path,
+    //             "-pix_fmt",
+    //             "yuv420p",
+    //             &ref_y4m,
+    //         ])
+    //         .status().unwrap();
+
+    //     // if !ref_status.success() {
+    //     //     return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
+    //     // }
+
+    //     // Convert lossy frame to Y4M
+    //     let lossy_status = Command::new("ffmpeg")
+    //         .args(&[
+    //             "-hwaccel",
+    //             "cuda",
+    //             "-loglevel",
+    //             "error", // Add this line to reduce verbosity
+    //             "-y",
+    //             "-f",
+    //             "rawvideo",
+    //             "-pixel_format",
+    //             "rgb24",
+    //             "-video_size",
+    //             &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+    //             "-i",
+    //             lossy_path,
+    //             "-pix_fmt",
+    //             "yuv420p",
+    //             &lossy_y4m,
+    //         ])
+    //         .status().unwrap();
+
+    //     // if !lossy_status.success() {
+    //     //     return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
+    //     // }
+
+    //     // Create the Sink_for_video directory within the temp directory
+    //     let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
+    //     std::fs::create_dir_all(&video_sink_dir).unwrap();
+
+    //     // Set up paths correctly
+    //     let vmaf_json = video_sink_dir
+    //         .join("vmaf.json")
+    //         .to_string_lossy()
+    //         .to_string();
+    //     let psnr_log = video_sink_dir
+    //         .join("psnr.log")
+    //         .to_string_lossy()
+    //         .to_string();
+    //     let ssim_log = video_sink_dir
+    //         .join("ssim.log")
+    //         .to_string_lossy()
+    //         .to_string();
+
+    //     // Calculate all metrics in a single ffmpeg call
+    //     let metrics_status = Command::new("ffmpeg")
+    //         .args(&[
+    //             "-hwaccel",
+    //             "cuda",
+    //             "-loglevel",
+    //             "error", // Add this line to reduce verbosity
+    //             "-i",
+    //             &ref_y4m,
+    //             "-i",
+    //             &lossy_y4m,
+    //             "-filter_complex",
+    //             &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
+    //             "-filter_complex",
+    //             &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
+    //             "-filter_complex",
+    //             &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
+    //             "-f",
+    //             "null",
+    //             "-",
+    //         ])
+    //         .status().unwrap();
+
+    //     // if !metrics_status.success() {
+    //     //     return Err(anyhow::anyhow!("Failed to calculate video metrics"));
+    //     // }
+
+    //     // Parse VMAF score
+    //     let mut vmaf_score = 0.0;
+    //     if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
+    //         if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
+    //             if let Some(score) = json_value["pooled_metrics"]["vmaf"]["mean"].as_f64() {
+    //                 vmaf_score = score;
+    //             } else if let Some(frames) = json_value["frames"].as_array() {
+    //                 if let Some(first_frame) = frames.first() {
+    //                     if let Some(score) = first_frame["metrics"]["vmaf"].as_f64() {
+    //                         vmaf_score = score;
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     // Parse PSNR score
+    //     let mut psnr_avg = 0.0;
+    //     if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
+    //         if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
+    //             let remaining = &psnr_content[avg_idx + 9..];
+    //             let end_idx = remaining.find(" ").unwrap_or(10);
+    //             let avg_str = &remaining[..end_idx];
+    //             if let Ok(value) = avg_str.trim().parse::<f64>() {
+    //                 psnr_avg = value;
+    //             }
+    //         }
+    //     }
+
+    //     // Parse SSIM score
+    //     let mut ssim_score = 0.0;
+    //     if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
+    //         if let Some(all_idx) = ssim_content.find("All:") {
+    //             let remaining = &ssim_content[all_idx + 4..];
+    //             let end_idx = remaining.find(" ").unwrap_or(10);
+    //             let all_str = &remaining[..end_idx];
+    //             if let Ok(value) = all_str.trim().parse::<f64>() {
+    //                 ssim_score = value;
+    //             }
+    //         }
+    //     }
+
+    //     // Print debug info
+    //     print_greennn!( 
+    //         // DebugColor::Green, 
+    //         "T: {:.3} [{}]| Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
+    //         timestamp_ms,
+    //         ip_client,
+    //         frame_number,
+    //         vmaf_score,
+    //         psnr_avg,
+    //         ssim_score
+    //     );
+
+    //     let metrics = FrameMetrics {
+    //         frame_number: frame_number,
+    //         timestamp_ms: timestamp_ms,
+    //         vmaf: vmaf_score,
+    //         psnr: psnr_avg,
+    //         ssim: ssim_score,
+    //     };
+
+    //     // Log the metrics
+    //     self.log_metrics(&metrics).unwrap();
+
+    //     // Ok(())
+    // }
 
     
 
@@ -1992,7 +2103,7 @@ fn make_encoder_task(
         while produced < trace.len() {
             // (re)fill the encoder’s internal queue
             enc.start_chunking(bitrate_mbps).await;
-            async_std::task::sleep(Duration::from_millis(6000)).await;
+            // async_std::task::sleep(Duration::from_millis(6000)).await;
             // drain all frames this chunk produced (but never overrun our trace)
             while produced < trace.len() {
                 // try to grab the next packet
@@ -2000,7 +2111,7 @@ fn make_encoder_task(
                     let info = &trace[produced];
                     produced += 1;
 
-                    async_std::task::sleep(Duration::from_millis(600)).await;
+                    // async_std::task::sleep(Duration::from_millis(600)).await;
 
                     // simulate loss only on the “low” path
                     if !simulate_loss || !info.lost {
@@ -2084,6 +2195,7 @@ fn draw_pair(
     window:  &mut Window,
     rgb_l:   &[u8],
     rgb_r:   &[u8],
+    scenario: &str, 
     id:      u32,
     sim:     f64,
 ) -> Result<()> {
@@ -2108,7 +2220,7 @@ fn draw_pair(
     render_text(&mut buf, &format!("#{}", id), 10,           y_lbl, ww, 0xFFAA00, 2);
     render_text(&mut buf, &format!("#{}", id), sw + 20,      y_lbl, ww, 0xFFAA00, 2);
 
-    window.set_title(&format!("ID {}  –  sim {:.1} %", id, sim*100.0));
+    window.set_title(&format!("ID {} | Scenario: {scenario}", id,));
     window.update_with_buffer(&buf, ww, sh)?;
     Ok(())
 }
@@ -2368,7 +2480,7 @@ pub async fn process_trace(
                         metric
                             .process_frame_buffers(id_l as u64, *ts_map.get(&id_l).unwrap_or(&0.0), &rgb_r, &rgb_l, ip)
                             .await?;
-                        draw_pair(&mut window, &rgb_l, &rgb_r, id_l, sim)?;
+                        draw_pair(&mut window,&rgb_l, &rgb_r, scenario.as_ref(), id_l, sim)?;
                         seen_pairs += 1;
                     } else {
                         low_buf.insert(id_l, rgb_l);
@@ -2382,7 +2494,7 @@ pub async fn process_trace(
                 if let Some((rgb_r, id_r, _ts)) = dec_ref.next_decoded_frame() {
                     if let Some(rgb_l) = low_buf.remove(&id_r) {
                         let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                        draw_pair(&mut window, &rgb_l, &rgb_r, id_r, sim)?;
+                        draw_pair(&mut window, &rgb_l, &rgb_r, scenario.as_ref() ,id_r, sim)?;
                         seen_pairs += 1;
                     } else {
                         ref_buf.insert(id_r, rgb_r);
@@ -2406,6 +2518,7 @@ pub async fn process_trace(
 use walkdir::WalkDir;
 use tokio::join;
 use tokio::spawn;
+
 
 fn main() -> Result<()> {
     // 1) Your IP
@@ -2436,29 +2549,23 @@ fn main() -> Result<()> {
         v
     };
 
-    // 4) Split into two groups by even/odd index
-    let mut g1 = Vec::new();
-    let mut g2 = Vec::new();
+    // 4) Split into N groups by index mod N
+    const WORKERS: usize = 2;
+    let mut groups: Vec<Vec<(PathBuf, Vec<PathBuf>)>> = vec![Vec::new(); WORKERS];
     for (i, scenario) in scenarios.drain(..).enumerate() {
-        if i % 2 == 0 {
-            g1.push(scenario);
-        } else {
-            g2.push(scenario);
-        }
+        groups[i % WORKERS].push(scenario);
     }
 
-    // 5) Worker that builds its own current-thread runtime and runs all its traces
+    // 5) Worker factory
     let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
         thread::spawn(move || -> Result<()> {
-            // build a single-threaded Tokio runtime
+            // each thread gets its own current-thread Tokio runtime
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-
             rt.block_on(async {
                 for (_folder, traces) in group {
                     for trace_csv in traces {
-                        // this is your async fn that creates Window, etc.
                         process_trace(trace_csv, ip.clone()).await?;
                     }
                 }
@@ -2467,13 +2574,17 @@ fn main() -> Result<()> {
         })
     };
 
-    // 6) Spawn both workers
-    let h1 = make_worker(g1, ip.clone());
-    let h2 = make_worker(g2, ip.clone());
+    // 6) Spawn all WORKERS threads
+    let mut handles = Vec::with_capacity(WORKERS);
+    for group in groups {
+        handles.push(make_worker(group, ip.clone()));
+    }
 
-    // 7) Wait for them
-    h1.join().expect("worker 1 panicked")?;
-    h2.join().expect("worker 2 panicked")?;
+    // 7) Join all of them
+    for (idx, h) in handles.into_iter().enumerate() {
+        h.join()
+         .unwrap_or_else(|_| panic!("worker {} panicked", idx))?; 
+    }
 
     Ok(())
 }
