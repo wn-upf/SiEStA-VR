@@ -9,6 +9,7 @@
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
+use lib::models_mm1k::NetworkPattern;
 
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
@@ -60,6 +61,8 @@ impl VRPair {
         distance: f64,
         name_folder: &str,
         test: &str,
+        patterns: &[NetworkPattern], 
+
     ) -> Self {
         let server_id = 100 + pair_index as i32;
         let client_id = 200 + pair_index as i32;
@@ -91,6 +94,7 @@ impl VRPair {
             INITIAL_FRAMERATE_FPS,
             initial_bitrate as f32,
             name_folder,
+            patterns, 
         );
         let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0, name_folder, test);
 
@@ -210,6 +214,32 @@ fn main() {
     let mut bg_sta_mailboxes = Vec::new();
     let mut bg_sta_addresses = Vec::new();
 
+
+
+    // Create and configure queue
+    let mut queue = QueueModule::new(
+        all_sta_ids.len(),
+        k_queue.saturating_sub(1),
+        pl_prob,
+        all_sta_ids.clone(),
+        name_folder.clone(),
+        UPLINK_QUEUE_SIZE,
+        Some((test_bandwidth, test_jitter, test_pl, test_random)),
+    );
+    let mbox_queue = Mailbox::new();
+    let queue_address = mbox_queue.address();
+
+    // let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
+    let queue_stats = queue.get_queue_stats_handle();
+    // let sta_stats = queue.get_stas_stats_handle();
+
+
+    // print_red!("EMU EFFECTS HERE", );
+    let emu_effects: &[lib::models_mm1k::NetworkPattern] = queue.get_network_patterns(); 
+    
+
+
+
     // Create XR pairs
     for i in 0..n_xr {
         let vr = VRPair::new(
@@ -220,6 +250,7 @@ fn main() {
             distance,
             &name_folder,
             suffix,
+            emu_effects, 
         );
         all_sta_ids.push(100 + i as i32);
         all_sta_ids.push(200 + i as i32);
@@ -257,22 +288,7 @@ fn main() {
         all_sta_ids.push(sta_id);
     }
 
-    // Create and configure queue
-    let mut queue = QueueModule::new(
-        all_sta_ids.len(),
-        k_queue.saturating_sub(1),
-        pl_prob,
-        all_sta_ids.clone(),
-        name_folder,
-        UPLINK_QUEUE_SIZE,
-        Some((test_bandwidth, test_jitter, test_pl, test_random)),
-    );
-    let mbox_queue = Mailbox::new();
-    let queue_address = mbox_queue.address();
 
-    // let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
-    let queue_stats = queue.get_queue_stats_handle();
-    // let sta_stats = queue.get_stas_stats_handle();
 
     // Connect all STAs to queue
     for vr in vr_pairs.iter_mut() {
@@ -315,7 +331,7 @@ fn main() {
                 vr.mbox_sta_client,
                 format!("STA Client {}", i),
             );
-    }
+    }  
 
     // Add background STAs to simulation
     for (i, (bg_sta, mbox)) in bg_sta_models.into_iter().zip(bg_sta_mailboxes).enumerate() {
@@ -378,6 +394,9 @@ fn main() {
             &queue_address,
         )
         .unwrap();
+
+
+
 
     // Run simulation
     simu.step_by(Duration::from_secs_f64(stoptime));

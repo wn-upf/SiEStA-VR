@@ -28,6 +28,7 @@ use tokio::sync::Semaphore;
 use std::path::Path;
 use minifb::{Window, WindowOptions};
 use std::{fs::File, thread};
+use crate::lib::models_mm1k::NetworkPattern;
 
 use crate::{format_elapsed, print_green};
 use crate::lib::{HeaderALVRStream, USE_FFMPEG};
@@ -2402,6 +2403,8 @@ pub struct XRServer {
     pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>,
     pub STATISTICS_MANAGER: StatisticsManager,
     pub name_folder: String,
+    pub network_effects: Vec<NetworkPattern>, 
+
 }
 #[allow(unused)]
 impl XRServer {
@@ -2412,6 +2415,7 @@ impl XRServer {
         frame_rate: f32,
         initial_bitrate: f32,
         name_folder: &str,
+        effects: &[NetworkPattern], 
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         Self {
@@ -2448,6 +2452,8 @@ impl XRServer {
                 name_folder,
                 ip_self,
             ),
+
+            network_effects: effects.to_vec() ,  
         }
     }
 
@@ -2734,6 +2740,7 @@ impl XRServer {
                         self.frames_sent_counter,
                         &self.name_folder,
                         max_bitrate_ladder_mbps,
+                        &self.network_effects, 
                     )
                     .await
                     .unwrap();
@@ -3363,8 +3370,6 @@ impl XRClient {
         
         }
     }
-
-
 
     pub async fn configure_streams(&mut self, packet_size: usize, context: &Context<Self>) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
@@ -4274,12 +4279,16 @@ impl XRClient {
                     println!("waiting until offline CSV created", ); 
                 }
                 else{
+
+                    // emu effects part here? 
+
                     let csv_writer = self.offline_csv_trace.writer.as_mut().unwrap();
                 
                     csv_writer.write_record(&[
                         "",                     // offset column (only first row uses it)
                         "",                     // source column (only first row uses it)
                         "",                     // IDR_freq
+                        // "",                     // network emulation effects
                         &format!("{:.6}", timestamp),
                         &id_f.to_string(),
                         &lost.to_string(),

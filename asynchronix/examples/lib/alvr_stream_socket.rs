@@ -1,5 +1,6 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use ffmpeg_next::format::network;
 // use futures_util::stream::empty;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -17,10 +18,8 @@ use std::io::BufReader;
 use crate::format_elapsed;
 use crate::lib::CsvTrace;
 use crate::print_green;
-// lazy_static! {
-//     // Global static encoder instance
-//     static ref HEVC_ENCODER: Mutex<Option<HevcEncoder>> = Mutex::new(None);
-// }
+
+use crate::lib::models_mm1k::NetworkPattern;
 
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
 
@@ -72,7 +71,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 140.0;
+pub const OFFSET_VIDEO: f64 = 40.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -1901,6 +1900,7 @@ impl<H> StreamSender<H> {
 }
 
 impl<H: Serialize> StreamSender<H> {
+
     pub async fn get_buffer_emu(
         &mut self,
         header: &H,
@@ -1910,10 +1910,11 @@ impl<H: Serialize> StreamSender<H> {
         id_frame: usize,
         name_folder: &str,
         max_bitrate_ladder_mbps: f32,
+        network_effects: &[NetworkPattern], 
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k",  "snow", "assemble", "cut_video"];
+        let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo" , "zoro"];
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
         let mut final_file = match choice_random {
             Some(file) => file,
@@ -1922,7 +1923,7 @@ impl<H: Serialize> StreamSender<H> {
                 // println!("No files to choose from");
             }
         };
-        final_file = "cut_video";
+        // final_file = "cut_video";
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
@@ -1963,14 +1964,19 @@ impl<H: Serialize> StreamSender<H> {
                         "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_offline_video{}.csv",
                         name_folder,
                         third_octet,
-                        // format_elapsed!(now), 
+                    );
+
+
+                    let csv_path_emu = format!(
+                        "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_emu_effects{}.csv",
+                        name_folder,
+                        third_octet,
                     );
 
                     print_green!("Creating OFFLINE CSV at: {csv_path}", ); 
 
                     let mut wtr = Writer::from_path(&csv_path)?;
-                    // no header row – the very first record is the offset & source
-                    
+                    let mut wtr2 = Writer::from_path(&csv_path_emu)?;                     
 
                     wtr.write_record(&[
                         "OFFSET_VIDEO",
@@ -1982,15 +1988,27 @@ impl<H: Serialize> StreamSender<H> {
                         "Throughput(avg)",
                     ])?; 
 
+                    wtr2.write_record(&["EMU_EFFECTS", ] )?; 
+
+                    for emu in network_effects {
+                        wtr2.write_record(&[ format!("{:#?}", emu) ] )?; 
+
+                    }
+
                     wtr.write_record(&[
                         format!("{random_offset:.4}"),     // offset used for this run
                         input_path.to_owned(),             // source clip
                         format!("{}", IDR_FRAME_SIZE_GOP), 
+                        // json, 
                         "".to_string(),                                // placeholder timestamp
                         "".to_string(),                                // placeholder id_f
                         "".to_string(),                                // placeholder lost
                         "".to_string(), 
                     ])?;
+
+
+                    
+                   
 
                     wtr.flush()?;
                     self.csv_trace.path = csv_path.into();

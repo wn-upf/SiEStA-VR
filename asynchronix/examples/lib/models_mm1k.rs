@@ -17,6 +17,8 @@ use crate::DebugColor;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
+use serde::ser::{Serializer, SerializeStruct};
+use serde::{Serialize, Deserialize};
 
 use crate::lib::{
     collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
@@ -369,14 +371,16 @@ impl QueueStats {
 }
 
 // First, let's add a new enum for distribution types
-#[derive(Clone, Debug)]
+// #[derive(Clone, Debug) ]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")] // optional: emits "gaussian"/"uniform" instead of Rust‑style names
 pub enum JitterDistributionType {
     Gaussian,
     Uniform,
 }
 
 #[allow(unused)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug )]
 pub enum NetworkPattern {
     Constant,
     OnOffPeriodic {
@@ -408,6 +412,8 @@ pub enum NetworkPattern {
         valid_until: TaiTime<0>,
     },
 }
+
+
 #[allow(unused)]
 impl NetworkPattern {
     /// Create a new `NetworkPattern` of type Bandwidth
@@ -487,6 +493,8 @@ impl NetworkPattern {
         }
     }
 
+
+
     /// Placeholder for creating other network patterns
     pub fn new_constant() -> Self {
         Self::Constant
@@ -542,6 +550,7 @@ impl QueueMechanism {
         let overall_start = _now.checked_add(Duration::from_secs(15)).unwrap();
         let overall_end = _now.checked_add(Duration::from_secs(65)).unwrap();
 
+        // print_red!("EMU EFFECTS APPLIED! {:?}", tests); 
         if tests_random {
             network_emulator.add_random_events(
                 NUMBER_OF_RANDOM_EVENTS,                                  // count: add 5 events
@@ -823,7 +832,10 @@ impl NetworkPatternEmulator {
             debug_counter: 0,
         }
     }
-
+    
+    pub fn get_patterns(&self) -> &[NetworkPattern] {
+        &self.patterns
+    }
         
         pub fn add_random_events(
             &mut self,
@@ -1264,6 +1276,10 @@ impl QueueModule {
         self.array_stas_stats.clone()
     }
 
+    pub fn get_network_patterns(&self) -> &[NetworkPattern] {
+        &self.queue_network_emulator.network_emulator.get_patterns()
+    }
+
     pub fn new(
         num_stas: usize,
         queue_size: usize,
@@ -1295,6 +1311,7 @@ impl QueueModule {
             queue_mechanism =
                 QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, values_tests);
         } else {
+            print_yellow!("NO PATTERNS?", ); 
             queue_mechanism = QueueMechanism::new(
                 MAX_EMULATED_QUEUE_PACKETS,
                 TaiTime::EPOCH,
