@@ -8,18 +8,28 @@ pub const IDR_FRAME_SIZE_GOP: usize = 30;
 
 pub const WIDTH_ENCODER: usize = 1920; 
 pub const HEIGHT_ENCODER: usize = 1080; 
+use ffmpeg_next::time;
 use tokio::sync::Semaphore;
 
 use std::io::BufRead;
-
-// const MAX_PARALLEL_VMAF: usize = 4;            // <= 16 GB box safe
-// static VMAF_SLOTS: Lazy<Semaphore> = Lazy::new(|| {
-//     Semaphore::const_new(MAX_PARALLEL_VMAF)
-// });
+use walkdir::WalkDir;
+use tokio::join;
+use tokio::spawn;
 
 
 
 
+const MAX_PARALLEL_VMAF: usize = 30;
+const WORKERS: usize = 2;
+
+/// One global pool → one permit per concurrent VMAF job
+static VMAF_SLOTS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
+    Arc::new(Semaphore::const_new(MAX_PARALLEL_VMAF))
+});
+use futures::stream::FuturesUnordered;
+
+
+use futures::future::join_all;
 
 // static METRIC_SLOTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::const_new(30)); // ≤4 frames in flight
 use asynchronix::model::Context;
@@ -173,36 +183,79 @@ impl MetricsLogger {
             name_folder: scenario.to_string(),
         })
     }
-   
-
+    /// *The heavy ffmpeg work happens in a dedicated thread;* the caller just awaits
+    /// the semaphore, spawns, and returns immediately.
     pub async fn process_frame_buffers(
         &self,
         frame_number: u64,
         timestamp_ms: f64,
-        ref_buf: &[u8],
-        lossy_buf: &[u8],
+        ref_buf: Vec<u8>,        // own the data
+        lossy_buf: Vec<u8>,
         ip_client: IpAddr,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
+        // 1️⃣ back‑pressure – wait until a slot is free
+        // let _permit = VMAF_SLOTS.acquire().await?;
 
-        // 1) create a new tempdir for *this* frame
-        let temp_dir = TempDir::new()?;
-        let ref_path = temp_dir.path().join("ref.rgb");
-        let lossy_path = temp_dir.path().join("lossy.rgb");
+        // 2️⃣ clone `self` (the logger) for the blocking thread
+        let logger = self.clone();
 
-        // 2) dump the in-memory RGB into raw files
-        std::fs::write(&ref_path, ref_buf)?;
-        std::fs::write(&lossy_path, lossy_buf)?;
-        println!("Processing!"); 
-        // 3) call your existing pipeline
-        self.process_frame_metrics(
-            frame_number,
-            timestamp_ms,
-            ref_path.to_str().unwrap(),
-            lossy_path.to_str().unwrap(),
-            ip_client,
-        );
+        // 3️⃣ move everything into a blocking worker thread
+        tokio::task::spawn_blocking(move || {
+            // a) create a per‑frame temp dir
+            let tmp = tempfile::TempDir::new().expect("create TempDir");
+
+            let ref_path   = tmp.path().join("ref.rgb");
+            let lossy_path = tmp.path().join("lossy.rgb");
+
+            std::fs::write(&ref_path,   &ref_buf).expect("write ref");
+            std::fs::write(&lossy_path, &lossy_buf).expect("write lossy");
+
+            // b) run the heavy ffmpeg+libvmaf pipeline
+            logger.process_frame_metrics(
+                frame_number,
+                timestamp_ms,
+                ref_path.to_str().unwrap(),
+                lossy_path.to_str().unwrap(),
+                ip_client,
+            );
+
+            // c) temp dir and semaphore permit are dropped here
+        })
+        .await?;       // propagate panic / JoinError
+
         Ok(())
     }
+
+       
+
+    // pub async fn process_frame_buffers(
+    //     &self,
+    //     frame_number: u64,
+    //     timestamp_ms: f64,
+    //     ref_buf: &[u8],
+    //     lossy_buf: &[u8],
+    //     ip_client: IpAddr,
+    // ) -> Result<()> {
+
+    //     // 1) create a new tempdir for *this* frame
+    //     let temp_dir = TempDir::new()?;
+    //     let ref_path = temp_dir.path().join("ref.rgb");
+    //     let lossy_path = temp_dir.path().join("lossy.rgb");
+
+    //     // 2) dump the in-memory RGB into raw files
+    //     std::fs::write(&ref_path, ref_buf)?;
+    //     std::fs::write(&lossy_path, lossy_buf)?;
+    //     println!("Processing!"); 
+    //     // 3) call your existing pipeline
+    //     self.process_frame_metrics(
+    //         frame_number,
+    //         timestamp_ms,
+    //         ref_path.to_str().unwrap(),
+    //         lossy_path.to_str().unwrap(),
+    //         ip_client,
+    //     );
+    //     Ok(())
+    // }
 
 pub fn process_frame_metrics(
     &self,
@@ -224,7 +277,8 @@ pub fn process_frame_metrics(
     // ───────────────────── one FFmpeg call ─────────────────
     let status = Command::new("ffmpeg")
     .args([
-        "-hwaccel", "cuda",
+        // "-hwaccel", "cuda",
+        "-threads", "0", "-filter_threads", "0", "-loglevel", "error", 
         "-loglevel", "error",
 
         /* distorted frame (must be first for libvmaf) */
@@ -237,20 +291,17 @@ pub fn process_frame_metrics(
         "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
         "-i", ref_path,
 
-        /* one filter_complex with three parallel chains           *
-         * semicolons (;) separate chains, commas (,) continue     *
-         * a single chain. Here every chain gets      [dist][ref]. */
-        "-filter_complex",
-        &format!(
-            "[0:v]format=yuv420p[dist]; \
-             [1:v]format=yuv420p[ref];  \
-             [dist][ref]libvmaf=log_fmt=json:log_path={vmaf}; \
-             [dist][ref]psnr=stats_file={psnr};               \
-             [dist][ref]ssim=stats_file={ssim}",
-            vmaf=vmaf_json.display(),
-            psnr=psnr_log.display(),
-            ssim=ssim_log.display(),
-        ),
+            "-filter_complex",
+            &format!(
+                "[0:v]format=yuv420p[dist]; \
+                    [1:v]format=yuv420p[ref]; \
+                    [dist][ref]libvmaf=log_fmt=json:log_path={vmaf}:n_threads=0; \
+                    [dist][ref]psnr=stats_file={psnr}:threads=0; \
+                    [dist][ref]ssim=stats_file={ssim}:threads=0",
+                vmaf=vmaf_json.display(),
+                psnr=psnr_log.display(),
+                ssim=ssim_log.display(),
+            ),
 
         "-frames:v", "1",
         "-f", "null", "-"
@@ -848,8 +899,8 @@ impl HevcDecoder {
             total_bytes_processed: 0.0,
             priming_complete: false,
             expected_frame_size: frame_size,
-            max_buffered_frames: 50,
-            min_buffered_frames: 30, 
+            max_buffered_frames: 30,
+            min_buffered_frames: 5, 
 
             decoder_string: decoder_str.to_string(),
 
@@ -1250,10 +1301,8 @@ impl HevcDecoder {
                             self.decoded_frames.push_back(frame);
                         }
                     }
-                    if self.decoded_frames.len() <= self.min_buffered_frames{
-                        break; 
-                    }
-                    if self.decoded_frames.len() >= self.max_buffered_frames {
+                    if self.decoded_frames.len() >= self.min_buffered_frames {
+                        // we’re primed now, stop draining further
                         break;
                     }
                 }
@@ -2198,6 +2247,7 @@ fn draw_pair(
     scenario: &str, 
     id:      u32,
     sim:     f64,
+    t:       f64, 
 ) -> Result<()> {
     const W: usize = 1920;
     const H: usize = 1080;
@@ -2220,7 +2270,7 @@ fn draw_pair(
     render_text(&mut buf, &format!("#{}", id), 10,           y_lbl, ww, 0xFFAA00, 2);
     render_text(&mut buf, &format!("#{}", id), sw + 20,      y_lbl, ww, 0xFFAA00, 2);
 
-    window.set_title(&format!("ID {} | Scenario: {scenario}", id,));
+    window.set_title(&format!("T: {:6.4} ID {} | Scenario: {scenario}", t, id,));
     window.update_with_buffer(&buf, ww, sh)?;
     Ok(())
 }
@@ -2250,22 +2300,6 @@ pub async fn process_trace(
     // 2) build a logger that writes to Results/<scenario>/VMAF_metrics_<idx>.csv
     let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
 
-    // 3) copy in your CSV‐parsing + FFmpeg + VMAF loop here, but
-    //    • replace the hard-coded `trace_path = "..."`
-    //      with `trace_csv.to_str().unwrap()`
-    //    • use this `metric` instead of re-creating the logger
-    //
-    //    For example (pseudo):
-    //
-    //    let mut rdr = csv::ReaderBuilder::new()
-    //        .has_headers(true)
-    //        .from_path(&trace_csv)?;
-    //    // … build your `trace: Arc<Vec<FrameInfo>>` …
-    //    // … spawn encoder tasks …
-    //    // … do your decode loop, calling
-    //    //      metric.process_frame_buffers(…) …
-    //
-    //    Everything else stays exactly the same.
 
     let mut counter_frames: usize = 0; 
     /* 1. ─ parse CSV ─────────────────────────────────────── */
@@ -2449,6 +2483,7 @@ pub async fn process_trace(
         let mut seen_pairs = 0;
         let (mut seen30, mut seen100) = (0usize, 0usize);
 
+        let mut vmaf_jobs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         
         while window.is_open() {
@@ -2463,7 +2498,7 @@ pub async fn process_trace(
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // no packet arrived in 50 ms → fall through to decode/draw
-                    break; 
+                    continue; 
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     // the channel is closed forever → we know
@@ -2472,52 +2507,95 @@ pub async fn process_trace(
                 }
             }
         
-            // — now decode *all* available frames and draw them —
+            // ── decode *all* available frames from the LOW decoder first ──────────
+           // -------- LOW first ---------------------------------------------------
             loop {
-                if let Some((rgb_l, id_l, _ts)) = dec_low.next_decoded_frame() {
-                    if let Some(rgb_r) = ref_buf.remove(&id_l) {
+                if let Some((rgb_l, id, _)) = dec_low.next_decoded_frame() {
+                    if let Some(rgb_r) = ref_buf.remove(&id) {
+                        // paint + GUI
                         let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                        metric
-                            .process_frame_buffers(id_l as u64, *ts_map.get(&id_l).unwrap_or(&0.0), &rgb_r, &rgb_l, ip)
-                            .await?;
-                        draw_pair(&mut window,&rgb_l, &rgb_r, scenario.as_ref(), id_l, sim)?;
+                        let ts  = *ts_map.get(&id).unwrap_or(&0.0);
+                        draw_pair(&mut window, &rgb_l, &rgb_r,
+                                scenario.as_ref(), id, sim, ts)?;
                         seen_pairs += 1;
+
+                        // back‑pressure: take a slot *before* spawning the job
+                        let permit = VMAF_SLOTS.clone()
+                                            .acquire_owned()
+                                            .await
+                                            .unwrap();
+
+                        let logger = metric.clone();             // CSV logger
+                        vmaf_jobs.push(tokio::spawn(async move {
+                            // keep the slot for the job’s lifetime
+                            let _permit = permit;
+
+                            if let Err(e) = logger
+                                .process_frame_buffers(id as u64,
+                                                    ts,
+                                                    rgb_r,      // reference
+                                                    rgb_l,      // lossy
+                                                    ip)
+                                .await
+                            {
+                                eprintln!("VMAF worker failed on frame #{id}: {e}");
+                            }
+                        }));
                     } else {
-                        low_buf.insert(id_l, rgb_l);
+                        low_buf.insert(id, rgb_l);
                     }
-                } else {
-                    break;
-                }
+                } else { break }
             }
-        
+
+            // -------- REF second --------------------------------------------------
             loop {
-                if let Some((rgb_r, id_r, _ts)) = dec_ref.next_decoded_frame() {
-                    if let Some(rgb_l) = low_buf.remove(&id_r) {
+                if let Some((rgb_r, id, _)) = dec_ref.next_decoded_frame() {
+                    if let Some(rgb_l) = low_buf.remove(&id) {
                         let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                        draw_pair(&mut window, &rgb_l, &rgb_r, scenario.as_ref() ,id_r, sim)?;
+                        let ts  = *ts_map.get(&id).unwrap_or(&0.0);
+                        draw_pair(&mut window, &rgb_l, &rgb_r,
+                                scenario.as_ref(), id, sim, ts)?;
                         seen_pairs += 1;
+
+                        let permit = VMAF_SLOTS.clone()
+                                            .acquire_owned()
+                                            .await
+                                            .unwrap();
+
+                        let logger = metric.clone();
+                        vmaf_jobs.push(tokio::spawn(async move {
+                            let _permit = permit;
+
+                            if let Err(e) = logger
+                                .process_frame_buffers(id as u64,
+                                                    ts,
+                                                    rgb_r,      // reference
+                                                    rgb_l,      // lossy
+                                                    ip)
+                                .await
+                            {
+                                eprintln!("VMAF worker failed on frame #{id}: {e}");
+                            }
+                        }));
                     } else {
-                        ref_buf.insert(id_r, rgb_r);
+                        ref_buf.insert(id, rgb_r);
                     }
-                } else {
-                    break;
-                }
+                } else { break }
             }
-        
+
+
             if seen_pairs >= expected {
                 break;
             }
             window.update();
         }
         
-
+    join_all(vmaf_jobs).await;
 
     Ok(())
 }
 
-use walkdir::WalkDir;
-use tokio::join;
-use tokio::spawn;
+
 
 
 fn main() -> Result<()> {
@@ -2550,7 +2628,6 @@ fn main() -> Result<()> {
     };
 
     // 4) Split into N groups by index mod N
-    const WORKERS: usize = 2;
     let mut groups: Vec<Vec<(PathBuf, Vec<PathBuf>)>> = vec![Vec::new(); WORKERS];
     for (i, scenario) in scenarios.drain(..).enumerate() {
         groups[i % WORKERS].push(scenario);
