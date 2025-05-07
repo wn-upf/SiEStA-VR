@@ -4749,7 +4749,7 @@ pub fn display_single_frame_with_info(
 
     // 6) Handle new lost-frames and add to buffer
     if !lost_frames.is_empty() {
-        let msg = format!("T: {} LOST FRAMES: {:?}", format_elapsed!(now), lost_frames);
+        let msg = format!("T: {:5.5} LOST FRAMES: {:?}", format_elapsed!(now), lost_frames);
         lost_frames_buffer.add_message(msg);
     }
 

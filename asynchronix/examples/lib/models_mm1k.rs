@@ -6,7 +6,8 @@ use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
-
+use serde::{Deserializer};
+use serde::de::Error as DeError;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
@@ -380,38 +381,58 @@ pub enum JitterDistributionType {
 }
 
 #[allow(unused)]
-#[derive(Clone, Debug )]
+#[derive(Clone, Debug, Serialize, Deserialize )]
 pub enum NetworkPattern {
     Constant,
+
     OnOffPeriodic {
         on_duration: Duration,
         off_duration: Duration,
         current_state: bool,
+
+        #[serde(with = "taitime_serde")] // ② apply custom (de)serializer
         last_state_change: TaiTime<0>,
     },
+
     ProbabilisticDrop {
         drop_probability: f64,
+
+        #[serde(with = "taitime_serde")]
         valid_from: TaiTime<0>,
+
+        #[serde(with = "taitime_serde")]
         valid_until: TaiTime<0>,
     },
+
     Bandwidth {
         max_bps: f64,
         current_tokens: f64,
         max_tokens: f64,
         token_refill_rate: f64,
+
+        #[serde(with = "taitime_serde")]
         valid_from: TaiTime<0>,
+
+        #[serde(with = "taitime_serde")]
         valid_until: TaiTime<0>,
     },
+
     Jitter {
         mean_delay: Duration,
         distribution_type: JitterDistributionType,
-        variance: f64,        // Standard deviation for Gaussian, half-width for Uniform
-        correlation_pct: f64, // Correlation with previous delay (0-100%)
-        last_delay: Duration, // Stores previous delay for correlation
+        variance: f64,
+        correlation_pct: f64,
+        last_delay: Duration,
+
+        #[serde(with = "taitime_serde")]
         valid_from: TaiTime<0>,
+
+        #[serde(with = "taitime_serde")]
         valid_until: TaiTime<0>,
     },
 }
+
+use crate::lib::taitime_serde; 
 
 
 #[allow(unused)]
@@ -432,6 +453,152 @@ impl NetworkPattern {
             valid_until,
         }
     }
+
+
+    pub fn csv_headers() -> &'static [&'static str] {
+        &[
+            "effect_type",
+
+            // OnOffPeriodic
+            "on_duration_secs",   "on_duration_nanos",
+            "off_duration_secs",  "off_duration_nanos",
+            "current_state",
+            "last_change_secs",   "last_change_nanos",
+
+            // ProbabilisticDrop
+            "drop_probability",
+            "pd_valid_from_secs", "pd_valid_from_nanos",
+            "pd_valid_until_secs","pd_valid_until_nanos",
+
+            // Bandwidth
+            "bw_max_bps",         "bw_current_tokens",
+            "bw_max_tokens",      "bw_token_refill_rate",
+            "bw_valid_from_secs", "bw_valid_from_nanos",
+            "bw_valid_until_secs","bw_valid_until_nanos",
+
+            // Jitter
+            "jit_mean_delay_secs","jit_mean_delay_nanos",
+            "jit_distribution",   "jit_variance",
+            "jit_correlation_pct","jit_last_delay_secs",
+            "jit_last_delay_nanos",
+            "jit_valid_from_secs","jit_valid_from_nanos",
+            "jit_valid_until_secs","jit_valid_until_nanos",
+        ]
+    }
+
+    /// Turn *this* variant into one row of Strings, matching exactly the above headers.
+    pub fn to_csv_row(&self) -> Vec<String> {
+        // convenience closures
+        let d2s = |d: &Duration| d.as_secs().to_string();
+        let d2n = |d: &Duration| d.subsec_nanos().to_string();
+        let t2s = |t: &TaiTime<0>| t.as_secs().to_string();
+        let t2n = |t: &TaiTime<0>| t.subsec_nanos().to_string();
+
+        // start with effect_type
+        let mut row = vec![format!("{:?}", self)  // but we'll overwrite below
+            .split('(').next().unwrap().to_string()
+        ];
+
+        // now push _all_ possible columns in the same order as csv_headers()
+        match self {
+            NetworkPattern::OnOffPeriodic {
+                on_duration,
+                off_duration,
+                current_state,
+                last_state_change,
+            } => {
+                row.push(d2s(on_duration));
+                row.push(d2n(on_duration));
+                row.push(d2s(off_duration));
+                row.push(d2n(off_duration));
+                row.push(current_state.to_string());
+                row.push(t2s(last_state_change));
+                row.push(t2n(last_state_change));
+
+                // fill the rest with empties
+                row.extend(std::iter::repeat(String::new()).take(
+                    NetworkPattern::csv_headers().len() - row.len(),
+                ));
+            }
+
+            NetworkPattern::ProbabilisticDrop {
+                drop_probability,
+                valid_from,
+                valid_until,
+            } => {
+                // push blanks for OnOffPeriodic
+                row.extend((0..7).map(|_| String::new()));
+
+                row.push(drop_probability.to_string());
+                row.push(t2s(valid_from));
+                row.push(t2n(valid_from));
+                row.push(t2s(valid_until));
+                row.push(t2n(valid_until));
+
+                // fill the rest
+                row.extend(std::iter::repeat(String::new())
+                    .take(NetworkPattern::csv_headers().len() - row.len()));
+            }
+
+            NetworkPattern::Bandwidth {
+                max_bps,
+                current_tokens,
+                max_tokens,
+                token_refill_rate,
+                valid_from,
+                valid_until,
+            } => {
+                // blanks for OnOffPeriodic + ProbabilisticDrop
+                row.extend((0..12).map(|_| String::new()));
+
+                row.push(max_bps.to_string());
+                row.push(current_tokens.to_string());
+                row.push(max_tokens.to_string());
+                row.push(token_refill_rate.to_string());
+                row.push(t2s(valid_from));
+                row.push(t2n(valid_from));
+                row.push(t2s(valid_until));
+                row.push(t2n(valid_until));
+
+                row.extend(std::iter::repeat(String::new())
+                    .take(NetworkPattern::csv_headers().len() - row.len()));
+            }
+
+            NetworkPattern::Jitter {
+                mean_delay,
+                distribution_type,
+                variance,
+                correlation_pct,
+                last_delay,
+                valid_from,
+                valid_until,
+            } => {
+                // blanks for the first three variants
+                row.extend((0..20).map(|_| String::new()));
+
+                row.push(d2s(mean_delay));
+                row.push(d2n(mean_delay));
+                row.push(format!("{:?}", distribution_type));
+                row.push(variance.to_string());
+                row.push(correlation_pct.to_string());
+                row.push(d2s(last_delay));
+                row.push(d2n(last_delay));
+                row.push(t2s(valid_from));
+                row.push(t2n(valid_from));
+                row.push(t2s(valid_until));
+                row.push(t2n(valid_until));
+            }
+
+            NetworkPattern::Constant => {
+                // nothing else to push—just pad out the full width
+                row.extend(std::iter::repeat(String::new())
+                    .take(NetworkPattern::csv_headers().len() - 1));
+            }
+        }
+
+        row
+    }
+
 
     pub fn new_jitter_gaussian(
         mean_delay_ms: f64,
@@ -544,14 +711,14 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        let (test_bw, test_jitter, test_pl, tests_random) = tests;
+        let (test_bw, test_jitter, test_pl, test_random) = tests;
 
                 // Assume these time values are defined appropriately:
-        let overall_start = _now.checked_add(Duration::from_secs(15)).unwrap();
+        let overall_start = _now.checked_add(Duration::from_secs(10)).unwrap();
         let overall_end = _now.checked_add(Duration::from_secs(65)).unwrap();
 
         // print_red!("EMU EFFECTS APPLIED! {:?}", tests); 
-        if tests_random {
+        if test_random {
             network_emulator.add_random_events(
                 NUMBER_OF_RANDOM_EVENTS,                                  // count: add 5 events
                 RandomEventKind::Jitter,            // type of event

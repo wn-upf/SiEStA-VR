@@ -18,7 +18,7 @@ use std::io::BufReader;
 use crate::format_elapsed;
 use crate::lib::CsvTrace;
 use crate::print_green;
-
+use serde_json;
 use crate::lib::models_mm1k::NetworkPattern;
 
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
@@ -1957,10 +1957,13 @@ impl<H: Serialize> StreamSender<H> {
                         "Throughput(avg)",
                     ])?; 
 
-                    wtr2.write_record(&["EMU_EFFECTS", ] )?; 
+                    // wtr2.write_record(&["EMU_EFFECTS", ] )?; 
+                    wtr2.write_record(NetworkPattern::csv_headers())?;
 
                     for emu in network_effects {
-                        wtr2.write_record(&[ format!("{:#?}", emu) ] )?; 
+
+                        wtr2.write_record(emu.to_csv_row())?;
+                        // wtr2.write_record(&[ format!("{:#?}", emu) ] )?; 
 
                     }
 
@@ -1980,6 +1983,7 @@ impl<H: Serialize> StreamSender<H> {
                    
 
                     wtr.flush()?;
+                    wtr2.flush()?; 
                     self.csv_trace.path = csv_path.into();
                 }
     

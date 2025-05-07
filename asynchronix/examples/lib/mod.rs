@@ -49,12 +49,12 @@ pub mod models_XR;
 pub mod models_mm1k;
 
 pub mod alvr_control_socket;
+pub mod taitime_serde;
 
 // pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))
 // }
-// pub static DEBUG_PRINT_ENABLED: bool = false;
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
@@ -131,6 +131,10 @@ macro_rules! format_elapsed {
         format!("{:.9}", total_seconds)
     }};
 }
+
+
+
+
 #[macro_export]
 macro_rules! taitime_to_f64 {
     ($tai:expr) => {{
