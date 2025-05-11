@@ -8,6 +8,12 @@ pub const IDR_FRAME_SIZE_GOP: usize = 30;
 
 pub const WIDTH_ENCODER: usize = 1920; 
 pub const HEIGHT_ENCODER: usize = 1080; 
+
+
+const MAX_PARALLEL_VMAF: usize = 20;
+const WORKERS: usize = 2;
+
+
 use ffmpeg_next::time;
 use tokio::sync::Semaphore;
 
@@ -15,12 +21,6 @@ use std::io::BufRead;
 use walkdir::WalkDir;
 use tokio::join;
 use tokio::spawn;
-
-
-
-
-const MAX_PARALLEL_VMAF: usize = 30;
-const WORKERS: usize = 2;
 
 /// One global pool → one permit per concurrent VMAF job
 static VMAF_SLOTS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
@@ -124,7 +124,7 @@ struct FrameGroup {
     _frames: Vec<FrameData>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Deserialize)]
 struct FrameMetrics {
     frame_number: u64,
     timestamp_ms: f64,
@@ -148,6 +148,7 @@ macro_rules! print_greennn {
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
     name_folder: String,
+    name_file_w_path: String, 
 }
 
 impl MetricsLogger {
@@ -160,16 +161,35 @@ impl MetricsLogger {
         // create it (and any missing parents) if it doesn't exist
         let dir =format!("Results/{}", name_folder); 
         std::fs::create_dir_all(&dir)?;
-        let file = File::create(format!(
-            "Results/{}/VMAF_metrics_{}.csv",
-            name_folder, value
-        ))?;
+        let filename = format!( "Results/{}/VMAF_metrics_{}.csv", name_folder, value); 
+        let file = File::create(filename.clone())?;
         let writer = csv::Writer::from_writer(file);
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             name_folder: name_folder.to_string(),
+            name_file_w_path: filename, 
         })
     }
+       /// Call once, after `join_all(vmaf_jobs).await`
+       pub fn finalize(&self) -> Result<()> {
+        // 1/ read everything (skip header)
+
+
+
+        let mut rdr = csv::Reader::from_path(&*self.name_file_w_path)?;
+        let mut rows: Vec<FrameMetrics> = rdr.deserialize().flatten().collect();
+
+        // 2/ sort by frame_number
+        rows.sort_by_key(|r| r.frame_number);
+
+        // 3/ overwrite the file
+        let mut wtr = csv::Writer::from_path(&*self.name_file_w_path)?;
+        wtr.write_record(&["frame_number","timestamp_ms","vmaf","psnr","ssim"])?;
+        for r in rows { wtr.serialize(r)?; }
+        wtr.flush()?;
+        Ok(())
+    }
+
     pub fn new_for_trace(
         scenario: &str,
         trace_idx: usize,
@@ -177,10 +197,11 @@ impl MetricsLogger {
         let dir = format!("Results/{}", scenario);
         std::fs::create_dir_all(&dir)?;
         let path = format!("{}/VMAF_metrics_{}.csv", dir, trace_idx);
-        let file = std::fs::File::create(path)?;
+        let file = std::fs::File::create(&path.clone().to_string())?;
         Ok(Self {
             writer: Arc::new(std::sync::Mutex::new(csv::Writer::from_writer(file))),
             name_folder: scenario.to_string(),
+            name_file_w_path: path, 
         })
     }
     /// *The heavy ffmpeg work happens in a dedicated thread;* the caller just awaits
@@ -1895,7 +1916,7 @@ impl ChunkedHevcEncoder {
         }
 
         // Only now try channel
-        if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(1)) {
+        if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(10)) {
             return Some(frame);
         }
 
@@ -2447,7 +2468,7 @@ pub async fn process_trace(
             offset_video,
             /* simulate_loss = */ false,
         );
-
+        drop(tx); 
         
         let mut dec_low  = HevcDecoder::new(60, 1920, 1080, "LOW");
         let mut dec_ref  = HevcDecoder::new(60, 1920, 1080, "REF");
@@ -2488,7 +2509,7 @@ pub async fn process_trace(
         
         while window.is_open() {
             // BLOCK up to 50 ms for the next packet
-            match rx.recv_timeout(Duration::from_millis(10000)) {
+            match rx.recv_timeout(Duration::from_secs(20)) {
                 Ok((tag, id, pkt)) => {
                     match tag {
                         0 => dec_low.process_packet(pkt, id),
@@ -2591,6 +2612,7 @@ pub async fn process_trace(
         }
         
     join_all(vmaf_jobs).await;
+    metric.finalize()?; 
 
     Ok(())
 }

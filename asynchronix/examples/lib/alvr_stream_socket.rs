@@ -1883,7 +1883,7 @@ impl<H: Serialize> StreamSender<H> {
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo" , "zoro"];
+        let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo"];
         let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
         let mut final_file = match choice_random {
             Some(file) => file,
