@@ -4,13 +4,13 @@ pub const INTRAREFRESH_ENABLED: bool = false;
 
 pub const FRAMERATE_WINDOWS: usize = 60; 
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
-pub const IDR_FRAME_SIZE_GOP: usize = 30; 
+// pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
 pub const WIDTH_ENCODER: usize = 1920; 
 pub const HEIGHT_ENCODER: usize = 1080; 
 
 
-const MAX_PARALLEL_VMAF: usize = 10;
+const MAX_PARALLEL_VMAF: usize = 5;
 const WORKERS: usize = 2;
 
 
@@ -176,11 +176,9 @@ impl MetricsLogger {
             name_file_w_path: filename, 
         })
     }
-       /// Call once, after `join_all(vmaf_jobs).await`
-       pub fn finalize(&self) -> Result<()> {
-        // 1/ read everything (skip header)
-
-
+    /// Call once, after `join_all(vmaf_jobs).await`
+    pub fn finalize(&self) -> Result<()> {
+    // 1/ read everything (skip header)
 
         let mut rdr = csv::Reader::from_path(&*self.name_file_w_path)?;
         let mut rows: Vec<FrameMetrics> = rdr.deserialize().flatten().collect();
@@ -221,7 +219,7 @@ impl MetricsLogger {
         ip_client: IpAddr,
     ) -> anyhow::Result<()> {
         // 1️⃣ back‑pressure – wait until a slot is free
-        // let _permit = VMAF_SLOTS.acquire().await?;
+        // let _permit = VMAF_SLOTS.acquire().await.unwrap();
 
         // 2️⃣ clone `self` (the logger) for the blocking thread
         let logger = self.clone();
@@ -1158,7 +1156,7 @@ impl HevcDecoder {
         self.keyframes_seen >= 1
     }
 
-    pub fn process_packet(&mut self, packet: Vec<u8>, id: u32) {
+    pub async fn process_packet(&mut self, packet: Vec<u8>, id: u32) {
         // Track if this packet contains a parameter set
         let mut has_parameter_update = false;
 
@@ -1204,7 +1202,7 @@ impl HevcDecoder {
         let alpha = 0.1; // Use a fixed alpha for simplicity
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
 
-        let _permit = self.processing_semaphore.acquire();
+        let _permit = self.processing_semaphore.acquire().await;
         
         // Add data to the parser
         self.parser.add_data(&packet);
@@ -1750,7 +1748,7 @@ impl ChunkedHevcEncoder {
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
 
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, idr: u32, ) {
         let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
@@ -1762,7 +1760,9 @@ impl ChunkedHevcEncoder {
         );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
+        
         if INTRAREFRESH_ENABLED {
+        
             command
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
@@ -1789,7 +1789,9 @@ impl ChunkedHevcEncoder {
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]); // output raw HEVC
+       
         } else {
+
             command
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
@@ -1808,7 +1810,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-rc-lookahead", "0"])
-                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
+                .args(&["-g", &format!("{:.0}", idr)])
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -1864,7 +1866,7 @@ impl ChunkedHevcEncoder {
         // Update offset for the next chunk.
         self.current_offset += self.chunk_duration;
         // Add a safety check to clear parser buffer if it gets too large
-        if self.parser.buffer.len() > 1_000_000_00 {
+        if self.parser.buffer.len() > 100_000_000_00 {
             // 100MB limit
             println!(
                 "{} Parser buffer getting too large ({}), clearing",
@@ -2139,6 +2141,7 @@ fn make_encoder_task(
     video_path: String,
     offset_video: f64,
     simulate_loss: bool,
+    idr_freq: u32, 
 ) {
     task::spawn(async move {
         // 1️⃣ Create your encoder
@@ -2156,7 +2159,7 @@ fn make_encoder_task(
         let mut produced = 0;
         while produced < trace.len() {
             // (re)fill the encoder’s internal queue
-            enc.start_chunking(bitrate_mbps).await;
+            enc.start_chunking(bitrate_mbps, idr_freq).await;
             // async_std::task::sleep(Duration::from_millis(6000)).await;
             // drain all frames this chunk produced (but never overrun our trace)
             while produced < trace.len() {
@@ -2302,7 +2305,19 @@ pub async fn process_trace(
         .to_string_lossy();
     print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario ); 
 
-    // 2) build a logger that writes to Results/<scenario>/VMAF_metrics_<idx>.csv
+
+
+    // Extract the bitrate as f32 from the pattern "_Br<value>_"
+    let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)_")?;
+    let bitrate: f32 = bitrate_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("br"))
+        .ok_or_else(|| anyhow::anyhow!("Bitrate not found in scenario name"))?
+        .as_str()
+        .parse()?;
+
+    // Example debug print
+    println!("Extracted bitrate: {}", bitrate);    // 2) build a logger that writes to Results/<scenario>/VMAF_metrics_<idx>.csv
     let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
 
 
@@ -2329,6 +2344,10 @@ pub async fn process_trace(
     let mut offset_video= None::<f64>;
     let mut idr_frequency = None::<u32>;
     let mut throughput_data = Vec::<f64>::new();
+
+
+
+
 
     // let trace_path = "/…/trace_offline_video0.csv";
     let mut rdr = csv::ReaderBuilder::new()
@@ -2441,12 +2460,13 @@ pub async fn process_trace(
         // low-bitrate path (30 Mbps) → simulate loss
         make_encoder_task(
             0,
-            30.0,
+            bitrate as f32,
             Arc::clone(&trace),
             tx.clone(),
             path_video.clone(),
             offset_video,
             /* simulate_loss = */ true,
+            idr, 
         );
 
         // high-bitrate reference (100 Mbps) → perfect
@@ -2458,15 +2478,13 @@ pub async fn process_trace(
             path_video.clone(),
             offset_video,
             /* simulate_loss = */ false,
+            idr
         );
         drop(tx); 
         
-        let mut dec_low  = HevcDecoder::new(60, 1920, 1080, "LOW");
-        let mut dec_ref  = HevcDecoder::new(60, 1920, 1080, "REF");
+        let mut dec_low  = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "LOW");
+        let mut dec_ref  = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "REF");
         
-        let mut want_id = None::<u32>;   // next id we try to pair
-        
-
         /* 4. ─ create window ONCE ───────────────────────────── */
         const W: usize = 1920;
         const H: usize = 1080;
@@ -2510,10 +2528,10 @@ while window.is_open() {
         Ok((tag, id, pkt)) => {
             match tag {
                 0 => {
-                    dec_low.process_packet(pkt, id);
+                    dec_low.process_packet(pkt, id).await;
                 }
                 1 => {
-                    dec_ref.process_packet(pkt, id);
+                    dec_ref.process_packet(pkt, id).await;
 
                     // ←––– NEW: force the low‐loss decoder to re‐inject ref’s VPS/SPS/PPS // causes green artifacts and sync is still bad sadly
                     // let (vps, sps, pps) = dec_ref.get_parameter_sets();

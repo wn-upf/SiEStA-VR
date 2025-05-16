@@ -1,11 +1,11 @@
 NUMBER_OF_JOBS=4
-SERIAL_EXECUTION=1
-N_XR=( 1 2 3 4 )
-initial_bitrate_mbps=(20.0 40.0 60.0 80.0 )
-TEST_TYPE=("STD" "PL" "BW")  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
+SERIAL_EXECUTION=0
+N_XR=( 1)
+initial_bitrate_mbps=(10.0 20.0 50.0 100.0 )
+TEST_TYPE=("PL" "RANDOM" "STD")  # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
  ## "TEST_TYPE = "RANDOM" ## for random PL BW and JI effects spread over the whole simulation
 
-simTime=70.0
+simTime=25.0
 k_queue=10000
 mean_length=12000.0
 rate_bps_src=20E6; 
@@ -102,5 +102,10 @@ rm "$temp_file"
 #         -f null -
 # fi
 
-
 echo "ALL JOBS FINISHED!!!"
+
+cargo run --release --example parallel_online_vmaf
+
+
+
+echo "XRUN FINALLY FINISHED!!!"
