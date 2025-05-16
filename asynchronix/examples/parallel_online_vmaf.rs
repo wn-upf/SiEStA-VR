@@ -10,7 +10,7 @@ pub const WIDTH_ENCODER: usize = 1920;
 pub const HEIGHT_ENCODER: usize = 1080; 
 
 
-const MAX_PARALLEL_VMAF: usize = 20;
+const MAX_PARALLEL_VMAF: usize = 10;
 const WORKERS: usize = 2;
 
 
@@ -141,7 +141,13 @@ macro_rules! print_greennn {
         println!("{}", DebugColor::ForestGreen.to_background_fn()(msg));
     };
 }
-
+#[macro_export]
+macro_rules! print_reds {
+    ($fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::Red.to_background_fn()(msg));
+    };
+}
 
 
 #[derive(Clone)]
@@ -248,135 +254,120 @@ impl MetricsLogger {
     }
 
        
-
-    // pub async fn process_frame_buffers(
-    //     &self,
-    //     frame_number: u64,
-    //     timestamp_ms: f64,
-    //     ref_buf: &[u8],
-    //     lossy_buf: &[u8],
-    //     ip_client: IpAddr,
-    // ) -> Result<()> {
-
-    //     // 1) create a new tempdir for *this* frame
-    //     let temp_dir = TempDir::new()?;
-    //     let ref_path = temp_dir.path().join("ref.rgb");
-    //     let lossy_path = temp_dir.path().join("lossy.rgb");
-
-    //     // 2) dump the in-memory RGB into raw files
-    //     std::fs::write(&ref_path, ref_buf)?;
-    //     std::fs::write(&lossy_path, lossy_buf)?;
-    //     println!("Processing!"); 
-    //     // 3) call your existing pipeline
-    //     self.process_frame_metrics(
-    //         frame_number,
-    //         timestamp_ms,
-    //         ref_path.to_str().unwrap(),
-    //         lossy_path.to_str().unwrap(),
-    //         ip_client,
-    //     );
-    //     Ok(())
-    // }
-
-pub fn process_frame_metrics(
-    &self,
-    frame_number: u64,
-    timestamp_ms: f64,
-    ref_path: &str,
-    lossy_path: &str,
-    ip_client: IpAddr,
-) {
-    // ───────────────────── scratch dir ─────────────────────
-    let tmp      = TempDir::new().expect("create TempDir");
-    let metrics  = tmp.path().join(&self.name_folder).join("Sink_for_video");
-    std::fs::create_dir_all(&metrics).unwrap();
-
-    let vmaf_json = metrics.join("vmaf.json");
-    let psnr_log  = metrics.join("psnr.log");
-    let ssim_log  = metrics.join("ssim.log");
-
-    // ───────────────────── one FFmpeg call ─────────────────
-    let status = Command::new("ffmpeg")
-    .args([
-        // "-hwaccel", "cuda",
-        "-threads", "0", "-filter_threads", "0", "-loglevel", "error", 
-        "-loglevel", "error",
-
-        /* distorted frame (must be first for libvmaf) */
-        "-f", "rawvideo", "-pixel_format", "rgb24",
-        "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-        "-i", lossy_path,
-
-        /* reference frame */
-        "-f", "rawvideo", "-pixel_format", "rgb24",
-        "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-        "-i", ref_path,
-
-            "-filter_complex",
-            &format!(
-                "[0:v]format=yuv420p[dist]; \
-                    [1:v]format=yuv420p[ref]; \
-                    [dist][ref]libvmaf=log_fmt=json:log_path={vmaf}:n_threads=0; \
-                    [dist][ref]psnr=stats_file={psnr}:threads=0; \
-                    [dist][ref]ssim=stats_file={ssim}:threads=0",
-                vmaf=vmaf_json.display(),
-                psnr=psnr_log.display(),
-                ssim=ssim_log.display(),
-            ),
-
-        "-frames:v", "1",
-        "-f", "null", "-"
-    ])
-    .status()
-    .expect("spawn ffmpeg");
-
-    if !status.success() {
-        eprintln!("ffmpeg failed on frame #{frame_number}");
-        return;
-    }
-
-    // ───────────────────── parse VMAF (JSON) ───────────────
-    let vmaf_score = std::fs::read_to_string(&vmaf_json)
-        .ok()
-        .and_then(|s| {
-            // Fast path: pooled mean present
-            serde_json::from_str::<serde_json::Value>(&s).ok()
-        })
-        .and_then(|j| j["pooled_metrics"]["vmaf"]["mean"].as_f64())
-        .unwrap_or(0.0);
-
-    // ───────────────────── parse PSNR / SSIM ───────────────
-    fn last_number(path: &std::path::Path, key: &str) -> f64 {
-        std::fs::File::open(path)
+      // ───────────────────── helper for parsing metrics ───────
+    fn extract_metric(&self, path: &std::path::Path, key: &str) -> Option<f64> {
+        std::fs::read_to_string(path)
             .ok()
-            .and_then(|f| {
-                std::io::BufReader::new(f).lines().flatten().last()
+            .and_then(|content| {
+                // Find the line containing the key
+                content.lines()
+                    .find(|line| line.contains(key))
+                    .and_then(|line| {
+                        // Extract the value after the key
+                        let after_key = line.split(key).nth(1)?;
+                        // Find the first number in the remaining text
+                        after_key.split_whitespace()
+                            .next()?
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                    })
             })
-            .and_then(|l| {
-                l.split(key).nth(1)?.split_whitespace().next()?.parse().ok()
-            })
-            .unwrap_or(0.0)
     }
-    let psnr_avg = last_number(&psnr_log,  "psnr_avg:");
-    let ssim_all = last_number(&ssim_log,  "All:");
 
-    // ───────────────────── emit & log ──────────────────────
-    print_greennn!(
-        "T:{:.3} [{}] | Frame {} : VMAF {:.2}  PSNR {:.2}  SSIM {:.4}",
-        timestamp_ms, ip_client, frame_number, vmaf_score, psnr_avg, ssim_all
-    );
+    pub fn process_frame_metrics(
+        &self,
+        frame_number: u64,
+        timestamp_ms: f64,
+        ref_path: &str,
+        lossy_path: &str,
+        ip_client: IpAddr,
+    ) {
+        // ─────────── setup a temp dir ───────────
+        let tmp = TempDir::new().expect("create TempDir");
+        let metrics_dir = tmp.path()
+            .join(&self.name_folder)
+            .join("Sink_for_video");
+        std::fs::create_dir_all(&metrics_dir).unwrap();
+        let vmaf_json = metrics_dir.join("vmaf.json");
 
-    let fm = FrameMetrics {
-        frame_number,
-        timestamp_ms,
-        vmaf: vmaf_score,
-        psnr: psnr_avg,
-        ssim: ssim_all,
-    };
-    self.log_metrics(&fm).unwrap();
-}   // ← tmp dir + files drop here
+        // ───────── single, combined FFmpeg call ─────────
+        // Note: we enable the PSNR feature and the (float) SSIM feature
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-threads", "0",
+                "-filter_threads", "0",
+                "-loglevel", "error",
 
-    // pub fn process_frame_metrics(
+                // distorted raw RGB24
+                "-f", "rawvideo",
+                "-pixel_format", "rgb24",
+                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-i", lossy_path,
+
+                // reference raw RGB24
+                "-f", "rawvideo",
+                "-pixel_format", "rgb24",
+                "-video_size", &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
+                "-i", ref_path,
+
+                // do all conversions + metrics in one filter_complex
+                "-filter_complex",
+                &format!(
+                    "[0:v]format=yuv420p[dist];\
+                    [1:v]format=yuv420p[ref];\
+                    [dist][ref]libvmaf=log_fmt=json:log_path={}:n_threads=0:\
+    feature='name=psnr':feature='name=float_ssim'",
+                    vmaf_json.display()
+                ),
+
+                // only a single frame
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ])
+            .status()
+            .expect("spawn ffmpeg");
+
+        if !status.success() {
+            eprintln!("ffmpeg failed on frame #{frame_number}");
+            return;
+        }
+
+        // ───────── parse the JSON ─────────
+        let raw = std::fs::read_to_string(&vmaf_json)
+            .expect("read vmaf JSON");
+        let j: serde_json::Value =
+            serde_json::from_str(&raw).expect("parse vmaf JSON");
+
+        // pooled_metrics now includes:
+        //  • vmaf.mean
+        //  • float_ssim.mean
+        // println!("METRICS: \n{j}"); 
+
+        let vmaf_score = j["pooled_metrics"]["vmaf"]["mean"]
+            .as_f64().unwrap_or(0.0);
+        
+        let ssim_score = j["pooled_metrics"]["float_ssim"]["mean"]
+            .as_f64().unwrap_or(0.0);
+
+        // ─────────── log & emit ───────────
+        print_greennn!(
+            "T:{:.3} [{}] | Frame {} : VMAF {:.2}, SSIM {:.4}",
+            timestamp_ms, ip_client, frame_number,
+            vmaf_score,  ssim_score
+        );
+
+        let fm = FrameMetrics {
+            frame_number,
+            timestamp_ms,
+            vmaf: vmaf_score,
+            psnr: 0.0,
+            ssim: ssim_score,
+        };
+        self.log_metrics(&fm).unwrap();
+    }
+
+    // pub fn process_frame_metrics(   // WORKS, but SLOW
     //     &self,
     //     frame_number: u64,
     //     timestamp_ms: f64,
@@ -472,8 +463,8 @@ pub fn process_frame_metrics(
     //     // Calculate all metrics in a single ffmpeg call
     //     let metrics_status = Command::new("ffmpeg")
     //         .args(&[
-    //             "-hwaccel",
-    //             "cuda",
+    //             // "-hwaccel",
+    //             // "cuda",
     //             "-loglevel",
     //             "error", // Add this line to reduce verbosity
     //             "-i",
@@ -793,11 +784,12 @@ impl HevcDecoder {
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
             .args(&["-f", "hevc", "-i", "-"])
-            .args(&["-vf", &format!("fps={}", framerate)])
+            // .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
             .args(&["-tune", "zerolatency"])
+            .args(&["-bf", "0"])    // disable use of B-frames
             // .args(&["-preset", "ultrafast"])
-            // .args(&["-vsync", "passthrough"])
+            .args(&["-vsync", "passthrough"])
             .args(&["-f", "rawvideo", "-"])
             .spawn()
             .unwrap();
@@ -1008,31 +1000,31 @@ impl HevcDecoder {
         }
 
         // Print injection information only for the first level
-        if depth == 0 {
-            if let Some(vps_data) = &vps {
-                println!(
-                    "{} Injecting VPS ({} bytes)",
-                    self.decoder_string,
-                    vps_data.len()
-                );
-            }
+        // if depth == 0 {
+        //     if let Some(vps_data) = &vps {
+        //         println!(
+        //             "{} Injecting VPS ({} bytes)",
+        //             self.decoder_string,
+        //             vps_data.len()
+        //         );
+        //     }
 
-            if let Some(sps_data) = &sps {
-                println!(
-                    "{} Injecting SPS ({} bytes)",
-                    self.decoder_string,
-                    sps_data.len()
-                );
-            }
+        //     if let Some(sps_data) = &sps {
+        //         println!(
+        //             "{} Injecting SPS ({} bytes)",
+        //             self.decoder_string,
+        //             sps_data.len()
+        //         );
+        //     }
 
-            if let Some(pps_data) = &pps {
-                println!(
-                    "{} Injecting PPS ({} bytes)",
-                    self.decoder_string,
-                    pps_data.len()
-                );
-            }
-        }
+        //     if let Some(pps_data) = &pps {
+        //         println!(
+        //             "{} Injecting PPS ({} bytes)",
+        //             self.decoder_string,
+        //             pps_data.len()
+        //         );
+        //     }
+        // }
 
         // Temporarily mark parameter sets as injected
         let mut was_processed = false;
@@ -1082,7 +1074,11 @@ impl HevcDecoder {
         }
 
         // After injecting parameter sets, process any frames in buffer
-        if was_processed && depth == 0 {
+        if was_processed && depth == 0 {    
+            
+            // self.decoded_frames.clear();
+            // self.id_queue.clear();
+            // self.frame_buffer.clear();
             self.process_decoded_frames();
         }
 
@@ -1170,19 +1166,6 @@ impl HevcDecoder {
         let (vps, sps, pps) = self.extract_complete_parameter_sets(&packet);
         let has_param_sets = vps.is_some() || sps.is_some() || pps.is_some();
 
-        // if has_param_sets {
-        //     has_parameter_update = true;
-
-        //     print_prettyy!(
-        //         DebugColor::Cyan,
-        //         "{} - Parameter sets found in packet: VPS: {}, SPS: {}, PPS: {}",
-        //         self.decoder_string,
-        //         vps.as_ref().map_or(0, |v| v.len()),
-        //         sps.as_ref().map_or(0, |v| v.len()),
-        //         pps.as_ref().map_or(0, |v| v.len()),
-        //     );
-        // }
-
         // Record frame metrics
         let frame_size = packet.len() as f64;
         let now = Instant::now();
@@ -1193,6 +1176,15 @@ impl HevcDecoder {
 
         // Check if this is a keyframe
         let is_keyframe = self.contains_keyframe(&packet);
+
+
+
+
+
+
+
+
+
         if is_keyframe {
             self.keyframes_seen += 1;
 
@@ -1221,6 +1213,8 @@ impl HevcDecoder {
         let frames = self.parser.get_frames();
         for frame in frames {
             self.frame_buffer.push_back(frame);
+
+            self.id_queue.push_back(id); 
         }
 
         // If we're in recovery mode, handle differently
@@ -1266,18 +1260,7 @@ impl HevcDecoder {
                 );
             }
         }
-        self.id_queue.push_back(id);
-
-        // // After parameter update, enter recovery mode if not already there
-        // if has_parameter_update && self.recovery_frames == 0 && !is_keyframe {
-        //     self.recovery_frames = 30; // Skip ~30 frames or until next keyframe
-        //     print_prettyy!(
-        //         DebugColor::Yellow,
-        //         "{} - Parameter update detected, entering recovery mode for {} frames",
-        //         self.decoder_string,
-        //         self.recovery_frames,
-        //     );
-        // }
+        // self.id_queue.push_back(id);
 
         // Check for decoder priming completion
         if !self.priming_complete && self.keyframes_seen >= 2 && self.frames_processed >= 60 {
@@ -1796,6 +1779,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
+                .args(&["-bf", "0"])    // disable use of B-frames
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
@@ -2436,6 +2420,13 @@ pub async fn process_trace(
                 trace.len(),
                 trace.iter().filter(|f| f.lost).count()
         );
+
+        let lost_ids: HashSet<u32> = trace.iter()
+            .filter(|f| f.lost)
+            .map(|f| f.id)
+            .collect();
+
+
         println!("Test4"); 
 
         let path_video = path_video.clone().ok_or_else(|| anyhow::anyhow!("PATH_VIDEO missing"))?;
@@ -2506,110 +2497,91 @@ pub async fn process_trace(
 
         let mut vmaf_jobs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        
-        while window.is_open() {
-            // BLOCK up to 50 ms for the next packet
-            match rx.recv_timeout(Duration::from_secs(20)) {
-                Ok((tag, id, pkt)) => {
-                    match tag {
-                        0 => dec_low.process_packet(pkt, id),
-                        1 => dec_ref.process_packet(pkt, id),
-                        _ => unreachable!(),
-                    }
+       use std::collections::BTreeSet;
+
+let mut low_buf  = HashMap::<u32, Vec<u8>>::new();
+let mut ref_buf  = HashMap::<u32, Vec<u8>>::new();
+let mut ready_ids = BTreeSet::<u32>::new(); // ⬅ sorted keys
+
+
+
+while window.is_open() {
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok((tag, id, pkt)) => {
+            match tag {
+                0 => {
+                    dec_low.process_packet(pkt, id);
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    // no packet arrived in 50 ms → fall through to decode/draw
-                    continue; 
+                1 => {
+                    dec_ref.process_packet(pkt, id);
+
+                    // ←––– NEW: force the low‐loss decoder to re‐inject ref’s VPS/SPS/PPS // causes green artifacts and sync is still bad sadly
+                    // let (vps, sps, pps) = dec_ref.get_parameter_sets();
+                    // print_reds!("INJECTING PARAMETER SETS {:?}", (vps.clone(), sps.clone(), pps.clone())); 
+
+                    // dec_low.inject_parameter_sets(vps, sps, pps);
+
                 }
-                Err(RecvTimeoutError::Disconnected) => {
-                    // the channel is closed forever → we know
-                    // no more packets will ever arrive
-                    break;
-                }
+                _ => unreachable!(),
             }
-        
-            // ── decode *all* available frames from the LOW decoder first ──────────
-           // -------- LOW first ---------------------------------------------------
-            loop {
-                if let Some((rgb_l, id, _)) = dec_low.next_decoded_frame() {
-                    if let Some(rgb_r) = ref_buf.remove(&id) {
-                        // paint + GUI
-                        let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                        let ts  = *ts_map.get(&id).unwrap_or(&0.0);
-                        draw_pair(&mut window, &rgb_l, &rgb_r,
-                                scenario.as_ref(), id, sim, ts)?;
-                        seen_pairs += 1;
-
-                        // back‑pressure: take a slot *before* spawning the job
-                        let permit = VMAF_SLOTS.clone()
-                                            .acquire_owned()
-                                            .await
-                                            .unwrap();
-
-                        let logger = metric.clone();             // CSV logger
-                        vmaf_jobs.push(tokio::spawn(async move {
-                            // keep the slot for the job’s lifetime
-                            let _permit = permit;
-
-                            if let Err(e) = logger
-                                .process_frame_buffers(id as u64,
-                                                    ts,
-                                                    rgb_r,      // reference
-                                                    rgb_l,      // lossy
-                                                    ip)
-                                .await
-                            {
-                                eprintln!("VMAF worker failed on frame #{id}: {e}");
-                            }
-                        }));
-                    } else {
-                        low_buf.insert(id, rgb_l);
-                    }
-                } else { break }
-            }
-
-            // -------- REF second --------------------------------------------------
-            loop {
-                if let Some((rgb_r, id, _)) = dec_ref.next_decoded_frame() {
-                    if let Some(rgb_l) = low_buf.remove(&id) {
-                        let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
-                        let ts  = *ts_map.get(&id).unwrap_or(&0.0);
-                        draw_pair(&mut window, &rgb_l, &rgb_r,
-                                scenario.as_ref(), id, sim, ts)?;
-                        seen_pairs += 1;
-
-                        let permit = VMAF_SLOTS.clone()
-                                            .acquire_owned()
-                                            .await
-                                            .unwrap();
-
-                        let logger = metric.clone();
-                        vmaf_jobs.push(tokio::spawn(async move {
-                            let _permit = permit;
-
-                            if let Err(e) = logger
-                                .process_frame_buffers(id as u64,
-                                                    ts,
-                                                    rgb_r,      // reference
-                                                    rgb_l,      // lossy
-                                                    ip)
-                                .await
-                            {
-                                eprintln!("VMAF worker failed on frame #{id}: {e}");
-                            }
-                        }));
-                    } else {
-                        ref_buf.insert(id, rgb_r);
-                    }
-                } else { break }
-            }
-
-
-            if seen_pairs >= expected {
-                break;
-            }
-            window.update();
         }
+        Err(RecvTimeoutError::Timeout) => continue,
+        Err(RecvTimeoutError::Disconnected) => break,
+    }
+
+    // Drain decoders and accumulate in buffers
+    while let Some((rgb_l, id, _)) = dec_low.next_decoded_frame() {
+        if ref_buf.contains_key(&id) {
+            ready_ids.insert(id);
+        }
+        low_buf.insert(id, rgb_l);
+    }
+
+    while let Some((rgb_r, id, _)) = dec_ref.next_decoded_frame() {
+        if lost_ids.contains(&id) {
+            continue; // no match will ever come for this frame
+        }
+        if low_buf.contains_key(&id) {
+            ready_ids.insert(id);
+        }
+        ref_buf.insert(id, rgb_r);
+    }
+
+    // Process ready frame pairs in ID (time) order
+    let mut to_remove = Vec::new();
+    for &id in ready_ids.iter() {
+        if let (Some(rgb_l), Some(rgb_r)) = (low_buf.remove(&id), ref_buf.remove(&id)) {
+            let sim = similarity_rgb_hybrid(&rgb_l, &rgb_r, 1920, 1080);
+            let ts  = *ts_map.get(&id).unwrap_or(&0.0);
+
+            draw_pair(&mut window, &rgb_l, &rgb_r, scenario.as_ref(), id, sim, ts)?;
+            seen_pairs += 1;
+
+            let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
+            let logger = metric.clone();
+            vmaf_jobs.push(tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(e) = logger
+                    .process_frame_buffers(id as u64, ts, rgb_r, rgb_l, ip)
+                    .await
+                {
+                    eprintln!("VMAF worker failed on frame #{id}: {e}");
+                }
+            }));
+
+            to_remove.push(id);
+        }
+    }
+    for id in to_remove {
+        ready_ids.remove(&id);
+    }
+
+    if seen_pairs >= expected {
+        break;
+    }
+
+    window.update();
+    }
         
     join_all(vmaf_jobs).await;
     metric.finalize()?; 

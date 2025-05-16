@@ -1225,11 +1225,11 @@ impl HevcDecoder {
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
             .args(&["-f", "hevc", "-i", "-"])
-            .args(&["-vf", &format!("fps={}", framerate)])
+            // .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
             .args(&["-tune", "zerolatency"])
             // .args(&["-preset", "ultrafast"])
-            // .args(&["-vsync", "passthrough"])
+            .args(&["-vsync", "passthrough"])
             .args(&["-f", "rawvideo", "-"])
             .spawn()
             .unwrap();
