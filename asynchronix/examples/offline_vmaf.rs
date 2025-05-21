@@ -2165,7 +2165,7 @@ fn main() -> Result<()> {
             let lost:  bool  = lost_s.trim().parse::<u32>()? != 0;
             let tp:    f64   = tp_s.trim().parse()?;
             let ts:     f64 = _ts.trim().parse()?; 
-
+            
             raw_ids.push(id);
             raw_ts.push(ts); 
             throughput_data.push(tp);
