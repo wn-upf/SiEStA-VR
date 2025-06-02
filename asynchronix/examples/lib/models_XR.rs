@@ -10,7 +10,7 @@ use rand::SeedableRng;
 
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
-
+use rand::prelude::IteratorRandom;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::HevcParser;
 use anyhow::Result;
@@ -2404,6 +2404,9 @@ pub struct XRServer {
     pub STATISTICS_MANAGER: StatisticsManager,
     pub name_folder: String,
     pub network_effects: Vec<NetworkPattern>, 
+    
+
+    pub video_sample_filename: String, 
 
 }
 #[allow(unused)]
@@ -2416,8 +2419,30 @@ impl XRServer {
         initial_bitrate: f32,
         name_folder: &str,
         effects: &[NetworkPattern], 
+        file_name_video: &str, 
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
+
+
+        let mut final_file; 
+
+        if file_name_video.contains("randomVid"){
+
+            let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo"];
+            let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
+            final_file = match choice_random {
+                Some(file) => file,
+                None => {
+                    "cut_video"
+                    // println!("No files to choose from");
+                }
+            };
+
+        }
+        else{
+            final_file = file_name_video.clone(); 
+        }
+
         Self {
             ip_self,
             ip_client,
@@ -2454,6 +2479,8 @@ impl XRServer {
             ),
 
             network_effects: effects.to_vec() ,  
+            video_sample_filename: final_file.to_string(), 
+
         }
     }
 
@@ -2731,6 +2758,18 @@ impl XRServer {
                 //
                 // let current_bitrate_mbps: f32 = self.bitrate_manager.one_pass_abr(); // for ABR bitrates
 
+                let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo"];
+                let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
+                let mut final_file = match choice_random {
+                    Some(file) => file,
+                    None => {
+                        "snow"
+                        // println!("No files to choose from");
+                    }
+                };
+                final_file = "garp4k";
+
+
                 let mut buffer_emu = send_socket // generate the actual video frame data
                     .get_buffer_emu(
                         &header,
@@ -2741,6 +2780,7 @@ impl XRServer {
                         &self.name_folder,
                         max_bitrate_ladder_mbps,
                         &self.network_effects, 
+                        &self.video_sample_filename, 
                     )
                     .await
                     .unwrap();

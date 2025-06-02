@@ -29,6 +29,30 @@ macro_rules! print_prettyy {
 }
 
 
+
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
+// pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
+
+// Similarity thresholds for sync state transitions
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.15; // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.35; // 60% similar to maintain sync
+/// Threshold for considering a frame match "good" (lower value = more similar)
+/// Value of 0.2 means frames are approximately 80% similar
+
+/// Number of consecutive good matches required to establish synchronization
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
+
+/// Number of consecutive poor matches before considering sync lost
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 30;
+
+pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30; 
+const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to wait for buffer
+
+const RECOVERY_GRACE_PERIOD: usize = 5;      // Frames to wait before trying to find new similarity matches
+const RECOVERY_MATCH_THRESHOLD: f64 = 0.35;   // More lenient similarity threshold during recovery
+const RECOVERY_MAX_ATTEMPTS: usize = 1;       // How many consecutive frames to check before accepting new offset
+
+
 use std::collections::{BTreeSet, BTreeMap};
 
 use ffmpeg_next::time;
@@ -598,7 +622,7 @@ pub struct NalUnit {
     pub data: Vec<u8>,
     pub is_keyframe: bool,
 }
-pub struct SyncState {
+pub struct SynStateOld {
     id_offset:       i32,                      // LOW id + offset  → REF id
     recent_low:      VecDeque<(u32, Vec<u8>)>, // (id, rgb)
     recent_ref:      VecDeque<(u32, Vec<u8>)>,
@@ -606,7 +630,7 @@ pub struct SyncState {
     desync_since:    Option<Instant>,          // first time stddev > 20
 }
 
-impl SyncState {
+impl SynStateOld {
     pub fn new() -> Self {
         Self {
             id_offset: 0,
@@ -2553,6 +2577,952 @@ struct FrameBuf { // structure for having synthetic frames replacing losses. Ide
     synthetic: bool,   // true ⇢ this is a repeated / “fake” frame
 }
 
+// 1) Update FramePair to remember both input IDs
+pub struct FramePair {
+    pub decoded:       Option<Vec<u32>>, // low-bitrate pixels
+    pub reference:     Option<Vec<u32>>, // high-bitrate pixels
+    pub decoded_raw:   Option<Vec<u8>>,  // low-bitrate raw RGB24
+    pub reference_raw: Option<Vec<u8>>,  // high-bitrate raw RGB24
+    pub frame_id:      usize,            // internal pair counter
+    pub regular_id:    usize,            // original “low” frame id
+    pub max_id:        usize,            // original “high” frame id
+}
+
+
+
+pub struct SynchronizedDecoder {
+    regular_decoder: HevcDecoder,
+    max_decoder: HevcDecoder,
+    output_queue: VecDeque<FramePair_old>,
+    throttle_semaphore: Arc<Semaphore>,
+    next_frame_id: Arc<AtomicUsize>,
+    
+    // Sync state
+    state: SyncState,
+    offset: Option<i64>,
+    
+    // Counters for state transitions
+    match_counter: usize,
+    mismatch_counter: usize,
+    
+    // Buffering
+    buffering_active: bool,
+    buffering_start_time: Option<Instant>,
+    
+    client_ip: IpAddr,
+
+    recovery_frame_counter: usize,             // Counts frames processed in recovery mode
+    recovery_last_offset: Option<i64>,         // Stores the offset when entering recovery mode
+    recovery_consecutive_matches: usize,       // Counts consecutive good matches with a new offset
+    recovery_candidate_offset: Option<i64>,    // Potential new offset during recovery
+
+    recovery_base_offset: i64, 
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SyncState {
+    Seeking,    // Looking for initial synchronization
+    Locked,     // Stable synchronization with known offset
+    Recovering, // Lost sync, trying to find it again
+}
+
+// Configuration constants
+const MAX_OUTPUT_QUEUE_LEN: usize = 60;
+const MATCHES_NEEDED_TO_LOCK: usize = 1;
+const MISMATCHES_TO_RECOVERY: usize = 5;
+const MAX_PEEK_COUNT: usize = 50;
+const BUFFERING_THRESHOLD: usize = 50;
+
+
+#[derive(Debug)]
+pub struct FramePair_old {
+    decoded: Option<Vec<u32>>,
+    reference: Option<Vec<u32>>,
+    decoded_raw: Option<Vec<u8>>,
+    reference_raw: Option<Vec<u8>>,
+    frame_id: usize,
+}
+
+
+fn compute_enhanced_frame_similarity(
+    frame1: &[u8],
+    frame2: &[u8],
+    width: usize,
+    height: usize,
+) -> f64 {
+    // Validate that both frames have the expected size (width * height * 3)
+    if frame1.len() != frame2.len() || frame1.len() != width * height * 3 {
+        return 1.0;
+    }
+
+    // Construct an RGB image from the raw byte slice.
+    let img1 = ImageBuffer::<Rgb<u8>, _>::from_raw(width as u32, height as u32, frame1.to_vec())
+        .expect("Failed to create image 1");
+    let img2 = ImageBuffer::<Rgb<u8>, _>::from_raw(width as u32, height as u32, frame2.to_vec())
+        .expect("Failed to create image 2");
+
+    // Use the image-compare crate's hybrid comparison method.
+    // This method internally converts to YUV, applies MSSIM on Y and RMS on U/V,
+    // then combines the differences into a single similarity score.
+    let result = rgb_hybrid_compare(&img1, &img2).expect("Images must have the same dimensions");
+
+    // println!("SCORE = {}", 1.0 - result.score);
+    1.0 - result.score
+}
+
+fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
+    if rgb_data.len() != width * height * 3 {
+        println!(
+            "ERROR: Expected rgb_data size {} but got {}",
+            width * height * 3,
+            rgb_data.len()
+        );
+        return None;
+    }
+
+    let mut pixels = Vec::with_capacity(width * height);
+    for chunk in rgb_data.chunks_exact(3) {
+        let pixel = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
+        pixels.push(pixel);
+    }
+
+    Some(pixels)
+}
+
+impl SynchronizedDecoder {
+    pub fn new(client_ip: IpAddr, throttle_semaphore: Arc<Semaphore>) -> Self {
+        Self {
+            regular_decoder: HevcDecoder::new(
+                FRAMERATE_WINDOWS as u32,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("[CLIENT_DECODER_REGULAR {}]", client_ip),
+            ),
+            max_decoder: HevcDecoder::new(
+                FRAMERATE_WINDOWS as u32,
+                WIDTH_ENCODER as u32,
+                HEIGHT_ENCODER as u32,
+                &format!("[CLIENT_DECODER_MAX {}]", client_ip),
+            ),
+            output_queue: VecDeque::with_capacity(MAX_OUTPUT_QUEUE_LEN),
+            throttle_semaphore,
+            next_frame_id: Arc::new(AtomicUsize::new(0)),
+            state: SyncState::Seeking,
+            offset: None,
+            match_counter: 0,
+            mismatch_counter: 0,
+            buffering_active: true,
+            buffering_start_time: Some(Instant::now()),
+            client_ip,
+
+            recovery_candidate_offset: None,
+            recovery_frame_counter: 0,
+            recovery_last_offset: None, 
+            recovery_consecutive_matches: 0 , 
+
+            recovery_base_offset: 0, 
+        }
+    }
+    pub async fn process_raw_packet(
+        &mut self,
+        tag: usize,
+        packet: Vec<u8>,
+        id: u32,
+    ) {
+        if tag == 0 {
+            self.regular_decoder.process_packet(packet, id).await;
+        } else {
+            self.max_decoder.process_packet(packet, id).await;
+        }
+        self.synchronize_frame_buffers();
+    }
+    
+    pub async fn process_packets(&mut self, regular_frame: Option<Vec<u8>>, max_frame: Option<Vec<u8>>, id_reg: u32, id_max: u32) {
+        // Process incoming packets
+        if let Some(reg_data) = regular_frame.clone() {
+            self.regular_decoder.process_packet(reg_data, id_reg).await;
+        }
+        if let Some(max_data) = max_frame.clone() {
+            self.max_decoder.process_packet(max_data, id_max).await;
+        }
+        if !regular_frame.is_none() && !max_frame.is_none(){
+            self.synchronize_frame_buffers();
+
+        }
+        // Try to synchronize frames
+    }
+
+    pub fn notify_regular_loss(&mut self, lost_count: usize) {
+        if let Some(off) = self.offset {
+            self.offset = Some(off - lost_count as i64);
+            // Also clear any pending mismatch escalation
+            self.mismatch_counter = 0;
+            // self.recovery_candidate_offset = None;
+            // self.recovery_consecutive_matches = 0;
+        }
+    }
+
+
+
+    
+    fn check_buffering_status(&mut self) -> bool {
+        if !self.buffering_active {
+            return false;
+        }
+        
+        let buffer_size = self.output_queue.len();
+        let elapsed = self.buffering_start_time
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO);
+            
+        if buffer_size >= BUFFERING_THRESHOLD || elapsed >= MAX_BUFFERING_TIME {
+            println!("✅ Buffer ready! Size: {}/{}, Time elapsed: {:.2}s", 
+                buffer_size, BUFFERING_THRESHOLD, elapsed.as_secs_f32());
+            self.buffering_active = false;
+            return false;
+        }
+        
+        return true;
+    }
+    
+    fn can_synchronize(&self) -> bool {
+        // Need sufficient frames in both decoders and space in output queue
+        return self.regular_decoder.available_frames() >= 20 &&
+               self.max_decoder.available_frames() >= 1 &&
+               self.output_queue.len() < MAX_OUTPUT_QUEUE_LEN;
+    }
+    
+    fn synchronize_frame_buffers(&mut self) {
+        // Process any decoded frames
+        self.regular_decoder.process_decoded_frames();
+        self.max_decoder.process_decoded_frames();
+        
+        // Main synchronization loop
+        while self.can_synchronize() {
+            // Get the next max frame
+            if let Some((max_raw, max_pixels, max_id)) = self.consume_max_frame() {
+                // Peek at regular frames to find matches
+                let regular_candidates = if self.state == SyncState::Locked
+                {
+                    self.peek_regular_frames(2)
+                } else{
+                    self.peek_regular_frames(MAX_PEEK_COUNT)
+                };
+
+                print_prettyy!( DebugColor::Yellow, "Peeked {} regular frames, {} available ", regular_candidates.len(), self.regular_decoder.decoded_frames.len()); 
+                if regular_candidates.is_empty() {
+                    continue; // No regular frames available
+                }
+                
+                // Find best match based on current state
+                let match_result = self.find_best_match(&max_raw, max_id, &regular_candidates);
+                
+                // Handle the match result
+                self.process_match(match_result, max_id, max_raw, max_pixels);
+            } else {
+                break; // No more max frames
+            }
+        }
+    }
+    
+    fn find_best_match(
+        &self,
+        max_raw: &[u8],
+        max_id: usize,
+        candidates: &[(Vec<u8>, Vec<u32>, usize)]
+    ) -> Option<(usize, f64, usize)> {
+        match self.state {
+            SyncState::Seeking | SyncState::Recovering => {
+                // Find the best similarity match across all candidates
+                let mut best_idx = 0;
+                let mut best_sim = f64::MAX;
+                let mut best_reg_id = 0;
+                
+                for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
+                    let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                    if sim < best_sim {
+                        best_sim = sim;
+                        best_idx = idx;
+                        best_reg_id = *reg_id;
+                    }
+                }
+                // println!("[{:?}] best_sim {:.3}", self.state, best_sim);
+                
+                if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                    print_greennn!("[{:?}] {} has best_sim  ({:.3}), better than threshold {}", self.state, best_idx,best_sim, ACCEPTABLE_SIMILARITY_THRESHOLD);
+
+                    return Some((best_idx, best_sim, best_reg_id));
+                }
+                else{
+                    print_purples!("No good similarity", ); 
+                }
+            },
+            SyncState::Locked => {
+                // In locked state, use the expected offset
+                if let Some(offset) = self.offset {
+                    println!("LOCKED: Offset -> {}", offset); 
+
+                    let expected_reg_id = (max_id as i64 + offset) as usize;
+                    
+                    // First try to find exact match
+                    for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
+                        if *reg_id == expected_reg_id {
+                            let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                            if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                                return Some((idx, sim, *reg_id));
+                            }
+                        }
+                    }
+                    
+                    // If exact match not found, find best similarity
+                    let mut best_idx = 0;
+                    let mut best_sim = f64::MAX;
+                    let mut best_reg_id = 0;
+                    
+                    for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
+                        let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        if sim < best_sim {
+                            best_sim = sim;
+                            best_idx = idx;
+                            best_reg_id = *reg_id;
+                        }
+                    }
+                    
+                    if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
+                        return Some((best_idx, best_sim, best_reg_id));
+                    }
+                }
+            }
+        }
+        
+        None // No good match found
+    }
+    
+    fn process_match(
+        &mut self, 
+        match_result: Option<(usize, f64, usize)>,
+        max_id: usize,
+        max_raw: Vec<u8>,
+        max_pixels: Vec<u32>
+    ) {
+        let mut matched_regular = None;
+        
+        if self.state == SyncState::Recovering {
+            self.recovery_frame_counter += 1;
+            
+            // During initial recovery period, just use the previous offset and don't check similarity
+            if self.recovery_frame_counter < RECOVERY_GRACE_PERIOD {
+                if let Some(old_offset) = self.recovery_last_offset {
+                    // Calculate where the regular frame should be based on the old offset
+                    let expected_reg_id = (max_id as i64 + old_offset) as usize;
+                    
+                    // Find and consume the regular frame closest to the expected ID
+                    let mut closest_idx = 0;
+                    let mut closest_distance = usize::MAX;
+                    
+                    let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                    for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
+                        let distance = reg_id.abs_diff(expected_reg_id);
+                        if distance < closest_distance {
+                            closest_distance = distance;
+                            closest_idx = idx;
+                        }
+                    }
+                    
+                    // Consume frames up to and including the closest match
+                    if !candidates.is_empty() {
+                        let consumed_frames = self.consume_regular_frames(closest_idx + 1);
+                        matched_regular = consumed_frames.last().cloned();
+                        
+                        println!("🔄 Recovery: Using old offset {}. Expected: {}, Actual: {:?}, Distance: {}",
+                                 old_offset, expected_reg_id, 
+                                 matched_regular.as_ref().map(|(_, _, id)| id), 
+                                 closest_distance);
+                    } else {
+                        // No regular frames available, just output the max frame
+                        println!("🔄 Recovery: No regular frames available for Max #{}", max_id);
+                    }
+                }
+            } else {
+                // After grace period, start looking for good similarity matches again
+                if let Some((best_idx, best_sim, best_reg_id)) = match_result {
+                    let new_offset = best_reg_id as i64 - max_id as i64;
+                    
+                    // Check if this is a genuinely good match
+                    if best_sim <= RECOVERY_MATCH_THRESHOLD {
+                        if self.recovery_candidate_offset == Some(new_offset) {
+                            // This offset matches our previous candidate
+                            self.recovery_consecutive_matches += 1;
+                            
+                            // If we've seen enough consecutive matches with this offset
+                            if self.recovery_consecutive_matches >= RECOVERY_MAX_ATTEMPTS {
+                                // We have confidence in this new offset
+                                if self.recovery_last_offset == Some(new_offset) {
+                                    // It's the same as our original offset - return to locked state
+                                    println!("✅ Recovery complete: Returning to locked state with original offset {}", new_offset);
+                                    self.state = SyncState::Locked;
+                                    self.offset = Some(new_offset);
+                                } else {
+                                    // It's a new offset - we need to update
+                                    println!("✅ Recovery complete: Re-synchronized with new offset {} (was {})",
+                                             new_offset, self.recovery_last_offset.unwrap_or(0));
+                                    self.state = SyncState::Locked;
+                                    self.offset = Some(new_offset);
+                                }
+                                self.recovery_consecutive_matches = 0;
+                                self.recovery_candidate_offset = None;
+                            }
+                        } else {
+                            // New candidate offset
+                            println!("🔄 Recovery: Found potential new offset {} (sim: {:.4})", new_offset, best_sim);
+                            // self.recovery_candidate_offset = Some(new_offset);
+                            // self.recovery_last_offset = Some(new_offset); 
+                            // self.recovery_consecutive_matches = 1;
+                            self.state = SyncState::Locked; 
+                            self.offset = Some(new_offset); 
+                        }
+                        
+                        // Consume the matched regular frame
+                        let consumed_frames = self.consume_regular_frames(best_idx + 1);
+                        matched_regular = consumed_frames.last().cloned();
+                    } else {
+                        // Not a good match - keep using the old offset
+                        if let Some(old_offset) = self.recovery_last_offset {
+                            // Use time-based matching like in the grace period
+                            let expected_reg_id = (max_id as i64 + old_offset) as usize;
+                            
+                            // Find closest regular frame (similar to grace period logic)
+                            let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                            if !candidates.is_empty() {
+                                let mut closest_idx = 0;
+                                let mut closest_distance = usize::MAX;
+                                
+                                for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
+                                    let distance = reg_id.abs_diff(expected_reg_id);
+                                    if distance < closest_distance {
+                                        closest_distance = distance;
+                                        closest_idx = idx;
+                                    }
+                                }
+                                
+                                // Consume frames up to and including the closest match
+                                let consumed_frames = self.consume_regular_frames(closest_idx + 1);
+                                matched_regular = consumed_frames.last().cloned();
+                                
+                                println!("🔄 Recovery: Using recovery offset {}. Expected: {}, Actual: {:?} (poor sim: {:.4})",
+                                         old_offset, expected_reg_id, 
+                                         matched_regular.as_ref().map(|(_, _, id)| id), 
+                                         best_sim);
+                            }
+                        } else {
+                            // Fallback - consume just the oldest frame
+                            let consumed_frames = self.consume_regular_frames(1);
+                            matched_regular = consumed_frames.last().cloned();
+                        }
+                    }
+                } else {
+                    // No match found - use old offset if available
+                    if let Some(old_offset) = self.recovery_last_offset {
+                        // Use time-based matching as fallback
+                        let expected_reg_id = (max_id as i64 + old_offset) as usize;
+                        println!("🔄 Recovery: No match found. Using old offset {} for Max #{} (expecting Reg #{})",
+                                 old_offset, max_id, expected_reg_id);
+                        
+                        // Try to find a frame close to the expected ID
+                        let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
+                        if !candidates.is_empty() {
+                            let mut closest_idx = 0;
+                            let mut closest_distance = usize::MAX;
+                            
+                            for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
+                                let distance = reg_id.abs_diff(expected_reg_id);
+                                if distance < closest_distance {
+                                    closest_distance = distance;
+                                    closest_idx = idx;
+                                }
+                            }
+                            
+                            // Consume frames up to and including the closest match
+                            let consumed_frames = self.consume_regular_frames(closest_idx + 1);
+                            matched_regular = consumed_frames.last().cloned();
+                        }
+                    }
+                }
+            }
+        } else {
+            // Process non-recovery states as before
+            if let Some((best_idx, best_sim, best_reg_id)) = match_result {
+                // We found a good match
+                if best_sim <= GOOD_SIMILARITY_THRESHOLD {
+                    // Very good match - update state
+                    self.mismatch_counter = 0;
+                    
+                    match self.state {
+                        SyncState::Seeking | SyncState::Recovering => {
+                            self.match_counter += 1;
+                            
+                            // Calculate offset between streams
+                            let new_offset = best_reg_id as i64 - max_id as i64;
+                            
+                            if self.match_counter >= MATCHES_NEEDED_TO_LOCK && !self.buffering_active {
+                                // We've found enough consecutive good matches to lock
+                                println!("🔒 Synchronization Locked! Offset: {}", new_offset);
+                                self.state = SyncState::Locked;
+                                self.offset = Some(new_offset);
+                                self.match_counter = 0;
+                            } else {
+                                // Not enough matches yet, but update the potential offset
+                                self.offset = Some(new_offset);
+                            }
+                        },
+                        SyncState::Locked => {
+                            // Already locked, just confirm current offset
+                        }
+                        // SyncState::Recovering => {} // Handled in the above logic
+                    }
+                    
+                    // Consume regular frames up to and including the matched one
+                    let consumed_frames = self.consume_regular_frames(best_idx + 1);
+                    matched_regular = consumed_frames.last().cloned();
+                } else {
+                    // Match isn't good enough
+                    self.handle_mismatch(max_id);
+
+                    
+                    // Consume just one regular frame to advance
+                    let consumed_frames = self.consume_regular_frames(1);
+                    matched_regular = consumed_frames.last().cloned();
+                }
+            } else {
+                // No match found
+                self.handle_mismatch(max_id); 
+                // Don't consume any regular frames
+            }
+        }
+        
+        // Output the pair
+        self.output_pair(matched_regular, Some((max_raw, max_pixels, max_id)));
+    }
+    
+    fn handle_mismatch(&mut self, max_id: usize) {
+        self.match_counter = 0;
+        
+        if self.state == SyncState::Locked {
+            self.mismatch_counter += 1;
+            if self.mismatch_counter >=2{
+                print_purples!("Locked-> Mismatch {} / {}" , self.mismatch_counter, MISMATCHES_TO_RECOVERY); 
+
+            }
+            
+            if self.mismatch_counter >= MISMATCHES_TO_RECOVERY {
+                println!("🔄 Sync lost ({}). Entering recovery mode with preserved offset: {:?}", 
+                         self.mismatch_counter, self.offset);
+                
+                // Store the current offset when entering recovery mode
+                self.recovery_last_offset = self.offset;
+                self.state = SyncState::Recovering;
+                self.mismatch_counter = 0;
+                self.recovery_frame_counter = 0;
+                self.recovery_consecutive_matches = 0;
+                self.recovery_candidate_offset = None;
+
+                self.recovery_base_offset = self.offset.unwrap(); 
+
+            }
+        }
+    }
+    
+    fn consume_max_frame(&mut self) -> Option<(Vec<u8>, Vec<u32>, usize)> {
+        let current_frame_id = self.max_decoder.internal_frame_counter;
+        
+        self.max_decoder.decoded_frames.pop_front().and_then(|frame_raw| {
+            self.max_decoder.internal_frame_counter += 1;
+            
+            convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
+                .map(|pixels| (frame_raw, pixels, current_frame_id))
+        })
+    }
+    
+    fn peek_regular_frames(&self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(max_count);
+        let base_id = self.regular_decoder.frames_processed;
+        
+        for (idx, frame_raw) in self.regular_decoder.decoded_frames.iter().take(max_count).enumerate() {
+            if let Some(pixels) = convert_rgb_to_u32(frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                frames.push((frame_raw.clone(), pixels, base_id + idx));
+            }
+        }
+        
+        frames
+    }
+    
+    fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
+        let mut frames = Vec::with_capacity(count);
+        
+        for _ in 0..count {
+            let current_frame_id = self.regular_decoder.frames_processed;
+            
+            if let Some(frame_raw) = self.regular_decoder.decoded_frames.pop_front() {
+                self.regular_decoder.frames_processed += 1;
+                
+                if let Some(pixels) = convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+                    frames.push((frame_raw, pixels, current_frame_id));
+                }
+            } else {
+                break;
+            }
+        }
+        
+        frames
+    }
+    
+    fn output_pair(
+        &mut self,
+        regular: Option<(Vec<u8>, Vec<u32>, usize)>,
+        reference: Option<(Vec<u8>, Vec<u32>, usize)>
+    ) {
+        let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
+        
+        let (decoded, decoded_raw, _) = match regular {
+            Some((raw, pixels, id)) => (Some(pixels), Some(raw), Some(id)),
+            None => (None, None, None),
+        };
+        
+        let (reference_pixels, reference_raw, _) = match reference {
+            Some((raw, pixels, id)) => (Some(pixels), Some(raw), Some(id)),
+            None => (None, None, None),
+        };
+        
+        let sync_pair = FramePair_old {
+            decoded,
+            reference: reference_pixels,
+            decoded_raw,
+            reference_raw,
+            frame_id,
+        };
+        
+        // println!("Debug sync_pair: {:?}", sync_pair); 
+
+        self.output_queue.push_back(sync_pair);
+    }
+    
+    pub fn next_frame_pair(&mut self) -> Option<FramePair_old> {
+        // Check if we're still buffering
+        if self.check_buffering_status() {
+            return None;
+        }
+        
+        // Make sure we have enough buffer before returning frames
+        if self.output_queue.len() <= BUFFERING_THRESHOLD / 3 {
+            self.synchronize_frame_buffers();
+        }
+        
+        // Only return a frame if we have sufficient buffer
+        if self.output_queue.len() > BUFFERING_THRESHOLD / 3 {
+            if let Some(pair) = self.output_queue.pop_front() {
+                self.throttle_semaphore.add_permits(1);
+                Some(pair)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    // Public API methods
+    pub fn get_sync_state(&self) -> SyncState {
+        self.state.clone()
+    }
+    
+    pub fn get_stable_offset(&self) -> Option<i64> {
+        self.offset
+    }
+    
+    pub fn change_stable_offset(&mut self, new: i64) {
+        self.offset = Some(new);
+    }
+}
+
+pub async fn process_trace_single_encoder_new(
+    trace_csv: PathBuf,
+    ip: IpAddr,
+) -> Result<()> {
+    // extract scenario name & trace index
+    let file_name = trace_csv.file_name().unwrap().to_string_lossy();
+    let caps = Regex::new(r"trace_offline_video(\d+)\.csv$")?
+        .captures(&file_name)
+        .expect("filename didn’t match");
+    let trace_idx: usize = caps[1].parse()?;
+
+    let scenario = trace_csv.parent()
+        .and_then(|p| p.file_name())
+        .unwrap()
+        .to_string_lossy();
+    print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario);
+
+    // extract bitrate
+    let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)_")?;
+    let bitrate: f32 = bitrate_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("br"))
+        .ok_or_else(|| anyhow::anyhow!("Bitrate not found in scenario name"))?
+        .as_str()
+        .parse()?;
+    println!("Extracted bitrate: {}", bitrate);
+
+    // setup metrics logger
+    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
+
+    // parse CSV trace
+    let trace_path = trace_csv.to_str().unwrap();
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(trace_path)?;
+
+        let start = Instant::now(); 
+    // 1. ─ parse CSV ───────────────────────────────────────
+    let mut raw_ids     = Vec::new();
+    let mut raw_ts: Vec<f64> = Vec::new(); 
+    let mut path_video  = None::<String>;
+    let mut offset_video= None::<f64>;
+    let mut idr_frequency = None::<u32>;
+    let mut throughput_data = Vec::<f64>::new();
+
+
+
+
+
+    // let trace_path = "/…/trace_offline_video0.csv";
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(trace_path)?;
+
+    for rec in rdr.records() {
+        let rec = rec?;
+
+        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2)
+        if path_video.is_none() {
+            if let (Some(o), Some(p), Some(i)) =
+                (rec.get(0), rec.get(1), rec.get(2))
+            {
+                if !o.trim().is_empty()
+                 && !p.trim().is_empty()
+                 && !i.trim().is_empty()
+                {
+                    offset_video    = Some(o.trim().parse()?);
+                    path_video      = Some(p.trim().to_string());
+                    idr_frequency   = Some(i.trim().parse()?);
+                    continue;
+                }
+            }
+        }
+
+        // subsequent rows → timestamp(col 3), ID_frame(col 4), Lost(col 5), Throughput(col 6)
+        if let (Some(_ts), Some(id_s), Some(lost_s), Some(tp_s)) =
+            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
+        {
+            // skip any empty/data‐garbage rows
+            if id_s.trim().is_empty() { continue; }
+
+            let id:    u32   = id_s.trim().parse()?;
+            let lost:  bool  = lost_s.trim().parse::<u32>()? != 0;
+            let tp:    f64   = tp_s.trim().parse()?;
+            let ts:     f64 = _ts.trim().parse()?; 
+
+            raw_ids.push(id);
+            raw_ts.push(ts); 
+            throughput_data.push(tp);
+
+            // if you want to track lost in the CSV pass-through you could also
+            // store it alongside id here, or later when you build FrameInfo[]
+        }
+    }
+
+
+        // sanity‐check & unwrap
+    let video = path_video
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
+    let offset = offset_video
+        .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
+    let idr    = idr_frequency
+        .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
+    let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
+
+
+    println!(
+        "Video={}\n, offset={} s\n, IDR_FREQ={}fps\n, read {} frames\n, {} throughput samples\n",
+        video,
+        offset,
+        idr,
+        raw_ids.len(),
+        throughput_data.len()
+    );
+
+
+    for rec in rdr.records() {
+        let rec = rec?;
+        if path_video.is_none() {
+            if let (Some(o), Some(p), Some(i)) = (rec.get(0), rec.get(1), rec.get(2)) {
+                if !o.trim().is_empty() && !p.trim().is_empty() && !i.trim().is_empty() {
+                    offset_video = Some(o.trim().parse()?);
+                    path_video = Some(p.trim().to_string());
+                    idr_frequency = Some(i.trim().parse()?);
+                    continue;
+                }
+            }
+        }
+        if let (Some(_ts), Some(id_s), Some(_lost), Some(_tp)) =
+            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
+        {
+            if id_s.trim().is_empty() { continue; }
+            raw_ids.push(id_s.trim().parse::<u32>()?);
+            raw_ts.push(_ts.trim().parse::<f64>()?);
+        }
+    }
+
+    let video = path_video.clone().ok_or_else(|| anyhow::anyhow!("missing video path"))?;
+    let offset = offset_video.ok_or_else(|| anyhow::anyhow!("missing offset"))?;
+    let idr = idr_frequency.ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
+
+    // rebuild full trace & lost set
+    raw_ids.sort_unstable(); raw_ids.dedup();
+    let min_id = *raw_ids.first().unwrap();
+    let max_id = *raw_ids.last().unwrap();
+    let id_set: HashSet<_> = raw_ids.iter().cloned().collect();
+    let mut trace = Vec::with_capacity((max_id - min_id + 1) as usize);
+    for id in min_id..=max_id {
+        trace.push(FrameInfo { id, lost: !id_set.contains(&id) });
+    }
+    let lost_ids: BTreeSet<u32> = trace.iter().filter(|f| f.lost).map(|f| f.id).collect();
+    let trace = Arc::new(trace);
+
+    // spawn encoder task
+    let (tx_low, rx_low) = unbounded::<(usize,u32,Vec<u8>)>();
+    make_encoder_task(
+        0, bitrate, Arc::clone(&trace), tx_low.clone(), video.clone(), offset, false, idr,
+    );
+    drop(tx_low);
+
+    let mut dec_low = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "LOW");
+    let mut dec_ref = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "REF");
+
+    // create window
+    const SCALE: f64 = 0.28;
+    let sw = (WIDTH_ENCODER as f64 * SCALE) as usize;
+    let sh = (HEIGHT_ENCODER as f64 * SCALE) as usize;
+    let mut window = Window::new(
+        "Frame-sync offline",
+        sw * 2 + 10,
+        sh,
+        WindowOptions::default(),
+    )?;
+
+    // sync-state machine
+    enum SyncState { InSync, OutOfSync }
+    let mut sync_state = SyncState::InSync;
+    let mut lost_run = 0;
+    let loss_threshold = 5;
+    let mut pending_resync = false;
+
+    let expected = trace.len();
+    let mut seen_pairs = 0;
+    let mut vmaf_jobs = Vec::new();
+    let mut low_buf = HashMap::new();
+    let mut ref_buf = HashMap::new();
+    let mut last_real_low: Option<FrameBuf> = None;
+    let mut ready_ids = BTreeSet::new();
+    let mut low_done = false;
+
+    while window.is_open() {
+        // receive low packets
+        match rx_low.recv_timeout(Duration::from_millis(2000)) {
+            Ok((_tag, id, pkt)) => {
+                // reference side
+                dec_ref.process_packet(pkt.clone(), id).await;
+                // update sync state on loss
+                if lost_ids.contains(&id) {
+                    lost_run += 1;
+                    sync_state = SyncState::OutOfSync;
+                    if lost_run > loss_threshold { pending_resync = true; }
+                    // synthetic filler
+                    if let Some(last) = last_real_low.take() {
+                        let fb = FrameBuf { rgb: last.rgb.clone(), synthetic: true };
+                        low_buf.insert(id, fb.clone());
+                        ready_ids.insert(id);
+                    }
+                } else {
+                    // real low decode
+                    lost_run = 0;
+                    dec_low.process_packet(pkt, id).await;
+                    while let Some((rgb, fid, _)) = dec_low.next_decoded_frame() {
+                        // check for IDR resync
+                        if fid % idr == 0 && pending_resync {
+                            sync_state = SyncState::InSync;
+                            pending_resync = false;
+                            print_prettyy!(DebugColor::Green, "Resync at IDR frame {}", fid);
+                        }
+                        let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
+                        low_buf.insert(fid, fb.clone());
+                        last_real_low = Some(fb);
+                        if ref_buf.contains_key(&fid) {
+                            ready_ids.insert(fid);
+                        }
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => { low_done = true; }
+        }
+
+        // drain ref decoder
+        while let Some((rgb_r, id, _)) = dec_ref.next_decoded_frame() {
+            ref_buf.insert(id, FrameBuf { rgb: rgb_r, synthetic: false });
+            if low_buf.contains_key(&id) {
+                ready_ids.insert(id);
+            }
+        }
+
+        // pair frames and optionally run VMAF
+        let mut to_remove = Vec::new();
+        for &id in &ready_ids {
+            if let (Some(fb_l), Some(fb_r)) = (low_buf.remove(&id), ref_buf.remove(&id)) {
+                // draw always
+                draw_pair(&mut window, &fb_l.rgb, &fb_r.rgb, &scenario, id, ts_map[&id])?;
+                seen_pairs += 1;
+                // only metric when in-sync and real frame
+                if matches!(sync_state, SyncState::InSync) && !fb_l.synthetic {
+                    let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
+                    let logger = metric.clone();
+                    let rgb_ref = fb_r.rgb.clone();
+                    let rgb_low: Vec<u8> = fb_l.rgb.clone();
+                    let clone_ts_map = ts_map.clone(); 
+                    vmaf_jobs.push(tokio::spawn(async move {
+                        let _permit = permit;
+                        if let Err(e) = logger
+                            .process_frame_buffers(id as u64, clone_ts_map[&id], rgb_ref, rgb_low, ip)
+                            .await
+                        {
+                            eprintln!("VMAF job failed on #{}: {}", id, e);
+                        }
+                    }));
+                } else {
+                    println!("⏭ Skipping VMAF for out-of-sync or synthetic id {}", id);
+                }
+                to_remove.push(id);
+            }
+        }
+        for id in to_remove { ready_ids.remove(&id); }
+
+        if seen_pairs >= expected || low_done { break; }
+        window.update();
+    }
+
+    join_all(vmaf_jobs).await;
+    metric.finalize()?;
+    Ok(())
+}
+
+
 /// Run your entire “main async block” on one trace CSV
 pub async fn process_trace_single_encoder(
     trace_csv: PathBuf,
@@ -2951,7 +3921,7 @@ fn main() -> Result<()> {
             rt.block_on(async {
                 for (_folder, traces) in group {
                     for trace_csv in traces {
-                        process_trace_single_encoder(trace_csv, ip.clone()).await?;
+                        process_trace_single_encoder_new(trace_csv, ip.clone()).await?;
                     }
                 }
                 Ok(())

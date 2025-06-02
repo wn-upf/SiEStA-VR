@@ -1880,19 +1880,11 @@ impl<H: Serialize> StreamSender<H> {
         name_folder: &str,
         max_bitrate_ladder_mbps: f32,
         network_effects: &[NetworkPattern], 
+        final_file: &str, 
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
-        let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo"];
-        let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
-        let mut final_file = match choice_random {
-            Some(file) => file,
-            None => {
-                "snow"
-                // println!("No files to choose from");
-            }
-        };
-        final_file = "garp4k";
+
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"

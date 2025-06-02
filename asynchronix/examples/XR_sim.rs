@@ -62,6 +62,7 @@ impl VRPair {
         name_folder: &str,
         test: &str,
         patterns: &[NetworkPattern], 
+        file_name_video: &str, 
 
     ) -> Self {
         let server_id = 100 + pair_index as i32;
@@ -95,6 +96,7 @@ impl VRPair {
             initial_bitrate as f32,
             name_folder,
             patterns, 
+            file_name_video, 
         );
         let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0, name_folder, test);
 
@@ -181,6 +183,8 @@ fn main() {
     let is_ul_bg_traffic: usize = args[11].parse().unwrap();
     let test_type: String = args[12].parse().unwrap(); // New test type parameter
 
+    let video_filename: String = args[13].parse().unwrap(); 
+
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
         "BW" => (true, false, false, false),
@@ -198,7 +202,7 @@ fn main() {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}",
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}",
         stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
     );
 
@@ -251,6 +255,7 @@ fn main() {
             &name_folder,
             suffix,
             emu_effects, 
+            &video_filename, 
         );
         all_sta_ids.push(100 + i as i32);
         all_sta_ids.push(200 + i as i32);
