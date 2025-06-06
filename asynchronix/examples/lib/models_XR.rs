@@ -83,12 +83,13 @@ use super::get_third_octet;
 // use async_process::Child;
 use lazy_static::lazy_static;
 
-pub const WIDTH_ENCODER: usize = 1920;
-pub const HEIGHT_ENCODER: usize = 1080;
+
+pub const WIDTH_ENCODER: usize = 3840;
+pub const HEIGHT_ENCODER: usize = 2160;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.37;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.15;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID

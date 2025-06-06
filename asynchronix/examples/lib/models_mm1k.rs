@@ -93,9 +93,9 @@ pub const STEP2_TEND: f64 = 18.0;
 pub const STEP3_TBEGIN: f64 = 31.0;
 pub const STEP3_TEND: f64 = 32.0;
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
-pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
-pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
+pub const BANDWIDTH_LIMIT_S1: f64 = 300E6;
+pub const BANDWIDTH_LIMIT_S2: f64 = 200E6;
+pub const BANDWIDTH_LIMIT_S3: f64 = 100E6;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,

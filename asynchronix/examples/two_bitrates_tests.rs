@@ -361,8 +361,8 @@ impl MetricsLogger {
                 &format!(
                     "[0:v]format=yuv420p[dist];\
                     [1:v]format=yuv420p[ref];\
-                    [dist][ref]libvmaf=log_fmt=json:log_path={}:n_threads=0:\
-    feature='name=psnr':feature='name=float_ssim'",
+                    [dist][ref]libvmaf=[dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=0:\
+                    feature='name=psnr':feature='name=float_ssim'",
                     vmaf_json.display()
                 ),
 
