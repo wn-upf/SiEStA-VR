@@ -2246,8 +2246,8 @@ fn make_encoder_task(
         // 1️⃣ Create your encoder
         let mut enc = ChunkedHevcEncoder::new(
             &video_path,
-            1920,
-            1080,
+            WIDTH_ENCODER as u32,
+            HEIGHT_ENCODER as u32,
             &format!("{bitrate_mbps}M"),
             1.0,
             format!("ENC{}M", bitrate_mbps),
@@ -2357,8 +2357,8 @@ fn draw_pair(
     id:      u32,
     t:       f64, 
 ) -> Result<()> {
-    const W: usize = 1920;
-    const H: usize = 1080;
+    const W: usize = WIDTH_ENCODER;
+    const H: usize = HEIGHT_ENCODER;
     const SCALE: f64 = 0.28;
     let sw = (W as f64 * SCALE) as usize;
     let sh = (H as f64 * SCALE) as usize;
@@ -3335,6 +3335,262 @@ pub async fn process_trace_single_encoder_new(
 }
 
 
+pub async fn process_trace_two_encoders_no_loss(
+    trace_csv: PathBuf,
+    ip: IpAddr,
+) -> Result<()> {
+    // extract scenario name & trace index
+    let file_name = trace_csv.file_name().unwrap().to_string_lossy();
+    let caps = Regex::new(r"trace_offline_video(\d+)\.csv$")?
+        .captures(&file_name)
+        .expect("filename didn’t match");
+    let trace_idx: usize = caps[1].parse()?;
+
+    let scenario = trace_csv.parent()
+        .and_then(|p| p.file_name())
+        .unwrap()
+        .to_string_lossy();
+    print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario);
+
+    // extract bitrate
+    let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)_")?;
+    let bitrate: f32 = bitrate_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("br"))
+        .ok_or_else(|| anyhow::anyhow!("Bitrate not found in scenario name"))?
+        .as_str()
+        .parse()?;
+    println!("Extracted bitrate: {}", bitrate);
+
+    // setup metrics logger
+    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
+
+    // parse CSV trace
+    let trace_path = trace_csv.to_str().unwrap();
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(trace_path)?;
+
+    // 1. ─ parse CSV ───────────────────────────────────────
+    let mut raw_ids     = Vec::new();
+    let mut raw_ts: Vec<f64> = Vec::new();
+    let mut path_video  = None::<String>;
+    let mut offset_video= None::<f64>;
+    let mut idr_frequency = None::<u32>;
+    let mut _throughput_data = Vec::<f64>::new(); // throughput_data is not used later
+
+    for rec in rdr.records() {
+        let rec = rec?;
+
+        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2)
+        if path_video.is_none() {
+            if let (Some(o), Some(p), Some(i)) =
+                (rec.get(0), rec.get(1), rec.get(2))
+            {
+                if !o.trim().is_empty()
+                 && !p.trim().is_empty()
+                 && !i.trim().is_empty()
+                {
+                    offset_video    = Some(o.trim().parse()?);
+                    path_video      = Some(p.trim().to_string());
+                    idr_frequency   = Some(i.trim().parse()?);
+                    continue;
+                }
+            }
+        }
+
+        // subsequent rows → timestamp(col 3), ID_frame(col 4), Lost(col 5), Throughput(col 6)
+        if let (Some(_ts), Some(id_s), Some(lost_s), Some(tp_s)) =
+            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
+        {
+            // skip any empty/data‐garbage rows
+            if id_s.trim().is_empty() { continue; }
+
+            let id:    u32   = id_s.trim().parse()?;
+            let lost:  bool  = lost_s.trim().parse::<u32>()? != 0;
+            let tp:    f64   = tp_s.trim().parse()?;
+            let ts:     f64 = _ts.trim().parse()?;
+
+            raw_ids.push(id);
+            raw_ts.push(ts);
+            _throughput_data.push(tp); // Still collecting, but variable name hints it's not used.
+        }
+    }
+
+    // sanity‐check & unwrap
+    let video = path_video
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
+    let offset = offset_video
+        .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
+    let idr    = idr_frequency
+        .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
+    let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
+
+
+    println!(
+        "Video={}\n, offset={} s\n, IDR_FREQ={}fps\n, read {} frames\n, {} throughput samples\n",
+        video,
+        offset,
+        idr,
+        raw_ids.len(),
+        _throughput_data.len()
+    );
+
+
+    // This second loop for reading CSV records is redundant with the first one.
+    // The previous loop already populates `raw_ids` and `raw_ts`.
+    // Keeping it here for now to match the original structure, but it could be removed.
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(trace_path)?; // Re-open CSV reader for the second loop.
+
+    for rec in rdr.records() {
+        let rec = rec?;
+        if path_video.is_none() { // This condition will always be false after the first loop.
+            if let (Some(o), Some(p), Some(i)) = (rec.get(0), rec.get(1), rec.get(2)) {
+                if !o.trim().is_empty() && !p.trim().is_empty() && !i.trim().is_empty() {
+                    offset_video = Some(o.trim().parse()?);
+                    path_video = Some(p.trim().to_string());
+                    idr_frequency = Some(i.trim().parse()?);
+                    continue;
+                }
+            }
+        }
+        if let (Some(_ts), Some(id_s), Some(_lost), Some(_tp)) =
+            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
+        {
+            if id_s.trim().is_empty() { continue; }
+           
+        }
+    }
+
+
+    // rebuild full trace & lost set
+    raw_ids.sort_unstable();
+    raw_ids.dedup();
+    let min_id = *raw_ids.first().unwrap();
+    let max_id = *raw_ids.last().unwrap();
+    let id_set: HashSet<_> = raw_ids.iter().cloned().collect();
+    let mut trace = Vec::with_capacity((max_id - min_id + 1) as usize);
+    for id in min_id..=max_id {
+        trace.push(FrameInfo { id, lost: !id_set.contains(&id) });
+    }
+    // No `lost_ids` needed as we are assuming no loss in this specific function.
+    let trace = Arc::new(trace);
+
+    // spawn two encoder tasks
+    let (tx_encoder_0, rx_encoder_0) = unbounded::<(usize,u32,Vec<u8>)>();
+    let (tx_encoder_1, rx_encoder_1) = unbounded::<(usize, u32, Vec<u8>)>();
+
+    make_encoder_task(
+        0, bitrate, Arc::clone(&trace), tx_encoder_0.clone(), video.clone(), offset, false, idr,
+    );
+    make_encoder_task(
+        1, 100.0, Arc::clone(&trace), tx_encoder_1.clone(), video.clone(), offset, false, idr,
+    );
+
+    drop(tx_encoder_0);
+    drop(tx_encoder_1);
+
+    // Initialize two distinct decoders, one for each encoder's output
+    let mut dec_encoder_0 = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_0");
+    let mut dec_encoder_1 = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_1");
+
+    // create window
+    const SCALE: f64 = 0.5;
+    let sw = (WIDTH_ENCODER as f64 * SCALE) as usize;
+    let sh = (HEIGHT_ENCODER as f64 * SCALE) as usize;
+    let mut window = Window::new(
+        "Frame-sync offline: Encoder 0 vs Encoder 1", // Updated window title
+        sw * 2 + 10,
+        sh,
+        WindowOptions::default(),
+    )?;
+
+    let expected = trace.len();
+    let mut seen_pairs = 0;
+    let mut vmaf_jobs = Vec::new();
+    let mut encoder_0_buf = HashMap::new(); // Buffer for decoded frames from encoder 0
+    let mut encoder_1_buf = HashMap::new(); // Buffer for decoded frames from encoder 1
+    let mut ready_ids = BTreeSet::new();
+    let mut encoder_0_done = false;
+    let mut encoder_1_done = false;
+
+    while window.is_open() {
+        // Receive packets from Encoder 0
+        match rx_encoder_0.recv_timeout(Duration::from_millis(10)) {
+            Ok((_tag, id, pkt)) => {
+                dec_encoder_0.process_packet(pkt, id).await;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => { encoder_0_done = true; }
+        }
+
+        // Receive packets from Encoder 1
+        match rx_encoder_1.recv_timeout(Duration::from_millis(10)) {
+            Ok((_tag, id, pkt)) => {
+                dec_encoder_1.process_packet(pkt, id).await;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => { encoder_1_done = true; }
+        }
+
+        // Drain Encoder 0 decoder
+        while let Some((rgb, fid, _)) = dec_encoder_0.next_decoded_frame() {
+            let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
+            encoder_0_buf.insert(fid, fb);
+            if encoder_1_buf.contains_key(&fid) {
+                ready_ids.insert(fid);
+            }
+        }
+
+        // Drain Encoder 1 decoder
+        while let Some((rgb, fid, _)) = dec_encoder_1.next_decoded_frame() {
+            let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
+            encoder_1_buf.insert(fid, fb);
+            if encoder_0_buf.contains_key(&fid) {
+                ready_ids.insert(fid);
+            }
+        }
+
+        // pair frames and optionally run VMAF
+        let mut to_remove = Vec::new();
+        for &id in &ready_ids {
+            if let (Some(fb_enc0), Some(fb_enc1)) = (encoder_0_buf.remove(&id), encoder_1_buf.remove(&id)) {
+                // draw always, comparing the two encoder outputs
+                draw_pair(&mut window, &fb_enc0.rgb, &fb_enc1.rgb, &scenario, id, ts_map[&id])?;
+                seen_pairs += 1;
+
+                // Run VMAF between the two encoder outputs (fb_enc0 vs fb_enc1)
+                let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
+                let logger = metric.clone();
+                let rgb_enc1 = fb_enc1.rgb.clone(); // Treat Encoder 1 as reference for VMAF
+                let rgb_enc0: Vec<u8> = fb_enc0.rgb.clone(); // Treat Encoder 0 as distorted for VMAF
+                let clone_ts_map = ts_map.clone();
+                vmaf_jobs.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Err(e) = logger
+                        .process_frame_buffers(id as u64, clone_ts_map[&id], rgb_enc1, rgb_enc0, ip)
+                        .await
+                    {
+                        eprintln!("VMAF job failed on #{}: {}", id, e);
+                    }
+                }));
+
+                to_remove.push(id);
+            }
+        }
+        for id in to_remove { ready_ids.remove(&id); }
+
+        if seen_pairs >= expected || (encoder_0_done && encoder_1_done) { break; }
+        window.update();
+    }
+
+    join_all(vmaf_jobs).await;
+    metric.finalize()?;
+    Ok(())
+}
+
+
 /// Run your entire “main async block” on one trace CSV
 pub async fn process_trace_single_encoder(
     trace_csv: PathBuf,
@@ -3733,7 +3989,7 @@ fn main() -> Result<()> {
             rt.block_on(async {
                 for (_folder, traces) in group {
                     for trace_csv in traces {
-                        process_trace_single_encoder_new(trace_csv, ip.clone()).await?;
+                        process_trace_two_encoders_no_loss(trace_csv, ip.clone()).await?;
                     }
                 }
                 Ok(())
