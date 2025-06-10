@@ -6,8 +6,9 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
 // pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
-pub const WIDTH_ENCODER: usize = 1920; 
-pub const HEIGHT_ENCODER: usize = 1080; 
+
+pub const WIDTH_ENCODER: usize = 3840;
+pub const HEIGHT_ENCODER: usize = 2160;
 
 
 const MAX_PARALLEL_VMAF: usize = 10;
@@ -361,7 +362,7 @@ impl MetricsLogger {
                 &format!(
                     "[0:v]format=yuv420p[dist];\
                     [1:v]format=yuv420p[ref];\
-                    [dist][ref]libvmaf=[dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=0:\
+                    [dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=0:\
                     feature='name=psnr':feature='name=float_ssim'",
                     vmaf_json.display()
                 ),
@@ -412,195 +413,6 @@ impl MetricsLogger {
         self.log_metrics(&fm).unwrap();
     }
 
-    // pub fn process_frame_metrics(   // WORKS, but SLOW
-    //     &self,
-    //     frame_number: u64,
-    //     timestamp_ms: f64,
-    //     ref_path: &str,
-    //     lossy_path: &str,
-    //     ip_client: IpAddr, 
-    // )  {
-    //     // Create a temporary directory for processing
-    //     let temp_dir = TempDir::new().unwrap();
-
-    //     // Convert RGB frames to Y4M format (better for VMAF processing)
-    //     let ref_y4m = temp_dir
-    //         .path()
-    //         .join("reference.y4m")
-    //         .to_string_lossy()
-    //         .to_string();
-    //     let lossy_y4m = temp_dir
-    //         .path()
-    //         .join("lossy.y4m")
-    //         .to_string_lossy()
-    //         .to_string();
-
-    //     // Convert reference frame to Y4M
-    //     let ref_status = Command::new("ffmpeg")
-    //         .args(&[
-    //             "-hwaccel",
-    //             "cuda",
-    //             "-loglevel",
-    //             "error", // Add this line to reduce verbosity
-    //             "-y",
-    //             "-f",
-    //             "rawvideo",
-    //             "-pixel_format",
-    //             "rgb24",
-    //             "-video_size",
-    //             &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-    //             "-i",
-    //             ref_path,
-    //             "-pix_fmt",
-    //             "yuv420p",
-    //             &ref_y4m,
-    //         ])
-    //         .status().unwrap();
-
-    //     // if !ref_status.success() {
-    //     //     return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
-    //     // }
-
-    //     // Convert lossy frame to Y4M
-    //     let lossy_status = Command::new("ffmpeg")
-    //         .args(&[
-    //             "-hwaccel",
-    //             "cuda",
-    //             "-loglevel",
-    //             "error", // Add this line to reduce verbosity
-    //             "-y",
-    //             "-f",
-    //             "rawvideo",
-    //             "-pixel_format",
-    //             "rgb24",
-    //             "-video_size",
-    //             &format!("{}x{}", WIDTH_ENCODER, HEIGHT_ENCODER),
-    //             "-i",
-    //             lossy_path,
-    //             "-pix_fmt",
-    //             "yuv420p",
-    //             &lossy_y4m,
-    //         ])
-    //         .status().unwrap();
-
-    //     // if !lossy_status.success() {
-    //     //     return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
-    //     // }
-
-    //     // Create the Sink_for_video directory within the temp directory
-    //     let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
-    //     std::fs::create_dir_all(&video_sink_dir).unwrap();
-
-    //     // Set up paths correctly
-    //     let vmaf_json = video_sink_dir
-    //         .join("vmaf.json")
-    //         .to_string_lossy()
-    //         .to_string();
-    //     let psnr_log = video_sink_dir
-    //         .join("psnr.log")
-    //         .to_string_lossy()
-    //         .to_string();
-    //     let ssim_log = video_sink_dir
-    //         .join("ssim.log")
-    //         .to_string_lossy()
-    //         .to_string();
-
-    //     // Calculate all metrics in a single ffmpeg call
-    //     let metrics_status = Command::new("ffmpeg")
-    //         .args(&[
-    //             // "-hwaccel",
-    //             // "cuda",
-    //             "-loglevel",
-    //             "error", // Add this line to reduce verbosity
-    //             "-i",
-    //             &ref_y4m,
-    //             "-i",
-    //             &lossy_y4m,
-    //             "-filter_complex",
-    //             &format!("[0:v][1:v]libvmaf=log_fmt=json:log_path={}", vmaf_json),
-    //             "-filter_complex",
-    //             &format!("[0:v][1:v]psnr=stats_file={}", psnr_log),
-    //             "-filter_complex",
-    //             &format!("[0:v][1:v]ssim=stats_file={}", ssim_log),
-    //             "-f",
-    //             "null",
-    //             "-",
-    //         ])
-    //         .status().unwrap();
-
-    //     // if !metrics_status.success() {
-    //     //     return Err(anyhow::anyhow!("Failed to calculate video metrics"));
-    //     // }
-
-    //     // Parse VMAF score
-    //     let mut vmaf_score = 0.0;
-    //     if let Ok(vmaf_content) = std::fs::read_to_string(&vmaf_json) {
-    //         if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&vmaf_content) {
-    //             if let Some(score) = json_value["pooled_metrics"]["vmaf"]["mean"].as_f64() {
-    //                 vmaf_score = score;
-    //             } else if let Some(frames) = json_value["frames"].as_array() {
-    //                 if let Some(first_frame) = frames.first() {
-    //                     if let Some(score) = first_frame["metrics"]["vmaf"].as_f64() {
-    //                         vmaf_score = score;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     // Parse PSNR score
-    //     let mut psnr_avg = 0.0;
-    //     if let Ok(psnr_content) = std::fs::read_to_string(&psnr_log) {
-    //         if let Some(avg_idx) = psnr_content.find("psnr_avg:") {
-    //             let remaining = &psnr_content[avg_idx + 9..];
-    //             let end_idx = remaining.find(" ").unwrap_or(10);
-    //             let avg_str = &remaining[..end_idx];
-    //             if let Ok(value) = avg_str.trim().parse::<f64>() {
-    //                 psnr_avg = value;
-    //             }
-    //         }
-    //     }
-
-    //     // Parse SSIM score
-    //     let mut ssim_score = 0.0;
-    //     if let Ok(ssim_content) = std::fs::read_to_string(&ssim_log) {
-    //         if let Some(all_idx) = ssim_content.find("All:") {
-    //             let remaining = &ssim_content[all_idx + 4..];
-    //             let end_idx = remaining.find(" ").unwrap_or(10);
-    //             let all_str = &remaining[..end_idx];
-    //             if let Ok(value) = all_str.trim().parse::<f64>() {
-    //                 ssim_score = value;
-    //             }
-    //         }
-    //     }
-
-    //     // Print debug info
-    //     print_greennn!( 
-    //         // DebugColor::Green, 
-    //         "T: {:.3} [{}]| Frame {}: VMAF = {:.2}, PSNR = {:.2}, SSIM = {:.4}",
-    //         timestamp_ms,
-    //         ip_client,
-    //         frame_number,
-    //         vmaf_score,
-    //         psnr_avg,
-    //         ssim_score
-    //     );
-
-    //     let metrics = FrameMetrics {
-    //         frame_number: frame_number,
-    //         timestamp_ms: timestamp_ms,
-    //         vmaf: vmaf_score,
-    //         psnr: psnr_avg,
-    //         ssim: ssim_score,
-    //     };
-
-    //     // Log the metrics
-    //     self.log_metrics(&metrics).unwrap();
-
-    //     // Ok(())
-    // }
-
-    
 
     fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
         // Get a single mutex guard and use it for both operations
