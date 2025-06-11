@@ -12,7 +12,7 @@ pub const HEIGHT_ENCODER: usize = 2160;
 
 
 const MAX_PARALLEL_VMAF: usize = 30;
-const WORKERS: usize = 2;
+const WORKERS: usize = 1;
 
 
 pub const RESYNC_BUFFER: usize = 20; 
@@ -56,7 +56,7 @@ const RECOVERY_MAX_ATTEMPTS: usize = 1;       // How many consecutive frames to 
 
 
 use std::collections::{BTreeSet, BTreeMap};
-
+use futures::stream::StreamExt;
 use ffmpeg_next::time;
 use ffmpeg_next::Frame;
 use tokio::sync::Semaphore;
@@ -246,10 +246,23 @@ impl MetricsLogger {
     pub fn new_for_trace(
         scenario: &str,
         trace_idx: usize,
+        two_encoders: bool, 
     ) -> Result<Self> {
         let dir = format!("Results/{}", scenario);
         std::fs::create_dir_all(&dir)?;
-        let path = format!("{}/VMAF_metrics_{}.csv", dir, trace_idx);
+
+        let strrrrr = if two_encoders{
+                "bitrate"
+            }
+            else{
+                "loss"
+            }; 
+
+
+        // let filename = format!( "Results/{}/VMAF_metrics_{}_{}.csv", name_folder, strrrrr, value); 
+
+
+        let path = format!("{}/VMAF_metrics_{}_{}.csv", dir, strrrrr,  trace_idx);
         let file = std::fs::File::create(&path.clone().to_string())?;
         Ok(Self {
             writer: Arc::new(std::sync::Mutex::new(csv::Writer::from_writer(file))),
@@ -3085,7 +3098,7 @@ pub async fn process_trace_single_encoder_new(
     println!("Extracted bitrate: {}", bitrate);
 
     // setup metrics logger
-    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
+    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false, )?;
 
     // parse CSV trace
     let trace_path = trace_csv.to_str().unwrap();
@@ -3364,7 +3377,7 @@ pub async fn process_trace_two_encoders_no_loss(
     println!("Extracted bitrate: {}", bitrate);
 
     // setup metrics logger
-    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
+    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, true)?;
 
     // parse CSV trace
     let trace_path = trace_csv.to_str().unwrap();
@@ -3424,7 +3437,12 @@ pub async fn process_trace_two_encoders_no_loss(
         .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
     let idr    = idr_frequency
         .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
-    let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
+    // let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
+    let ts_map = Arc::new(
+    raw_ids.iter().cloned()
+           .zip(raw_ts.iter().cloned())
+           .collect::<HashMap<_,_>>()
+);
 
 
     println!(
@@ -3508,7 +3526,13 @@ pub async fn process_trace_two_encoders_no_loss(
 
     let expected = trace.len();
     let mut seen_pairs = 0;
-    let mut vmaf_jobs = Vec::new();
+    // let mut vmaf_jobs = Vec::new();
+
+    let sem = Arc::new(Semaphore::new(num_cpus::get())); 
+    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
+        FuturesUnordered::new();
+
+
     let mut encoder_0_buf = HashMap::new(); // Buffer for decoded frames from encoder 0
     let mut encoder_1_buf = HashMap::new(); // Buffer for decoded frames from encoder 1
     let mut ready_ids = BTreeSet::new();
@@ -3561,20 +3585,22 @@ pub async fn process_trace_two_encoders_no_loss(
                 seen_pairs += 1;
 
                 // Run VMAF between the two encoder outputs (fb_enc0 vs fb_enc1)
-                let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
-                let logger = metric.clone();
-                let rgb_enc1 = fb_enc1.rgb.clone(); // Treat Encoder 1 as reference for VMAF
-                let rgb_enc0: Vec<u8> = fb_enc0.rgb.clone(); // Treat Encoder 0 as distorted for VMAF
-                let clone_ts_map = ts_map.clone();
-                vmaf_jobs.push(tokio::spawn(async move {
-                    let _permit = permit;
-                    if let Err(e) = logger
-                        .process_frame_buffers(id as u64, clone_ts_map[&id], rgb_enc1, rgb_enc0, ip)
-                        .await
-                    {
-                        eprintln!("VMAF job failed on #{}: {}", id, e);
-                    }
-                }));
+                let sem_clone   = sem.clone();
+                let logger      = metric.clone();
+                let ts_map      = ts_map.clone();
+                let ip_clone    = ip.clone();
+                let rgb_enc1    = fb_enc1.rgb.clone();
+                let rgb_enc0    = fb_enc0.rgb.clone();
+                let handle = tokio::spawn(async move {
+                       let _permit = sem_clone.acquire().await.unwrap();
+                       if let Err(e) = logger
+                           .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
+                           .await
+                       {
+                           eprintln!("VMAF job failed on #{}: {}", id, e);
+                       }
+                   });
+                   vmaf_tasks.push(handle);
 
                 to_remove.push(id);
             }
@@ -3585,7 +3611,15 @@ pub async fn process_trace_two_encoders_no_loss(
         window.update();
     }
 
-    join_all(vmaf_jobs).await;
+    while let Some(res) = vmaf_tasks.next().await {
+        if let Err(join_err) = res {
+            eprintln!("VMAF task panicked: {}", join_err);
+        }
+    }
+    
+    
+    
+    // join_all(vmaf_jobs).await;
     metric.finalize()?;
     Ok(())
 }
@@ -3625,7 +3659,7 @@ pub async fn process_trace_single_encoder(
 
     // Example debug print
     println!("Extracted bitrate: {}", bitrate);    // 2) build a logger that writes to Results/<scenario>/VMAF_metrics_<idx>.csv
-    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx)?;
+    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false)?;
 
 
     let mut counter_frames: usize = 0; 
@@ -3983,9 +4017,18 @@ fn main() -> Result<()> {
     let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
         thread::spawn(move || -> Result<()> {
             // each thread gets its own current-thread Tokio runtime
-            let rt = tokio::runtime::Builder::new_current_thread()
+            // let rt = tokio::runtime::Builder::new_current_thread()
+            //     .enable_all()
+            //     .build()?;
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(num_cpus::get())   // e.g. 8 on your machine
                 .enable_all()
                 .build()?;
+
+
+
+
             rt.block_on(async {
                 for (_folder, traces) in group {
                     for trace_csv in traces {
