@@ -164,8 +164,8 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 13 {
-        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <emu_effect>", args[0]);
+    if args.len() != 14 {
+        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename>", args[0]);
         return;
     }
 

@@ -6,19 +6,20 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
 // pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
-
+const SCALE: f64 = 0.3;
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
 
 
-const MAX_PARALLEL_VMAF: usize = 10;
-const WORKERS: usize = 1;
+const MAX_PARALLEL_VMAF: usize = 30;
+const WORKERS: usize = 2;
 
 
 pub const RESYNC_BUFFER: usize = 20; 
 const SIM_HISTORY: usize = 20; 
 const DESYNC_STD_DEV :f64 = 20.0; 
 const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500); 
+
 
 macro_rules! print_prettyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
@@ -344,7 +345,7 @@ impl MetricsLogger {
                 "-threads", "1",
                 "-filter_threads", "0",
                 "-loglevel", "error",
-
+                "-hwaccel", "cuda", 
                 // distorted raw RGB24
                 "-f", "rawvideo",
                 "-pixel_format", "rgb24",
@@ -362,7 +363,7 @@ impl MetricsLogger {
                 &format!(
                     "[0:v]format=yuv420p[dist];\
                     [1:v]format=yuv420p[ref];\
-                    [dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=0:\
+                    [dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=2:\
                     feature='name=psnr':feature='name=float_ssim'",
                     vmaf_json.display()
                 ),
@@ -1020,7 +1021,7 @@ impl HevcDecoder {
             // frame_rate_target: FRAMERATE_WINDOWS as f32, 
             // last_frame_time: Instant::now(),
             // frame_interval: Duration::from_secs_f64(1.0 / FRAMERATE_WINDOWS as f64), 
-            processing_semaphore: Arc::new(Semaphore::new(3)),  
+            processing_semaphore: Arc::new(Semaphore::new(10)),  
             decoded_frame_counter: 0, 
             id_queue: VecDeque::new(), 
             pending_param_sets: None, 
@@ -2359,7 +2360,7 @@ fn draw_pair(
 ) -> Result<()> {
     const W: usize = WIDTH_ENCODER;
     const H: usize = HEIGHT_ENCODER;
-    const SCALE: f64 = 0.28;
+    // const SCALE: f64 = 0.28;
     let sw = (W as f64 * SCALE) as usize;
     let sh = (H as f64 * SCALE) as usize;
     let ww = sw * 2 + 10;
@@ -3496,7 +3497,6 @@ pub async fn process_trace_two_encoders_no_loss(
     let mut dec_encoder_1 = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_1");
 
     // create window
-    const SCALE: f64 = 0.5;
     let sw = (WIDTH_ENCODER as f64 * SCALE) as usize;
     let sh = (HEIGHT_ENCODER as f64 * SCALE) as usize;
     let mut window = Window::new(
