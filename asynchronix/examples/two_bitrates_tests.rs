@@ -11,8 +11,8 @@ pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
 
 
-const MAX_PARALLEL_VMAF: usize = 30;
-const WORKERS: usize = 1;
+const MAX_PARALLEL_VMAF: usize = 20;
+const WORKERS: usize = 2;
 
 
 pub const RESYNC_BUFFER: usize = 20; 
@@ -20,6 +20,9 @@ const SIM_HISTORY: usize = 20;
 const DESYNC_STD_DEV :f64 = 20.0; 
 const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500); 
 
+#[path = "lib/mod.rs"]      // relative path to the module root you want
+mod lib; 
+use lib::render_text; 
 
 macro_rules! print_prettyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
@@ -57,8 +60,7 @@ const RECOVERY_MAX_ATTEMPTS: usize = 1;       // How many consecutive frames to 
 
 use std::collections::{BTreeSet, BTreeMap};
 use futures::stream::StreamExt;
-use ffmpeg_next::time;
-use ffmpeg_next::Frame;
+
 use tokio::sync::Semaphore;
 
 use std::io::BufRead;
@@ -358,7 +360,7 @@ impl MetricsLogger {
                 "-threads", "1",
                 "-filter_threads", "0",
                 "-loglevel", "error",
-                "-hwaccel", "cuda", 
+                // "-hwaccel", "cuda", 
                 // distorted raw RGB24
                 "-f", "rawvideo",
                 "-pixel_format", "rgb24",
@@ -2025,226 +2027,6 @@ impl ChunkedHevcEncoder {
 
 use csv::StringRecord;
 
-fn render_text(
-    buffer: &mut [u32],
-    text: &str,
-    x: usize,
-    y: usize,
-    stride: usize,
-    color: u32,
-    scale: usize,
-) {
-    // Simple 5x7 pixel font (common for basic bitmap fonts)
-    // Each character is represented as an array of 7 bytes, where each byte represents a row
-    // and the bits in each byte represent the pixels in that row
-    const FONT_WIDTH: usize = 5;
-    const FONT_HEIGHT: usize = 7;
-    const CHAR_SPACING: usize = 1;
-
-    // Apply scaling
-    let scaled_font_width = FONT_WIDTH * scale;
-    let scaled_char_spacing = CHAR_SPACING * scale;
-
-    // Define a simple bitmap font (only uppercase letters and some basic characters)
-    // Each character is 5x7 pixels
-    let font = [
-        // Space
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        // !
-        [0x04, 0x04, 0x04, 0x04, 0x00, 0x04, 0x00],
-        // "
-        [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00],
-        // #
-        [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
-        // $
-        [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
-        // %
-        [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
-        // &
-        [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
-        // '
-        [0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
-        // (
-        [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-        // )
-        [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-        // *
-        [0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00],
-        // +
-        [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
-        // ,
-        [0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08],
-        // -
-        [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
-        // .
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
-        // /
-        [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
-        // 0
-        [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        // 1
-        [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        // 2
-        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
-        // 3
-        [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
-        // 4
-        [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        // 5
-        [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        // 6
-        [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-        // 7
-        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        // 8
-        [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        // 9
-        [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
-        // :
-        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
-        // ;
-        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08],
-        // <
-        [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
-        // =
-        [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
-        // >
-        [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
-        // ?
-        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
-        // @
-        [0x0E, 0x11, 0x01, 0x0D, 0x15, 0x15, 0x0E],
-        // A
-        [0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11],
-        // B
-        [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        // C
-        [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        // D
-        [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
-        // E
-        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        // F
-        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        // G
-        [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        // H
-        [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        // I
-        [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        // J
-        [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-        // K
-        [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        // L
-        [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        // M
-        [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        // N
-        [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
-        // O
-        [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        // P
-        [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        // Q
-        [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        // R
-        [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        // S
-        [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-        // T
-        [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        // U
-        [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        // V
-        [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        // W
-        [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
-        // X
-        [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        // Y
-        [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
-        // Z
-        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        // [
-        [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
-        // \
-        [0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00],
-        // ]
-        [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
-        // ^
-        [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
-        // _
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
-    ];
-
-    let mut char_x = x;
-
-    for c in text.chars() {
-        let index = match c {
-            ' ' => 0,
-            '!' => 1,
-            '"' => 2,
-            '#' => 3,
-            '$' => 4,
-            '%' => 5,
-            '&' => 6,
-            '\'' => 7,
-            '(' => 8,
-            ')' => 9,
-            '*' => 10,
-            '+' => 11,
-            ',' => 12,
-            '-' => 13,
-            '.' => 14,
-            '/' => 15,
-            '0'..='9' => (c as usize) - ('0' as usize) + 16,
-            ':' => 26,
-            ';' => 27,
-            '<' => 28,
-            '=' => 29,
-            '>' => 30,
-            '?' => 31,
-            '@' => 32,
-            'A'..='Z' => (c as usize) - ('A' as usize) + 33,
-            'a'..='z' => (c as usize) - ('a' as usize) + 33, // Map lowercase to uppercase
-            '[' => 59,
-            '\\' => 60,
-            ']' => 61,
-            '^' => 62,
-            '_' => 63,
-            _ => 0, // Default to space for unknown characters
-        };
-
-        // Draw the character with scaling
-        for row in 0..FONT_HEIGHT {
-            for scaled_row in 0..scale {
-                let buffer_y = y + (row * scale) + scaled_row;
-
-                for col in 0..FONT_WIDTH {
-                    // Check if the current pixel is set in the font bitmap
-                    if (font[index][row] & (1 << (FONT_WIDTH - 1 - col))) != 0 {
-                        for scaled_col in 0..scale {
-                            let buffer_x = char_x + (col * scale) + scaled_col;
-
-                            // Calculate buffer index and check bounds
-                            if buffer_y < buffer.len() / stride && buffer_x < stride {
-                                let buffer_index = buffer_y * stride + buffer_x;
-                                if buffer_index < buffer.len() {
-                                    buffer[buffer_index] = color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Move to the next character position
-        char_x += scaled_font_width + scaled_char_spacing;
-    }
-}
-
 
 fn make_encoder_task(
     tag: usize,
@@ -3185,27 +2967,6 @@ pub async fn process_trace_single_encoder_new(
     );
 
 
-    for rec in rdr.records() {
-        let rec = rec?;
-        if path_video.is_none() {
-            if let (Some(o), Some(p), Some(i)) = (rec.get(0), rec.get(1), rec.get(2)) {
-                if !o.trim().is_empty() && !p.trim().is_empty() && !i.trim().is_empty() {
-                    offset_video = Some(o.trim().parse()?);
-                    path_video = Some(p.trim().to_string());
-                    idr_frequency = Some(i.trim().parse()?);
-                    continue;
-                }
-            }
-        }
-        if let (Some(_ts), Some(id_s), Some(_lost), Some(_tp)) =
-            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
-        {
-            if id_s.trim().is_empty() { continue; }
-            raw_ids.push(id_s.trim().parse::<u32>()?);
-            raw_ts.push(_ts.trim().parse::<f64>()?);
-        }
-    }
-
     let video = path_video.clone().ok_or_else(|| anyhow::anyhow!("missing video path"))?;
     let offset = offset_video.ok_or_else(|| anyhow::anyhow!("missing offset"))?;
     let idr = idr_frequency.ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
@@ -3252,7 +3013,13 @@ pub async fn process_trace_single_encoder_new(
 
     let expected = trace.len();
     let mut seen_pairs = 0;
-    let mut vmaf_jobs = Vec::new();
+    // let mut vmaf_jobs = Vec::new();
+    let sem = Arc::new(Semaphore::new(num_cpus::get())); 
+    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
+        FuturesUnordered::new();
+
+
+
     let mut low_buf = HashMap::new();
     let mut ref_buf = HashMap::new();
     let mut last_real_low: Option<FrameBuf> = None;
@@ -3322,15 +3089,23 @@ pub async fn process_trace_single_encoder_new(
                     let rgb_ref = fb_r.rgb.clone();
                     let rgb_low: Vec<u8> = fb_l.rgb.clone();
                     let clone_ts_map = ts_map.clone(); 
-                    vmaf_jobs.push(tokio::spawn(async move {
-                        let _permit = permit;
+                    // Run VMAF between the two encoder outputs (fb_enc0 vs fb_enc1)
+                    let sem_clone   = sem.clone();
+                    let logger      = metric.clone();
+                    let ts_map      = ts_map.clone();
+                    let ip_clone    = ip.clone();
+                    let rgb_enc1    = fb_l.rgb.clone();
+                    let rgb_enc0    = fb_r.rgb.clone();
+                    let handle = tokio::spawn(async move {
+                        let _permit = sem_clone.acquire().await.unwrap();
                         if let Err(e) = logger
-                            .process_frame_buffers(id as u64, clone_ts_map[&id], rgb_ref, rgb_low, ip)
+                            .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
                             .await
                         {
                             eprintln!("VMAF job failed on #{}: {}", id, e);
                         }
-                    }));
+                    });
+                    vmaf_tasks.push(handle);
                 } else {
                     println!("⏭ Skipping VMAF for out-of-sync or synthetic id {}", id);
                 }
@@ -3343,7 +3118,12 @@ pub async fn process_trace_single_encoder_new(
         window.update();
     }
 
-    join_all(vmaf_jobs).await;
+    while let Some(res) = vmaf_tasks.next().await {
+        if let Err(join_err) = res {
+            eprintln!("VMAF task panicked: {}", join_err);
+        }
+    }
+    
     metric.finalize()?;
     Ok(())
 }
@@ -3830,7 +3610,11 @@ pub async fn process_trace_single_encoder(
     let expected = trace.len();
     let mut seen_pairs = 0;
 
-    let mut vmaf_jobs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // let mut vmaf_jobs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let sem = Arc::new(Semaphore::new(num_cpus::get())); 
+    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
+        FuturesUnordered::new();
+
 
     let mut low_buf  = HashMap::<u32, FrameBuf>::new();
     let mut ref_buf  = HashMap::<u32, FrameBuf>::new();
@@ -3934,17 +3718,27 @@ pub async fn process_trace_single_encoder(
                     draw_pair(&mut window, &fb_l.rgb, &fb_r.rgb, scenario.as_ref(), id,  ts)?;
                     seen_pairs += 1;
 
+
+
+                    let sem_clone   = sem.clone();
+                    let logger      = metric.clone();
+                    let ts_map      = ts_map.clone();
+                    let ip_clone    = ip.clone();
+                    let rgb_enc1    = fb_l.rgb.clone();
+                    let rgb_enc0    = fb_r.rgb.clone();
                     let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
                     let logger = metric.clone();
-                    vmaf_jobs.push(tokio::spawn(async move {
-                        let _permit = permit;
-                        if let Err(e) = logger
-                            .process_frame_buffers(id as u64, ts, fb_r.rgb, fb_l.rgb, ip)
-                            .await
-                        {
-                            eprintln!("VMAF worker failed on frame #{id}: {e}");
-                        }
-                    }));
+                    let handle = tokio::spawn(async move {
+                       let _permit = sem_clone.acquire().await.unwrap();
+                       if let Err(e) = logger
+                           .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
+                           .await
+                       {
+                           eprintln!("VMAF job failed on #{}: {}", id, e);
+                       }
+                   });
+                   vmaf_tasks.push(handle);
+
 
                             
                 }
@@ -3970,7 +3764,11 @@ pub async fn process_trace_single_encoder(
         window.update();
     }
         
-    join_all(vmaf_jobs).await;
+    while let Some(res) = vmaf_tasks.next().await {
+        if let Err(join_err) = res {
+            eprintln!("VMAF task panicked: {}", join_err);
+        }
+    }
     metric.finalize()?; 
 
     Ok(())
@@ -4032,7 +3830,8 @@ fn main() -> Result<()> {
             rt.block_on(async {
                 for (_folder, traces) in group {
                     for trace_csv in traces {
-                        process_trace_two_encoders_no_loss(trace_csv, ip.clone()).await?;
+                        process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone()).await?;
+                        process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?; 
                     }
                 }
                 Ok(())

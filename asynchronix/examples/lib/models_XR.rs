@@ -2385,6 +2385,7 @@ pub struct XRServer {
     pub bitrate_manager: BitrateManager,
 
     pub video_app_sender: Option<StreamSender<VideoPacketHeader>>,
+    pub audio_app_sender: Option<StreamSender<()>>,  
 
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
@@ -2455,6 +2456,7 @@ impl XRServer {
             ),
 
             video_app_sender: None,
+            audio_app_sender: None, 
 
             tracking_app_receiver: None,
             statistics_app_receiver: None,
@@ -2462,7 +2464,6 @@ impl XRServer {
             control_socket_sender: None,
             control_socket_receiver: None,
             outport_videoapp_network: Output::default(),
-            // output_audio: Output::default(),
             // output_haptics: Output::default(),
             is_streaming: false,
             fps: frame_rate,
@@ -2634,7 +2635,7 @@ impl XRServer {
                             stop = true;
                             break;
                         } else {
-                            // TODO: CHECK WITH WIRESHARK ENCAPSULATION OF PACKET
+
                             // println!("{}", DebugColor::DarkGreen.to_color_fn()(String::from("Parsed from connection output:")));
                             if let Ok((
                                 packet_length,
@@ -2675,9 +2676,12 @@ impl XRServer {
                                     //     packet.header_alvr
                                     // );
                                 }
-                                if stream_id == VIDEO {
+                                if stream_id == VIDEO || stream_id == AUDIO {
                                     self.outport_videoapp_network.send(packet).await;
                                 }
+
+
+
                             } else {
                                 println!(
                                     "{}",
@@ -2704,8 +2708,6 @@ impl XRServer {
         }
     }
 
-    // pub fn generate_video_frame(&mut self, context: &Context<Self> ){
-
     async fn read_network_interface_to_app<'a>(
         &'a mut self,
         _: (),
@@ -2721,6 +2723,60 @@ impl XRServer {
             };
         }
     }
+
+
+    pub fn generate_audio_frame<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let now = context.scheduler.time();
+
+            if let Some(mut sender) = self.audio_app_sender.clone() {
+                // 1) how big is our "two empties" payload?
+                let payload_len = 1400 + 600; 
+
+                // 2) compute the hidden prefix so fragmentation/sharding still lines up
+                let header = VideoPacketHeader::new(Duration::from_secs(1), false);
+                let hsize = bincode::serialized_size(&header).unwrap() as usize;
+                let hidden_offset = SHARD_PREFIX_SIZE + hsize;
+
+                // 3) allocate one big vec = prefix + payload
+                let mut raw = vec![0u8; hidden_offset + payload_len];
+
+                // 4) (optional) encode your header into the reserved space
+                let header_bytes = bincode::serialize(&header).unwrap();
+                raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + hsize]
+                    .copy_from_slice(&header_bytes);
+
+                // 5) wrap it—length is _only_ the payload
+                let buf = crate::lib::alvr_stream_socket::Buffer {
+                    inner: raw,
+                    hidden_offset,
+                    length: payload_len,
+                    _phantom: std::marker::PhantomData::<()>,
+                };
+
+                // 6) send + handle the app‐recv path
+                let _ = sender.send(buf, now); 
+                let arc_receiver = sender.app_network_interface.clone();
+                let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+                XRServer::read_app_send_network_interface(
+                    self, (), now, buffer, arc_receiver
+                ).await;
+            }
+
+            // 7) schedule next in 10 ms
+            context
+                .scheduler
+                .schedule_event(Duration::from_millis(10),
+                                Self::generate_audio_frame, ())
+                .unwrap();
+        }
+    }
+
+
 
     pub fn generate_video_frame<'a>(
         &'a mut self,
@@ -2756,20 +2812,6 @@ impl XRServer {
                     _ => 100.0,
                 };
 
-                //
-                // let current_bitrate_mbps: f32 = self.bitrate_manager.one_pass_abr(); // for ABR bitrates
-
-                let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo"];
-                let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
-                let mut final_file = match choice_random {
-                    Some(file) => file,
-                    None => {
-                        "snow"
-                        // println!("No files to choose from");
-                    }
-                };
-                final_file = "garp4k";
-
 
                 let mut buffer_emu = send_socket // generate the actual video frame data
                     .get_buffer_emu(
@@ -2790,16 +2832,10 @@ impl XRServer {
                     self.video_app_sender.as_mut().unwrap().ffmpeg_encoder = Some(encoder_init);
                     // println!("ENCODER INITIALIZED");
                 }
-                // if let Some(maxencoder_init) = send_socket.clone().ffmpeg_maxbitrate_encoder {
-                //     self.video_app_sender
-                //         .as_mut()
-                //         .unwrap()
-                //         .ffmpeg_maxbitrate_encoder = Some(maxencoder_init); // ACTUALLY CONSERVE THE COPY, CRITICAL!
-                // }
-
-                // Use DashMap's thread-safe `insert` API instead of write locks
-                let frame_tracker_map = send_socket.get_frame_tracker_map();
-                frame_tracker_map.into_iter().for_each(|(key, value)| {
+               
+                // Use DashMap's thread-safe `insert` API instead of write locks   
+                let frame_tracker_map = send_socket.get_frame_tracker_map(); 
+                    frame_tracker_map.into_iter().for_each(|(key, value)| {
                     map_clone.insert(key, value);
                 });
 
@@ -2871,6 +2907,10 @@ impl XRServer {
 
             self.video_app_sender =
                 Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO, self.t_0));
+            
+            self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0)); 
+            
+            
             self.tracking_app_receiver =
                 Some(stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS));
             self.statistics_app_receiver = Some(
@@ -2893,6 +2933,7 @@ impl XRServer {
             self.control_socket_receiver = Some(control_receiver);
 
             XRServer::generate_video_frame(self, (), context).await;
+            XRServer::generate_audio_frame(self, (), context).await; 
             // STEP 2: DO SAME FOR REST OF PACKETS (VIDEO; HAPTICS) and loop using context.scheduler!
             // TODO!
         }
@@ -4579,14 +4620,19 @@ impl XRClient {
                         let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
-                        println!("receiver: {:?}", receiver);
+                        // println!("receiver: {:?}", receiver);
+                        
+                        println!("Received audio packet: {:?}", header); 
                     }
+
+
+
+
                 }
                 VIDEO => {
                     if let Some(sock) = self.input_app_video.clone() {
                         // println!("app lock");
                         let _sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
-                                                                                                // println!("reader lock");
 
                         if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
                             let _resulllt = StreamSocket::recv(
@@ -4595,9 +4641,6 @@ impl XRClient {
                                 sock.inner,
                                 context,
                             );
-
-                            // println!("result of sender {:?}", sender );
-                            // println!("Result of reader? {:?}" , resulllt);
                         }
                     } else {
                         println!("NO SOME??");
