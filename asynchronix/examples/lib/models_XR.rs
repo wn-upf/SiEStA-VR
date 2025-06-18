@@ -4622,11 +4622,9 @@ impl XRClient {
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                         // println!("receiver: {:?}", receiver);
                         
-                        println!("Received audio packet: {:?}", header); 
+                        // println!("Received audio packet: {:?}", header); // We do nothing with received audio packets at time,
+                                                                            // it's just empty data being sent every 10ms following structure of ALVR game audio transmissions. 
                     }
-
-
-
 
                 }
                 VIDEO => {
