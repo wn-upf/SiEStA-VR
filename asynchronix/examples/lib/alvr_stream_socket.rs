@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 #[allow(unused_imports)]
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
-
+use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 // use tokio::io::{AsyncReadExt, BufReader};
 use crate::lib::{get_third_octet, HevcParser};
@@ -168,8 +168,8 @@ impl ChunkedHevcEncoder {
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-cbr_padding", "1"])        // Ensure that if bitrate target is higher than source material
-                                                                        // the throughput distribution will match that of the bitrate target strictly by padding. 
+                .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
+                // the throughput distribution will match that of the bitrate target strictly by padding. 
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
                 .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
@@ -196,6 +196,8 @@ impl ChunkedHevcEncoder {
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
+
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])

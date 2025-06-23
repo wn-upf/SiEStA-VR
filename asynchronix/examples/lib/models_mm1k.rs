@@ -410,6 +410,7 @@ pub enum NetworkPattern {
         current_tokens: f64,
         max_tokens: f64,
         token_refill_rate: f64,
+        last_refill: f64, 
 
         #[serde(with = "taitime_serde")]
         valid_from: TaiTime<0>,
@@ -445,15 +446,52 @@ impl NetworkPattern {
         valid_from: TaiTime<0>,
         valid_until: TaiTime<0>,
     ) -> Self {
+
+        let valid_s = valid_from.duration_since(TaiTime::EPOCH).as_secs_f64(); 
+
         Self::Bandwidth {
             max_bps,
             current_tokens: max_bps, // Initialize tokens to maximum
             max_tokens: max_bps,     // Maximum bucket capacity
             token_refill_rate,
+            last_refill: valid_s, 
             valid_from,
             valid_until,
         }
     }
+    fn bandwidth_account(
+        &mut self,
+        now: TaiTime<0>,
+        packet_bits: Option<f64>,
+    ) -> (bool /*can_send*/, Duration /*delay if not*/) {
+        let Self::Bandwidth {
+            current_tokens,
+            max_tokens,
+            token_refill_rate,
+            last_refill,
+            ..
+        } = self else { unreachable!() };
+
+        let mut now = now.duration_since(TaiTime::EPOCH).as_secs_f64(); 
+        // Refill
+        let dt = now - *last_refill; 
+        *current_tokens = (*current_tokens + dt * *token_refill_rate).min(*max_tokens);
+        *last_refill = now;
+
+        if let Some(bits) = packet_bits {
+            if *current_tokens >= bits {
+                *current_tokens -= bits;           // send – netem path
+                return (true, Duration::ZERO);
+            }
+            let need = bits - *current_tokens;     // queue – netem path
+            *current_tokens -= bits;               // go negative – keep the deficit            
+            let delay = need / *token_refill_rate;
+            return (false, Duration::from_secs_f64(delay));
+        }
+        (false, Duration::ZERO) // called as pure refill
+    }
+
+
 
 
     pub fn csv_headers() -> &'static [&'static str] {
@@ -486,6 +524,8 @@ impl NetworkPattern {
             "jit_valid_until_secs","jit_valid_until_nanos",
         ]
     }
+
+
 
     /// Turn *this* variant into one row of Strings, matching exactly the above headers.
     pub fn to_csv_row(&self) -> Vec<String> {
@@ -546,6 +586,7 @@ impl NetworkPattern {
                 current_tokens,
                 max_tokens,
                 token_refill_rate,
+                last_refill, 
                 valid_from,
                 valid_until,
             } => {
@@ -1193,6 +1234,7 @@ impl NetworkPatternEmulator {
                     } else {
                         None
                     }
+                
                 } else if let NetworkPattern::ProbabilisticDrop {
                     valid_from,
                     valid_until,
@@ -1266,45 +1308,19 @@ impl NetworkPatternEmulator {
                     valid_until,
                     ..
                 } => {
-                    bandwidth_limit_bps_parent = *token_refill_rate;
+                        let pkt_bits = (packet.length_packet * 8) as f64;
+                        let (can_send, delay) = pattern.bandwidth_account(current_time, Some(pkt_bits));
 
-                    // Token bucket algorithm
-                    let refilled_tokens = *token_refill_rate * time_delta.as_secs_f64();
-                    let new_tokens = (*current_tokens + refilled_tokens).min(*max_tokens);
-                    let packet_tokens = (packet.length_packet * 8) as f64;
-                    self.debug_counter += 1;
+                        if can_send {
+                            packet.has_consumed_emu_tokens = true;
+                            return Some(Duration::ZERO);
+                        }
+                        else {
+                            packet.has_consumed_emu_tokens = true;   // we already debited the bucket
+                            return Some(delay);
+                        }
 
-                    if self.debug_counter >= 64 {
-                        print_pretty!(DebugColor::DarkBlue,
-                        "{:4.9} [DBG NETEM ({:.5} -> {:.5})] BW bucket -> ΔT: {} - [DBG]Δt2 : {}, BW: {} Mbps| refill: {} Mb, available: {:.5} Mbps, packet cost: {:.5} Mb | (ALVR F_id: {} -  {}/{})" , 
-                        format_elapsed!(current_time),
-                        format_elapsed!(valid_from),
-                        format_elapsed!(valid_until),
-                        time_delta.as_secs_f64(),
-                        time_delta_dbg.as_secs_f64(),
-                        bandwidth_limit_bps_parent / 1e6,
-                        refilled_tokens/1e6,
-                        new_tokens / 1e6,
-                        packet_tokens/1e6,
-                        alvr_header.next_packet_index,
-                        alvr_header.shard_index,
-                        alvr_header.shards_count - 1 );
-                        self.debug_counter = 0;
-                    }
-
-                    if new_tokens >= packet_tokens {
-                        // Packet can be transmitted
-                        *current_tokens = new_tokens - packet_tokens;
-                        packet.has_consumed_emu_tokens = true; // Mark tokens as consumed
-                        return Some(Duration::ZERO);
-                    } else {
-                        // Calculate delay needed to accumulate enough tokens
-                        let tokens_needed = packet_tokens - new_tokens;
-                        let delay_seconds = tokens_needed / *token_refill_rate;
-                        // println!("Tokens needed: packet({}) - new({}) =  {} -> Delay = {} ", packet_tokens, new_tokens, tokens_needed , delay_seconds);
-                        *current_tokens = new_tokens - packet_tokens;
-                        return Some(Duration::from_secs_f64(delay_seconds));
-                    }
+                        return Some(delay);          // queued, tokens NOT deducted yet  
                 }
 
                 NetworkPattern::Jitter {
