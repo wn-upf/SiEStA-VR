@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::lib::ResultsFrameTXDelay;
-use crate::DebugColor;
+use crate::lib::DebugColor; 
+
 // use crate::lib::TESTS_RANDOM_PATTERNS;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
@@ -81,21 +82,21 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     let sum_exp: f64 = exp_values.iter().sum();
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
-pub const MAX_EMULATED_QUEUE_PACKETS: usize = 100000;
+pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
 // pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
 // Steps of emulated bandwidth
-pub const STEP1_TBEGIN: f64 = 15.0;
-pub const STEP1_TEND: f64 = 15.1;
+pub const STEP1_TBEGIN: f64 = 20.0;
+pub const STEP1_TEND: f64 = 30.0;
 
-pub const STEP2_TBEGIN: f64 = 17.0;
-pub const STEP2_TEND: f64 = 18.0;
+pub const STEP2_TBEGIN: f64 = 40.0;
+pub const STEP2_TEND: f64 = 50.0;
 
-pub const STEP3_TBEGIN: f64 = 31.0;
-pub const STEP3_TEND: f64 = 32.0;
+pub const STEP3_TBEGIN: f64 = 60.0;
+pub const STEP3_TEND: f64 = 70.0;
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 300E6;
-pub const BANDWIDTH_LIMIT_S2: f64 = 200E6;
-pub const BANDWIDTH_LIMIT_S3: f64 = 100E6;
+pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
+pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
+pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -758,20 +759,22 @@ impl QueueMechanism {
 
 
         if test_bw {
+
+            let mtu = 1500.0 * 8.0; 
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
-                BANDWIDTH_LIMIT_S1 / 10.0,
+                mtu,
                 BANDWIDTH_LIMIT_S1,
                 valid_from,
                 valid_until,
             ));
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
-                BANDWIDTH_LIMIT_S2 / 10.0,
+                mtu, 
                 BANDWIDTH_LIMIT_S2,
                 valid_from2,
                 valid_until2,
             ));
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
-                BANDWIDTH_LIMIT_S3 / 10.0,
+                mtu, 
                 BANDWIDTH_LIMIT_S3,
                 valid_from3,
                 valid_until3,
@@ -798,8 +801,8 @@ impl QueueMechanism {
         }
         if test_jitter {
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
-                8.0, // mean delay in ms
-                8.0, // standard deviation in ms
+                3.0, // mean delay in ms
+                3.0, // standard deviation in ms
                 0.0, // 20% correlation with previous packet delay
                 valid_from,
                 valid_until,
@@ -807,8 +810,8 @@ impl QueueMechanism {
 
             // Example 2: Uniform jitter with 15ms mean delay and 10ms half-width
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
-                10.0, // mean delay in ms
-                10.0, // half-width in ms
+                5.0, // mean delay in ms
+                5.0, // half-width in ms
                 0.0, // no correlation with previous packet
                 valid_from2,
                 valid_until2,
@@ -816,8 +819,8 @@ impl QueueMechanism {
 
             // Example 3: Highly correlated gaussian jitter (simulates slow fluctuations)
             network_emulator.add_pattern(NetworkPattern::new_jitter_uniform(
-                13.0, // mean delay in ms
-                13.0, // standard deviation in ms
+                10.0, // mean delay in ms
+                10.0, // standard deviation in ms
                 0.0,  // 80% correlation with previous packet delay
                 valid_from3,
                 valid_until3,
@@ -889,8 +892,7 @@ impl QueueMechanism {
                     self.queue.push_back(delayed_packet.clone());
                     EnqueueResult::Queued(delayed_packet)
                 } else {
-                    debug_bgprint!(
-                        DebugColor::Red,
+                    print_red!(
                         "[NETEM FULL queue] Packet {} DROPPED (ALVR: F_id: {} , {} / {})",
                         delayed_packet.packet_id,
                         delayed_packet.header_alvr.next_packet_index,
@@ -1673,7 +1675,7 @@ impl QueueModule {
                     );
                 }
                 for (i, packet) in self.queue_network_emulator.queue.clone().iter().enumerate() {
-                    print!("Packet {} in queue:", i);
+                    // print!("Packet {} in queue:", i);
                     packet.print(DebugColor::Rose);
                 }
 

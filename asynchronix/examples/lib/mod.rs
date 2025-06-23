@@ -1846,6 +1846,8 @@ pub fn frametransmission_delay(
         _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
     };
 
+    // println!("P_rx = {}", Pr); 
+
     let Subcarriers = match channel_width {
         // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
         80 => 980,

@@ -62,7 +62,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 from input args to simulator
-pub const INTRAREFRESH_ENABLED: bool = false;
+pub const INTRAREFRESH_ENABLED: bool = true;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
@@ -168,6 +168,8 @@ impl ChunkedHevcEncoder {
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-cbr_padding", "1"])        // Ensure that if bitrate target is higher than source material
+                                                                        // the throughput distribution will match that of the bitrate target strictly by padding. 
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
                 .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
