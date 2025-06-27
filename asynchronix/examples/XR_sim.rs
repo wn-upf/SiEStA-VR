@@ -177,19 +177,19 @@ fn main() {
     let k_queue: usize = args[3].parse().unwrap();
     let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
     let _rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
-    let distance: f64 = args[6].parse().unwrap().expect("Invalid distance");
-    let initial_bitrate: f64 = args[7].parse().unwrap().expect("Invalid bitrate");
-    let pl_prob: f64 = args[8].parse().unwrap().expect("Invalid PL");
-    let n_xr: usize = args[9].parse().unwrap().expect("Invalid N_xr");
-    let n_bg: usize = args[10].parse().unwrap().expect("Invalid N_bg"); // New parameter for background STAs
-    let is_ul_bg_traffic: usize = args[11].parse().unwrap().expect("Invalid IS_UL");
-    let test_type: String = args[12].parse().unwrap().expect("Invalid emulated Test"); // New test type parameter
+    let distance: f64 = args[6].parse().expect("Invalid distance");
+    let initial_bitrate: f64 = args[7].parse().expect("Invalid bitrate");
+    let pl_prob: f64 = args[8].parse().expect("Invalid PL");
+    let n_xr: usize = args[9].parse().expect("Invalid N_xr");
+    let n_bg: usize = args[10].parse().expect("Invalid N_bg"); // New parameter for background STAs
+    let is_ul_bg_traffic: usize = args[11].parse().expect("Invalid IS_UL");
+    let test_type: String = args[12].parse().expect("Invalid emulated Test"); // New test type parameter
 
-    let video_filename: String = args[13].parse().unwrap().expect("Invalid video filename"); 
-    let fps:f32 = args[14].parse().unwrap().expect("Invalid FPS"); 
+    let video_filename: String = args[13].parse().expect("Invalid video filename"); 
+    let fps:f32 = args[14].parse().expect("Invalid FPS"); 
 
-    let n_close: usize = args[15].parse().unwrap().expect("Invalid N_close_users"); 
-    let distance_close: f64 =  args[16].parse().unwrap().expect("Invalid Distance_close_users"); 
+    let n_close: usize = args[15].parse().expect("Invalid N_close_users"); 
+    let distance_close: f64 =  args[16].parse().expect("Invalid Distance_close_users"); 
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
