@@ -1,31 +1,22 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use ffmpeg_next::format::network;
-// use futures_util::stream::empty;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 #[allow(unused_imports)]
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
-use std::io::BufRead;
 use std::sync::{Arc, Mutex};
-// use tokio::io::{AsyncReadExt, BufReader};
 use crate::lib::{get_third_octet, HevcParser};
 use crate::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
-use rand::seq::IteratorRandom;
 use std::io::BufReader;
-use crate::format_elapsed;
 use crate::lib::CsvTrace;
 use crate::print_green;
-use serde_json;
 use crate::lib::models_mm1k::NetworkPattern;
 
-use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty, print_prettyy};
+use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
 
 use crate::debug_bgprint;
-
-use rand::Rng;
 use std::cell::RefCell;
 use std::fmt::{self, Debug};
 use std::{
@@ -48,12 +39,6 @@ use std::net::IpAddr;
 
 use std::result::Result::Ok;
 use tai_time::TaiTime;
-
-
-use std::{
-    fs::{File, OpenOptions},
-    path::PathBuf,
-};
 use csv::Writer;
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
@@ -1886,7 +1871,7 @@ impl<H: Serialize> StreamSender<H> {
         ip: IpAddr,
         id_frame: usize,
         name_folder: &str,
-        max_bitrate_ladder_mbps: f32,
+        // max_bitrate_ladder_mbps: f32,
         network_effects: &[NetworkPattern], 
         final_file: &str, 
         framerate: f32, 
@@ -1912,8 +1897,6 @@ impl<H: Serialize> StreamSender<H> {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
-
-                let maxbitrate_cmd = format!("{:.0}M", max_bitrate_ladder_mbps);
 
                 // print_prettyy!(
                 //     DebugColor::Yellow,

@@ -16,11 +16,10 @@ use lib::models_mm1k::NetworkPattern;
 
 // use tai_time::TaiTime;
 
-use rand::{Rng, SeedableRng};
+use rand::{SeedableRng};
 use rand::rngs::StdRng;
 
 
-use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 mod lib; // for calling m own local library
 
 use crate::lib::models_mm1k::QueueModule;

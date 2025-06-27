@@ -1,13 +1,10 @@
 use crate::{debug_bgprint, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
-use ffmpeg_next::codec::Debug;
 use rand::Rng;
 use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
-use serde::{Deserializer};
-use serde::de::Error as DeError;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
@@ -19,12 +16,11 @@ use rand::rngs::StdRng;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
-use serde::ser::{Serializer, SerializeStruct};
 use serde::{Serialize, Deserialize};
 
 use crate::lib::{
     collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
-    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, UPLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS, 
+    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS, 
     P_TX,
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
@@ -728,7 +724,6 @@ pub struct QueueMechanism {
     queue: VecDeque<MpduPacket>,              // Packet queue
     network_emulator: NetworkPatternEmulator, // Bandwidth pattern
     max_queue_size: usize,
-    bandwidth_limit_bps: f64,
 }
 
 impl QueueMechanism {
@@ -875,14 +870,10 @@ impl QueueMechanism {
             ));
         }
 
-        let bandwidth_limit = BANDWIDTH_LIMIT_S1;
-
         Self {
             queue: VecDeque::new(),
             network_emulator,
             max_queue_size: max_emulated_queue_packets,
-            // bandwidth_limit_bps: 1E9, //as if ethernet, 1gbps
-            bandwidth_limit_bps: bandwidth_limit,
         }
     }
 
@@ -915,7 +906,6 @@ impl QueueMechanism {
         match self.network_emulator.should_transmit_with_delay(
             &mut packet,
             now,
-            self.bandwidth_limit_bps,
         ) {
             Some(delay) if delay == Duration::ZERO => {
                 // Immediate transmission possible
@@ -1195,7 +1185,7 @@ impl NetworkPatternEmulator {
         &mut self,
         packet: &mut MpduPacket,
         current_time: TaiTime<0>,
-        mut bandwidth_limit_bps_parent: f64,
+        // bandwidth_limit_bps_parent: f64,
     ) -> Option<Duration> {
         // Update time-based patterns
         let alvr_header = packet.header_alvr.clone();
@@ -1207,8 +1197,8 @@ impl NetworkPatternEmulator {
             return Some(Duration::ZERO);
         }
 
-        let time_delta = current_time.duration_since(self.last_update_time);
-        let time_delta_dbg = current_time.duration_since(self.last_update_only_DBG_NETEM);
+        let _time_delta = current_time.duration_since(self.last_update_time);
+        let _time_delta_dbg = current_time.duration_since(self.last_update_only_DBG_NETEM);
 
         self.last_update_only_DBG_NETEM = current_time;
         self.last_update_time = current_time;
@@ -1308,11 +1298,11 @@ impl NetworkPatternEmulator {
                 }
 
                 NetworkPattern::Bandwidth {
-                    current_tokens,
-                    max_tokens,
-                    token_refill_rate,
-                    valid_from,
-                    valid_until,
+                    // current_tokens,
+                    // max_tokens,
+                    // token_refill_rate,
+                    // valid_from,
+                    // valid_until,
                     ..
                 } => {
                         let pkt_bits = (packet.length_packet * 8) as f64;
@@ -1327,7 +1317,7 @@ impl NetworkPatternEmulator {
                             return Some(delay);
                         }
 
-                        return Some(delay);          // queued, tokens NOT deducted yet  
+                        // return Some(delay);          // queued, tokens NOT deducted yet  
                 }
 
                 NetworkPattern::Jitter {

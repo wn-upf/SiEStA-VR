@@ -1,7 +1,7 @@
 // src/taitime_serde.rs
 use serde::{Deserializer, Serializer};
 use serde::de::Error as DeError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use tai_time::TaiTime;
 use crate::format_elapsed;
 

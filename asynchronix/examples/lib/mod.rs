@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 
 const CW_MIN: i32 = 8;
 const CHANNEL_WIDTH: usize = 80; //MHz
@@ -29,11 +29,10 @@ const PHY_DURATION: f64 = 100E-6;
 const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
 const DIFS: f64 = 2.0 * SLOT + SIFS;
-
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
-
+#[allow(unused)]
 pub const UPLINK_QUEUE_SIZE: usize = 128;
 pub const NUMBER_OF_RANDOM_EVENTS: usize = 20; 
 
@@ -357,7 +356,8 @@ impl<T> SlidingWindowWeighted<T> {
         self.interval_buffer.iter().sum::<f32>()
     }
 }
-
+#[allow(unused)]
+// Renders ASCII text into the minifb window with coordinates.
 pub fn render_text(
     buffer: &mut [u32],
     text: &str,
@@ -1032,8 +1032,6 @@ impl CsvData {
         }
     }
 }
-
-use csv::WriterBuilder;
 use std::io::BufWriter;
 
 #[derive(Clone)]

@@ -1,19 +1,18 @@
 NUMBER_OF_JOBS=2
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 N_XR=(3)
-initial_bitrate_mbps=(100.0)
+initial_bitrate_mbps=(50.0 100.0)
 TEST_TYPE=("STD")
 
 # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
  ## "TEST_TYPE = "RANDOM" ## for random PL BW and JI effects spread over the whole simulation
 
-simTime=50.0
+simTime=30.0
 k_queue=10000
 mean_length=12000.0
 rate_bps_src=20E6; 
 # rate_bps_src=6.5E8 ## loads the queue
 rate_bps_queue=6E5 ## does nothing theoretically 
-
 distance=15.0
 PL=0.1
 fps_list=(60.0 90.0)
