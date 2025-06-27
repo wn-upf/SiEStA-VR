@@ -987,18 +987,18 @@ macro_rules! format_timestamp {
     }};
 }
 
-// pub fn exponential(mean: f64) -> f64 {
-//     let mut rng = thread_rng();
-//     let exp = Exp::new(1.0 / mean).unwrap();
-//     let value = exp.sample(&mut rng);
-//     value
-// }
 
-pub fn exponential(mean: f64) -> f64 {
-    let mut rng = rand::thread_rng();
-    let u: f64 = rng.gen_range(0.0..=1.0); // Generate a random value in the range (0, 1]
+/// Draws an exponential sample using RNG seed.
+pub fn exponential<R: Rng + ?Sized>(mean: f64, rng: &mut R) -> f64 {
+    let u: f64 = rng.gen_range(0.0..1.0); 
     -mean * u.ln()
 }
+
+// pub fn exponential(mean: f64) -> f64 {
+//     let mut rng = rand::thread_rng();
+//     let u: f64 = rng.gen_range(0.0..=1.0); // Generate a random value in the range (0, 1]
+//     -mean * u.ln()
+// }
 
 // Separate struct to hold the data that will be shared
 #[derive(Clone)]

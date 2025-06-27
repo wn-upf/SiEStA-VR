@@ -4470,8 +4470,8 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            print_pink!(
-                                // DebugColor::Violet,
+                            print_pretty!(
+                                DebugColor::Violet,
                                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                                 format_elapsed!(now),
                                 ip_client,
@@ -4642,7 +4642,7 @@ impl XRClient {
                             );
                         }
                     } else {
-                        println!("NO SOME??");
+                        print!(".");
                     }
                 }
                 _ => {
@@ -5292,13 +5292,16 @@ impl STA_extended {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
+            let mut rng = StdRng::seed_from_u64(42);
+
             if self.does_sta_tx && self.is_bg_sta {
                 // if STA is "TX type"         (and not "RX only")
 
                 let mut packet = MpduPacket::new();
 
+
                 let mut time_interarrival =
-                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate_BG));
+                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate_BG, &mut rng));
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 

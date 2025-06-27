@@ -16,6 +16,10 @@ use lib::models_mm1k::NetworkPattern;
 
 // use tai_time::TaiTime;
 
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+
+
 use crate::lib::alvr_stream_socket::INITIAL_FRAMERATE_FPS;
 mod lib; // for calling m own local library
 
@@ -165,9 +169,9 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 17 {
+    if args.len() != 18 {
         eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> 
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users>", args[0]);
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed>", args[0]);
         return;
     }
 
@@ -190,6 +194,10 @@ fn main() {
 
     let n_close: usize = args[15].parse().expect("Invalid N_close_users"); 
     let distance_close: f64 =  args[16].parse().expect("Invalid Distance_close_users"); 
+    let seed: u64 = args[17].parse().unwrap();
+
+
+    let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -208,8 +216,8 @@ fn main() {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, 
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -372,8 +380,8 @@ fn main() {
 
     // Schedule XR events
     for addr in &xr_client_addresses {
-        // let epsilon = Duration::from_secs_f64(exponential(0.5));
-        let epsilon = Duration::from_secs_f64(0.01);
+        let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
+        // let epsilon = Duration::from_secs_f64(0.01);
         scheduler
             .schedule_event(
                 Duration::from_secs(SIM_START_TIME) + epsilon,
@@ -393,7 +401,7 @@ fn main() {
     }
 
     for (i, addr) in xr_server_addresses.iter().enumerate() {
-        let epsilon = Duration::from_secs_f64(exponential(0.3));
+        let epsilon = Duration::from_secs_f64(exponential(0.3, &mut rng));
         let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
         scheduler
             .schedule_event(
@@ -407,7 +415,7 @@ fn main() {
 
     // Schedule background STA events
     for address in &bg_sta_addresses {
-        let epsilon = Duration::from_secs_f64(exponential(0.1));
+        let epsilon = Duration::from_secs_f64(exponential(0.1, &mut rng));
         scheduler
             .schedule_event(epsilon, STA_extended::send_packet_BG, (), address)
             .unwrap();

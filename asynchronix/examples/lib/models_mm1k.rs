@@ -15,7 +15,7 @@ use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::lib::ResultsFrameTXDelay;
 use crate::lib::DebugColor; 
-
+use rand::rngs::StdRng;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
@@ -29,6 +29,7 @@ use crate::lib::{
 };
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
+use rand::{SeedableRng};
 
 //////////// CONST DEFINES ///////////
 
@@ -105,17 +106,20 @@ pub struct PoissonSource {
     pub output_port: Output<MpduPacket>,
 
     pub num_packets_sent: usize,
+
+    pub rng_seed: StdRng
 }
 
 #[allow(dead_code)]
 impl PoissonSource {
-    pub fn new(arrival_rate_bps: f64, mean_length: f64) -> Self {
+    pub fn new(arrival_rate_bps: f64, mean_length: f64, rng_seed: u64) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
         Self {
             arrival_rate: arrival_rate,
             mean_length_packets: mean_length,
             output_port: Default::default(),
             num_packets_sent: 0,
+            rng_seed: StdRng::seed_from_u64(rng_seed), 
         }
     }
     fn send_packet<'a>(
@@ -126,11 +130,12 @@ impl PoissonSource {
         async move {
             let mut packet = MpduPacket::new();
 
+
             let mut time_interarrival =
-                Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
+                Duration::from_secs_f64(exponential(1.0 / self.arrival_rate, &mut self.rng_seed));
             time_interarrival = max(time_interarrival, Duration::from_secs_f64(1E-9));
 
-            let len_random = exponential(self.mean_length_packets as f64) as usize;
+            let len_random = exponential(self.mean_length_packets as f64, &mut self.rng_seed) as usize;
             packet.length_packet = cmp::max(1, len_random);
 
             self.num_packets_sent += 1;
@@ -162,6 +167,7 @@ pub struct STA_source {
 
     pub sta_coordinates: Coords,
     pub does_sta_tx: bool,
+    pub rng_seed: StdRng, 
 }
 #[allow(unused)]
 impl STA_source {
@@ -173,6 +179,7 @@ impl STA_source {
         coordinates: Coords,
         does_sta_transmit: bool,
         rate_service_bps: f64,
+        rng_seed: u64, 
     ) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps / mean_length;
@@ -192,16 +199,16 @@ impl STA_source {
 
             received_packet_counter: 0,
             does_sta_tx: does_sta_transmit,
+            rng_seed: StdRng::seed_from_u64(rng_seed), 
         }
     }
 
     pub fn move_coordinates(&mut self, distance_to_move: f64) {
         // brownian movement for STA
-        let mut rng = rand::thread_rng();
 
         // Generate a random angle in spherical coordinates to determine the direction of movement
-        let theta = rng.gen_range(0.0..2.0 * PI); // azimuthal angle for x and y
-        let phi = rng.gen_range(0.0..PI); // polar angle for z-axis
+        let theta = self.rng_seed.gen_range(0.0..2.0 * PI); // azimuthal angle for x and y
+        let phi = self.rng_seed.gen_range(0.0..PI); // polar angle for z-axis
 
         // Decompose the distance into x, y, and z components
         let dx = distance_to_move * theta.cos() * phi.sin();
@@ -246,11 +253,11 @@ impl STA_source {
                 let mut packet = MpduPacket::new();
 
                 let mut time_interarrival =
-                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate));
+                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate, &mut self.rng_seed));
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
-                let len_random = exponential(self.mean_length_packets as f64) as usize;
+                let len_random = exponential(self.mean_length_packets as f64, &mut self.rng_seed) as usize;
 
                 // let len_random = self.mean_length_packets as usize;
 
