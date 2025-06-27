@@ -1012,9 +1012,11 @@ pub struct CsvData {
 
     v_id_src: Vec<usize>,
     v_id_dest: Vec<usize>,
+    v_ampdu_id: Vec<u32>, 
 }
 
 impl CsvData {
+    
     pub fn new() -> Self {
         Self {
             v_timestamp: Vec::new(),
@@ -1025,32 +1027,49 @@ impl CsvData {
             v_packet_l: Vec::new(),
             v_id_src: Vec::new(),
             v_id_dest: Vec::new(),
+            v_ampdu_id: Vec::new(),  
+
         }
     }
 }
+
+use csv::WriterBuilder;
+use std::io::BufWriter;
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct CsvType {
     csv_data: Arc<Mutex<CsvData>>,
-    folder: String,
+    writer: Arc<Mutex<BufWriter<std::fs::File>>>,
+    batch_size: usize,
 }
-#[allow(dead_code)]
+
 impl CsvType {
-    pub fn new(folder_name: &str) -> Self {
-        Self {
- 
-            csv_data: Arc::new(Mutex::new(CsvData::new())),
-            folder: folder_name.to_string(),
+    /// Creates a new CsvType with a buffered writer and specified batch size.
+    pub fn new(folder_name: &str) -> io::Result<Self> {
+
+        const BATCH_SIZE : usize = 64; 
+
+
+        let dir = format!("Results/{}", folder_name);
+        std::fs::create_dir_all(&dir)?;
+        let file_path = format!("{}/QUEUE_stats.csv", dir);
+        let file = OpenOptions::new().create(true).append(true).open(&file_path)?;
+        let mut buf = BufWriter::new(file);
+        // Write header if file is empty
+        if buf.get_ref().metadata()?.len() == 0 {
+            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID")?;
+            buf.flush()?;
         }
+        Ok(Self {
+            csv_data: Arc::new(Mutex::new(CsvData::new())),
+            writer: Arc::new(Mutex::new(buf)),
+            batch_size: BATCH_SIZE,
+        })
     }
 
-    pub fn get_data_handle(&self) -> Arc<Mutex<CsvData>> {
-        Arc::clone(&self.csv_data)
-    }
-
+    /// Pushes a new record into the in-memory buffer and flushes when batch size is reached.
     pub fn update_stats(
-        &mut self,
+        &self,
         now: TaiTime<0>,
         id_packet: usize,
         queue_size: usize,
@@ -1059,64 +1078,44 @@ impl CsvType {
         length_packet: usize,
         id_src: usize,
         id_dest: usize,
+        ampdu_id: u32,
     ) {
-        let formatted_timestamp = format_timestamp!(now);
-        debug_print!(
-            DebugColor::Purple,
-            "{} [DBG STATS QUEUE]Pushing to csv_data - timestamp: {}, packet ID: {}, queue size: {}, queue Ts: {}, queue Tq: {}, packet length: {}, source ID: {}, destination ID: {}",
-            format_elapsed!(now),
-            formatted_timestamp,
-            id_packet,
-            queue_size,
-            Ts,
-            Tq,
-            length_packet,
-            id_src,
-            id_dest
-        );
-        if let Ok(mut data) = self.csv_data.lock() {
-            data.v_timestamp.push(formatted_timestamp);
+        let ts_str = format_timestamp!(now);
+        {
+            let mut data = self.csv_data.lock().unwrap();
+            data.v_timestamp.push(ts_str.clone());
             data.v_packet_id.push(id_packet);
             data.v_queue_size.push(queue_size);
+            data.v_packet_l.push(length_packet);
             data.v_queue_ts.push(Ts);
             data.v_queue_tq.push(Tq);
-            data.v_packet_l.push(length_packet);
             data.v_id_src.push(id_src);
             data.v_id_dest.push(id_dest);
+            data.v_ampdu_id.push(ampdu_id);
         }
 
-        // Dump all the current data to CSV each time this is called.
-        if let Err(e) = self.save_network_stats_to_csv() {
-            eprintln!("Error writing CSV: {}", e);
+        // Check if batch limit reached
+        let flush_now = {
+            let data = self.csv_data.lock().unwrap();
+            data.v_timestamp.len() >= self.batch_size
+        };
+
+        if flush_now {
+            if let Err(e) = self.flush_batch() {
+                eprintln!("Error flushing CSV batch: {}", e);
+            }
         }
     }
 
-    /// Dumps the entire content of the in-memory vectors to the CSV file.
-    /// After a successful write, the vectors are cleared.
-    pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
-        // Construct the file path
-        let file_path = format!("Results/{}/QUEUE_stats.csv", self.folder);
-        let path = Path::new(&file_path);
-
-        // Open the file in append mode; create it if necessary.
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
-        // If the file is empty, write a header.
-        if file.metadata()?.len() == 0 {
-            writeln!(
-                file,
-                "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest"
-            )?;
-        }
-
-        // Lock the shared data and drain its contents.
+    /// Writes all buffered records to CSV and clears the buffer.
+    fn flush_batch(&self) -> io::Result<()> {
         let mut data = self.csv_data.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap();
 
-        // Assuming all vectors have the same length.
         for i in 0..data.v_timestamp.len() {
-            // Format one CSV record from the current index.
-            let record = format!(
-                "{},{},{},{},{},{},{},{}",
+            writeln!(
+                writer,
+                "{},{},{},{},{},{},{},{},{}",
                 data.v_timestamp[i],
                 data.v_packet_id[i],
                 data.v_queue_size[i],
@@ -1124,25 +1123,35 @@ impl CsvType {
                 data.v_queue_ts[i],
                 data.v_queue_tq[i],
                 data.v_id_src[i],
-                data.v_id_dest[i]
-            );
-            writeln!(file, "{}", record)?;
+                data.v_id_dest[i],
+                data.v_ampdu_id[i],
+            )?;
         }
-        file.flush()?;
-
-        // Clear the vectors so the same data is not written again.
+        writer.flush()?;
+        // Clear the in-memory buffer
         data.v_timestamp.clear();
         data.v_packet_id.clear();
         data.v_queue_size.clear();
+        data.v_packet_l.clear();
         data.v_queue_ts.clear();
         data.v_queue_tq.clear();
-        data.v_packet_l.clear();
         data.v_id_src.clear();
         data.v_id_dest.clear();
+        data.v_ampdu_id.clear();
 
         Ok(())
     }
 }
+
+// Optionally, implement Drop to flush any remaining data on drop
+impl Drop for CsvType {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush_batch() {
+            eprintln!("Error flushing CSV on drop: {}", e);
+        }
+    }
+}
+
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -1873,7 +1882,7 @@ pub fn frametransmission_delay(
         PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6;
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
-    let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
                                                                       // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
 
     let T =

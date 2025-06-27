@@ -2824,6 +2824,7 @@ impl XRServer {
                         max_bitrate_ladder_mbps,
                         &self.network_effects, 
                         &self.video_sample_filename, 
+                        self.fps, 
                     )
                     .await
                     .unwrap();

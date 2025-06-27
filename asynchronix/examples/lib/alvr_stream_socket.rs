@@ -71,7 +71,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 2.0;
+pub const OFFSET_VIDEO: f64 = 5.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -99,6 +99,8 @@ pub struct ChunkedHevcEncoder {
     frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
+
+    framerate: f32, 
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -110,6 +112,7 @@ impl ChunkedHevcEncoder {
         chunk_duration: f64,
         string: String,
         offset_video: f64,
+        framerate: f32, 
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
@@ -126,6 +129,7 @@ impl ChunkedHevcEncoder {
             frame_queue: VecDeque::new(),
             parser: HevcParser::new(),
             encoder_str: string.clone(),
+            framerate, 
         }
     }
 
@@ -139,7 +143,7 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
 
     pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
-        let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
+        let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
@@ -1885,6 +1889,7 @@ impl<H: Serialize> StreamSender<H> {
         max_bitrate_ladder_mbps: f32,
         network_effects: &[NetworkPattern], 
         final_file: &str, 
+        framerate: f32, 
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
@@ -1991,6 +1996,7 @@ impl<H: Serialize> StreamSender<H> {
                     CHUNK_DURATION_F64_S, // Chunk duration in seconds
                     format!("[ENCODER {}]", ip),
                     random_offset,
+                    framerate 
                 );
 
                 // Wrap the encoder in an Arc<Mutex<_>>

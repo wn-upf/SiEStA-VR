@@ -63,6 +63,7 @@ impl VRPair {
         test: &str,
         patterns: &[NetworkPattern], 
         file_name_video: &str, 
+        fps: f32, 
 
     ) -> Self {
         let server_id = 100 + pair_index as i32;
@@ -70,7 +71,7 @@ impl VRPair {
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let server_coords = Coords::with_coords(1.0, 0.0, 0.0);
+        let server_coords = Coords::with_coords(0.0, 0.0, 0.0);
         let client_coords = Coords::with_coords(distance, 0.0, 0.0);
 
         let server_tx = frametransmission_delay(
@@ -92,13 +93,13 @@ impl VRPair {
             server_ip,
             client_ip,
             t0,
-            INITIAL_FRAMERATE_FPS,
+            fps,
             initial_bitrate as f32,
             name_folder,
             patterns, 
             file_name_video, 
         );
-        let mut xr_client = XRClient::new(client_ip, INITIAL_FRAMERATE_FPS, t0, name_folder, test);
+        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test);
 
         let mut sta_server = STA_extended::new(
             initial_bitrate * 1e6,
@@ -164,8 +165,9 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 14 {
-        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename>", args[0]);
+    if args.len() != 17 {
+        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> 
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users>", args[0]);
         return;
     }
 
@@ -175,15 +177,19 @@ fn main() {
     let k_queue: usize = args[3].parse().unwrap();
     let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
     let _rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
-    let distance: f64 = args[6].parse().unwrap();
-    let initial_bitrate: f64 = args[7].parse().unwrap();
-    let pl_prob: f64 = args[8].parse().unwrap();
-    let n_xr: usize = args[9].parse().unwrap();
-    let n_bg: usize = args[10].parse().unwrap(); // New parameter for background STAs
-    let is_ul_bg_traffic: usize = args[11].parse().unwrap();
-    let test_type: String = args[12].parse().unwrap(); // New test type parameter
+    let distance: f64 = args[6].parse().unwrap().expect("Invalid distance");
+    let initial_bitrate: f64 = args[7].parse().unwrap().expect("Invalid bitrate");
+    let pl_prob: f64 = args[8].parse().unwrap().expect("Invalid PL");
+    let n_xr: usize = args[9].parse().unwrap().expect("Invalid N_xr");
+    let n_bg: usize = args[10].parse().unwrap().expect("Invalid N_bg"); // New parameter for background STAs
+    let is_ul_bg_traffic: usize = args[11].parse().unwrap().expect("Invalid IS_UL");
+    let test_type: String = args[12].parse().unwrap().expect("Invalid emulated Test"); // New test type parameter
 
-    let video_filename: String = args[13].parse().unwrap(); 
+    let video_filename: String = args[13].parse().unwrap().expect("Invalid video filename"); 
+    let fps:f32 = args[14].parse().unwrap().expect("Invalid FPS"); 
+
+    let n_close: usize = args[15].parse().unwrap().expect("Invalid N_close_users"); 
+    let distance_close: f64 =  args[16].parse().unwrap().expect("Invalid Distance_close_users"); 
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -202,8 +208,8 @@ fn main() {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic,
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -217,8 +223,6 @@ fn main() {
     let mut bg_sta_models = Vec::new();
     let mut bg_sta_mailboxes = Vec::new();
     let mut bg_sta_addresses = Vec::new();
-
-
 
     // Create and configure queue
     let mut queue = QueueModule::new(
@@ -236,16 +240,33 @@ fn main() {
     // let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
     let queue_stats = queue.get_queue_stats_handle();
     // let sta_stats = queue.get_stas_stats_handle();
-
-
     // print_red!("EMU EFFECTS HERE", );
+
     let emu_effects: &[lib::models_mm1k::NetworkPattern] = queue.get_network_patterns(); 
     
-
-
-
-    // Create XR pairs
-    for i in 0..n_xr {
+    for i in 0..n_close{ // to set up variable distance scenarios across users
+        let first_vr_pair_distance= VRPair::new(
+            
+            i,
+            t0,
+            mean_length,
+            initial_bitrate,
+            distance_close,
+            &name_folder,
+            suffix,
+            emu_effects, 
+            &video_filename, 
+            fps
+        ); 
+        all_sta_ids.push(100 + i as i32);
+        all_sta_ids.push(200 + i as i32);
+        xr_client_addresses.push(first_vr_pair_distance.mbox_xr_client.address());
+        xr_server_addresses.push(first_vr_pair_distance.mbox_xr_server.address());
+        vr_pairs.push(first_vr_pair_distance);
+    }
+    
+    // Create extra XR pairs
+    for i in n_close..n_xr {
         let vr = VRPair::new(
             i,
             t0,
@@ -256,6 +277,7 @@ fn main() {
             suffix,
             emu_effects, 
             &video_filename, 
+            fps
         );
         all_sta_ids.push(100 + i as i32);
         all_sta_ids.push(200 + i as i32);

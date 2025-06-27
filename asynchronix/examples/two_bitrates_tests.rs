@@ -1,6 +1,6 @@
 
 
-pub const INTRAREFRESH_ENABLED: bool = false; 
+pub const INTRAREFRESH_ENABLED: bool = true; 
 
 pub const FRAMERATE_WINDOWS: usize = 60; 
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
@@ -12,7 +12,7 @@ pub const HEIGHT_ENCODER: usize = 2160;
 
 
 const MAX_PARALLEL_VMAF: usize = 20;
-const WORKERS: usize = 2;
+const WORKERS: usize = 1;
 
 
 pub const RESYNC_BUFFER: usize = 20; 
@@ -3831,7 +3831,7 @@ fn main() -> Result<()> {
                 for (_folder, traces) in group {
                     for trace_csv in traces {
                         process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone()).await?;
-                        process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?; 
+                        // process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?; 
                     }
                 }
                 Ok(())

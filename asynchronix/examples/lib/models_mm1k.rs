@@ -83,8 +83,8 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
-// pub const BANDWIDTH_LIMIT: f64 = 25.01E6;
-// Steps of emulated bandwidth
+
+
 pub const STEP1_TBEGIN: f64 = 20.0;
 pub const STEP1_TEND: f64 = 30.0;
 
@@ -1406,6 +1406,8 @@ pub struct StatsUpdate {
     pub packet_id: i32,
     pub now: tai_time::TaiTime<0>,
     pub length_packet: usize,
+
+    pub ampdu_id: u32, 
 }
 
 #[allow(unused)]
@@ -1450,6 +1452,8 @@ pub struct QueueModule {
     pub network_emulator: NetworkPatternEmulator,
     pub queue_network_emulator: QueueMechanism,
     pub ul_capacity_queue_device: usize,
+
+    pub ampdu_id: u32, 
 }
 #[allow(unused)]
 impl QueueModule {
@@ -1518,7 +1522,7 @@ impl QueueModule {
             service_rate: 0.0,
             t0_time: Instant::now(),
 
-            csv_metrics: CsvType::new(&folder_dir),
+            csv_metrics: CsvType::new(&folder_dir).expect("?? CSVTYPE"),
 
             coords_queue: Coords::new(),
             p_tx: P_TX,
@@ -1535,6 +1539,7 @@ impl QueueModule {
             network_emulator: network_emulator,
             queue_network_emulator: queue_mechanism,
             ul_capacity_queue_device: ul_size,
+            ampdu_id: 0, 
         }
     }
 
@@ -1811,6 +1816,8 @@ impl QueueModule {
             AMPDU_sent.size - 1
         );
         // AMPDU_sent.print();
+        self.ampdu_id += 1; // increment the AMPDU counter for logging. 
+
         self.packet_being_served = false;
 
         // match AMPDU_sent.sta_dest_id {
@@ -1868,6 +1875,7 @@ impl QueueModule {
                             stats_update.length_packet,
                             stats_update.sta_src_id,
                             stats_update.sta_dest_id,
+                            stats_update.ampdu_id, 
                         );
                     }
                 }
@@ -2206,7 +2214,7 @@ impl QueueModule {
                             cloned_packet.queue_out_instant = now;
 
                             cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
-
+                            
 
                             // Update stats before moving packet
                             if let Some(stats_tx) = &self.stats_tx {
@@ -2223,22 +2231,12 @@ impl QueueModule {
                                     packet_id: cloned_packet.packet_id as i32,
                                     now,
                                     length_packet: cloned_packet.length_packet,
+                                    ampdu_id: self.ampdu_id, 
                                 };
                                 stats_tx
                                     .send(stats_update)
                                     .expect("Failed to send stats update");
                             }
-
-
-
-
-
-
-
-
-
-
-
 
                             // Add the cloned packet to the AMPDU
                             self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
@@ -2274,6 +2272,7 @@ impl QueueModule {
                             // Optionally, we could log it or mark it.
                         } else {
                             new_ampdu_packets.push(packet);
+                            
                         }
                     }
                     self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
