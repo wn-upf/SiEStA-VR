@@ -1,7 +1,7 @@
 use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Read};
 #[allow(unused_imports)]
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
@@ -2012,20 +2012,20 @@ impl<H: Serialize> StreamSender<H> {
                     Some(frame) => {
                         buffer = frame;
 
-                        let hevc_file_path: String = format!(
-                            "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref",
-                            name_folder, ip
-                        );
+                        // let hevc_file_path: String = format!(
+                        //     "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref",
+                        //     name_folder, ip
+                        // );
 
-                        std::fs::create_dir_all(hevc_file_path).unwrap();
-                        let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref);
-                        print_pretty!(
-                            DebugColor::ForestGreen,
-                            "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY",
-                            id_frame_files_ref
-                        );
-                        let mut file = std::fs::File::create(filename).unwrap();
-                        file.write_all(&buffer).unwrap();
+                        // std::fs::create_dir_all(hevc_file_path).unwrap();
+                        // let filename = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc",name_folder,ip, id_frame_files_ref);
+                        // print_pretty!(
+                        //     DebugColor::ForestGreen,
+                        //     "[Encoder XRServer] REF FRAME {} SAVED TO MEMORY",
+                        //     id_frame_files_ref
+                        // );
+                        // let mut file = std::fs::File::create(filename).unwrap();
+                        // file.write_all(&buffer).unwrap();
                     }
                     None => {
                         print_pretty!(
@@ -2046,18 +2046,18 @@ impl<H: Serialize> StreamSender<H> {
                         // Try again after waiting
                         match encoder.next_frame().await {
                             Some(frame) => {
-                                let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref",name_folder ,ip);
+                                // let hevc_file_path = format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref",name_folder ,ip);
 
-                                std::fs::create_dir_all(hevc_file_path).unwrap();
-                                let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
-                                print_pretty!(
-                                    DebugColor::Peach,
-                                    "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}",
-                                    id_frame_files_ref,
-                                    buffer.len()
-                                );
+                                // std::fs::create_dir_all(hevc_file_path).unwrap();
+                                // let mut file = std::fs::File::create(format!("/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}/{}/hevc_ref/{}.hevc", name_folder ,ip, id_frame_files_ref)).unwrap();
+                                // print_pretty!(
+                                //     DebugColor::Peach,
+                                //     "^^^^^^^^^^^^^^^^^[DBG ENCODER REF SAVE] Storing {}, len: {}",
+                                //     id_frame_files_ref,
+                                //     buffer.len()
+                                // );
 
-                                file.write_all(&frame.clone()).unwrap();
+                                // file.write_all(&frame.clone()).unwrap();
 
                                 buffer = frame
                             }

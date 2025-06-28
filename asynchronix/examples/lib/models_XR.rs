@@ -3364,11 +3364,11 @@ impl XRClient {
         }
 
         let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
-        let base_dir = &format!("Sink_for_video/{}", &self.name_folder);
+        // let base_dir = &format!("Sink_for_video/{}", &self.name_folder);
 
-        // Define paths to reference and lossy directories
-        let ref_dir = format!("{}/{}/reference_rgb", base_dir, ip);
-        let lossy_dir = format!("{}/{}/lossy_rgb", base_dir, ip);
+        // // Define paths to reference and lossy directories
+        // let ref_dir = format!("{}/{}/reference_rgb", base_dir, ip);
+        // let lossy_dir = format!("{}/{}/lossy_rgb", base_dir, ip);
 
         self.flush_vmaf_buffer(now).await?;
 
@@ -3402,9 +3402,9 @@ impl XRClient {
             Ok(())
         };
 
-        // Clean up both directories
-        remove_old_frames(&ref_dir)?;
-        remove_old_frames(&lossy_dir)?;
+        // // Clean up both directories
+        // remove_old_frames(&ref_dir)?;
+        // remove_old_frames(&lossy_dir)?;
 
         if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
             println!("Cleaned up frames older than {}", oldest_frame_to_keep);

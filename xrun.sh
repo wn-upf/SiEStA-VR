@@ -1,7 +1,7 @@
 NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=0
 N_XR=(3)
-initial_bitrate_mbps=(50.0 100.0)
+initial_bitrate_mbps=(100.0)
 TEST_TYPE=("STD")
 
 # Can be "BW", "JI", "PL", or "STD" for different emulated tests (or none)
@@ -17,8 +17,8 @@ distance=15.0
 PL=0.1
 fps_list=(60.0 90.0)
 
-num_close_users=(2)
-distance_close_users=(15.0)
+num_close_users=(1 2)
+distance_close_users=(1.0)
 
 RANDOM_SEEDS=(1 2 3 4 5)
 
