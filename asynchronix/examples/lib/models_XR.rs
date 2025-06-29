@@ -3281,24 +3281,7 @@ impl XRClient {
             }
         }
     }
-    fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Vec<u32>> {
-        if rgb_data.len() != width * height * 3 {
-            println!(
-                "ERROR: Expected rgb_data size {} but got {}",
-                width * height * 3,
-                rgb_data.len()
-            );
-            return None;
-        }
 
-        let mut pixels = Vec::with_capacity(width * height);
-        for chunk in rgb_data.chunks_exact(3) {
-            let pixel = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
-            pixels.push(pixel);
-        }
-
-        Some(pixels)
-    }
 
     // Function to convert YUV420p to RGB
     pub fn yuv420_to_rgb(yuv: &[u8], width: usize, height: usize) -> Vec<u8> {

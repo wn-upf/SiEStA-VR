@@ -23,6 +23,7 @@ use crate::lib::{
     CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS, 
     P_TX,
 };
+use std::collections::HashSet;
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
 use rand::{SeedableRng};
@@ -1130,7 +1131,7 @@ impl NetworkPatternEmulator {
                             event_end,
                         ),
                     }
-                }
+                }, 
                 RandomEventKind::Bandwidth => {
                     // For bandwidth events, mean_value represents the max_bps limit.
                     NetworkPattern::new_bandwidth(
@@ -1974,18 +1975,19 @@ impl QueueModule {
                 format_elapsed!(now)
             );
     
-            let mut is_ul_count = 0;
-            let mut is_dl = 0;
+            let mut ul_stas = HashSet::new();
+            let mut is_dl : bool = false; 
+
     
             const TAU_COLLISIONS: f32 = 2.0 / 9.0;
     
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
+               
                 let is_ul = sta_src > sta_dest;
-    
                 if is_ul {
-                    is_ul_count += 1;
+                    ul_stas.insert(*sta_src);        // count each UL-STA once
                 } else {
-                    is_dl = 1;
+                    is_dl = true; 
                 }
     
                 debug_schedule!(
@@ -1997,8 +1999,8 @@ impl QueueModule {
                 );
     
                 if is_ul && packets.packet_count > self.ul_capacity_queue_device {
-                    debug_print!(
-                        DebugColor::Red,
+                    print_red!(
+                        // DebugColor::Red,
                         "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {})",
                         format_elapsed!(now),
                         sta_src,
@@ -2036,7 +2038,7 @@ impl QueueModule {
                 }
             }
     
-            let n_devices_collisions = is_ul_count + is_dl;
+            let n_devices_collisions = ul_stas.len() + is_dl as usize; 
             let collision_probability =
                 1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
             let mut rng = rand::thread_rng();
@@ -2045,8 +2047,8 @@ impl QueueModule {
     
             debug_schedule!(
                 "Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}",
-                is_ul_count,
-                is_dl,
+                ul_stas.len(),
+                is_dl, 
                 n_devices_collisions,
                 collision_probability,
                 random_value,

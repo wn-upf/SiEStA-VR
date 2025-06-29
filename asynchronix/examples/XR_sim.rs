@@ -223,13 +223,29 @@ fn main() {
     fs::create_dir_all(&output_path).expect("Failed to create directory");
 
     let t0 = MonotonicTime::EPOCH;
-    let mut all_sta_ids = Vec::new();
     let mut vr_pairs = Vec::new();
     let mut xr_client_addresses = Vec::new();
     let mut xr_server_addresses = Vec::new();
     let mut bg_sta_models = Vec::new();
     let mut bg_sta_mailboxes = Vec::new();
     let mut bg_sta_addresses = Vec::new();
+
+
+    let mut all_sta_ids = Vec::new();
+   
+    for i in 0..n_close {
+        all_sta_ids.push(100 + i as i32);
+        all_sta_ids.push(200 + i as i32);
+    }
+    for i in n_close..n_xr {
+            all_sta_ids.push(100 + i as i32);
+            all_sta_ids.push(200 + i as i32);
+    }
+        // 2) Gather all of the BG STA IDs
+    for i in 0..n_bg {
+        all_sta_ids.push(300 + i as i32);
+    }
+
 
     // Create and configure queue
     let mut queue = QueueModule::new(
@@ -250,7 +266,8 @@ fn main() {
     // print_red!("EMU EFFECTS HERE", );
 
     let emu_effects: &[lib::models_mm1k::NetworkPattern] = queue.get_network_patterns(); 
-    
+    assert!(n_close <= n_xr, "n_close_users must not exceed total XR users");
+
     for i in 0..n_close{ // to set up variable distance scenarios across users
         let first_vr_pair_distance= VRPair::new(
             
@@ -265,8 +282,8 @@ fn main() {
             &video_filename, 
             fps
         ); 
-        all_sta_ids.push(100 + i as i32);
-        all_sta_ids.push(200 + i as i32);
+        // all_sta_ids.push(100 + i as i32);
+        // all_sta_ids.push(200 + i as i32);
         xr_client_addresses.push(first_vr_pair_distance.mbox_xr_client.address());
         xr_server_addresses.push(first_vr_pair_distance.mbox_xr_server.address());
         vr_pairs.push(first_vr_pair_distance);
@@ -286,8 +303,8 @@ fn main() {
             &video_filename, 
             fps
         );
-        all_sta_ids.push(100 + i as i32);
-        all_sta_ids.push(200 + i as i32);
+        // all_sta_ids.push(100 + i as i32);
+        // all_sta_ids.push(200 + i as i32);
         xr_client_addresses.push(vr.mbox_xr_client.address());
         xr_server_addresses.push(vr.mbox_xr_server.address());
         vr_pairs.push(vr);
@@ -319,7 +336,7 @@ fn main() {
         bg_sta_addresses.push(mbox_bg_sta.address());
         bg_sta_mailboxes.push(mbox_bg_sta);
         bg_sta_models.push(bg_sta);
-        all_sta_ids.push(sta_id);
+        // all_sta_ids.push(sta_id);
     }
 
 
