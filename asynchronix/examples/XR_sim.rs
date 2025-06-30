@@ -74,7 +74,7 @@ impl VRPair {
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let server_coords = Coords::with_coords(0.0, 0.0, 0.0);
+        let server_coords = Coords::with_coords(1.0, 0.0, 0.0);
         let client_coords = Coords::with_coords(distance, 0.0, 0.0);
 
         let server_tx = frametransmission_delay(
@@ -237,9 +237,9 @@ fn main() {
         all_sta_ids.push(100 + i as i32);
         all_sta_ids.push(200 + i as i32);
     }
-    for i in n_close..n_xr {
-            all_sta_ids.push(100 + i as i32);
-            all_sta_ids.push(200 + i as i32);
+    for j in n_close..n_xr {
+            all_sta_ids.push(100 + j as i32);
+            all_sta_ids.push(200 + j as i32);
     }
         // 2) Gather all of the BG STA IDs
     for i in 0..n_bg {
@@ -338,11 +338,22 @@ fn main() {
         bg_sta_models.push(bg_sta);
         // all_sta_ids.push(sta_id);
     }
+    
 
 
 
     // Connect all STAs to queue
     for vr in vr_pairs.iter_mut() {
+
+        queue.STA_coords_map.insert(
+            vr.sta_server.sta_id as usize,
+            vr.sta_server.sta_coordinates.clone(),
+        );
+        queue.STA_coords_map.insert(
+            vr.sta_client.sta_id as usize,
+            vr.sta_client.sta_coordinates.clone(),
+        );
+
         vr.sta_server
             .output_network_port
             .connect(QueueModule::input, &mbox_queue);
@@ -362,6 +373,12 @@ fn main() {
         bg_sta
             .output_network_port
             .connect(QueueModule::input, &mbox_queue);
+
+        queue.STA_coords_map.insert(
+            bg_sta.sta_id as usize,
+            bg_sta.sta_coordinates.clone(),
+        );
+
     }
 
     // Build simulation

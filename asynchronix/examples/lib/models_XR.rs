@@ -7,10 +7,11 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
-
+use crate::debug_debug;
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
+use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::HevcParser;
 use anyhow::Result;
@@ -1777,7 +1778,6 @@ pub struct XRServer {
     pub STATISTICS_MANAGER: StatisticsManager,
     pub name_folder: String,
     pub network_effects: Vec<NetworkPattern>, 
-    
 
     pub video_sample_filename: String, 
 
@@ -1864,7 +1864,7 @@ impl XRServer {
 
             match packet {
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-                    // debug_bgprint!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
+                    debug_debug!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
 
                     // let mut map_rtt_lock = map_clone.write().unwrap();
                     let frame_id = network_stats.frame_index as u32;
@@ -2051,8 +2051,6 @@ impl XRServer {
                                     self.outport_videoapp_network.send(packet).await;
                                 }
 
-
-
                             } else {
                                 println!(
                                     "{}",
@@ -2235,10 +2233,14 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-                // let normal = Normal::new(0.0, 2.0).unwrap(); // Mean = 0, Std dev = 5
-                // let epsilon = normal.sample(&mut rand::thread_rng()); // Random Gaussian value
+                let normal: Normal<f32> = Normal::new(0.0, 0.001).unwrap(); // σ = 0.001s
+                let epsilon = normal.sample(&mut rand::thread_rng());
 
-                let time_until_next_frame = Duration::from_secs_f32(1.0 / (self.fps)); // no epsilon for now, deterministic FPS at server.
+                let ideal = 1.0 / (self.fps as f32);
+                let floor = 0.5 * ideal; 
+
+                let dt = (ideal + epsilon).max(floor);
+                let time_until_next_frame = Duration::from_secs_f32(dt);
 
                 self.bitrate_manager.report_encoded_frame_server(now);
 
@@ -3821,7 +3823,7 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            print_pretty!(
+                            debug_debug!(
                                 DebugColor::Violet,
                                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
                                 format_elapsed!(now),

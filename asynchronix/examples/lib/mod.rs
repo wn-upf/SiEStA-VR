@@ -122,6 +122,17 @@ macro_rules! debug_print {
     }
 }
 
+
+
+#[macro_export]
+macro_rules! debug_debug {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_color_fn()(msg));
+
+    }
+}
+
 #[macro_export]
 macro_rules! format_elapsed {
     ($elapsed:expr) => {{
@@ -1514,6 +1525,7 @@ pub struct MpduPacket {
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_src_coords: Coords,
+    pub sta_dest_coords: Coords, 
     pub queue_length_when_out: usize,
 
     pub data_inner: Vec<u8>,
@@ -1540,6 +1552,8 @@ impl MpduPacket {
             sta_src_id: 0,
             sta_dest_id: 0,
             sta_src_coords: Coords::with_coords(0.0, 0.0, 0.0),
+            sta_dest_coords: Coords::with_coords(0.0, 0.0, 0.0),
+
             queue_length_when_out: 0,
             data_inner: vec![],
             header_alvr: HeaderALVRStream::default(),
@@ -1828,7 +1842,7 @@ pub fn frametransmission_delay(
         coords_dest.y,
         coords_dest.z,
     );
-
+    // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance); 
     let PL = path_loss(distance);
     let Pr = effPt - PL;
 
@@ -1887,7 +1901,7 @@ pub fn frametransmission_delay(
         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
 
     // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
-
+    // println!("T = {:?}", T); 
     ResultsFrameTXDelay {
         pathloss: PL,
         p_rx: Pr,

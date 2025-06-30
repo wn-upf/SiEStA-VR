@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, print_pretty, print_prettyyyy, print_red, print_yellow};
+use crate::{debug_bgprint, print_pretty, print_prettyyyy, print_red, print_yellow, debug_debug};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -1803,7 +1803,7 @@ impl QueueModule {
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
 
-        debug_print!(
+        debug_debug!(
             DebugColor::Red,
             "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
             format_elapsed!(elapsed),
@@ -1990,7 +1990,8 @@ impl QueueModule {
                     is_dl = true; 
                 }
     
-                debug_schedule!(
+                debug_debug!(
+                    DebugColor::Cyan, 
                     "src: {}, dest: {} | UL_FLOW: {} |queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ",
                     sta_src, sta_dest, is_ul, packets.packet_count,
                     packets.fullampdu_max_size,
@@ -2023,6 +2024,8 @@ impl QueueModule {
                             }
                         }
                     }
+
+                    
                     // Remove identified packets (from back to front to avoid index issues)
                     for idx in indices_to_remove {
                         if let Some(removed_packet) = self.queue.remove(idx) {
@@ -2148,7 +2151,8 @@ impl QueueModule {
                 // In non-collision, we build an AMPDU for the selected STA.
                 let mut packet_with_id: Option<&MpduPacket> = self.queue.front();
                 if let Some(_packet) = packet_with_id {
-                    debug_schedule!(
+                    debug_debug!(
+                        DebugColor::SaddleBrown, 
                         "QUEUE FRONT: SRC {}, DEST: {}",
                         _packet.sta_src_id,
                         _packet.sta_dest_id
@@ -2162,7 +2166,8 @@ impl QueueModule {
                     }
                 }
                 if let Some(first_packet) = packet_with_id {
-                    debug_schedule!(
+                    debug_debug!(
+                        DebugColor::SaddleBrown, 
                         "Selected STA: Src{:.0} ,Dest: {:.0}",
                         first_packet.sta_src_id,
                         first_packet.sta_dest_id
@@ -2188,15 +2193,44 @@ impl QueueModule {
                             let new_total_length =
                                 self.aux_ampdu_serviced.total_length + current_packet.length_packet;
                             let new_size = self.aux_ampdu_serviced.size + 1;
-                            resultz = frametransmission_delay(
+                            
+
+                            let is_ul = current_packet.sta_src_id > current_packet.sta_dest_id; // 
+                            
+                            if is_ul{
+                                resultz = frametransmission_delay(
                                 new_total_length as f64,
                                 new_size,
                                 self.coords_queue,
                                 current_packet.sta_src_coords.clone(),
                                 P_TX,
-                            );
+                                );
+                            }
+                            else{
+
+
+                                let dest_coords = self
+                                    .STA_coords_map
+                                    .get(&(current_packet.sta_dest_id as usize))
+                                    .unwrap_or_else(|| panic!(
+                                        "no coordinates for STA {}",
+                                        current_packet.sta_dest_id
+                                    ))
+                                    .clone();
+
+                                // println!("DOWNLINK so coords are {:?}", dest_coords.x); 
+                                resultz = frametransmission_delay(
+                                    new_total_length as f64,
+                                    new_size,
+                                    self.coords_queue,
+                                    dest_coords,
+                                    P_TX,
+                                );
+                            }
+
+                 
                             if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
-                                debug_print!(
+                                debug_debug!(
                                     DebugColor::DarkRed,
                                     "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
                                     new_size,
@@ -2232,6 +2266,8 @@ impl QueueModule {
                                     length_packet: cloned_packet.length_packet,
                                     ampdu_id: self.ampdu_id, 
                                 };
+
+                                
                                 stats_tx
                                     .send(stats_update)
                                     .expect("Failed to send stats update");
@@ -2250,11 +2286,14 @@ impl QueueModule {
                     // Process AMPDU packets: simulate transmission errors
                     let mut new_ampdu_packets: Vec<MpduPacket> = Vec::new();
                     let mut rng = rand::thread_rng();
-                    for packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
+                    for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
+
+                        packet.T_s = Duration::from_secs_f64(resultz.service_delay);   // Assign transmission delay of full AMPDU                       
                         let random_value: f64 = rng.gen();
+
                         if random_value <= self.PL_probability {
 
-                            debug_bgprint!( DebugColor::SaddleBrown, 
+                            debug_debug!( DebugColor::SaddleBrown, 
                                 "{:.6} [DBG QUEUE] - packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Index in Q: {}",
                                 format_elapsed!(now),
                                 packet.sta_src_id,
@@ -2293,7 +2332,8 @@ impl QueueModule {
     
                     // Debug print: show remaining queue after removals.
                 
-                    if DEBUG_PRINT_ENABLED {
+                    // if DEBUG_PRINT_ENABLED 
+                    {
                         print_yellow!(
                             "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
                             format_elapsed!(now),
