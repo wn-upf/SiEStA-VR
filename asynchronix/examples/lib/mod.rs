@@ -127,9 +127,13 @@ macro_rules! debug_print {
 #[macro_export]
 macro_rules! debug_debug {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_color_fn()(msg));
 
+        if DEBUG_PRINT_ENABLED == true {
+
+                let msg = format!($fmt, $($arg)*);
+                println!("{}", $color.to_color_fn()(msg));
+
+        }
     }
 }
 
@@ -1024,6 +1028,9 @@ pub struct CsvData {
     v_id_src: Vec<usize>,
     v_id_dest: Vec<usize>,
     v_ampdu_id: Vec<u32>, 
+
+    v_collision: Vec<usize>, 
+    v_T_collision: Vec<f64>, 
 }
 
 impl CsvData {
@@ -1039,6 +1046,8 @@ impl CsvData {
             v_id_src: Vec::new(),
             v_id_dest: Vec::new(),
             v_ampdu_id: Vec::new(),  
+            v_collision: Vec::new(), 
+            v_T_collision: Vec::new(), 
 
         }
     }
@@ -1066,7 +1075,7 @@ impl CsvType {
         let mut buf = BufWriter::new(file);
         // Write header if file is empty
         if buf.get_ref().metadata()?.len() == 0 {
-            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID")?;
+            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision")?;
             buf.flush()?;
         }
         Ok(Self {
@@ -1088,6 +1097,8 @@ impl CsvType {
         id_src: usize,
         id_dest: usize,
         ampdu_id: u32,
+        is_collision: bool,
+        T_collision: f64, 
     ) {
         let ts_str = format_timestamp!(now);
         {
@@ -1101,6 +1112,10 @@ impl CsvType {
             data.v_id_src.push(id_src);
             data.v_id_dest.push(id_dest);
             data.v_ampdu_id.push(ampdu_id);
+
+
+            data.v_collision.push(is_collision as usize); 
+            data.v_T_collision.push(T_collision); 
         }
 
         // Check if batch limit reached
@@ -1124,7 +1139,7 @@ impl CsvType {
         for i in 0..data.v_timestamp.len() {
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{}",
                 data.v_timestamp[i],
                 data.v_packet_id[i],
                 data.v_queue_size[i],
@@ -1134,6 +1149,8 @@ impl CsvType {
                 data.v_id_src[i],
                 data.v_id_dest[i],
                 data.v_ampdu_id[i],
+                data.v_collision[i], 
+                data.v_T_collision[i]
             )?;
         }
         writer.flush()?;
@@ -1147,7 +1164,8 @@ impl CsvType {
         data.v_id_src.clear();
         data.v_id_dest.clear();
         data.v_ampdu_id.clear();
-
+        data.v_collision.clear();
+        data.v_T_collision.clear();
         Ok(())
     }
 }
@@ -1525,7 +1543,6 @@ pub struct MpduPacket {
     pub sta_src_id: i32,
     pub sta_dest_id: i32,
     pub sta_src_coords: Coords,
-    pub sta_dest_coords: Coords, 
     pub queue_length_when_out: usize,
 
     pub data_inner: Vec<u8>,
@@ -1552,7 +1569,6 @@ impl MpduPacket {
             sta_src_id: 0,
             sta_dest_id: 0,
             sta_src_coords: Coords::with_coords(0.0, 0.0, 0.0),
-            sta_dest_coords: Coords::with_coords(0.0, 0.0, 0.0),
 
             queue_length_when_out: 0,
             data_inner: vec![],

@@ -1406,6 +1406,11 @@ pub struct StatsUpdate {
     pub length_packet: usize,
 
     pub ampdu_id: u32, 
+
+    pub is_collision: bool, 
+    pub collision_backoff: f64, 
+
+
 }
 
 #[allow(unused)]
@@ -1874,6 +1879,8 @@ impl QueueModule {
                             stats_update.sta_src_id,
                             stats_update.sta_dest_id,
                             stats_update.ampdu_id, 
+                            stats_update.is_collision, 
+                            stats_update.collision_backoff, 
                         );
                     }
                 }
@@ -2044,6 +2051,7 @@ impl QueueModule {
             let n_devices_collisions = ul_stas.len() + is_dl as usize; 
             let collision_probability =
                 1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
+
             let mut rng = rand::thread_rng();
             let random_value: f32 = rng.gen();
             let collision_now: bool = random_value < collision_probability;
@@ -2136,11 +2144,30 @@ impl QueueModule {
                         Coords::default(),
                         P_TX,
                     );
-                    // print_yellow!(
-                    //     "COLLISION! for {:?} | Scheduling backoff for T_col = {} seconds",
-                    //     selected_sta.unwrap(),
-                    //     T_col
-                    // );
+
+                    if let Some(stats_tx) = &self.stats_tx {
+                            let stats_update = StatsUpdate {
+                                T_s: 0.0,
+                                T_q: 0.0,
+                                blocked_packet_counter: self.blocked_packet_counter,
+                                arrived_packet_counter: self.arrived_packet_counter,
+                                queue_length_when_out: 0,
+                                sta_src_id: _sta_key.0 as usize,
+                                sta_dest_id: _sta_key.1 as usize,
+                                packet_id: 0,
+                                now,
+                                length_packet: 0,
+                                ampdu_id: self.ampdu_id, 
+
+                                is_collision: true,
+                                collision_backoff: T_col as f64, 
+                            };
+
+                            stats_tx
+                                .send(stats_update)
+                                .expect("Failed to send stats update");                    
+                        }
+                   
                     let collision_duration = Duration::from_secs_f64(T_col as f64);
                     context
                         .scheduler
@@ -2265,6 +2292,9 @@ impl QueueModule {
                                     now,
                                     length_packet: cloned_packet.length_packet,
                                     ampdu_id: self.ampdu_id, 
+
+                                    is_collision: false,
+                                    collision_backoff: 0.0, 
                                 };
 
                                 
@@ -2332,7 +2362,7 @@ impl QueueModule {
     
                     // Debug print: show remaining queue after removals.
                 
-                    // if DEBUG_PRINT_ENABLED 
+                    if DEBUG_PRINT_ENABLED 
                     {
                         print_yellow!(
                             "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",

@@ -13,6 +13,8 @@ use std::io::BufReader;
 use crate::lib::CsvTrace;
 use crate::print_green;
 use crate::lib::models_mm1k::NetworkPattern;
+#[allow(unused)]
+use std::io::BufRead;
 
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
 
@@ -47,7 +49,6 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 from input args to simulator
-pub const INTRAREFRESH_ENABLED: bool = true;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
@@ -59,7 +60,7 @@ pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 5.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
-pub const IDR_FRAME_SIZE_GOP: usize = 60;
+// pub const IDR_FRAME_SIZE_GOP: usize = 60;
 
 pub const MAX_PACKET_SIZE_RECV: usize = 2000 * 8;
 pub const TRACKING: u16 = 0;
@@ -86,6 +87,8 @@ pub struct ChunkedHevcEncoder {
     encoder_str: String,
 
     framerate: f32, 
+    gop_size: usize, 
+    intra_refresh: bool, 
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -98,6 +101,8 @@ impl ChunkedHevcEncoder {
         string: String,
         offset_video: f64,
         framerate: f32, 
+        gop_size: usize, 
+        intra_refresh: bool, 
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
@@ -115,6 +120,8 @@ impl ChunkedHevcEncoder {
             parser: HevcParser::new(),
             encoder_str: string.clone(),
             framerate, 
+            gop_size, 
+            intra_refresh, 
         }
     }
 
@@ -139,7 +146,7 @@ impl ChunkedHevcEncoder {
         );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
-        if INTRAREFRESH_ENABLED {
+        if self.intra_refresh {
             command
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
@@ -161,7 +168,9 @@ impl ChunkedHevcEncoder {
                 // the throughput distribution will match that of the bitrate target strictly by padding. 
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
+                .args(&["-bf", "0"])    // force zero B-frames for PIR to work
                 .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
+                // .args(&["-intra-refresh-period", &format!("{:.0}, ", self.gop_size) ]) 
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -188,7 +197,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
 
                 .args(&["-rc-lookahead", "0"])
-                .args(&["-g", &format!("{:.0}", IDR_FRAME_SIZE_GOP)]) // using your GOP size constant
+                .args(&["-g", &format!("{:.0}", self.gop_size)]) // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -1875,6 +1884,8 @@ impl<H: Serialize> StreamSender<H> {
         network_effects: &[NetworkPattern], 
         final_file: &str, 
         framerate: f32, 
+        gop_size: usize, 
+        intra_refresh: bool, 
     ) -> Result<Buffer<H>> {
         let id_frame_files_ref = id_frame + 1;
 
@@ -1933,7 +1944,8 @@ impl<H: Serialize> StreamSender<H> {
                     wtr.write_record(&[
                         "OFFSET_VIDEO",
                         "PATH_VIDEO",
-                        "IDR_FREQUENCY", 
+                        "IDR_FREQUENCY",
+                        // "Intrarefresh_enabled", 
                         "timestamp",
                         "ID_frame",
                         "Lost", 
@@ -1953,17 +1965,13 @@ impl<H: Serialize> StreamSender<H> {
                     wtr.write_record(&[
                         format!("{random_offset:.4}"),     // offset used for this run
                         input_path.to_owned(),             // source clip
-                        format!("{}", IDR_FRAME_SIZE_GOP), 
+                        format!("{}", gop_size), 
                         // json, 
                         "".to_string(),                                // placeholder timestamp
                         "".to_string(),                                // placeholder id_f
                         "".to_string(),                                // placeholder lost
                         "".to_string(), 
                     ])?;
-
-
-                    
-                   
 
                     wtr.flush()?;
                     wtr2.flush()?; 
@@ -1979,7 +1987,9 @@ impl<H: Serialize> StreamSender<H> {
                     CHUNK_DURATION_F64_S, // Chunk duration in seconds
                     format!("[ENCODER {}]", ip),
                     random_offset,
-                    framerate 
+                    framerate, 
+                    gop_size, 
+                    intra_refresh, 
                 );
 
                 // Wrap the encoder in an Arc<Mutex<_>>

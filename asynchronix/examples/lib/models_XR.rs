@@ -1752,34 +1752,27 @@ impl BitrateManager {
 pub struct XRServer {
     pub ip_self: IpAddr,
     pub ip_client: IpAddr,
-
     pub t_0: TaiTime<0>,
     pub bitrate_manager: BitrateManager,
-
     pub video_app_sender: Option<StreamSender<VideoPacketHeader>>,
     pub audio_app_sender: Option<StreamSender<()>>,  
-
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
-
     pub control_socket_sender: Option<ControlSocketSender<ClientControlPacket>>,
     pub control_socket_receiver: Option<ControlSocketReceiver<ClientControlPacket>>,
-
-    pub outport_videoapp_network: Output<MpduPacket>, // ONLY VIDEO FOR NOW!
-
+    pub outport_videoapp_network: Output<MpduPacket>,
     pub is_streaming: bool,
-
     pub fps: f32,
-
-    // pub sockets: SimRuntimeSockets,
     pub frames_sent_counter: usize,
-
     pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>,
     pub STATISTICS_MANAGER: StatisticsManager,
     pub name_folder: String,
     pub network_effects: Vec<NetworkPattern>, 
 
     pub video_sample_filename: String, 
+    pub gop_size: usize, 
+    pub intra_refresh: bool, 
+
 
 }
 #[allow(unused)]
@@ -1792,7 +1785,9 @@ impl XRServer {
         initial_bitrate: f32,
         name_folder: &str,
         effects: &[NetworkPattern], 
-        file_name_video: &str, 
+        file_name_video: &str,
+        gop_size: usize, 
+        intra_refresh: bool, 
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
 
@@ -1853,6 +1848,8 @@ impl XRServer {
 
             network_effects: effects.to_vec() ,  
             video_sample_filename: final_file.to_string(), 
+            gop_size, 
+            intra_refresh, 
 
         }
     }
@@ -2195,6 +2192,8 @@ impl XRServer {
                         &self.network_effects, 
                         &self.video_sample_filename, 
                         self.fps, 
+                        self.gop_size, 
+                        self.intra_refresh, 
                     )
                     .await
                     .unwrap();

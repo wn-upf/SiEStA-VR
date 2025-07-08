@@ -67,6 +67,8 @@ impl VRPair {
         patterns: &[NetworkPattern], 
         file_name_video: &str, 
         fps: f32, 
+        gop_size: usize, 
+        intrarefresh: bool, 
 
     ) -> Self {
         let server_id = 100 + pair_index as i32;
@@ -74,7 +76,7 @@ impl VRPair {
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let server_coords = Coords::with_coords(1.0, 0.0, 0.0);
+        let server_coords = Coords::with_coords(0.0, 0.0, 0.0);
         let client_coords = Coords::with_coords(distance, 0.0, 0.0);
 
         let server_tx = frametransmission_delay(
@@ -101,6 +103,8 @@ impl VRPair {
             name_folder,
             patterns, 
             file_name_video, 
+            gop_size, 
+            intrarefresh, 
         );
         let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test);
 
@@ -168,9 +172,9 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 18 {
+    if args.len() != 20 {
         eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> 
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed>", args[0]);
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled>", args[0]);
         return;
     }
 
@@ -194,6 +198,8 @@ fn main() {
     let n_close: usize = args[15].parse().expect("Invalid N_close_users"); 
     let distance_close: f64 =  args[16].parse().expect("Invalid Distance_close_users"); 
     let seed: u64 = args[17].parse().unwrap();
+    let gop_size: usize = args[18].parse().expect("Invalid GoP size"); 
+    let intra_refresh: usize = args[19].parse().expect("Invalid intra-refresh (0 or 1)"); 
 
 
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
@@ -215,8 +221,8 @@ fn main() {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, 
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, 
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -280,7 +286,9 @@ fn main() {
             suffix,
             emu_effects, 
             &video_filename, 
-            fps
+            fps,
+            gop_size, 
+            intra_refresh != 0, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -301,7 +309,9 @@ fn main() {
             suffix,
             emu_effects, 
             &video_filename, 
-            fps
+            fps, 
+            gop_size, 
+            intra_refresh != 0 , 
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);

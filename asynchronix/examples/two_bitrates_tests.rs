@@ -1,6 +1,6 @@
 
 
-pub const INTRAREFRESH_ENABLED: bool = true; 
+// pub const INTRAREFRESH_ENABLED: bool = true; 
 
 pub const FRAMERATE_WINDOWS: usize = 60; 
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
@@ -19,6 +19,8 @@ pub const RESYNC_BUFFER: usize = 20;
 const SIM_HISTORY: usize = 20; 
 const DESYNC_STD_DEV :f64 = 20.0; 
 const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500); 
+
+pub const MAX_BITRATE_REFERENCE: f32 = 100.0; 
 
 #[path = "lib/mod.rs"]      // relative path to the module root you want
 mod lib; 
@@ -1819,6 +1821,9 @@ pub struct ChunkedHevcEncoder {
     frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
+    intra_refresh: bool, 
+
+
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -1830,6 +1835,7 @@ impl ChunkedHevcEncoder {
         chunk_duration: f64,
         string: String,
         offset_video: f64,
+        intra_refresh: bool, 
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
@@ -1846,6 +1852,7 @@ impl ChunkedHevcEncoder {
             frame_queue: VecDeque::new(),
             parser: HevcParser::new(),
             encoder_str: string.clone(),
+            intra_refresh, 
         }
     }
 
@@ -1871,7 +1878,7 @@ impl ChunkedHevcEncoder {
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         
-        if INTRAREFRESH_ENABLED {
+        if self.intra_refresh {
         
             command
                 .hwaccel("cuda")
@@ -1887,7 +1894,7 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                .args(&["-preset", "fast"])
+                .args(&["-preset", "ultrafast"])
                 .args(&["-rc", "cbr"])
                 .args(&["-bf", "0"])    // disable use of B-frames
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
@@ -1916,7 +1923,7 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                .args(&["-preset", "llhp"])
+                .args(&["-preset", "ultrafast"])
                 // .args(&["-tune", "zerolatency"])
 
                 .args(&["-rc", "cbr"])
@@ -2037,6 +2044,8 @@ fn make_encoder_task(
     offset_video: f64,
     simulate_loss: bool,
     idr_freq: u32, 
+    intra_refresh: bool, 
+
 ) {
     task::spawn(async move {
         // 1️⃣ Create your encoder
@@ -2048,6 +2057,7 @@ fn make_encoder_task(
             1.0,
             format!("ENC{}M", bitrate_mbps),
             offset_video,
+            intra_refresh, 
         );
 
         // 2️⃣ Iterate until we’ve produced every ID in the trace
@@ -2879,6 +2889,17 @@ pub async fn process_trace_single_encoder_new(
         .parse()?;
     println!("Extracted bitrate: {}", bitrate);
 
+    let intra_re = Regex::new(r"_IR(?P<ir>[01])")?;
+    let intra_refresh: bool = intra_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("ir"))
+        .ok_or_else(|| anyhow::anyhow!("IR flag not found in scenario name"))?
+        .as_str()
+        .ne("0");
+
+
+    println!("Extracted intra_refresh flag: {}", intra_refresh);
+
     // setup metrics logger
     let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false, )?;
 
@@ -2907,7 +2928,10 @@ pub async fn process_trace_single_encoder_new(
     for rec in rdr.records() {
         let rec = rec?;
 
-        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2)
+        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2), intra_refresh (col 3); 
+
+        println!("rec = {:?}", rec); 
+
         if path_video.is_none() {
             if let (Some(o), Some(p), Some(i)) =
                 (rec.get(0), rec.get(1), rec.get(2))
@@ -2919,6 +2943,8 @@ pub async fn process_trace_single_encoder_new(
                     offset_video    = Some(o.trim().parse()?);
                     path_video      = Some(p.trim().to_string());
                     idr_frequency   = Some(i.trim().parse()?);
+                    // intra_refresh = Some(j.trim().parse()?);  
+
                     continue;
                 }
             }
@@ -2954,6 +2980,7 @@ pub async fn process_trace_single_encoder_new(
         .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
     let idr    = idr_frequency
         .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
+
     let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
 
 
@@ -2986,7 +3013,7 @@ pub async fn process_trace_single_encoder_new(
     // spawn encoder task
     let (tx_low, rx_low) = unbounded::<(usize,u32,Vec<u8>)>();
     make_encoder_task(
-        0, bitrate, Arc::clone(&trace), tx_low.clone(), video.clone(), offset, false, idr,
+        0, bitrate, Arc::clone(&trace), tx_low.clone(), video.clone(), offset, false, idr, intra_refresh, 
     );
     drop(tx_low);
 
@@ -3156,74 +3183,83 @@ pub async fn process_trace_two_encoders_no_loss(
         .parse()?;
     println!("Extracted bitrate: {}", bitrate);
 
-    // setup metrics logger
+    let intra_re = Regex::new(r"_IR(?P<ir>\d+)")?;
+    let intra_refresh_enabled = intra_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("ir"))
+        .ok_or_else(|| anyhow::anyhow!("IR flag missing"))?
+        .as_str()
+        .parse::<u32>()? > 0;
+
+    // setup metrics logger (no-loss mode)
     let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, true)?;
 
-    // parse CSV trace
+    // parse CSV trace with updated format (includes intra-refresh flag)
     let trace_path = trace_csv.to_str().unwrap();
-    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(trace_path)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(trace_path)?;
 
     // 1. ─ parse CSV ───────────────────────────────────────
-    let mut raw_ids     = Vec::new();
+    let mut raw_ids = Vec::new();
     let mut raw_ts: Vec<f64> = Vec::new();
-    let mut path_video  = None::<String>;
-    let mut offset_video= None::<f64>;
+    let mut path_video = None::<String>;
+    let mut offset_video = None::<f64>;
     let mut idr_frequency = None::<u32>;
-    let mut _throughput_data = Vec::<f64>::new(); // throughput_data is not used later
+    let mut _throughput_data = Vec::<f64>::new();
 
     for rec in rdr.records() {
         let rec = rec?;
 
-        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2)
+        // first non-empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2), INTRA_REFRESH (col 3)
         if path_video.is_none() {
             if let (Some(o), Some(p), Some(i)) =
                 (rec.get(0), rec.get(1), rec.get(2))
             {
                 if !o.trim().is_empty()
-                 && !p.trim().is_empty()
-                 && !i.trim().is_empty()
+                    && !p.trim().is_empty()
+                    && !i.trim().is_empty()
                 {
-                    offset_video    = Some(o.trim().parse()?);
-                    path_video      = Some(p.trim().to_string());
-                    idr_frequency   = Some(i.trim().parse()?);
+                    offset_video = Some(o.trim().parse()?);
+                    path_video = Some(p.trim().to_string());
+                    idr_frequency = Some(i.trim().parse()?);
+                    // intra_refresh = Some(j.trim().parse()?);
                     continue;
                 }
             }
         }
 
-        // subsequent rows → timestamp(col 3), ID_frame(col 4), Lost(col 5), Throughput(col 6)
-        if let (Some(_ts), Some(id_s), Some(lost_s), Some(tp_s)) =
+        // subsequent rows → timestamp(col 4), ID_frame(col 5), Lost(col 6), Throughput(col 7)
+        if let (Some(_ts), Some(id_s), Some(_lost), Some(tp_s)) =
             (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
         {
-            // skip any empty/data‐garbage rows
             if id_s.trim().is_empty() { continue; }
 
-            let id:    u32   = id_s.trim().parse()?;
-            let lost:  bool  = lost_s.trim().parse::<u32>()? != 0;
-            let tp:    f64   = tp_s.trim().parse()?;
-            let ts:     f64 = _ts.trim().parse()?;
+            let id: u32 = id_s.trim().parse()?;
+            let ts: f64 = _ts.trim().parse()?;
+            let tp: f64 = tp_s.trim().parse()?;
 
             raw_ids.push(id);
             raw_ts.push(ts);
-            _throughput_data.push(tp); // Still collecting, but variable name hints it's not used.
+            _throughput_data.push(tp);
         }
     }
 
-    // sanity‐check & unwrap
+    // sanity-check & unwrap
     let video = path_video
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
     let offset = offset_video
         .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
-    let idr    = idr_frequency
+    let idr = idr_frequency
         .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
-    // let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
-    let ts_map = Arc::new(
-    raw_ids.iter().cloned()
-           .zip(raw_ts.iter().cloned())
-           .collect::<HashMap<_,_>>()
-);
 
+
+    let ts_map = Arc::new(
+        raw_ids.iter().cloned()
+            .zip(raw_ts.iter().cloned())
+            .collect::<HashMap<_, _>>()
+    );
 
     println!(
         "Video={}\n, offset={} s\n, IDR_FREQ={}fps\n, read {} frames\n, {} throughput samples\n",
@@ -3234,38 +3270,8 @@ pub async fn process_trace_two_encoders_no_loss(
         _throughput_data.len()
     );
 
-
-    // This second loop for reading CSV records is redundant with the first one.
-    // The previous loop already populates `raw_ids` and `raw_ts`.
-    // Keeping it here for now to match the original structure, but it could be removed.
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(trace_path)?; // Re-open CSV reader for the second loop.
-
-    for rec in rdr.records() {
-        let rec = rec?;
-        if path_video.is_none() { // This condition will always be false after the first loop.
-            if let (Some(o), Some(p), Some(i)) = (rec.get(0), rec.get(1), rec.get(2)) {
-                if !o.trim().is_empty() && !p.trim().is_empty() && !i.trim().is_empty() {
-                    offset_video = Some(o.trim().parse()?);
-                    path_video = Some(p.trim().to_string());
-                    idr_frequency = Some(i.trim().parse()?);
-                    continue;
-                }
-            }
-        }
-        if let (Some(_ts), Some(id_s), Some(_lost), Some(_tp)) =
-            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
-        {
-            if id_s.trim().is_empty() { continue; }
-           
-        }
-    }
-
-
-    // rebuild full trace & lost set
-    raw_ids.sort_unstable();
-    raw_ids.dedup();
+    // rebuild full trace (no loss assumption)
+    raw_ids.sort_unstable(); raw_ids.dedup();
     let min_id = *raw_ids.first().unwrap();
     let max_id = *raw_ids.last().unwrap();
     let id_set: HashSet<_> = raw_ids.iter().cloned().collect();
@@ -3273,18 +3279,33 @@ pub async fn process_trace_two_encoders_no_loss(
     for id in min_id..=max_id {
         trace.push(FrameInfo { id, lost: !id_set.contains(&id) });
     }
-    // No `lost_ids` needed as we are assuming no loss in this specific function.
     let trace = Arc::new(trace);
 
-    // spawn two encoder tasks
-    let (tx_encoder_0, rx_encoder_0) = unbounded::<(usize,u32,Vec<u8>)>();
+    // spawn two encoder tasks with intra-refresh option
+    let (tx_encoder_0, rx_encoder_0) = unbounded::<(usize, u32, Vec<u8>)>();
     let (tx_encoder_1, rx_encoder_1) = unbounded::<(usize, u32, Vec<u8>)>();
 
     make_encoder_task(
-        0, bitrate, Arc::clone(&trace), tx_encoder_0.clone(), video.clone(), offset, false, idr,
+        0,
+        bitrate,
+        Arc::clone(&trace),
+        tx_encoder_0.clone(),
+        video.clone(),
+        offset,
+        false,
+        idr,
+        intra_refresh_enabled,
     );
     make_encoder_task(
-        1, 100.0, Arc::clone(&trace), tx_encoder_1.clone(), video.clone(), offset, false, idr,
+        1,
+        MAX_BITRATE_REFERENCE,
+        Arc::clone(&trace),
+        tx_encoder_1.clone(),
+        video,
+        offset,
+        false,
+        0, // doesn't get used for IR, IR 100 Mbps reference for VMAF. 
+        true,
     );
 
     drop(tx_encoder_0);
@@ -3405,377 +3426,6 @@ pub async fn process_trace_two_encoders_no_loss(
 }
 
 
-/// Run your entire “main async block” on one trace CSV
-pub async fn process_trace_single_encoder(
-    trace_csv: PathBuf,
-    ip: IpAddr,
-) -> Result<()> {
-
-    // 1) extract the “scenario” folder name and the trace index
-    let file_name = trace_csv.file_name().unwrap().to_string_lossy();
-    let caps = Regex::new(r"trace_offline_video(\d+)\.csv$")?
-        .captures(&file_name)
-        .expect("filename didn’t match");
-    let trace_idx: usize = caps[1].parse()?;
-
-
-
-    let scenario = trace_csv.parent()
-        .and_then(|p| p.file_name())
-        .unwrap()
-        .to_string_lossy();
-    print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario ); 
-
-
-
-    // Extract the bitrate as f32 from the pattern "_Br<value>_"
-    let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)_")?;
-    let bitrate: f32 = bitrate_re
-        .captures(&scenario)
-        .and_then(|caps| caps.name("br"))
-        .ok_or_else(|| anyhow::anyhow!("Bitrate not found in scenario name"))?
-        .as_str()
-        .parse()?;
-
-    // Example debug print
-    println!("Extracted bitrate: {}", bitrate);    // 2) build a logger that writes to Results/<scenario>/VMAF_metrics_<idx>.csv
-    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false)?;
-
-
-    let mut counter_frames: usize = 0; 
-    /* 1. ─ parse CSV ─────────────────────────────────────── */
-    // After you open the ReaderBuilder…
-
-    let trace_path =  trace_csv.to_str().unwrap();
-
-
-    println!("Test1"); 
-    let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
-    // let metric: MetricsLogger = MetricsLogger::new(ip, "scenario")?;
-
-    
-    let start = Instant::now(); 
-    // 1. ─ parse CSV ───────────────────────────────────────
-    let mut raw_ids     = Vec::new();
-    let mut raw_ts = Vec::new(); 
-    let mut path_video  = None::<String>;
-    let mut offset_video= None::<f64>;
-    let mut idr_frequency = None::<u32>;
-    let mut throughput_data = Vec::<f64>::new();
-
-
-
-
-
-    // let trace_path = "/…/trace_offline_video0.csv";
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(trace_path)?;
-
-    for rec in rdr.records() {
-        let rec = rec?;
-
-        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2)
-        if path_video.is_none() {
-            if let (Some(o), Some(p), Some(i)) =
-                (rec.get(0), rec.get(1), rec.get(2))
-            {
-                if !o.trim().is_empty()
-                 && !p.trim().is_empty()
-                 && !i.trim().is_empty()
-                {
-                    offset_video    = Some(o.trim().parse()?);
-                    path_video      = Some(p.trim().to_string());
-                    idr_frequency   = Some(i.trim().parse()?);
-                    continue;
-                }
-            }
-        }
-
-        // subsequent rows → timestamp(col 3), ID_frame(col 4), Lost(col 5), Throughput(col 6)
-        if let (Some(_ts), Some(id_s), Some(lost_s), Some(tp_s)) =
-            (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
-        {
-            // skip any empty/data‐garbage rows
-            if id_s.trim().is_empty() { continue; }
-
-            let id:    u32   = id_s.trim().parse()?;
-            let lost:  bool  = lost_s.trim().parse::<u32>()? != 0;
-            let tp:    f64   = tp_s.trim().parse()?;
-            let ts:     f64 = _ts.trim().parse()?; 
-
-            raw_ids.push(id);
-            raw_ts.push(ts); 
-            throughput_data.push(tp);
-
-            // if you want to track lost in the CSV pass-through you could also
-            // store it alongside id here, or later when you build FrameInfo[]
-        }
-    }
-
-    // sanity‐check & unwrap
-    let video = path_video
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
-    let offset = offset_video
-        .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
-    let idr    = idr_frequency
-        .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
-    let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
-
-
-    println!(
-        "Video={}\n, offset={} s\n, IDR_FREQ={}fps\n, read {} frames\n, {} throughput samples\n",
-        video,
-        offset,
-        idr,
-        raw_ids.len(),
-        throughput_data.len()
-    );
-
-
-        // sanity‐check
-    let video = path_video.clone().ok_or_else(|| anyhow::anyhow!("missing video path"))?;
-    let offset = offset_video.ok_or_else(|| anyhow::anyhow!("missing offset"))?;
-
-    raw_ids.sort_unstable();
-    raw_ids.dedup();
-    let &min_id = raw_ids.first().unwrap();
-    let &max_id = raw_ids.last().unwrap();
-    let id_set: HashSet<_> = raw_ids.into_iter().collect();
-
-    // build a complete sequence, marking any missing `id` as lost
-    let mut trace = Vec::with_capacity((max_id - min_id + 1) as usize);
-    for id in min_id..=max_id {
-        trace.push(FrameInfo {
-        id,
-        lost: !id_set.contains(&id),
-        });
-    }
-    let trace = Arc::new(trace);
-    println!("Rebuilt trace with {} total packets ({} lost)", 
-            trace.len(),
-            trace.iter().filter(|f| f.lost).count()
-    );
-
-    let lost_ids: BTreeSet<u32> = trace.iter()
-        .filter(|f| f.lost)
-        .map(|f| f.id)
-        .collect();
-
-    print_reds!("Lost packets: {:?}", lost_ids);   // e.g. {1, 4, 7, 42}
-
-    let path_video = path_video.clone().ok_or_else(|| anyhow::anyhow!("PATH_VIDEO missing"))?;
-    let offset_video = offset_video.ok_or_else(|| anyhow::anyhow!("OFFSET_VIDEO missing"))?;
-    let trace = Arc::new(trace);
-    println!("Loaded {} rows – path=\"{}\" offset={}", trace.len(), path_video, offset_video);
-
-    /* 2. ─ shared channel + encoder tasks ───────────────── */
-    // make_encoder_task(1, 100.0, Arc::clone(&trace), tx.clone(), path_video.clone(), offset_video);
-        // central dispatcher: now (tag, id, Vec<u8>)
-    let (tx_low, rx_low) = unbounded::<(usize, u32, Vec<u8>)>();
-    // low-bitrate path (30 Mbps) → simulate loss
-    make_encoder_task(
-        0,
-        bitrate as f32,
-        Arc::clone(&trace),
-        tx_low.clone(),
-        path_video.clone(),
-        offset_video,
-        /* simulate_loss = */ false,
-        idr, 
-    );
-    drop(tx_low);
-
-    let mut dec_low  = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "LOW");
-    let mut dec_ref  = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "REF");
-    
-    /* 4. ─ create window ONCE ───────────────────────────── */
-
-    const SCALE: f64 = 0.28;
-    let scaled_w = (WIDTH_ENCODER as f64 * SCALE) as usize;
-    let scaled_h = (HEIGHT_ENCODER as f64 * SCALE) as usize;
-    let win_w = scaled_w * 2 + 10;
-    let mut window = Window::new(
-        "Frame-sync offline",
-        win_w,
-        scaled_h,
-        WindowOptions {
-            scale: Scale::X1,         // we already down-scale manually
-            ..WindowOptions::default()
-        },
-    )?;
-
-    /* 5. ─ main dispatch loop ───────────────────────────── */
-    let expected = trace.len();
-    let mut seen_pairs = 0;
-
-    // let mut vmaf_jobs: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    let sem = Arc::new(Semaphore::new(num_cpus::get())); 
-    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
-        FuturesUnordered::new();
-
-
-    let mut low_buf  = HashMap::<u32, FrameBuf>::new();
-    let mut ref_buf  = HashMap::<u32, FrameBuf>::new();
-    let mut last_real_low: Option<FrameBuf> = None; 
-    let mut ready_ids = BTreeSet::<u32>::new(); // ⬅ sorted keys
- 
-    let mut low_done  = false;
-    let mut high_done = false;
-    
-
-    
-    while window.is_open() {
-
-
-         match rx_low.recv_timeout(Duration::from_millis(2000)) {
-            Ok((_tag, id, pkt)) => {
-                
-                let clone_ref = pkt.clone();  
-
-                dec_ref.process_packet(pkt, id).await; 
-
-                if lost_ids.contains(&id) {  
-                    
-                    if let Some(last) = last_real_low.take() {
-                        let fb = FrameBuf {
-                            rgb: last.rgb.clone(),
-                            synthetic: true,
-                        };
-                        low_buf.insert(id, fb.clone());
-                        ready_ids.insert(id);
-                    }
-                    //do nothing on low decoder, packet was lost
-                }  
-                else{
-                    dec_low.process_packet(clone_ref, id).await;
-                     while let Some((rgb, fid, _pts)) = dec_low.next_decoded_frame() {
-                        let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
-                        low_buf.insert(fid, fb.clone());
-                        last_real_low = Some(fb);
-                        if ref_buf.contains_key(&fid) {
-                            ready_ids.insert(fid);
-                        }
-                    }
-
-                }
-
-            }
-            Err(RecvTimeoutError::Timeout) => { /* no packet right now */ }
-            Err(RecvTimeoutError::Disconnected) => {
-                low_done = true;
-            }
-        }
-
-        // Drain decoders and accumulate in buffers
-        while let Some((rgb_l, id, pts)) = dec_low.next_decoded_frame() {
-            // println!("🟠 LOW  → ID: {id}, PTS: {:?}", pts);
-            low_buf.insert(id, FrameBuf { rgb: rgb_l, synthetic: false });
-            if ref_buf.contains_key(&id) {
-                ready_ids.insert(id);      // Tracking the low ID here. 
-            }
-        }
-
-        while let Some((rgb_r, id, pts)) = dec_ref.next_decoded_frame() {
-            // println!("🔵 REF  → ID: {id}, PTS: {:?}", pts) ;
-
-            if low_buf.contains_key(&id) {
-                ready_ids.insert(id);
-            }
-            
-            ref_buf.insert(id, FrameBuf { rgb: rgb_r, synthetic: false });
-
-        }
-
-        // Process ready frame pairs in ID (time) order
-        let mut to_remove = Vec::new();
-        for &id in ready_ids.iter() {
-
-
-            let ref_id = id as u32;        // current mapping
-            if let (Some(fb_l), Some(fb_r)) = (low_buf.remove(&id), ref_buf.remove(&ref_id)) { // using the offset
-                
-                let is_fake = fb_l.synthetic; // unused
-                if !is_fake {
-
-
-                    print_prettyy!( DebugColor::Chocolate, 
-                        "[Match] pairing id={} | before: low={} ref={} | low_keys={:?} | ref_keys={:?}",
-                        id,
-                        low_buf.len(),
-                        ref_buf.len(),
-                        low_buf.keys().take(5).collect::<Vec<_>>(),   // first few keys
-                        ref_buf.keys().take(5).collect::<Vec<_>>()
-                    );   
-
-                    // similarity_window.push(sim as f32);
-                    // if similarity_window.as_vec().len() == similarity_window.capacity{
-                    //     print_prettyy!(DebugColor::DarkBlue, "Ringbuffer full. STD DEV = {:.3}", similarity_window.std_dev() * 100.0); 
-                    // }
-                    let ts = 0.0; 
-
-                    draw_pair(&mut window, &fb_l.rgb, &fb_r.rgb, scenario.as_ref(), id,  ts)?;
-                    seen_pairs += 1;
-
-
-
-                    let sem_clone   = sem.clone();
-                    let logger      = metric.clone();
-                    let ts_map      = ts_map.clone();
-                    let ip_clone    = ip.clone();
-                    let rgb_enc1    = fb_l.rgb.clone();
-                    let rgb_enc0    = fb_r.rgb.clone();
-                    let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
-                    let logger = metric.clone();
-                    let handle = tokio::spawn(async move {
-                       let _permit = sem_clone.acquire().await.unwrap();
-                       if let Err(e) = logger
-                           .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
-                           .await
-                       {
-                           eprintln!("VMAF job failed on #{}: {}", id, e);
-                       }
-                   });
-                   vmaf_tasks.push(handle);
-
-
-                            
-                }
-                else{
-                    println!("⏭  Skipping metrics for synthetic id {id}");
-                }
-                    to_remove.push(id);         
-                }            
-            }
-        for id in to_remove {
-            ready_ids.remove(&id);
-        }
-
-        if seen_pairs >= expected {
-            break;
-        }
-
-        if low_done || high_done {
-            println!("DONE!"); 
-            break; 
-        }
-
-        window.update();
-    }
-        
-    while let Some(res) = vmaf_tasks.next().await {
-        if let Err(join_err) = res {
-            eprintln!("VMAF task panicked: {}", join_err);
-        }
-    }
-    metric.finalize()?; 
-
-    Ok(())
-}
-
-
-
 fn main() -> Result<()> {
     // 1) Your IP
     let ip: IpAddr = "192.168.0.1".parse().unwrap();
@@ -3823,9 +3473,6 @@ fn main() -> Result<()> {
                 .worker_threads(num_cpus::get())   // e.g. 8 on your machine
                 .enable_all()
                 .build()?;
-
-
-
 
             rt.block_on(async {
                 for (_folder, traces) in group {
