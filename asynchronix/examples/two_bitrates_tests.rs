@@ -11,8 +11,13 @@ pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
 
 
-const MAX_PARALLEL_VMAF: usize = 20;
+const MAX_PARALLEL_VMAF: usize = 5;
 const WORKERS: usize = 1;
+
+const MAX_PARALLEL_ENCODE: usize = 6;
+static ENCODE_SLOTS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::const_new(MAX_PARALLEL_ENCODE)));
+
 
 
 pub const RESYNC_BUFFER: usize = 20; 
@@ -882,6 +887,7 @@ impl HevcDecoder {
         let decoder_string = decoder_str.to_string();
 
         let mut child = FfmpegCommand::new()
+            .args(&["-threads", "1"])
             .hwaccel("cuda")
 
             .args(&["-skip_frame", "none",              // NO SKIPPING UPON FRAME LOSS!
@@ -1866,6 +1872,8 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
 
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, idr: u32, ) {
+        
+        let _encode_permit = ENCODE_SLOTS.clone().acquire_owned().await.unwrap();
         let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
@@ -1881,6 +1889,8 @@ impl ChunkedHevcEncoder {
         if self.intra_refresh {
         
             command
+                .args(&["-threads", "1"])
+
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
@@ -1910,6 +1920,8 @@ impl ChunkedHevcEncoder {
         } else {
 
             command
+                .args(&["-threads", "1"])
+
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
@@ -1945,20 +1957,20 @@ impl ChunkedHevcEncoder {
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
 
-        if let Some(stderr) = child.take_stderr() {
-            let mut err_reader = std::io::BufReader::new(stderr);
-            std::thread::spawn(move || {
-                for line in err_reader.lines() {
-                    match line {
-                        Ok(l) => println!("ffmpeg stderr: {}", l),
-                        Err(e) => {
-                            eprintln!("Error reading ffmpeg stderr: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
+        // if let Some(stderr) = child.take_stderr() {
+        //     let mut err_reader = std::io::BufReader::new(stderr);
+        //     std::thread::spawn(move || {
+        //         for line in err_reader.lines() {
+        //             match line {
+        //                 Ok(l) => println!("ffmpeg stderr: {}", l),
+        //                 Err(e) => {
+        //                     eprintln!("Error reading ffmpeg stderr: {}", e);
+        //                     break;
+        //                 }
+        //             }
+        //         }
+        //     });
+        // }
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
@@ -2073,7 +2085,8 @@ fn make_encoder_task(
                     let info = &trace[produced];
                     produced += 1;
 
-                    // async_std::task::sleep(Duration::from_millis(600)).await;
+                    let millis_sleep = (1000 / FRAMERATE_WINDOWS ) as u64; 
+                    async_std::task::sleep(Duration::from_millis(millis_sleep)).await;
 
                     // simulate loss only on the “low” path
                     if !simulate_loss || !info.lost {
@@ -3041,7 +3054,7 @@ pub async fn process_trace_single_encoder_new(
     let expected = trace.len();
     let mut seen_pairs = 0;
     // let mut vmaf_jobs = Vec::new();
-    let sem = Arc::new(Semaphore::new(num_cpus::get())); 
+    let sem = Arc::new(Semaphore::new(5)); 
     let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
         FuturesUnordered::new();
 
@@ -3110,30 +3123,40 @@ pub async fn process_trace_single_encoder_new(
                 draw_pair(&mut window, &fb_l.rgb, &fb_r.rgb, &scenario, id, ts_map[&id])?;
                 seen_pairs += 1;
                 // only metric when in-sync and real frame
-                if matches!(sync_state, SyncState::InSync) && !fb_l.synthetic {
-                    let permit = VMAF_SLOTS.clone().acquire_owned().await.unwrap();
+                 if matches!(sync_state, SyncState::InSync) && !fb_l.synthetic {
                     let logger = metric.clone();
-                    let rgb_ref = fb_r.rgb.clone();
-                    let rgb_low: Vec<u8> = fb_l.rgb.clone();
-                    let clone_ts_map = ts_map.clone(); 
-                    // Run VMAF between the two encoder outputs (fb_enc0 vs fb_enc1)
-                    let sem_clone   = sem.clone();
-                    let logger      = metric.clone();
-                    let ts_map      = ts_map.clone();
-                    let ip_clone    = ip.clone();
-                    let rgb_enc1    = fb_l.rgb.clone();
-                    let rgb_enc0    = fb_r.rgb.clone();
+                    let cpu_semaphore = sem.clone();
+                    let vmaf_semaphore = VMAF_SLOTS.clone();
+                    let ts_map = ts_map.clone();
+                    let ip_clone = ip.clone();
+                    let rgb_enc1 = fb_l.rgb.clone();
+                    let rgb_enc0 = fb_r.rgb.clone();
+                    let frame_id = id;
+
+                    // spawn a VMAF job that won’t start until both permits are held
                     let handle = tokio::spawn(async move {
-                        let _permit = sem_clone.acquire().await.unwrap();
+                        // throttle total VMAF concurrency
+                        let _vmaf_permit = vmaf_semaphore.acquire_owned().await.unwrap();
+                        // throttle CPU usage
+                        let _cpu_permit  = cpu_semaphore.acquire_owned().await.unwrap();
+
                         if let Err(e) = logger
-                            .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
+                            .process_frame_buffers(
+                                frame_id as u64,
+                                ts_map[&frame_id],
+                                rgb_enc1,
+                                rgb_enc0,
+                                ip_clone,
+                            )
                             .await
                         {
-                            eprintln!("VMAF job failed on #{}: {}", id, e);
+                            eprintln!("VMAF job failed on #{}: {}", frame_id, e);
                         }
+                        // permits are dropped here, freeing slots
                     });
                     vmaf_tasks.push(handle);
-                } else {
+                }
+                 else {
                     println!("⏭ Skipping VMAF for out-of-sync or synthetic id {}", id);
                 }
                 to_remove.push(id);
@@ -3304,8 +3327,8 @@ pub async fn process_trace_two_encoders_no_loss(
         video,
         offset,
         false,
-        0, // doesn't get used for IR, IR 100 Mbps reference for VMAF. 
-        true,
+        30, // doesn't get used for IR, IR 100 Mbps reference for VMAF. 
+        false,
     );
 
     drop(tx_encoder_0);
@@ -3410,6 +3433,7 @@ pub async fn process_trace_two_encoders_no_loss(
 
         if seen_pairs >= expected || (encoder_0_done && encoder_1_done) { break; }
         window.update();
+        // tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     while let Some(res) = vmaf_tasks.next().await {
@@ -3470,7 +3494,7 @@ fn main() -> Result<()> {
             //     .build()?;
 
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_cpus::get())   // e.g. 8 on your machine
+                .worker_threads(num_cpus::get().saturating_sub(5).max(3))   // e.g. 8 on your machine
                 .enable_all()
                 .build()?;
 
