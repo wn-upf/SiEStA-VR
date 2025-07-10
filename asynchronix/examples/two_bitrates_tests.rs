@@ -3329,8 +3329,8 @@ pub async fn process_trace_two_encoders_no_loss(
         video,
         offset,
         false,
-        30, // doesn't get used for IR, IR 100 Mbps reference for VMAF. 
-        false,
+        idr, // doesn't get used for IR, IR 100 Mbps reference for VMAF. 
+        intra_refresh_enabled,
     );
 
     drop(tx_encoder_0);
