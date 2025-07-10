@@ -1,4 +1,6 @@
-
+use std::fs;
+use std::panic::{AssertUnwindSafe};
+use std::panic; 
 
 // pub const INTRAREFRESH_ENABLED: bool = true; 
 
@@ -6,7 +8,7 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
 // pub const IDR_FRAME_SIZE_GOP: usize = 30; 
 
-const SCALE: f64 = 0.3;
+const SCALE: f64 = 0.15;
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
 
@@ -3252,7 +3254,6 @@ pub async fn process_trace_two_encoders_no_loss(
             }
         }
 
-        // subsequent rows → timestamp(col 4), ID_frame(col 5), Lost(col 6), Throughput(col 7)
         if let (Some(_ts), Some(id_s), Some(_lost), Some(tp_s)) =
             (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
         {
@@ -3305,9 +3306,10 @@ pub async fn process_trace_two_encoders_no_loss(
     let trace = Arc::new(trace);
 
     // spawn two encoder tasks with intra-refresh option
-    let (tx_encoder_0, rx_encoder_0) = unbounded::<(usize, u32, Vec<u8>)>();
-    let (tx_encoder_1, rx_encoder_1) = unbounded::<(usize, u32, Vec<u8>)>();
-
+    // let (tx_encoder_0, rx_encoder_0) = unbounded::<(usize, u32, Vec<u8>)>();
+    // let (tx_encoder_1, rx_encoder_1) = unbounded::<(usize, u32, Vec<u8>)>();
+    let (tx_encoder_0, rx_encoder_0) = bounded::<(usize, u32, Vec<u8>)>(1);
+    let (tx_encoder_1, rx_encoder_1) = bounded::<(usize, u32, Vec<u8>)>(1);
     make_encoder_task(
         0,
         bitrate,
@@ -3405,7 +3407,12 @@ pub async fn process_trace_two_encoders_no_loss(
         for &id in &ready_ids {
             if let (Some(fb_enc0), Some(fb_enc1)) = (encoder_0_buf.remove(&id), encoder_1_buf.remove(&id)) {
                 // draw always, comparing the two encoder outputs
-                draw_pair(&mut window, &fb_enc0.rgb, &fb_enc1.rgb, &scenario, id, ts_map[&id])?;
+                 if let Some(&ts) = Arc::clone(&ts_map).get(&id) {
+                    draw_pair(&mut window, &fb_enc0.rgb, &fb_enc1.rgb, &scenario, id, ts)?;
+                } else {
+                    eprintln!("⚠️  No timestamp for frame ID {} — skipping draw", id);
+                    continue;
+                }
                 seen_pairs += 1;
 
                 // Run VMAF between the two encoder outputs (fb_enc0 vs fb_enc1)
@@ -3450,65 +3457,150 @@ pub async fn process_trace_two_encoders_no_loss(
 }
 
 
-fn main() -> Result<()> {
+
+#[tokio::main]
+async fn main() -> Result<()> {
     // 1) Your IP
     let ip: IpAddr = "192.168.0.1".parse().unwrap();
 
     // 2) Trace‐filename regex
     let trace_re = Regex::new(r"^trace_offline_video\d+\.csv$")?;
 
-    // 3) Group CSVs by their parent folder
-    let mut scenarios: Vec<(PathBuf, Vec<PathBuf>)> = {
-        let mut map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for entry in WalkDir::new("Results/")
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path().to_path_buf();
-            if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-                if trace_re.is_match(fname) {
-                    map.entry(path.parent().unwrap().to_path_buf())
-                       .or_default()
-                       .push(path);
-                }
+    // 3) Build the map: folder → Vec<traces>
+    let mut map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for entry in WalkDir::new("Results/")
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path().to_path_buf();
+        if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+            if trace_re.is_match(fname) {
+                map.entry(path.parent().unwrap().to_path_buf())
+                   .or_default()
+                   .push(path);
             }
         }
-        let mut v: Vec<_> = map.into_iter().collect();
-        v.sort_by(|(a, _), (b, _)| a.cmp(b));
-        v
-    };
+    }
+
+    // 3a) Partition into “keep” vs “skip” based on presence of *any* vmaf file
+    let total = map.len();
+    let mut kept = Vec::new();
+    let mut skipped = 0;
+    for (folder, traces) in map {
+        match fs::read_dir(&folder) {
+            Ok(rd) => {
+                // consume `rd` directly—no clone()
+                let has_vmaf = rd
+                    .filter_map(Result::ok)
+                    .any(|e| {
+                        let fname_os = e.file_name();
+                        let name = fname_os.to_string_lossy().to_lowercase();
+                        name.contains("vmaf")
+                    });
+                if has_vmaf {
+                    skipped += 1;
+                    eprintln!("Skipping {:?} (found existing *vmaf* file)", folder);
+                } else {
+                    kept.push((folder, traces));
+                }
+            }
+            Err(err) => {
+                skipped += 1;
+                eprintln!("Skipping {:?} (could not read dir: {})", folder, err);
+            }
+        }
+    }
+    kept.sort_by(|(a, _), (b, _)| a.cmp(b));
+    println!(
+        "Found {} total scenarios, kept {} (no vmaf), skipped {}",
+        total,
+        kept.len(),
+        skipped
+    );
 
     // 4) Split into N groups by index mod N
     let mut groups: Vec<Vec<(PathBuf, Vec<PathBuf>)>> = vec![Vec::new(); WORKERS];
-    for (i, scenario) in scenarios.drain(..).enumerate() {
+    for (i, scenario) in kept.into_iter().enumerate() {
         groups[i % WORKERS].push(scenario);
     }
 
-    // 5) Worker factory
-    let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
-        thread::spawn(move || -> Result<()> {
-            // each thread gets its own current-thread Tokio runtime
-            // let rt = tokio::runtime::Builder::new_current_thread()
-            //     .enable_all()
-            //     .build()?;
+    // 5) Worker factory with panic-catching & retry
+    let make_worker =
+        |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
+            thread::spawn(move || -> Result<()> {
+                // We'll wrap *all* of the async work
+                // so that any panic can be caught:
+                let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    // build your multi-threaded runtime
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(num_cpus::get().saturating_sub(5).max(3))
+                        .enable_all()
+                        .build()
+                        .unwrap();
 
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_cpus::get().saturating_sub(5).max(3))   // e.g. 8 on your machine
-                .enable_all()
-                .build()?;
+                    rt.block_on(async {
+                        for (_folder, traces) in &group {
+                            for trace_csv in traces {
+                                process_trace_two_encoders_no_loss(
+                                    trace_csv.clone(),
+                                    ip.clone(),
+                                )
+                                .await?;
+                            }
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    })
+                }));
 
-            rt.block_on(async {
-                for (_folder, traces) in group {
-                    for trace_csv in traces {
-                        process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone()).await?;
-                        // process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?; 
+                match result {
+                    // no panic
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => {
+                        // async code returned an Err
+                        Err(e)
+                    }
+                    Err(_) => {
+                        // we *did* panic — clean up & retry once
+                        eprintln!("Worker panicked; deleting stale vmaf files and retrying…");
+                        for (folder, _) in &group {
+                            if let Ok(rd) = fs::read_dir(folder) {
+                                for e in rd.filter_map(Result::ok) {
+                                    let fname_os = e.file_name();          
+                                    let fname = fname_os.to_string_lossy(); 
+                                    if fname.contains("VMAF") {
+                                        let path = e.path();
+                                        let _ = fs::remove_file(&path);
+                                        eprintln!(
+                                            "  deleted {}",
+                                            path.display()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // retry
+                        let rt2 = tokio::runtime::Builder::new_multi_thread()
+                            .worker_threads(num_cpus::get().saturating_sub(5).max(3))
+                            .enable_all()
+                            .build()?;
+                        rt2.block_on(async {
+                            for (_folder, traces) in &group {
+                                for trace_csv in traces {
+                                    process_trace_two_encoders_no_loss(
+                                        trace_csv.clone(),
+                                        ip.clone(),
+                                    )
+                                    .await?;
+                                }
+                            }
+                            Ok(())
+                        })
                     }
                 }
-                Ok(())
             })
-        })
-    };
+        };
 
     // 6) Spawn all WORKERS threads
     let mut handles = Vec::with_capacity(WORKERS);
@@ -3516,11 +3608,95 @@ fn main() -> Result<()> {
         handles.push(make_worker(group, ip.clone()));
     }
 
-    // 7) Join all of them
-    for (idx, h) in handles.into_iter().enumerate() {
-        h.join()
-         .unwrap_or_else(|_| panic!("worker {} panicked", idx))?; 
+    // 7) Join all of them without panicking
+    for (idx, handle) in handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(Ok(())) => {
+                // all good
+            }
+            Ok(Err(e)) => {
+                eprintln!("Worker {} returned error: {}", idx, e);
+            }
+            Err(_) => {
+                // should never happen, since we caught all panics inside the thread
+                eprintln!("Worker {} panicked unexpectedly", idx);
+            }
+        }
     }
 
     Ok(())
 }
+// fn main() -> Result<()> {
+//     // 1) Your IP
+//     let ip: IpAddr = "192.168.0.1".parse().unwrap();
+
+//     // 2) Trace‐filename regex
+//     let trace_re = Regex::new(r"^trace_offline_video\d+\.csv$")?;
+
+//     // 3) Group CSVs by their parent folder
+//     let mut scenarios: Vec<(PathBuf, Vec<PathBuf>)> = {
+//         let mut map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+//         for entry in WalkDir::new("Results/")
+//             .into_iter()
+//             .filter_map(|e| e.ok())
+//             .filter(|e| e.file_type().is_file())
+//         {
+//             let path = entry.path().to_path_buf();
+//             if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+//                 if trace_re.is_match(fname) {
+//                     map.entry(path.parent().unwrap().to_path_buf())
+//                        .or_default()
+//                        .push(path);
+//                 }
+//             }
+//         }
+//         let mut v: Vec<_> = map.into_iter().collect();
+//         v.sort_by(|(a, _), (b, _)| a.cmp(b));
+//         v
+//     };
+
+//     // 4) Split into N groups by index mod N
+//     let mut groups: Vec<Vec<(PathBuf, Vec<PathBuf>)>> = vec![Vec::new(); WORKERS];
+//     for (i, scenario) in scenarios.drain(..).enumerate() {
+//         groups[i % WORKERS].push(scenario);
+//     }
+
+//     // 5) Worker factory
+//     let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
+//         thread::spawn(move || -> Result<()> {
+//             // each thread gets its own current-thread Tokio runtime
+//             // let rt = tokio::runtime::Builder::new_current_thread()
+//             //     .enable_all()
+//             //     .build()?;
+
+//             let rt = tokio::runtime::Builder::new_multi_thread()
+//                 .worker_threads(num_cpus::get().saturating_sub(5).max(3))   // e.g. 8 on your machine
+//                 .enable_all()
+//                 .build()?;
+
+//             rt.block_on(async {
+//                 for (_folder, traces) in group {
+//                     for trace_csv in traces {
+//                         process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone()).await?;
+//                         // process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?; 
+//                     }
+//                 }
+//                 Ok(())
+//             })
+//         })
+//     };
+
+//     // 6) Spawn all WORKERS threads
+//     let mut handles = Vec::with_capacity(WORKERS);
+//     for group in groups {
+//         handles.push(make_worker(group, ip.clone()));
+//     }
+
+//     // 7) Join all of them
+//     for (idx, h) in handles.into_iter().enumerate() {
+//         h.join()
+//          .unwrap_or_else(|_| panic!("worker {} panicked", idx))?; 
+//     }
+
+//     Ok(())
+// }
