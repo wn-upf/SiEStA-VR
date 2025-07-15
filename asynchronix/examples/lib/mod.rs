@@ -191,6 +191,15 @@ macro_rules! print_pink {
 }
 
 
+#[macro_export]
+macro_rules! print_brown {
+    ($fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::SaddleBrown.to_background_fn()(msg));
+    };
+}
+
+
 
 // use crate::lib::alvr_stream_socket::ConResult;
 #[allow(unused)]

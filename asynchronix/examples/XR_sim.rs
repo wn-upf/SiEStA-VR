@@ -389,12 +389,19 @@ fn main() {
         vr.sta_client
             .output_network_port
             .connect(QueueModule::input_UL, &mbox_queue);
+        
+        vr.xr_server.output_perfect_information_bitrate
+                .connect(XRClient::input_perfect_information_bitrate, &vr.mbox_xr_client.address()); 
+
+        
         queue
             .output_port_sta1
             .connect(STA_extended::input_wireless, &vr.mbox_sta_server);
         queue
             .output_port_sta1
             .connect(STA_extended::input_wireless, &vr.mbox_sta_client);
+    
+
     }
 
     // Connect background STAs to queue

@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
-use crate::debug_debug;
+use crate::{debug_debug, print_brown, print_prettyyy};
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
@@ -1815,7 +1815,7 @@ impl BitrateManager {
                 print_pink!(
                     // DebugColor::Purple,
                     "{} ONE PASS OF NEST-VR! Bitrate: {} Mbps and {} bytes",
-                    self.last_target_bitrate_mbps, self.last_target_bitrate_bps, format_elapsed!(now)
+                    format_elapsed!(now), self.last_target_bitrate_mbps, self.last_target_bitrate_bps, 
                 );
 
                 let (max_bps, min_bps) = (max_bitrate_mbps * 1e6, min_bitrate_mbps * 1e6); 
@@ -2039,6 +2039,7 @@ pub struct XRServer {
     pub intra_refresh: bool, 
     pub abr_enabled: bool, 
 
+    pub output_perfect_information_bitrate: Output<f32>, 
 }
 #[allow(unused)]
 impl XRServer {
@@ -2127,7 +2128,7 @@ impl XRServer {
             gop_size, 
             intra_refresh, 
             abr_enabled, 
-
+            output_perfect_information_bitrate: Output::default(),
         }
     }
 
@@ -2448,11 +2449,14 @@ impl XRServer {
 
                 if now.duration_since(self.bitrate_manager.last_update_instant)
                     >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL)
-                {
+                {   
+
                     let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
 
-                    self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
+                    self.output_perfect_information_bitrate.send(last_bitrate_mbps).await; // just used for display!
+
+                    // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
 
                     print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
 
@@ -3020,6 +3024,7 @@ pub struct XRClient {
     last_seen_id: usize, 
 
     last_throughput_avg: f32, 
+    last_bitrate_perfect_info_update: f32, 
 }
 
 #[allow(unused)]
@@ -3107,7 +3112,7 @@ impl XRClient {
             last_throughput_avg: 0.0, 
 
             original_decoder: None, 
-        
+            last_bitrate_perfect_info_update: 0.0, 
         }
     }
 
@@ -4186,7 +4191,7 @@ impl XRClient {
                                             decoder.decoded_frame_counter,
                                             window,
                                             now,
-                                            bitrate_sample_mbps,
+                                            self.last_bitrate_perfect_info_update,
                                             lost_frames_aux.clone(),
                                             &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
                                             &self.test, 
@@ -4233,6 +4238,13 @@ impl XRClient {
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
+    pub async fn input_perfect_information_bitrate(&mut self, bitrate: f32, context: &Context<Self>) {
+        
+        let now = context.scheduler.time(); 
+        print_brown!("{} - perfect bitrate input: {}", format_elapsed!(now), bitrate); 
+
+        self.last_bitrate_perfect_info_update = bitrate; 
+    }
 
     
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
