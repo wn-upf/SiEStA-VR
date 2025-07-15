@@ -1725,7 +1725,7 @@ impl BitrateManager {
             ),
 
             bitrate_mode,
-            last_target_bitrate_bps: 0.0,
+            last_target_bitrate_bps: initial_bitrate_mbps * 1e6,
             bitrate_ladder_bps: None, 
             bitrate_step_size_bps: 0.0, 
         }
@@ -1812,16 +1812,15 @@ impl BitrateManager {
                     bitrate
                 }
                 
-                print_prettyy!(
-                    DebugColor::Purple,
-                    "{} ONE PASS OF NEST-VR!",
-                    format_elapsed!(now)
+                print_pink!(
+                    // DebugColor::Purple,
+                    "{} ONE PASS OF NEST-VR! Bitrate: {} Mbps and {} bytes",
+                    self.last_target_bitrate_mbps, self.last_target_bitrate_bps, format_elapsed!(now)
                 );
 
                 let (max_bps, min_bps) = (max_bitrate_mbps * 1e6, min_bitrate_mbps * 1e6); 
 
                 if self.bitrate_ladder_bps.is_none() {
-
                     
                     let bitrate_step_count = nest_vr_profile.bitrate_step_count; 
                     if max_bps != 0.0 && min_bps != 0.0 {

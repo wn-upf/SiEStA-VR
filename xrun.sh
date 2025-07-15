@@ -1,5 +1,5 @@
 NUMBER_OF_JOBS=3
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 initial_bitrate_mbps=( 100.0 )
 # initial_bitrate_mbps=( 100.0 )
 
@@ -10,17 +10,18 @@ mean_length=12000.0  ## TODO: DELETE THESE
 rate_bps_src=20E6;   ## TODO: DELETE THESE
 rate_bps_queue=6E5 ## does nothing theoretically 
 
-distance_list=( 1.5 11.0 )
-distance_close_users=(1.5 4.0 7.0 9.0 11.0 )  ## to have heterogeneous distances
-num_close_users=(0 1 2)     ## number of users with alternate distance
+distance_list=( 1.5 )
+distance_close_users=( 1.5 )  ## to have heterogeneous distances
+num_close_users=( 0 )     ## number of users with alternate distance
 
 PL=0.1
 fps_list=(90.0)
 N_XR=(1)
-# distance_close_users=(1.0 1.8 2.0 4.0 5.0 7.0 8.0 11.0)
 
 ABR_ENABLED=( 1 )
-nest_profiles=(0 1 2) ## Nest-VR profiles: 
+nest_profiles=(0 1 2) ## Nest-VR profiles:         0 => {NestVrProfile::Speedy},
+#                                                  1 => {NestVrProfile::Balanced},
+#                                                  2 => {NestVrProfile::Anxious},
 
 RANDOM_SEEDS=(1)
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
