@@ -2181,7 +2181,7 @@ pub struct HeuristicStats {
     pub bitrate_dec_steps: usize,
     pub bitrate_inc_steps: usize,
 
-    pub bitrate_step_size_bps: f32,
+    pub bitrate_step_size_mbps: f32,
 
     pub r_rtt: f32,
     pub r_inc: f32,
@@ -2198,7 +2198,8 @@ pub struct HeuristicStats {
     pub nfr_thresh: f32,
     pub rtt_thresh_ms: f32,
 
-    pub requested_bitrate_bps: f32,
+    pub requested_bitrate_mbps: f32,
+    pub estimated_capacity_mbps: f32, 
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

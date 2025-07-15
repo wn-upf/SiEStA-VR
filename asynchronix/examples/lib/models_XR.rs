@@ -1777,9 +1777,6 @@ impl BitrateManager {
                 ..
             } => {
 
-                fn floor_to_nearest_mult_from_initial(value: f32, step: f32, initial: f32) -> f32 {
-                    initial + ((value - initial) / step).floor() * step
-                }
                 fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
                     // Perform binary search to find the largest value less than or equal to `bitrate_bps`
                     match bitrate_ladder
@@ -1798,18 +1795,22 @@ impl BitrateManager {
                         }
                     }
                 }
+ 
                 fn minmax_bitrate(
                     bitrate_bps: f32,
-                    max_bitrate_mbps: f32,
-                    min_bitrate_mbps: f32,
+                    max_bitrate_bps: f32,
+                    min_bitrate_bps: f32,
                 ) -> f32 {
                     let mut bitrate = bitrate_bps;
-                    bitrate = f32::min(bitrate, max_bitrate_mbps * 1e6);
-                    bitrate = f32::max(bitrate, min_bitrate_mbps * 1e6);
+                    bitrate = f32::min(bitrate, max_bitrate_bps);
+                    bitrate = f32::max(bitrate, min_bitrate_bps);
+
+
+                    println!("minmax: bitrate_mbps_orig: {}, final {}", bitrate_bps/1e6, bitrate/1e6); 
+
 
                     bitrate
                 }
-
                 
                 print_prettyy!(
                     DebugColor::Purple,
@@ -1879,23 +1880,31 @@ impl BitrateManager {
 
                 if nfr_avg < profile_config.nfr_thresh {
                     // decrease
+                    print_yellow!("decrease (nfr_thresh)",); 
+
                     bitrate_bps -=
                         profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps;
                 } else {
                     if rtt_avg_ms > profile_config.rtt_thresh_ms {
                         if r_rtt <= profile_config.rtt_adj_prob {
                             // decrease
+                            print_yellow!("decrease (rtt prob)",); 
+
                             bitrate_bps -= profile_config.bitrate_dec_steps as f32
                                 * self.bitrate_step_size_bps;
                         }
                     } else {
                         if r_inc <= profile_config.bitrate_inc_prob {
                             // increase
+                            print_yellow!("INCREASE (rtt prob)",); 
+
                             bitrate_bps += profile_config.bitrate_inc_steps as f32
                                 * self.bitrate_step_size_bps;
                         }
                     }
                 }
+
+                print_pink!("bitrate in Mbps after Nest: {}", bitrate_bps / 1e6); 
 
                 // Ensure bitrate is below the estimated network capacity
                 let capacity_upper_limit =
@@ -1916,7 +1925,7 @@ impl BitrateManager {
                     bitrate_dec_steps: profile_config.bitrate_dec_steps,
                     bitrate_inc_steps: profile_config.bitrate_inc_steps,
 
-                    bitrate_step_size_bps: self.bitrate_step_size_bps,
+                    bitrate_step_size_mbps: self.bitrate_step_size_bps / 1e6,
 
                     r_rtt: r_rtt,
                     r_inc: r_inc,
@@ -1933,7 +1942,8 @@ impl BitrateManager {
                     nfr_thresh: profile_config.nfr_thresh,
                     rtt_thresh_ms: profile_config.rtt_thresh_ms,
 
-                    requested_bitrate_bps: bitrate_bps,
+                    requested_bitrate_mbps: bitrate_bps / 1e6,
+                    estimated_capacity_mbps: estimated_capacity_bps / 1e6, 
                 };
 
                 print_pink!(
@@ -2440,8 +2450,13 @@ impl XRServer {
                 if now.duration_since(self.bitrate_manager.last_update_instant)
                     >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL)
                 {
-                    self.bitrate_manager.one_pass_abr(now);
+                    let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
+
+                    self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
+
+                    print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
+
                 }
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
 

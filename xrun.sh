@@ -3,7 +3,7 @@ SERIAL_EXECUTION=1
 initial_bitrate_mbps=( 100.0 )
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+TEST_TYPE=("BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 simTime=80.0
 k_queue=10000
 mean_length=12000.0  ## TODO: DELETE THESE
@@ -15,11 +15,11 @@ distance_close_users=(1.5 4.0 7.0 9.0 11.0 )  ## to have heterogeneous distances
 num_close_users=(0 1 2)     ## number of users with alternate distance
 
 PL=0.1
-fps_list=(60.0 90.0)
-N_XR=(2)
+fps_list=(90.0)
+N_XR=(1)
 # distance_close_users=(1.0 1.8 2.0 4.0 5.0 7.0 8.0 11.0)
 
-ABR_ENABLED=( 0 1 )
+ABR_ENABLED=( 1 )
 nest_profiles=(0 1 2) ## Nest-VR profiles: 
 
 RANDOM_SEEDS=(1)
@@ -28,7 +28,7 @@ video_samples=("snow")
 N_BGs=(0)
 IS_UL_BG=(0)
 
-intrarefresh_choice=(0 1)
+intrarefresh_choice=(1)
 GoP_sizes=(90)
 # Define the function to execute on Ctrl+C
 handle_interrupt() {
