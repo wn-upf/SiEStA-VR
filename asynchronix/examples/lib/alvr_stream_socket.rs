@@ -15,7 +15,7 @@ use crate::print_green;
 use crate::lib::models_mm1k::NetworkPattern;
 #[allow(unused)]
 use std::io::BufRead;
-
+use rand::Rng;
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
 
 use crate::debug_bgprint;
@@ -57,7 +57,7 @@ pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 5.0;
+pub const OFFSET_VIDEO: f64 = 80.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -1916,8 +1916,8 @@ impl<H: Serialize> StreamSender<H> {
                 //     self.ffmpeg_maxbitrate_encoder.is_some()
                 // );
 
-                // let mut random_offset = rand::thread_rng().gen_range(3.0..OFFSET_VIDEO);
-                let random_offset = OFFSET_VIDEO;
+                let mut random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
+                // let random_offset = OFFSET_VIDEO;
 
                 let third_octet = get_third_octet(ip).unwrap(); 
 

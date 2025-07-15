@@ -13,7 +13,7 @@ use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::HevcParser;
+use crate::lib::{HevcParser, _INITIAL_BITRATE_MBPS_SIM};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -55,10 +55,10 @@ use crate::lib::alvr_control_socket::ProtoControlSocket;
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
 use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
-    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
+    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader, CHUNK_DURATION_F64_S,
 };
 use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, INITIAL_FRAMERATE_FPS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
+    AUDIO, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
 };
 use crate::lib::DEBUG_PRINT_ENABLED;
 use dashmap::DashMap;
@@ -110,7 +110,7 @@ pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 pub const DECODER_BUFFERING_FRAMES: usize = 10;
-
+pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
 
 #[allow(unused)]                                                                                    
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES / 2; // unused at the moment, 
@@ -1436,6 +1436,7 @@ impl SharedParameterSetManager {
 }
 
 // #[derive(Clone)]   // TODO: Use for modelling "Adaptive" mode of ALVR. Encoding latencies are tricky to get from chunks, could be modelled directly as some distribution over T_enc_chunk/N_frames_chunk
+                      // ** Might want to look into libavcodec instead of FFMPEG. 
 // pub struct EncoderLatencyLimiter {
 //     pub max_saturation_multiplier: f32,
 // }
@@ -1445,6 +1446,41 @@ impl SharedParameterSetManager {
 //     pub latency_overstep_frames: usize,
 //     pub latency_overstep_multiplier: f32,
 // }
+
+ #[derive(Clone)]
+pub enum WindowType {
+    BySeconds {
+        sliding_window_secs: Option<f32>,
+    },
+    // #[schema(strings(display_name = "Sample-based"))]
+    BySamples {
+        // #[schema(strings(display_name = "Window size"))]
+        // #[schema(flag = "real-time")]
+        // #[schema(gui(slider(min = 32, max = 256, step = 1)), suffix = " samples")]
+        sliding_window_samp: usize,
+    },
+}
+#[derive(Clone)]
+pub enum AveragingStrategy {
+    SimpleWindowAverage {
+        // #[schema(flag = "real-time")]
+        // #[schema(strings(display_name = "Statistics sliding window type"))]
+        window_type: WindowType,
+    },
+    // #[schema(strings(display_name = "Exponential Weighted Moving Average"))]
+    ExponentialMovingAverage {
+        // #[schema(flag = "real-time")]
+        // #[schema(strings(
+        //     help = "EWMA_t = alpha*r_t+(1-alpha)*EWMA_{t-1}, where `alpha` denotes the EWMA weight and `r` is the value in the current period."
+        // ))]
+        // #[schema(gui(slider(min = 0.1, max = 1.0, step = 0.01)))]
+        ewma_weight: f32,
+    },
+}
+
+
+
+
 #[derive(Clone)]
 #[allow(unused)]
 pub enum BitrateMode {
@@ -1457,18 +1493,149 @@ pub enum BitrateMode {
     //     encoder_latency_limiter: EncoderLatencyLimiter,
     //     decoder_latency_limiter: DecoderLatencyLimiter,
     // },
-    NestVr {
-        update_interval_nestvr_s: f32,
-        max_bitrate_mbps: f32,
-        min_bitrate_mbps: f32,
-        initial_bitrate_mbps: f32,
-        step_size_mbps: f32,
-        capacity_scaling_factor: f32,
-        rtt_explor_prob: f32,
-        nfr_thresh: f32,
-        rtt_thresh_scaling_factor: f32,
-    },
+    // NestVr {
+    //     update_interval_nestvr_s: f32,
+    //     max_bitrate_mbps: f32,
+    //     min_bitrate_mbps: f32,
+    //     initial_bitrate_mbps: f32,
+
+    //     step_size_mbps: f32,
+        
+        
+    //     capacity_scaling_factor: f32,
+    //     rtt_explor_prob: f32,
+    //     nfr_thresh: f32,
+    //     rtt_thresh_scaling_factor: f32,
+    //     profile: NestVrProfile, 
+    // },
+
+        NestVr{
+            averaging_strategy: AveragingStrategy,            
+            max_bitrate_mbps: f32,
+
+            min_bitrate_mbps: f32,
+
+            initial_bitrate_mbps: f32,
+
+            nest_vr_profile: ProfileConfig,
+
+        }
 }
+
+#[derive(Clone, PartialEq)]
+pub enum NestVrProfile {
+    Custom {
+        update_interval_nestvr_s: f32,
+        bitrate_step_count: usize,
+        bitrate_inc_steps: usize,
+        bitrate_dec_steps: usize,
+        rtt_adj_prob: f32,
+        bitrate_inc_prob: f32,
+        nfr_thresh: f32,
+        rtt_thresh_ms: f32,
+        capacity_scaling_factor: f32,
+    },
+    Balanced,
+    Speedy,
+    Anxious,
+}
+
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileConfig {
+    pub update_interval_nestvr_s: f32,
+
+    pub max_bitrate_mbps: f32,
+    pub min_bitrate_mbps: f32,
+    pub initial_bitrate_mbps: f32,
+
+    pub bitrate_step_count: usize,
+    pub bitrate_inc_steps: usize,
+    pub bitrate_dec_steps: usize,
+
+    pub rtt_adj_prob: f32,
+    pub bitrate_inc_prob: f32,
+
+    pub nfr_thresh: f32,
+    pub rtt_thresh_ms: f32,
+
+    pub capacity_scaling_factor: f32,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        ProfileConfig {
+            update_interval_nestvr_s: 1.,
+
+            max_bitrate_mbps: 100.,
+            min_bitrate_mbps: 10.,
+            initial_bitrate_mbps: 50.,
+
+            bitrate_step_count: 9,
+            bitrate_inc_steps: 1,
+            bitrate_dec_steps: 1,
+
+            rtt_adj_prob: 1.0,
+            bitrate_inc_prob: 0.25,
+
+            nfr_thresh: 0.99,
+            rtt_thresh_ms: 22.,
+
+            capacity_scaling_factor: 0.9,
+        }
+    }
+}
+
+pub fn get_profile_config(
+    max_bitrate_mbps: f32,
+    min_bitrate_mbps: f32,
+    initial_bitrate_mbps: f32,
+    nest_vr_profile: &NestVrProfile,
+) -> ProfileConfig {
+    let base_config = ProfileConfig {
+        max_bitrate_mbps,
+        min_bitrate_mbps,
+        initial_bitrate_mbps,
+        ..Default::default()
+    };
+    match nest_vr_profile {
+        NestVrProfile::Custom {
+            update_interval_nestvr_s,
+            bitrate_step_count,
+            bitrate_inc_steps,
+            bitrate_dec_steps,
+            rtt_adj_prob,
+            bitrate_inc_prob,
+            nfr_thresh,
+            rtt_thresh_ms,
+            capacity_scaling_factor,
+        } => ProfileConfig {
+            update_interval_nestvr_s: *update_interval_nestvr_s,
+            bitrate_step_count: *bitrate_step_count,
+            bitrate_inc_steps: *bitrate_inc_steps,
+            bitrate_dec_steps: *bitrate_dec_steps,
+            rtt_adj_prob: *rtt_adj_prob,
+            bitrate_inc_prob: *bitrate_inc_prob,
+            nfr_thresh: *nfr_thresh,
+            rtt_thresh_ms: *rtt_thresh_ms,
+            capacity_scaling_factor: *capacity_scaling_factor,
+            ..base_config
+        },
+        NestVrProfile::Balanced => ProfileConfig {
+            bitrate_dec_steps: 1,
+            ..base_config
+        },
+        NestVrProfile::Speedy => ProfileConfig {
+            bitrate_dec_steps: 2,
+            ..base_config
+        },
+        NestVrProfile::Anxious => ProfileConfig {
+            bitrate_dec_steps: 10,
+            ..base_config
+        },
+    }
+}
+
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -1493,9 +1660,76 @@ pub struct BitrateManager {
     frame_interarrival_average: SlidingWindowAverage<f32>,
 
     last_target_bitrate_bps: f32,
+    bitrate_ladder_bps: Option<Vec<f32>>, 
+    bitrate_step_size_bps: f32,
 }
 
+
 impl BitrateManager {
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: bool, nest_vr_profile: &NestVrProfile, 
+) -> Self {
+        let decrement = match(nest_vr_profile){
+            NestVrProfile::Anxious => {10}, 
+            NestVrProfile::Balanced => {1},
+            NestVrProfile::Speedy => {2}, 
+            NestVrProfile::Custom{..} => {1}, 
+        }; 
+
+        let bitrate_mode = if abr_enabled{
+            BitrateMode::NestVr { 
+                //     NestVr{
+                    averaging_strategy: AveragingStrategy::SimpleWindowAverage { window_type: WindowType::BySeconds { sliding_window_secs: Some(BITRATE_UPDATE_INTERVAL as f32) } },            
+                    max_bitrate_mbps: 100.0,
+                    min_bitrate_mbps: 10.0,
+                    initial_bitrate_mbps: 50.0,
+                    nest_vr_profile: ProfileConfig {
+                                        update_interval_nestvr_s: UPDATE_BITRATE_INTERVAL.as_secs_f32(), 
+                                        max_bitrate_mbps: 100.0,
+                                        min_bitrate_mbps: 10.0,
+                                        initial_bitrate_mbps: initial_bitrate_mbps,
+
+                                        bitrate_step_count: 9, 
+                                        bitrate_inc_steps: 1, 
+                                        bitrate_dec_steps: decrement, 
+
+                                        rtt_adj_prob: 1.0,
+                                        bitrate_inc_prob: 0.25, 
+                                        nfr_thresh: 0.99,
+                                        rtt_thresh_ms: 22.0, 
+                                        capacity_scaling_factor: 0.9,},
+                }
+            }
+            else{
+                BitrateMode::ConstantMbps(initial_bitrate_mbps)
+        };         
+
+        Self {
+            last_frame_instant: TaiTime::EPOCH,
+            last_update_instant: TaiTime::EPOCH,
+
+            frame_index: 0,
+
+            frame_interval_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
+            encoder_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
+            network_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
+
+            bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
+            last_target_bitrate_mbps: initial_bitrate_mbps,
+            update_interval_s: UPDATE_BITRATE_INTERVAL,
+
+            rtt_average: SlidingWindowAverage::new(Duration::from_millis(5), max_history_size),
+            peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
+            frame_interarrival_average: SlidingWindowAverage::new(
+                1. / initial_framerate,
+                max_history_size,
+            ),
+
+            bitrate_mode,
+            last_target_bitrate_bps: 0.0,
+            bitrate_ladder_bps: None, 
+            bitrate_step_size_bps: 0.0, 
+        }
+    }
     pub fn report_encoded_frame_server(&mut self, now: TaiTime<0>) {
         print_prettyy!(
             DebugColor::Purple,
@@ -1539,17 +1773,31 @@ impl BitrateManager {
                 max_bitrate_mbps,
                 min_bitrate_mbps,
                 initial_bitrate_mbps,
-                step_size_mbps,
-                capacity_scaling_factor,
-                rtt_explor_prob,
-                nfr_thresh,
-                rtt_thresh_scaling_factor,
+                nest_vr_profile,
                 ..
             } => {
+
                 fn floor_to_nearest_mult_from_initial(value: f32, step: f32, initial: f32) -> f32 {
                     initial + ((value - initial) / step).floor() * step
                 }
-
+                fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
+                    // Perform binary search to find the largest value less than or equal to `bitrate_bps`
+                    match bitrate_ladder
+                        .binary_search_by(|x| x.partial_cmp(&bitrate_bps).unwrap_or(std::cmp::Ordering::Less))
+                    {
+                        Ok(index) => bitrate_ladder[index], // Exact match found
+                        Err(index) => {
+                            // If not found, `index` is where the value would be inserted to maintain sorted order
+                            if index == 0 {
+                                // If `bitrate_bps` is smaller than the first element, return the first element
+                                bitrate_ladder.first().copied().unwrap_or(bitrate_bps)
+                            } else {
+                                // Otherwise, return the element just before the insertion point (i.e., the largest <= bitrate_bps)
+                                bitrate_ladder[index - 1]
+                            }
+                        }
+                    }
+                }
                 fn minmax_bitrate(
                     bitrate_bps: f32,
                     max_bitrate_mbps: f32,
@@ -1561,97 +1809,135 @@ impl BitrateManager {
 
                     bitrate
                 }
+
+                
                 print_prettyy!(
                     DebugColor::Purple,
                     "{} ONE PASS OF NEST-VR!",
                     format_elapsed!(now)
                 );
 
+                let (max_bps, min_bps) = (max_bitrate_mbps * 1e6, min_bitrate_mbps * 1e6); 
+
+                if self.bitrate_ladder_bps.is_none() {
+
+                    
+                    let bitrate_step_count = nest_vr_profile.bitrate_step_count; 
+                    if max_bps != 0.0 && min_bps != 0.0 {
+                        let mut vec_bitrates = Vec::new();
+
+                        let bitrate_step_size_bps = (max_bps - min_bps) / bitrate_step_count as f32;
+
+                        let mut last_value = min_bps;
+
+                        vec_bitrates.push(min_bps); // first bitrate is min
+                        
+                        for _ in 0..bitrate_step_count {
+                            last_value += bitrate_step_size_bps;
+                            vec_bitrates.push(last_value);
+                        }
+
+                        self.bitrate_ladder_bps = Some(vec_bitrates);
+                        self.bitrate_step_size_bps = bitrate_step_size_bps;
+
+                        self.last_target_bitrate_bps = upper_bound_bitrate(
+                            self.last_target_bitrate_bps,
+                            &self.bitrate_ladder_bps.clone().unwrap(),
+                        );
+                    }
+                }
+
+
+                let profile_config = nest_vr_profile; 
                 // Sample from uniform distribution
                 let mut rng = rand::thread_rng();
                 let uniform_dist = Uniform::new(0.0, 1.0);
-                let random_prob = rng.sample(uniform_dist);
 
-                let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
+                let r_rtt = rng.sample(uniform_dist);
+                let r_inc = rng.sample(uniform_dist);
 
                 let frame_interval_s = self.frame_interval_average.get_average().as_secs_f32();
-                let rtt_avg_heur_s = self.rtt_average.get_average().as_secs_f32();
 
-                let server_fps = if frame_interval_s != 0.0 {
+                let fps_tx_avg = if frame_interval_s != 0.0 {
                     1.0 / frame_interval_s
                 } else {
                     0.0
                 };
-                let heur_fps = if self.frame_interarrival_average.get_average() != 0.0 {
+
+                let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 {
                     1.0 / self.frame_interarrival_average.get_average()
                 } else {
                     0.0
                 };
 
+                let nfr_avg = fps_rx_avg / fps_tx_avg;
+                let rtt_avg_ms = self.rtt_average.get_average().as_secs_f32() * 1000.0;
+
                 let estimated_capacity_bps = self.peak_throughput_average.get_average();
-                let steps_bps = step_size_mbps * 1E6;
 
-                let threshold_fps = nfr_thresh * server_fps;
-                let threshold_rtt = frame_interval_s * rtt_thresh_scaling_factor;
-                let threshold_u = rtt_explor_prob;
-                print_prettyy!(
-                    DebugColor::Purple,
-                    "Server FPS = {}, nfr_thresh = {}, rtt_thresh = {}",
-                    server_fps,
-                    threshold_fps,
-                    threshold_rtt
-                );
+                let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
 
-                if heur_fps >= threshold_fps {
-                    if rtt_avg_heur_s > threshold_rtt {
-                        if random_prob >= threshold_u {
-                            print_prettyy!(DebugColor::Purple, " BITRATE DECREASE",);
-
-                            bitrate_bps -= steps_bps; // decrease bitrate by 1 step
+                if nfr_avg < profile_config.nfr_thresh {
+                    // decrease
+                    bitrate_bps -=
+                        profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps;
+                } else {
+                    if rtt_avg_ms > profile_config.rtt_thresh_ms {
+                        if r_rtt <= profile_config.rtt_adj_prob {
+                            // decrease
+                            bitrate_bps -= profile_config.bitrate_dec_steps as f32
+                                * self.bitrate_step_size_bps;
                         }
                     } else {
-                        if random_prob <= threshold_u {
-                            print_prettyy!(DebugColor::Purple, " BITRATE INCREASE",);
-
-                            bitrate_bps += steps_bps; // increase bitrate by 1 step
+                        if r_inc <= profile_config.bitrate_inc_prob {
+                            // increase
+                            bitrate_bps += profile_config.bitrate_inc_steps as f32
+                                * self.bitrate_step_size_bps;
                         }
                     }
-                } else {
-                    bitrate_bps -= steps_bps; // decrease bitrate by 1 step
-                    print_prettyy!(DebugColor::Purple, " BITRATE DECREASE 2",);
                 }
 
-                // Ensure bitrate is within allowed range
-                bitrate_bps = minmax_bitrate(bitrate_bps, max_bitrate_mbps, min_bitrate_mbps);
-
                 // Ensure bitrate is below the estimated network capacity
-                let capacity_upper_limit = capacity_scaling_factor * estimated_capacity_bps;
-                bitrate_bps = floor_to_nearest_mult_from_initial(
-                    f32::min(bitrate_bps, capacity_upper_limit),
-                    steps_bps,
-                    initial_bitrate_mbps * 1E6,
-                );
+                let capacity_upper_limit =
+                    profile_config.capacity_scaling_factor * estimated_capacity_bps;
+
+                bitrate_bps = f32::min(bitrate_bps, capacity_upper_limit);
+
+                // Ensure bitrate is always within the configured range
+                bitrate_bps = minmax_bitrate(bitrate_bps, max_bps, min_bps);
+
+                bitrate_bps =
+                    upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap());
+
 
                 let heur_stats = HeuristicStats {
-                    frame_interval_s: frame_interval_s,
-                    server_fps: server_fps, // fps_tx
-                    steps_mbps: steps_bps / 1e6,
+                    bitrate_step_count: profile_config.bitrate_step_count,
 
-                    network_heur_fps: heur_fps, // fps_rx
-                    rtt_avg_heur_s: rtt_avg_heur_s,
-                    random_prob: random_prob,
+                    bitrate_dec_steps: profile_config.bitrate_dec_steps,
+                    bitrate_inc_steps: profile_config.bitrate_inc_steps,
 
-                    threshold_fps: threshold_fps,
-                    threshold_rtt_s: threshold_rtt,
-                    threshold_u: threshold_u,
+                    bitrate_step_size_bps: self.bitrate_step_size_bps,
 
-                    capacity_estimated_mbps: estimated_capacity_bps / 1E6,
+                    r_rtt: r_rtt,
+                    r_inc: r_inc,
 
-                    requested_bitrate_mbps: bitrate_bps / 1e6,
+                    rtt_adj_prob: profile_config.rtt_adj_prob,
+                    bitrate_inc_prob: profile_config.bitrate_inc_prob,
+
+                    fps_tx_avg: fps_tx_avg,
+                    fps_rx_avg: fps_rx_avg,
+
+                    nfr_avg: nfr_avg,
+                    rtt_avg_ms: rtt_avg_ms,
+
+                    nfr_thresh: profile_config.nfr_thresh,
+                    rtt_thresh_ms: profile_config.rtt_thresh_ms,
+
+                    requested_bitrate_bps: bitrate_bps,
                 };
 
-                print_prettyy!(
-                    DebugColor::Purple,
+                print_pink!(
+                    // DebugColor::Purple,
                     " ------NeSt-VR STATS-------: {:#?}",
                     heur_stats
                 );
@@ -1718,36 +2004,6 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
 
-impl BitrateManager {
-    // TODO: Add method for CBR
-    pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32) -> Self {
-        Self {
-            last_frame_instant: TaiTime::EPOCH,
-            last_update_instant: TaiTime::EPOCH,
-
-            frame_index: 0,
-
-            frame_interval_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
-            encoder_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
-            network_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
-
-            bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
-            last_target_bitrate_mbps: initial_bitrate_mbps,
-            update_interval_s: UPDATE_BITRATE_INTERVAL,
-
-            rtt_average: SlidingWindowAverage::new(Duration::from_millis(5), max_history_size),
-            peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
-            frame_interarrival_average: SlidingWindowAverage::new(
-                1. / initial_framerate,
-                max_history_size,
-            ),
-
-            bitrate_mode: BitrateMode::ConstantMbps(initial_bitrate_mbps), // ONLY CBR FOR NOW!!!
-
-            last_target_bitrate_bps: 0.0,
-        }
-    }
-}
 #[allow(unused)]
 pub struct XRServer {
     pub ip_self: IpAddr,
@@ -1772,7 +2028,7 @@ pub struct XRServer {
     pub video_sample_filename: String, 
     pub gop_size: usize, 
     pub intra_refresh: bool, 
-
+    pub abr_enabled: bool, 
 
 }
 #[allow(unused)]
@@ -1788,6 +2044,9 @@ impl XRServer {
         file_name_video: &str,
         gop_size: usize, 
         intra_refresh: bool, 
+        abr_enabled: bool, 
+        nest_vr_profile: &NestVrProfile, 
+
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
 
@@ -1811,14 +2070,22 @@ impl XRServer {
             final_file = file_name_video; 
         }
 
+
+        let history_interval = BITRATE_UPDATE_INTERVAL;
+
         Self {
             ip_self,
             ip_client,
             t_0: t0_sim,
+
+
+
             bitrate_manager: BitrateManager::new(
                 MAX_HISTORY_SIZE,
-                INITIAL_FRAMERATE_FPS,
+                frame_rate,
                 initial_bitrate,
+                abr_enabled, 
+                nest_vr_profile, 
             ),
 
             video_app_sender: None,
@@ -1850,6 +2117,7 @@ impl XRServer {
             video_sample_filename: final_file.to_string(), 
             gop_size, 
             intra_refresh, 
+            abr_enabled, 
 
         }
     }
@@ -1952,7 +2220,12 @@ impl XRServer {
                             framed_recv_vec(&packet.data_inner).unwrap();
                         // println!("STATS IS {:?}", stats);
 
-                        let results = sock.send(&stats);
+                        if let Ok(()) = sock.send(&stats){
+                            
+                        }
+                        else{
+                            print_red!("[ERROR] Socket error control stream!", ); 
+                        }
 
                         XRServer::handle_control_packet(self, stats, now);
                     }
@@ -2165,7 +2438,7 @@ impl XRServer {
                 // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
 
                 if now.duration_since(self.bitrate_manager.last_update_instant)
-                    >= Duration::from_secs(1)
+                    >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL)
                 {
                     self.bitrate_manager.one_pass_abr(now);
                     self.bitrate_manager.last_update_instant = now;

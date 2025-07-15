@@ -39,7 +39,7 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use crate::lib::models_XR::{STA_extended, XRClient, XRServer};
+use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 10;
@@ -69,6 +69,8 @@ impl VRPair {
         fps: f32, 
         gop_size: usize, 
         intrarefresh: bool, 
+        abr_enabled: bool, 
+        nest_vr_profile: &NestVrProfile, 
 
     ) -> Self {
         let server_id = 100 + pair_index as i32;
@@ -105,6 +107,8 @@ impl VRPair {
             file_name_video, 
             gop_size, 
             intrarefresh, 
+            abr_enabled, 
+            nest_vr_profile, 
         );
         let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test);
 
@@ -172,9 +176,9 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 20 {
+    if args.len() != 22 {
         eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> 
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled>", args[0]);
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled> <ABR enabled> <nest-vr_profile>", args[0]);
         return;
     }
 
@@ -201,6 +205,17 @@ fn main() {
     let gop_size: usize = args[18].parse().expect("Invalid GoP size"); 
     let intra_refresh: usize = args[19].parse().expect("Invalid intra-refresh (0 or 1)"); 
 
+    let abr: usize = args[20].parse().expect("Invalid ABR (0 or 1) "); 
+    let abr_bool = abr > 0; 
+    let nest_vr_choice = args[21].parse().expect("Invalid NeSt profile"); 
+
+
+    let nest_vr_profile = match nest_vr_choice{
+        0 => {NestVrProfile::Speedy},
+        1 => {NestVrProfile::Balanced},
+        2 => {NestVrProfile::Anxious},
+        _ => {NestVrProfile::Balanced}, //default to balanced 
+    }; 
 
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
@@ -221,8 +236,8 @@ fn main() {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, 
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.3}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr_bool, nest_vr_choice, 
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -289,6 +304,8 @@ fn main() {
             fps,
             gop_size, 
             intra_refresh != 0, 
+            abr_bool, 
+            &nest_vr_profile, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -312,6 +329,8 @@ fn main() {
             fps, 
             gop_size, 
             intra_refresh != 0 , 
+            abr_bool, 
+            &nest_vr_profile
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
