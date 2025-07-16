@@ -2367,7 +2367,7 @@ impl XRServer {
                 // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
 
                 if now.duration_since(self.bitrate_manager.last_update_instant)
-                    >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL)
+                    >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL * FRAMERATE_WINDOWS as f64 / self.fps as f64)
                 {   
                     let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
                     self.bitrate_manager.last_update_instant = now;

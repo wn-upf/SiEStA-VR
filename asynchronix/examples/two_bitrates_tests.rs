@@ -1831,6 +1831,8 @@ pub struct ChunkedHevcEncoder {
     encoder_str: String,
     intra_refresh: bool, 
 
+    fps_desired: f32, 
+
 
 }
 #[allow(unused)]
@@ -1844,6 +1846,8 @@ impl ChunkedHevcEncoder {
         string: String,
         offset_video: f64,
         intra_refresh: bool, 
+        fps_desired: f32, 
+
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(100);
@@ -1861,6 +1865,7 @@ impl ChunkedHevcEncoder {
             parser: HevcParser::new(),
             encoder_str: string.clone(),
             intra_refresh, 
+            fps_desired, 
         }
     }
 
@@ -1876,7 +1881,7 @@ impl ChunkedHevcEncoder {
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, idr: u32, ) {
         
         let _encode_permit = ENCODE_SLOTS.clone().acquire_owned().await.unwrap();
-        let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / INITIAL_FRAMERATE_FPS;
+        let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.fps_desired;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
@@ -2052,6 +2057,7 @@ use csv::StringRecord;
 fn make_encoder_task(
     tag: usize,
     bitrate_mbps: f32,
+    framerate_fps: f32, 
     trace: Arc<Vec<FrameInfo>>,
     tx: Sender<(usize, u32, Vec<u8>)>,
     video_path: String,
@@ -2072,6 +2078,7 @@ fn make_encoder_task(
             format!("ENC{}M", bitrate_mbps),
             offset_video,
             intra_refresh, 
+            framerate_fps, 
         );
 
         // 2️⃣ Iterate until we’ve produced every ID in the trace
@@ -2904,6 +2911,15 @@ pub async fn process_trace_single_encoder_new(
         .parse()?;
     println!("Extracted bitrate: {}", bitrate);
 
+    let fps_re = Regex::new(r"_FPS(?P<fps>\d+)_")?;
+    let fps_value: f32 = fps_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("fps"))
+        .ok_or_else(|| anyhow::anyhow!("FPS not found in scenario name"))?
+        .as_str()
+        .parse()?;
+    println!("Extracted FPS: {}", fps_value);
+
     let intra_re = Regex::new(r"_IR(?P<ir>[01])")?;
     let intra_refresh: bool = intra_re
         .captures(&scenario)
@@ -3028,7 +3044,7 @@ pub async fn process_trace_single_encoder_new(
     // spawn encoder task
     let (tx_low, rx_low) = unbounded::<(usize,u32,Vec<u8>)>();
     make_encoder_task(
-        0, bitrate, Arc::clone(&trace), tx_low.clone(), video.clone(), offset, false, idr, intra_refresh, 
+        0, bitrate, fps_value, Arc::clone(&trace), tx_low.clone(), video.clone(), offset, false, idr, intra_refresh, 
     );
     drop(tx_low);
 
@@ -3208,6 +3224,15 @@ pub async fn process_trace_two_encoders_no_loss(
         .parse()?;
     println!("Extracted bitrate: {}", bitrate);
 
+    let fps_re = Regex::new(r"_FPS(?P<fps>\d+)_")?;
+    let fps_value: f32 = fps_re
+        .captures(&scenario)
+        .and_then(|caps| caps.name("fps"))
+        .ok_or_else(|| anyhow::anyhow!("FPS not found in scenario name"))?
+        .as_str()
+        .parse()?;
+    println!("Extracted FPS: {}", fps_value);
+
     let intra_re = Regex::new(r"_IR(?P<ir>\d+)")?;
     let intra_refresh_enabled = intra_re
         .captures(&scenario)
@@ -3313,6 +3338,7 @@ pub async fn process_trace_two_encoders_no_loss(
     make_encoder_task(
         0,
         bitrate,
+        fps_value, 
         Arc::clone(&trace),
         tx_encoder_0.clone(),
         video.clone(),
@@ -3324,6 +3350,7 @@ pub async fn process_trace_two_encoders_no_loss(
     make_encoder_task(
         1,
         MAX_BITRATE_REFERENCE,
+        fps_value, 
         Arc::clone(&trace),
         tx_encoder_1.clone(),
         video,
