@@ -84,13 +84,13 @@ pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
 
 
 pub const STEP1_TBEGIN: f64 = 20.0;
-pub const STEP1_TEND: f64 = 30.0;
+pub const STEP1_TEND: f64 =   40.0;
 
-pub const STEP2_TBEGIN: f64 = 40.0;
-pub const STEP2_TEND: f64 = 50.0;
+pub const STEP2_TBEGIN: f64 = 60.0;
+pub const STEP2_TEND: f64 =   80.0;
 
-pub const STEP3_TBEGIN: f64 = 60.0;
-pub const STEP3_TEND: f64 = 70.0;
+pub const STEP3_TBEGIN: f64 = 100.0;
+pub const STEP3_TEND: f64 =   120.0;
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;

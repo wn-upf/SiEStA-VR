@@ -52,7 +52,7 @@ pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256;
-pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
+// pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
@@ -1916,7 +1916,7 @@ impl<H: Serialize> StreamSender<H> {
                 //     self.ffmpeg_maxbitrate_encoder.is_some()
                 // );
 
-                let mut random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
+                let random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
                 // let random_offset = OFFSET_VIDEO;
 
                 let third_octet = get_third_octet(ip).unwrap(); 

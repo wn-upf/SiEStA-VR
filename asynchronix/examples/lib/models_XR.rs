@@ -7,13 +7,13 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
-use crate::{debug_debug, print_brown, print_prettyyy};
+use crate::{debug_debug, print_brown};
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{HevcParser, _INITIAL_BITRATE_MBPS_SIM};
+use crate::lib::{HevcParser, AveragingStrategy, WindowType};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -1447,38 +1447,6 @@ impl SharedParameterSetManager {
 //     pub latency_overstep_multiplier: f32,
 // }
 
- #[derive(Clone)]
-pub enum WindowType {
-    BySeconds {
-        sliding_window_secs: Option<f32>,
-    },
-    // #[schema(strings(display_name = "Sample-based"))]
-    BySamples {
-        // #[schema(strings(display_name = "Window size"))]
-        // #[schema(flag = "real-time")]
-        // #[schema(gui(slider(min = 32, max = 256, step = 1)), suffix = " samples")]
-        sliding_window_samp: usize,
-    },
-}
-#[derive(Clone)]
-pub enum AveragingStrategy {
-    SimpleWindowAverage {
-        // #[schema(flag = "real-time")]
-        // #[schema(strings(display_name = "Statistics sliding window type"))]
-        window_type: WindowType,
-    },
-    // #[schema(strings(display_name = "Exponential Weighted Moving Average"))]
-    ExponentialMovingAverage {
-        // #[schema(flag = "real-time")]
-        // #[schema(strings(
-        //     help = "EWMA_t = alpha*r_t+(1-alpha)*EWMA_{t-1}, where `alpha` denotes the EWMA weight and `r` is the value in the current period."
-        // ))]
-        // #[schema(gui(slider(min = 0.1, max = 1.0, step = 0.01)))]
-        ewma_weight: f32,
-    },
-}
-
-
 
 
 #[derive(Clone)]
@@ -1521,7 +1489,7 @@ pub enum BitrateMode {
 
         }
 }
-
+#[allow(unused)]
 #[derive(Clone, PartialEq)]
 pub enum NestVrProfile {
     Custom {
@@ -1540,7 +1508,7 @@ pub enum NestVrProfile {
     Anxious,
 }
 
-
+#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub struct ProfileConfig {
     pub update_interval_nestvr_s: f32,
@@ -1586,55 +1554,6 @@ impl Default for ProfileConfig {
     }
 }
 
-pub fn get_profile_config(
-    max_bitrate_mbps: f32,
-    min_bitrate_mbps: f32,
-    initial_bitrate_mbps: f32,
-    nest_vr_profile: &NestVrProfile,
-) -> ProfileConfig {
-    let base_config = ProfileConfig {
-        max_bitrate_mbps,
-        min_bitrate_mbps,
-        initial_bitrate_mbps,
-        ..Default::default()
-    };
-    match nest_vr_profile {
-        NestVrProfile::Custom {
-            update_interval_nestvr_s,
-            bitrate_step_count,
-            bitrate_inc_steps,
-            bitrate_dec_steps,
-            rtt_adj_prob,
-            bitrate_inc_prob,
-            nfr_thresh,
-            rtt_thresh_ms,
-            capacity_scaling_factor,
-        } => ProfileConfig {
-            update_interval_nestvr_s: *update_interval_nestvr_s,
-            bitrate_step_count: *bitrate_step_count,
-            bitrate_inc_steps: *bitrate_inc_steps,
-            bitrate_dec_steps: *bitrate_dec_steps,
-            rtt_adj_prob: *rtt_adj_prob,
-            bitrate_inc_prob: *bitrate_inc_prob,
-            nfr_thresh: *nfr_thresh,
-            rtt_thresh_ms: *rtt_thresh_ms,
-            capacity_scaling_factor: *capacity_scaling_factor,
-            ..base_config
-        },
-        NestVrProfile::Balanced => ProfileConfig {
-            bitrate_dec_steps: 1,
-            ..base_config
-        },
-        NestVrProfile::Speedy => ProfileConfig {
-            bitrate_dec_steps: 2,
-            ..base_config
-        },
-        NestVrProfile::Anxious => ProfileConfig {
-            bitrate_dec_steps: 10,
-            ..base_config
-        },
-    }
-}
 
 
 #[allow(unused)]
@@ -1668,7 +1587,7 @@ pub struct BitrateManager {
 impl BitrateManager {
      pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: bool, nest_vr_profile: &NestVrProfile, 
 ) -> Self {
-        let decrement = match(nest_vr_profile){
+        let decrement = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
             NestVrProfile::Balanced => {1},
             NestVrProfile::Speedy => {2}, 
@@ -1772,7 +1691,7 @@ impl BitrateManager {
             BitrateMode::NestVr {
                 max_bitrate_mbps,
                 min_bitrate_mbps,
-                initial_bitrate_mbps,
+                // initial_bitrate_mbps,
                 nest_vr_profile,
                 ..
             } => {
@@ -4567,7 +4486,7 @@ pub struct STA_extended {
 
     pub t_0: TaiTime<0>,
 }
-// #[allow(unused)]
+#[allow(unused)]
 impl STA_extended {
     pub fn new(
         // arrival_rate_bps: f64,

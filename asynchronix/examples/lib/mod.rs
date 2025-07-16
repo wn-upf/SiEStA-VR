@@ -2181,6 +2181,39 @@ impl Clone for CsvTrace {
     }
 }
 
+#[allow(unused)]
+#[derive(Clone)]
+pub enum WindowType {
+    BySeconds {
+        sliding_window_secs: Option<f32>,
+    },
+    // #[schema(strings(display_name = "Sample-based"))]
+    BySamples {
+        // #[schema(strings(display_name = "Window size"))]
+        // #[schema(flag = "real-time")]
+        // #[schema(gui(slider(min = 32, max = 256, step = 1)), suffix = " samples")]
+        sliding_window_samp: usize,
+    },
+}
+#[allow(unused)]
+#[derive(Clone)]
+pub enum AveragingStrategy {
+    SimpleWindowAverage {
+        // #[schema(flag = "real-time")]
+        // #[schema(strings(display_name = "Statistics sliding window type"))]
+        window_type: WindowType,
+    },
+    // #[schema(strings(display_name = "Exponential Weighted Moving Average"))]
+    ExponentialMovingAverage {
+        // #[schema(flag = "real-time")]
+        // #[schema(strings(
+        //     help = "EWMA_t = alpha*r_t+(1-alpha)*EWMA_{t-1}, where `alpha` denotes the EWMA weight and `r` is the value in the current period."
+        // ))]
+        // #[schema(gui(slider(min = 0.1, max = 1.0, step = 0.01)))]
+        ewma_weight: f32,
+    },
+}
+
 
 
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]

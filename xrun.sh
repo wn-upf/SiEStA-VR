@@ -1,10 +1,10 @@
 NUMBER_OF_JOBS=3
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 initial_bitrate_mbps=( 100.0 )
 # initial_bitrate_mbps=( 100.0 )
 
 TEST_TYPE=("BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
-simTime=130.0
+simTime=140.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -18,11 +18,11 @@ fps_list=(90.0)
 N_XR=(1)
 
 ABR_ENABLED=( 1 )
-nest_profiles=( 0 1 2 ) ## Nest-VR profiles:         0 => {NestVrProfile::Speedy},
+nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
 #                                                  1 => {NestVrProfile::Balanced},
 #                                                  2 => {NestVrProfile::Anxious},
 
-RANDOM_SEEDS=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")
 N_BGs=(0)
@@ -44,7 +44,7 @@ temp_file=$(mktemp)
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
 cargo build --release --example XR_sim
-
+sleep 2
 for test in "${TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
         for nxr in "${N_XR[@]}"; do
