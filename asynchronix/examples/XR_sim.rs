@@ -3,8 +3,8 @@
 #[allow(unused)]
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
 ///
-///  Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
-///     * Will try to stay accurate to packet latencies in all parts of the pipeline ( for now, linear terms with maybe some randomness)
+///     Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
+///     
 ///
 ///
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
@@ -59,7 +59,7 @@ impl VRPair {
     fn new(
         pair_index: usize,
         t0: MonotonicTime,
-        mean_length: f64,
+        // mean_length_BG: f64,
         initial_bitrate: f64,
         distance: f64,
         name_folder: &str,
@@ -81,20 +81,6 @@ impl VRPair {
         let server_coords = Coords::with_coords(0.0, 0.0, 0.0);
         let client_coords = Coords::with_coords(distance, 0.0, 0.0);
 
-        let server_tx = frametransmission_delay(
-            initial_bitrate * 1e6,
-            MAX_AMPDU_SIZE,
-            Coords::new(),
-            server_coords,
-            P_TX,
-        );
-        let client_tx = frametransmission_delay(
-            initial_bitrate * 1e6,
-            MAX_AMPDU_SIZE,
-            Coords::new(),
-            client_coords,
-            P_TX,
-        );
 
         let mut xr_server = XRServer::new(
             server_ip,
@@ -113,25 +99,23 @@ impl VRPair {
         let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test);
 
         let mut sta_server = STA_extended::new(
-            initial_bitrate * 1e6,
-            mean_length,
+            // initial_bitrate * 1e6,
+            0.,
             server_id,
             client_id,
             server_coords,
             true,
-            mean_length / server_tx.service_delay,
             t0,
             false,
             0.0,
         );
         let mut sta_client = STA_extended::new(
-            initial_bitrate * 1e6,
-            mean_length,
+            // initial_bitrate * 1e6,
+            0.,
             client_id,
             server_id,
             client_coords,
             true,
-            mean_length / client_tx.service_delay,
             t0,
             false,
             0.0,
@@ -176,48 +160,33 @@ impl VRPair {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 22 {
-        eprintln!("Usage: {} <stoptime> <mean_length> <k_queue> <rate_bps_in> <rate_queue_bps> 
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled> <ABR enabled> <nest-vr_profile>", args[0]);
+    if args.len() != 21 {
+        eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue>
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled> <ABR enabled> <nest-vr_profile>", args[0]);
         return;
     }
 
     // Parse arguments
-    let stoptime: f64 = args[1].parse().unwrap();
-    let mean_length: f64 = args[2].parse().unwrap();
-    let k_queue: usize = args[3].parse().unwrap();
-    let rate_bps_in: f64 = args[4].parse().expect("Invalid rate_bps_in");
-    let _rate_queue_bps: f64 = args[5].parse().expect("Invalid rate_queue_bps");
-    let distance: f64 = args[6].parse().expect("Invalid distance");
-    let initial_bitrate: f64 = args[7].parse().expect("Invalid bitrate");
-    let pl_prob: f64 = args[8].parse().expect("Invalid PL");
-    let n_xr: usize = args[9].parse().expect("Invalid N_xr");
-    let n_bg: usize = args[10].parse().expect("Invalid N_bg"); // New parameter for background STAs
-    let is_ul_bg_traffic: usize = args[11].parse().expect("Invalid IS_UL");
-    let test_type: String = args[12].parse().expect("Invalid emulated Test"); // New test type parameter
-
-    let video_filename: String = args[13].parse().expect("Invalid video filename"); 
-    let fps:f32 = args[14].parse().expect("Invalid FPS"); 
-
-    let n_close: usize = args[15].parse().expect("Invalid N_close_users"); 
-    let distance_close: f64 =  args[16].parse().expect("Invalid Distance_close_users"); 
-    let seed: u64 = args[17].parse().unwrap();
-    let gop_size: usize = args[18].parse().expect("Invalid GoP size"); 
-    let intra_refresh: usize = args[19].parse().expect("Invalid intra-refresh (0 or 1)"); 
-
-    let abr: usize = args[20].parse().expect("Invalid ABR (0 or 1) "); 
-    let abr_bool = abr > 0; 
-    let nest_vr_choice = args[21].parse().expect("Invalid NeSt profile"); 
-
-
-    let nest_vr_profile = match nest_vr_choice{
-        0 => {NestVrProfile::Speedy},
-        1 => {NestVrProfile::Balanced},
-        2 => {NestVrProfile::Anxious},
-        _ => {NestVrProfile::Balanced}, //default to balanced 
-    }; 
-
-    let mut rng: StdRng = StdRng::seed_from_u64(seed);
+    let stoptime: f64           =       args[1].parse().unwrap();
+    let mean_length_bg: f64     =       args[2].parse().unwrap();
+    let k_queue: usize          =       args[3].parse().unwrap();
+    let distance: f64           =       args[4].parse().expect("Invalid distance");
+    let initial_bitrate: f64    =       args[5].parse().expect("Invalid bitrate");
+    let pl_prob: f64            =       args[6].parse().expect("Invalid PL");
+    let n_xr: usize             =       args[7].parse().expect("Invalid N_xr");
+    let n_bg: usize             =       args[8].parse().expect("Invalid N_bg"); // New parameter for background STAs
+    let rate_bps_bg_in     =       args[9].parse().expect("Invalid BG arrival rate");
+    let is_ul_bg_traffic: usize =       args[10].parse().expect("Invalid IS_UL");
+    let test_type: String       =       args[11].parse().expect("Invalid emulated Test"); // New test type parameter
+    let video_filename: String  =       args[12].parse().expect("Invalid video filename"); 
+    let fps:f32                 =       args[13].parse().expect("Invalid FPS"); 
+    let n_close: usize          =       args[14].parse().expect("Invalid N_close_users"); 
+    let distance_close: f64     =       args[15].parse().expect("Invalid Distance_close_users"); 
+    let seed: u64               =       args[16].parse().unwrap();
+    let gop_size: usize         =       args[17].parse().expect("Invalid GoP size"); 
+    let intra_refresh: usize    =       args[18].parse().expect("Invalid intra-refresh (0 or 1)"); 
+    let abr: usize              =       args[19].parse().expect("Invalid ABR (0 or 1) "); 
+    let nest_vr_choice     =       args[20].parse().expect("Invalid NeSt profile"); 
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -233,6 +202,14 @@ fn main() {
     } else {
         "STD" // Default suffix if invalid test type provided
     };
+    let mut rng: StdRng = StdRng::seed_from_u64(seed);
+    let abr_bool = abr > 0; 
+    let nest_vr_profile = match nest_vr_choice{
+        0 => {NestVrProfile::Speedy},
+        1 => {NestVrProfile::Balanced},
+        2 => {NestVrProfile::Anxious},
+        _ => {NestVrProfile::Balanced}, //default to balanced 
+    }; 
 
     // Create output directory
     let name_folder = format!(
@@ -294,7 +271,7 @@ fn main() {
             
             i,
             t0,
-            mean_length,
+            // mean_length_BG,
             initial_bitrate,
             distance_close,
             &name_folder,
@@ -319,7 +296,7 @@ fn main() {
         let vr = VRPair::new(
             i,
             t0,
-            mean_length,
+            // mean_length_BG,
             initial_bitrate,
             distance,
             &name_folder,
@@ -349,16 +326,15 @@ fn main() {
         };
 
         let bg_sta = STA_extended::new(
-            rate_bps_in,
-            mean_length,
+            // rate_bps_in,
+            mean_length_bg,
             sta_id,
             2, // Default destination (AP)
             coords,
             true,
-            rate_bps_in, // Using input rate as effective rate for simplicity
             t0,
             true,
-            rate_bps_in, // Background traffic rate
+            rate_bps_bg_in, // Background traffic rate
         );
 
         let mbox_bg_sta = Mailbox::new();

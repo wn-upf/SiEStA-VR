@@ -1,14 +1,13 @@
 NUMBER_OF_JOBS=3
-SERIAL_EXECUTION=0
+SERIAL_EXECUTION=1
 initial_bitrate_mbps=( 100.0 )
 # initial_bitrate_mbps=( 100.0 )
 
 TEST_TYPE=("BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
-simTime=80.0
+simTime=130.0
 k_queue=10000
-mean_length=12000.0  ## TODO: DELETE THESE
-rate_bps_src=20E6;   ## TODO: DELETE THESE
-rate_bps_queue=6E5 ## does nothing theoretically 
+mean_length_BG=12000.0     ## BG traffic length 
+rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
@@ -19,11 +18,11 @@ fps_list=(90.0)
 N_XR=(1)
 
 ABR_ENABLED=( 1 )
-nest_profiles=(0 1 2) ## Nest-VR profiles:         0 => {NestVrProfile::Speedy},
+nest_profiles=( 0 1 2 ) ## Nest-VR profiles:         0 => {NestVrProfile::Speedy},
 #                                                  1 => {NestVrProfile::Balanced},
 #                                                  2 => {NestVrProfile::Anxious},
 
-RANDOM_SEEDS=(1)
+RANDOM_SEEDS=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")
 N_BGs=(0)
@@ -71,10 +70,10 @@ for test in "${TEST_TYPE[@]}"; do
 
                                                             if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder\n"
-                                                                echo           ./target/release/examples/XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $bitrate $PL $nxr $nbg $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile >> "$temp_file"
+                                                                echo           ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                script -c "cargo run --release --example XR_sim $simTime $mean_length $k_queue $rate_bps_src $rate_bps_queue $distance $bitrate $PL $nxr $nbg $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile" "out_log.ans"
+                                                                script -c "cargo run --release --example XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile" "out_log.ans"
                                                                 sleep 1
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*

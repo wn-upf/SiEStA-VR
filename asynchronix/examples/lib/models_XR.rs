@@ -2450,12 +2450,10 @@ impl XRServer {
                 if now.duration_since(self.bitrate_manager.last_update_instant)
                     >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL)
                 {   
-
                     let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
-
                     self.output_perfect_information_bitrate.send(last_bitrate_mbps).await; // just used for display!
-
+                    
                     // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
 
                     print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
@@ -4569,25 +4567,24 @@ pub struct STA_extended {
 
     pub t_0: TaiTime<0>,
 }
-#[allow(unused)]
+// #[allow(unused)]
 impl STA_extended {
     pub fn new(
-        arrival_rate_bps: f64,
-        mean_length: f64,
+        // arrival_rate_bps: f64,
+        mean_length_BG: f64,
         src: i32,
         dest: i32,
         coordinates: Coords,
         does_sta_transmit: bool,
-        rate_service_bps: f64,
         t0_sim: TaiTime<0>,
         is_bg_sta: bool,
         arrival_rate_BG: f64,
     ) -> Self {
-        let arrival_rate_BG_packets = arrival_rate_BG / mean_length;
+        let arrival_rate_BG_packets = arrival_rate_BG / mean_length_BG;
 
         println!("\n*************************************************");
-        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t arrival_rate_BG (pack/s): {:.3}, Departure_rate: {:.3},  L = {}, is_BG_STA {}",
-                            src, coordinates, dest, arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate_BG, rate_service_bps / mean_length , mean_length, is_bg_sta);
+        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3}, RATE_BG: {:.3} Mbps, is_BG_STA {}",
+                            src, coordinates, dest, mean_length_BG,   arrival_rate_BG, is_bg_sta);
 
         Self {
             output_network_port: Default::default(),
@@ -4597,7 +4594,7 @@ impl STA_extended {
             sta_id: src,
             destination_id: dest,
             arrival_rate_BG: arrival_rate_BG_packets,
-            mean_length_packets_BG: mean_length,
+            mean_length_packets_BG: mean_length_BG,
             num_packets_sent: 0,
             sta_coordinates: coordinates,
 
