@@ -22,7 +22,7 @@ use rand::rngs::StdRng;
 
 mod lib; // for calling m own local library
 
-use crate::lib::models_mm1k::QueueModule;
+use crate::lib::models_mm1k::{EmulatedLink, QueueModule, MAX_EMULATED_QUEUE_PACKETS};
 use crate::lib::{
     exponential,
     // frametransmission_delay,
@@ -49,10 +49,12 @@ struct VRPair {
     xr_client: XRClient,
     sta_server: STA_extended,
     sta_client: STA_extended,
-    mbox_xr_server: Mailbox<XRServer>,
-    mbox_xr_client: Mailbox<XRClient>,
+    emu_link: EmulatedLink, 
+    mbox_xr_server:  Mailbox<XRServer>,
+    mbox_xr_client:  Mailbox<XRClient>,
     mbox_sta_server: Mailbox<STA_extended>,
     mbox_sta_client: Mailbox<STA_extended>,
+    mbox_emu_link:  Mailbox<EmulatedLink>, 
 }
 
 impl VRPair {
@@ -71,6 +73,7 @@ impl VRPair {
         intrarefresh: bool, 
         abr_enabled: bool, 
         nest_vr_profile: &NestVrProfile, 
+        netem_values_tests: Option<(bool,bool,bool,bool)>
 
     ) -> Self {
         let server_id = 100 + pair_index as i32;
@@ -121,14 +124,21 @@ impl VRPair {
             0.0,
         );
 
+        let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests); 
+
         let mbox_xr_server = Mailbox::new();
         let mbox_xr_client = Mailbox::new();
         let mbox_sta_server = Mailbox::new();
         let mbox_sta_client = Mailbox::new();
 
-        xr_server
-            .outport_videoapp_network
-            .connect(STA_extended::input_XR_app, &mbox_sta_server);
+        let mbox_emu_link = Mailbox::new(); 
+
+        // xr_server
+        //     .outport_videoapp_network
+        //     .connect(STA_extended::input_XR_app, &mbox_sta_server);
+
+        xr_server.outport_videoapp_network.connect(EmulatedLink::input, &mbox_emu_link); // Add the netem module in the middle. 
+        emu_link.output.connect(STA_extended::input_XR_app, &mbox_sta_server) ; 
 
         xr_client
             .outport_tracking_network
@@ -149,10 +159,12 @@ impl VRPair {
             xr_client,
             sta_server,
             sta_client,
+            emu_link, 
             mbox_xr_server,
             mbox_xr_client,
             mbox_sta_server,
             mbox_sta_client,
+            mbox_emu_link, 
         }
     }
 }
@@ -221,7 +233,7 @@ fn main() {
     fs::create_dir_all(&output_path).expect("Failed to create directory");
 
     let t0 = MonotonicTime::EPOCH;
-    let mut vr_pairs = Vec::new();
+    let mut vr_pairs: Vec<VRPair> = Vec::new();
     let mut xr_client_addresses = Vec::new();
     let mut xr_server_addresses = Vec::new();
     let mut bg_sta_models = Vec::new();
@@ -236,8 +248,8 @@ fn main() {
         all_sta_ids.push(200 + i as i32);
     }
     for j in n_close..n_xr {
-            all_sta_ids.push(100 + j as i32);
-            all_sta_ids.push(200 + j as i32);
+        all_sta_ids.push(100 + j as i32);
+        all_sta_ids.push(200 + j as i32);
     }
         // 2) Gather all of the BG STA IDs
     for i in 0..n_bg {
@@ -263,10 +275,14 @@ fn main() {
     // let sta_stats = queue.get_stas_stats_handle();
     // print_red!("EMU EFFECTS HERE", );
 
-    let emu_effects: &[lib::models_mm1k::NetworkPattern] = queue.get_network_patterns(); 
     assert!(n_close <= n_xr, "n_close_users must not exceed total XR users");
 
+
+    let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)));
+    let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
+
     for i in 0..n_close{ // to set up variable distance scenarios across users
+
         let first_vr_pair_distance= VRPair::new(
             
             i,
@@ -276,23 +292,26 @@ fn main() {
             distance_close,
             &name_folder,
             suffix,
-            emu_effects, 
+            &emu_effects, 
             &video_filename, 
             fps,
             gop_size, 
             intra_refresh != 0, 
             abr_bool, 
             &nest_vr_profile, 
+            Some((test_bandwidth, test_jitter, test_pl, test_random)),
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
         xr_client_addresses.push(first_vr_pair_distance.mbox_xr_client.address());
         xr_server_addresses.push(first_vr_pair_distance.mbox_xr_server.address());
         vr_pairs.push(first_vr_pair_distance);
-    }
-    
+    }    
+ 
     // Create extra XR pairs
     for i in n_close..n_xr {
+        // let emu_effects: &[lib::models_mm1k::NetworkPattern] = vr_pairs[0].emu_link.get_network_patterns(); 
+
         let vr = VRPair::new(
             i,
             t0,
@@ -301,13 +320,15 @@ fn main() {
             distance,
             &name_folder,
             suffix,
-            emu_effects, 
+            &emu_effects, 
             &video_filename, 
             fps, 
             gop_size, 
             intra_refresh != 0 , 
             abr_bool, 
-            &nest_vr_profile
+            &nest_vr_profile,
+            Some((test_bandwidth, test_jitter, test_pl, test_random)),
+
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -362,6 +383,7 @@ fn main() {
         vr.sta_server
             .output_network_port
             .connect(QueueModule::input, &mbox_queue);
+
         vr.sta_client
             .output_network_port
             .connect(QueueModule::input_UL, &mbox_queue);
@@ -376,8 +398,6 @@ fn main() {
         queue
             .output_port_sta1
             .connect(STA_extended::input_wireless, &vr.mbox_sta_client);
-    
-
     }
 
     // Connect background STAs to queue
@@ -400,6 +420,7 @@ fn main() {
     for (i, vr) in vr_pairs.into_iter().enumerate() {
         sim_builder = sim_builder
             .add_model(vr.xr_server, vr.mbox_xr_server, format!("XR Server {}", i))
+            .add_model(vr.emu_link, vr.mbox_emu_link, format!("EmuLink {}", i))
             .add_model(vr.xr_client, vr.mbox_xr_client, format!("XR Client {}", i))
             .add_model(
                 vr.sta_server,
@@ -446,7 +467,9 @@ fn main() {
     }
 
     for (i, addr) in xr_server_addresses.iter().enumerate() {
-        let epsilon = Duration::from_secs_f64(exponential(0.3, &mut rng));
+        // let epsilon = Duration::from_secs_f64(exponential(0.3, &mut rng));
+        let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
+
         let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
         scheduler
             .schedule_event(
@@ -466,14 +489,14 @@ fn main() {
             .unwrap();
     }
 
-    scheduler
-        .schedule_event(
-            Duration::from_secs(SIM_START_TIME),
-            QueueModule::self_scheduled_emu_queue_tx,
-            (),
-            &queue_address,
-        )
-        .unwrap();
+    // scheduler
+    //     .schedule_event(
+    //         Duration::from_secs(SIM_START_TIME),
+    //         QueueModule::self_scheduled_emu_queue_tx,
+    //         (),
+    //         &queue_address,
+    //     )
+    //     .unwrap();
 
 
 

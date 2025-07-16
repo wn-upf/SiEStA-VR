@@ -92,9 +92,9 @@ pub const STEP2_TEND: f64 =   80.0;
 pub const STEP3_TBEGIN: f64 = 100.0;
 pub const STEP3_TEND: f64 =   120.0;
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
-pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
-pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
+pub const BANDWIDTH_LIMIT_S1: f64 = 70E6;
+pub const BANDWIDTH_LIMIT_S2: f64 = 60E6;
+pub const BANDWIDTH_LIMIT_S3: f64 = 50E6;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -714,6 +714,103 @@ impl NetworkPattern {
     }
 }
 
+
+
+
+pub struct EmulatedLink { /// Can be inserted between any STA output and the `QueueModule` input.
+
+    pub output: Output<MpduPacket>,
+    queue_mechanism: QueueMechanism,
+}
+
+impl EmulatedLink {
+    /// Create a new emulated link.
+    /// - `max_queue_size`: maximum packets to buffer in the emulator
+    /// - `now`: current simulator time as a `TaiTime`
+    /// - `tests`: tuple flags `(bandwidth, jitter, packet_loss, random_events)`
+    
+    
+    pub fn get_network_patterns(&self) -> &[NetworkPattern] {
+        &self.queue_mechanism.network_emulator.get_patterns()
+    }
+    
+    pub fn new(
+        max_queue_size: usize,
+        now: TaiTime<0>,
+        emulated_tests: Option<(bool, bool, bool, bool)>,
+    ) -> Self {
+
+        let queue_mechanism: QueueMechanism;
+
+        if let Some(values_tests) = emulated_tests {
+            queue_mechanism =
+                QueueMechanism::new(max_queue_size, now, values_tests);
+        } else {
+            print_yellow!("NO PATTERNS?", ); 
+            queue_mechanism = QueueMechanism::new(
+                MAX_EMULATED_QUEUE_PACKETS,
+                TaiTime::EPOCH,
+                (false, false, false, false),
+            );
+        }
+
+        EmulatedLink {
+            output: Default::default(),
+            queue_mechanism,
+            
+        }
+    }
+
+    /// Handle packet arrival from a STA. Applies emulation logic, possibly queuing or dropping.
+    pub async fn input(&mut self, packet: MpduPacket, context: &Context<Self>) {
+        // Delegate to the queue mechanism
+        match self.queue_mechanism.enqueue_or_transmit(packet, context) {
+            EnqueueResult::Transmitted(pkt) => {
+                // No emulation delay: forward immediately
+                self.output.send(pkt).await;
+            }
+            EnqueueResult::Queued(queued_pkt) => {
+                // Scheduled for delayed transmission
+                if let Some(deadline) = queued_pkt.emulated_added_delay_deadline {
+                    let now = context.scheduler.time();
+                    let delay = deadline
+                        .duration_since(now)
+                        .max(Duration::from_nanos(1));
+                    // Schedule a flush event
+                    context
+                        .scheduler
+                        .schedule_event(delay, Self::flush_queue, ())
+                        .unwrap();
+                }
+            }
+            EnqueueResult::Dropped => {
+                // Packet dropped by network pattern or overflow. Logging can go here.
+                debug_print!(
+                    crate::lib::DebugColor::Red,
+                    "[EMULATED LINK] Packet dropped by network emulator", 
+                );
+            }
+        }
+    }
+
+    /// Scheduled event: attempt to emit all ready packets from the internal queue
+    pub fn flush_queue<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            // Process all delayed packets that have reached their deadline
+            let ready = self.queue_mechanism.process_emu_queued_packets(context);
+            for pkt in ready {
+                self.output.send(pkt).await;
+            }
+        }
+    }
+}
+
+impl Model for EmulatedLink {}
+
 #[derive(Debug)]
 pub enum EnqueueResult {
     Transmitted(MpduPacket), // Packet was immediately transmitted
@@ -878,28 +975,28 @@ impl QueueMechanism {
         }
     }
 
-    pub fn should_purge_queue(&self, current_time: TaiTime<0>) -> bool {
-        // Check each bandwidth pattern's end time
-        for pattern in &self.network_emulator.patterns {
-            if let NetworkPattern::Bandwidth { valid_until, .. } = pattern {
-                // If we've just passed the end time of a pattern, purge the queue
-                if current_time >= *valid_until
-                    && current_time
-                        <= valid_until
-                            .checked_add(Duration::from_millis(200))
-                            .unwrap_or(*valid_until)
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
+    // pub fn should_purge_queue(&self, current_time: TaiTime<0>) -> bool {
+    //     // Check each bandwidth pattern's end time
+    //     for pattern in &self.network_emulator.patterns {
+    //         if let NetworkPattern::Bandwidth { valid_until, .. } = pattern {
+    //             // If we've just passed the end time of a pattern, purge the queue
+    //             if current_time >= *valid_until
+    //                 && current_time
+    //                     <= valid_until
+    //                         .checked_add(Duration::from_millis(200))
+    //                         .unwrap_or(*valid_until)
+    //             {
+    //                 return true;
+    //             }
+    //         }
+    //     }
+    //     false
+    // }
 
     pub fn enqueue_or_transmit(
         &mut self,
         mut packet: MpduPacket,
-        context: &Context<QueueModule>,
+        context: &Context<EmulatedLink>,
     ) -> EnqueueResult {
         let now = context.scheduler.time();
 
@@ -947,7 +1044,7 @@ impl QueueMechanism {
 
     pub fn process_emu_queued_packets(
         &mut self,
-        context: &Context<QueueModule>,
+        context: &Context<EmulatedLink>,
     ) -> Vec<MpduPacket> {
         let now = context.scheduler.time();
         let mut transmitted_packets: Vec<MpduPacket> = Vec::new();
@@ -1045,106 +1142,103 @@ impl NetworkPatternEmulator {
         &self.patterns
     }
         
-        pub fn add_random_events(
-            &mut self,
-            count: usize,
-            event_type: RandomEventKind,
-            overall_start: TaiTime<0>,
-            overall_end: TaiTime<0>,
-            min_duration: Duration,
-            max_duration: Duration,
-            dist: JitterDistributionType,
-            mean_value: f64,
-            variance: f64,
-        ) {
+    pub fn add_random_events(
+        &mut self,
+        count: usize,
+        event_type: RandomEventKind,
+        overall_start: TaiTime<0>,
+        overall_end: TaiTime<0>,
+        min_duration: Duration,
+        max_duration: Duration,
+        dist: JitterDistributionType,
+        mean_value: f64,
+        variance: f64,
+    ) {
+        let overall_duration = overall_end.duration_since(overall_start);
+        let max_offset_secs = overall_duration
+            .as_secs_f64()- (max_duration.as_secs_f64());
 
+        let mut rng = rand::thread_rng();
 
+        for _ in 0..count {
+            // Randomly choose a start time within the overall window, leaving room for a full event duration.
+            let offset_secs = rng.gen_range(0.0..max_offset_secs);
+            let event_start = overall_start
+                .checked_add(Duration::from_secs_f64(offset_secs))
+                .expect("Time addition failed");
 
-            let overall_duration = overall_end.duration_since(overall_start);
-            let max_offset_secs = overall_duration
-                .as_secs_f64()- (max_duration.as_secs_f64());
+            // Determine event duration based on chosen distribution
+            let duration_secs = match dist {
+                JitterDistributionType::Uniform => {
+                    let min = min_duration.as_secs_f64();
+                    let max = max_duration.as_secs_f64();
+                    rng.gen_range(min..max)
+                }
+                JitterDistributionType::Gaussian => {
+                    // For Gaussian, we use a Normal distribution centered at the midpoint.
+                    let center = (min_duration.as_secs_f64() + max_duration.as_secs_f64()) / 2.0;
+                    // Create a normal distribution; if variance <= 0, fallback to center.
+                    let normal = Normal::new(center, variance).unwrap_or_else(|_| Normal::new(center, 0.1).unwrap());
+                    // Sample and then clamp the duration between min and max.
+                    let sample = normal.sample(&mut rng);
+                    sample.max(min_duration.as_secs_f64()).min(max_duration.as_secs_f64())
+                }
+            };
+            let event_duration = Duration::from_secs_f64(duration_secs);
+            let event_end = event_start
+                .checked_add(event_duration)
+                .expect("Time addition failed");
+                // Debug log: print event details before creation.
+            print_prettyyyy!(
+                DebugColor::Green, 
+                "Creating event: {:?}, start: {:?}, duration: {:?}, intensity: {}",
+                event_type, event_start, event_duration, mean_value
+            ); 
 
-            let mut rng = rand::thread_rng();
-
-            for _ in 0..count {
-                // Randomly choose a start time within the overall window, leaving room for a full event duration.
-                let offset_secs = rng.gen_range(0.0..max_offset_secs);
-                let event_start = overall_start
-                    .checked_add(Duration::from_secs_f64(offset_secs))
-                    .expect("Time addition failed");
-
-                // Determine event duration based on chosen distribution
-                let duration_secs = match dist {
-                    JitterDistributionType::Uniform => {
-                        let min = min_duration.as_secs_f64();
-                        let max = max_duration.as_secs_f64();
-                        rng.gen_range(min..max)
-                    }
-                    JitterDistributionType::Gaussian => {
-                        // For Gaussian, we use a Normal distribution centered at the midpoint.
-                        let center = (min_duration.as_secs_f64() + max_duration.as_secs_f64()) / 2.0;
-                        // Create a normal distribution; if variance <= 0, fallback to center.
-                        let normal = Normal::new(center, variance).unwrap_or_else(|_| Normal::new(center, 0.1).unwrap());
-                        // Sample and then clamp the duration between min and max.
-                        let sample = normal.sample(&mut rng);
-                        sample.max(min_duration.as_secs_f64()).min(max_duration.as_secs_f64())
-                    }
-                };
-                let event_duration = Duration::from_secs_f64(duration_secs);
-                let event_end = event_start
-                    .checked_add(event_duration)
-                    .expect("Time addition failed");
-                    // Debug log: print event details before creation.
-                print_prettyyyy!(
-                    DebugColor::Green, 
-                    "Creating event: {:?}, start: {:?}, duration: {:?}, intensity: {}",
-                    event_type, event_start, event_duration, mean_value
-                ); 
-
-                let std_dev = variance.sqrt();
-                let normal = Normal::new(mean_value, std_dev).expect("Invalid distribution parameters");
-                let mut drop_probability = normal.sample(&mut rng);
-                drop_probability = drop_probability.clamp(0.0, 1.0);
-                                
-                // Create the event based on its type.
-                let pattern = match event_type {
-                    RandomEventKind::PacketLoss => NetworkPattern::ProbabilisticDrop {
-                        drop_probability: drop_probability, // e.g. 0.8 for intense loss
-                        valid_from: event_start,
-                        valid_until: event_end,
-                    },
-                    RandomEventKind::Jitter => {
-                        // Use the distribution type to pick between jitter constructors.
-                        match dist {
-                            JitterDistributionType::Uniform => NetworkPattern::new_jitter_uniform(
-                                mean_value, // mean delay in ms
-                                variance,   // half-width in ms
-                                0.0,        // no correlation by default
-                                event_start,
-                                event_end,
-                            ),
-                            JitterDistributionType::Gaussian => NetworkPattern::new_jitter_gaussian(
-                                mean_value, // mean delay in ms
-                            variance,   // standard deviation in ms
+            let std_dev = variance.sqrt();
+            let normal = Normal::new(mean_value, std_dev).expect("Invalid distribution parameters");
+            let mut drop_probability = normal.sample(&mut rng);
+            drop_probability = drop_probability.clamp(0.0, 1.0);
+                            
+            // Create the event based on its type.
+            let pattern = match event_type {
+                RandomEventKind::PacketLoss => NetworkPattern::ProbabilisticDrop {
+                    drop_probability: drop_probability, // e.g. 0.8 for intense loss
+                    valid_from: event_start,
+                    valid_until: event_end,
+                },
+                RandomEventKind::Jitter => {
+                    // Use the distribution type to pick between jitter constructors.
+                    match dist {
+                        JitterDistributionType::Uniform => NetworkPattern::new_jitter_uniform(
+                            mean_value, // mean delay in ms
+                            variance,   // half-width in ms
                             0.0,        // no correlation by default
                             event_start,
                             event_end,
                         ),
-                    }
-                }, 
-                RandomEventKind::Bandwidth => {
-                    // For bandwidth events, mean_value represents the max_bps limit.
-                    NetworkPattern::new_bandwidth(
-                        mean_value, // max_bps for the event
-                        mean_value, // here we use the same value for the token refill rate
+                        JitterDistributionType::Gaussian => NetworkPattern::new_jitter_gaussian(
+                            mean_value, // mean delay in ms
+                        variance,   // standard deviation in ms
+                        0.0,        // no correlation by default
                         event_start,
                         event_end,
-                    )
+                    ),
                 }
-            };
+            }, 
+            RandomEventKind::Bandwidth => {
+                // For bandwidth events, mean_value represents the max_bps limit.
+                NetworkPattern::new_bandwidth(
+                    mean_value, // max_bps for the event
+                    mean_value, // here we use the same value for the token refill rate
+                    event_start,
+                    event_end,
+                )
+            }
+        };
 
-            // Finally, add the generated pattern to the emulator.
-            self.add_pattern(pattern);
+        // Finally, add the generated pattern to the emulator.
+        self.add_pattern(pattern);
         }
     }
 
@@ -1167,7 +1261,6 @@ impl NetworkPatternEmulator {
                 if current_time >= *valid_from && current_time <= *valid_until {
                     any_active = true;
                 }
-
                 // Check if pattern just ended (within last 100ms)
                 let end_window = valid_until
                     .checked_add(Duration::from_millis(100))
@@ -1177,7 +1270,6 @@ impl NetworkPatternEmulator {
                 }
             }
         }
-
         (any_active, just_ended)
     }
 
@@ -1452,8 +1544,7 @@ pub struct QueueModule {
 
     pub PL_probability: f64,
 
-    pub network_emulator: NetworkPatternEmulator,
-    pub queue_network_emulator: QueueMechanism,
+    // pub queue_network_emulator: QueueMechanism,
     pub ul_capacity_queue_device: usize,
 
     pub ampdu_id: u32, 
@@ -1468,9 +1559,7 @@ impl QueueModule {
         self.array_stas_stats.clone()
     }
 
-    pub fn get_network_patterns(&self) -> &[NetworkPattern] {
-        &self.queue_network_emulator.network_emulator.get_patterns()
-    }
+    
 
     pub fn new(
         num_stas: usize,
@@ -1494,21 +1583,6 @@ impl QueueModule {
                 println!("iter: {}, stats id : {:?}", i, stats.sta_id);
                 stats_vec.insert(stats.sta_id.clone() as usize, sta_stats.clone());
             }
-        }
-        let network_emulator = NetworkPatternEmulator::new();
-
-        // println!("Scheduling EMU TX daemon in 1 second");
-        let queue_mechanism: QueueMechanism;
-        if let Some(values_tests) = emulated_tests {
-            queue_mechanism =
-                QueueMechanism::new(MAX_EMULATED_QUEUE_PACKETS, TaiTime::EPOCH, values_tests);
-        } else {
-            print_yellow!("NO PATTERNS?", ); 
-            queue_mechanism = QueueMechanism::new(
-                MAX_EMULATED_QUEUE_PACKETS,
-                TaiTime::EPOCH,
-                (false, false, false, false),
-            );
         }
 
         Self {
@@ -1539,201 +1613,217 @@ impl QueueModule {
             stats_rx: Some(stats_rx),
 
             PL_probability: PL_prob,
-            network_emulator: network_emulator,
-            queue_network_emulator: queue_mechanism,
+            // queue_network_emulator: queue_mechanism,
             ul_capacity_queue_device: ul_size,
             ampdu_id: 0, 
         }
     }
 
-    pub async fn input(&mut self, mut packet_arg: MpduPacket, context: &Context<Self>) {
-        let now = context.scheduler.time();
+    pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
+        let now = ctx.scheduler.time();
+        pkt.queue_in_instant = now;
+        self.arrived_packet_counter += 1;
 
-        let id = packet_arg.packet_id.clone();
-        packet_arg.queue_in_instant = now;
-        let cloned_dbg = packet_arg.clone();
-
-        // print!("[IN QUEUEMODULE] Q_length:{}", self.queue.len());
-        // packet_arg.print(DebugColor::Indigo);
-
-        // if self.network_emulator.should_transmit(&packet_arg, now) {
-        match self
-            .queue_network_emulator
-            .enqueue_or_transmit(packet_arg, &context)
-        {
-            EnqueueResult::Transmitted(packet) => {
-                // enqueue in the actual network interface, not netem
-                self.arrived_packet_counter += 1;
-                self.queue_length_counter += self.queue.len();
-
-                if self.queue.len() < self.queue_maxsize {
-                    self.queue.push_back(packet.clone());
-
-                    if self.queue.len() == 1 && !self.packet_being_served {
-                        self.deque_schedule_service((), context).await;
-                    }
-                } else {
-                    self.blocked_packet_counter += 1;
-                    debug_bgprint!(
-                        DebugColor::Red,
-                        "{} [DBG FULL QUEUE] Packet {} DROPPED from input!! , Q_size = {:2.0}",
-                        format_elapsed!(now),
-                        packet.packet_id,
-                        self.queue.len()
-                    );
-                }
+        if self.queue.len() < self.queue_maxsize {
+            self.queue.push_back(pkt);
+            if !self.packet_being_served {
+                self.deque_schedule_service((), ctx).await;
             }
-            EnqueueResult::Queued(packet_delayed) => {
-                self.arrived_packet_counter += 1;
-                self.queue_length_counter += self.queue.len();
-                if let Some(delay) = packet_delayed.emulated_added_delay_deadline {
-                    let delay_until_tx = delay.duration_since(now);
-                    debug_bgprint!(DebugColor::Chocolate, "\tScheduling transmission of F: {} S: {}/{} in {} seconds -> Now : {} , then: {} ",
-                                cloned_dbg.header_alvr.next_packet_index, cloned_dbg.header_alvr.shard_index,
-                                cloned_dbg.header_alvr.shards_count - 1,
-                                delay_until_tx.as_secs_f64(),
-                                format_elapsed!(now),
-                                format_elapsed!(now.checked_add(delay_until_tx).unwrap())
-                             );
-                    context
-                        .scheduler
-                        .schedule_event(delay_until_tx, Self::self_scheduled_emu_queue_tx, ())
-                        .unwrap();
-                }
-            }
-            EnqueueResult::Dropped => {
-                // Packet dropped by network pattern
-                self.blocked_packet_counter += 1;
-                debug_bgprint!(
-                    DebugColor::Red,
-                    "Packet {} dropped by network pattern (ALVR: frame {} shard {:4.0}/{:4.0})",
-                    id, // Assuming packet_arg has a packet_id
-                    cloned_dbg.header_alvr.next_packet_index,
-                    cloned_dbg.header_alvr.shard_index,
-                    cloned_dbg.header_alvr.shards_count,
-                );
-            }
-        }
-        if !self.queue_network_emulator.queue.is_empty() {
-            context
-                .scheduler
-                .schedule_event(
-                    Duration::from_micros(1),
-                    QueueModule::self_scheduled_emu_queue_tx,
-                    (),
-                )
-                .unwrap();
+        } else {
+            self.blocked_packet_counter += 1;
+            debug_bgprint!(DebugColor::Green, "[QUEUE FULL] dropping packet {}", pkt.packet_id);
         }
     }
 
-    pub fn self_scheduled_emu_queue_tx<'a>(
-        &'a mut self,
-        _: (),
-        context: &'a Context<Self>,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            let now = context.scheduler.time();
-            let processed_packets = self
-                .queue_network_emulator
-                .process_emu_queued_packets(context);
-            // println!("Processing packets. Empty? {}", processed_packets.is_empty());
+    // pub async fn input(&mut self, mut packet_arg: MpduPacket, context: &Context<Self>) {
+    //     let now = context.scheduler.time();
 
-            // Check if we should purge the queue based on bandwidth pattern changes
-            if self.queue_network_emulator.should_purge_queue(now) && !self.queue.is_empty() {
-                let queue_size = self.queue_network_emulator.queue.len();
-                print_pretty!(
-                DebugColor::Red,
-                "{} [QUEUE PURGE] Bandwidth pattern change at time boundary! Purging {} packets from emulated queue",
-                format_elapsed!(now),
-                queue_size
-            );
+    //     let id = packet_arg.packet_id.clone();
+    //     packet_arg.queue_in_instant = now;
+    //     let cloned_dbg = packet_arg.clone();
 
-                // Optional: log details about purged packets
-                if queue_size > 0 {
-                    print_pretty!(
-                        DebugColor::Red,
-                        "  First packet: ALVR F_id: {}, shard: {}/{}",
-                        self.queue_network_emulator
-                            .queue
-                            .front()
-                            .unwrap()
-                            .header_alvr
-                            .next_packet_index,
-                        self.queue_network_emulator
-                            .queue
-                            .front()
-                            .unwrap()
-                            .header_alvr
-                            .shard_index,
-                        self.queue_network_emulator
-                            .queue
-                            .front()
-                            .unwrap()
-                            .header_alvr
-                            .shards_count
-                            - 1
-                    );
+    //     // print!("[IN QUEUEMODULE] Q_length:{}", self.queue.len());
+    //     // packet_arg.print(DebugColor::Indigo);
 
-                    print_pretty!(
-                        DebugColor::Red,
-                        "  Last packet: ALVR F_id: {}, shard: {}/{}",
-                        self.queue_network_emulator
-                            .queue
-                            .back()
-                            .unwrap()
-                            .header_alvr
-                            .next_packet_index,
-                        self.queue_network_emulator
-                            .queue
-                            .back()
-                            .unwrap()
-                            .header_alvr
-                            .shard_index,
-                        self.queue_network_emulator
-                            .queue
-                            .back()
-                            .unwrap()
-                            .header_alvr
-                            .shards_count
-                            - 1
-                    );
-                }
-                for (i, packet) in self.queue_network_emulator.queue.clone().iter().enumerate() {
-                    // print!("Packet {} in queue:", i);
-                    packet.print(DebugColor::Rose);
-                }
+    //     // if self.network_emulator.should_transmit(&packet_arg, now) {
+    //     match self
+    //         .queue_network_emulator
+    //         .enqueue_or_transmit(packet_arg, &context)
+    //     {
+    //         EnqueueResult::Transmitted(packet) => {
+    //             // enqueue in the actual network interface, not netem
+    //             self.arrived_packet_counter += 1;
+    //             self.queue_length_counter += self.queue.len();
 
-                // Clear the queue
-                self.queue_network_emulator.queue.clear();
+    //             if self.queue.len() < self.queue_maxsize {
+    //                 self.queue.push_back(packet.clone());
 
-                // Return an empty vector since we've purged everything
-                // return Vec::new();
-            }
+    //                 if self.queue.len() == 1 && !self.packet_being_served {
+    //                     self.deque_schedule_service((), context).await;
+    //                 }
+    //             } else {
+    //                 self.blocked_packet_counter += 1;
+    //                 debug_bgprint!(
+    //                     DebugColor::Red,
+    //                     "{} [DBG FULL QUEUE] Packet {} DROPPED from input!! , Q_size = {:2.0}",
+    //                     format_elapsed!(now),
+    //                     packet.packet_id,
+    //                     self.queue.len()
+    //                 );
+    //             }
+    //         }
+    //         EnqueueResult::Queued(packet_delayed) => {
+    //             self.arrived_packet_counter += 1;
+    //             self.queue_length_counter += self.queue.len();
+    //             if let Some(delay) = packet_delayed.emulated_added_delay_deadline {
+    //                 let delay_until_tx = delay.duration_since(now);
+    //                 debug_bgprint!(DebugColor::Chocolate, "\tScheduling transmission of F: {} S: {}/{} in {} seconds -> Now : {} , then: {} ",
+    //                             cloned_dbg.header_alvr.next_packet_index, cloned_dbg.header_alvr.shard_index,
+    //                             cloned_dbg.header_alvr.shards_count - 1,
+    //                             delay_until_tx.as_secs_f64(),
+    //                             format_elapsed!(now),
+    //                             format_elapsed!(now.checked_add(delay_until_tx).unwrap())
+    //                          );
+    //                 context
+    //                     .scheduler
+    //                     .schedule_event(delay_until_tx, Self::self_scheduled_emu_queue_tx, ())
+    //                     .unwrap();
+    //             }
+    //         }
+    //         EnqueueResult::Dropped => {
+    //             // Packet dropped by network pattern
+    //             self.blocked_packet_counter += 1;
+    //             debug_bgprint!(
+    //                 DebugColor::Red,
+    //                 "Packet {} dropped by network pattern (ALVR: frame {} shard {:4.0}/{:4.0})",
+    //                 id, // Assuming packet_arg has a packet_id
+    //                 cloned_dbg.header_alvr.next_packet_index,
+    //                 cloned_dbg.header_alvr.shard_index,
+    //                 cloned_dbg.header_alvr.shards_count,
+    //             );
+    //         }
+    //     }
+    //     if !self.queue_network_emulator.queue.is_empty() {
+    //         context
+    //             .scheduler
+    //             .schedule_event(
+    //                 Duration::from_micros(1),
+    //                 QueueModule::self_scheduled_emu_queue_tx,
+    //                 (),
+    //             )
+    //             .unwrap();
+    //     }
+    // }
 
-            if !processed_packets.is_empty() {
-                debug_bgprint!(
-                    DebugColor::Azure,
-                    "{} - [DBG PROCESS NETEM] Processed packets:",
-                    format_elapsed!(now)
-                );
-                self.network_emulator.last_update_time = now;
-                for packet in processed_packets.clone() {
-                    debug_bgprint!(
-                        DebugColor::Azure,
-                        "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})",
-                        packet.packet_id,
-                        packet.header_alvr.next_packet_index,
-                        packet.header_alvr.shard_index,
-                        packet.header_alvr.shards_count - 1
-                    );
-                }
-                self.process_transmitted_packets(processed_packets, context)
-                    .await;
-            } else {
-                // print!(".");
-            }
-        }
-    }
+    // pub fn self_scheduled_emu_queue_tx<'a>(
+    //     &'a mut self,
+    //     _: (),
+    //     context: &'a Context<Self>,
+    // ) -> impl Future<Output = ()> + Send + 'a {
+    //     async move {
+    //         let now = context.scheduler.time();
+    //         let processed_packets = self
+    //             .queue_network_emulator
+    //             .process_emu_queued_packets(context);
+    //         // println!("Processing packets. Empty? {}", processed_packets.is_empty());
+
+    //         // Check if we should purge the queue based on bandwidth pattern changes
+    //         if self.queue_network_emulator.should_purge_queue(now) && !self.queue.is_empty() {
+    //             let queue_size = self.queue_network_emulator.queue.len();
+    //             print_pretty!(
+    //             DebugColor::Red,
+    //             "{} [QUEUE PURGE] Bandwidth pattern change at time boundary! Purging {} packets from emulated queue",
+    //             format_elapsed!(now),
+    //             queue_size
+    //         );
+
+    //             // Optional: log details about purged packets
+    //             if queue_size > 0 {
+    //                 print_pretty!(
+    //                     DebugColor::Red,
+    //                     "  First packet: ALVR F_id: {}, shard: {}/{}",
+    //                     self.queue_network_emulator
+    //                         .queue
+    //                         .front()
+    //                         .unwrap()
+    //                         .header_alvr
+    //                         .next_packet_index,
+    //                     self.queue_network_emulator
+    //                         .queue
+    //                         .front()
+    //                         .unwrap()
+    //                         .header_alvr
+    //                         .shard_index,
+    //                     self.queue_network_emulator
+    //                         .queue
+    //                         .front()
+    //                         .unwrap()
+    //                         .header_alvr
+    //                         .shards_count
+    //                         - 1
+    //                 );
+
+    //                 print_pretty!(
+    //                     DebugColor::Red,
+    //                     "  Last packet: ALVR F_id: {}, shard: {}/{}",
+    //                     self.queue_network_emulator
+    //                         .queue
+    //                         .back()
+    //                         .unwrap()
+    //                         .header_alvr
+    //                         .next_packet_index,
+    //                     self.queue_network_emulator
+    //                         .queue
+    //                         .back()
+    //                         .unwrap()
+    //                         .header_alvr
+    //                         .shard_index,
+    //                     self.queue_network_emulator
+    //                         .queue
+    //                         .back()
+    //                         .unwrap()
+    //                         .header_alvr
+    //                         .shards_count
+    //                         - 1
+    //                 );
+    //             }
+    //             for (i, packet) in self.queue_network_emulator.queue.clone().iter().enumerate() {
+    //                 // print!("Packet {} in queue:", i);
+    //                 packet.print(DebugColor::Rose);
+    //             }
+
+    //             // Clear the queue
+    //             self.queue_network_emulator.queue.clear();
+
+    //             // Return an empty vector since we've purged everything
+    //             // return Vec::new();
+    //         }
+
+    //         if !processed_packets.is_empty() {
+    //             debug_bgprint!(
+    //                 DebugColor::Azure,
+    //                 "{} - [DBG PROCESS NETEM] Processed packets:",
+    //                 format_elapsed!(now)
+    //             );
+    //             self.queue_network_emulator.network_emulator.last_update_time = now; 
+    //             // self.network_emulator.last_update_time = now;
+    //             for packet in processed_packets.clone() {
+    //                 debug_bgprint!(
+    //                     DebugColor::Azure,
+    //                     "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})",
+    //                     packet.packet_id,
+    //                     packet.header_alvr.next_packet_index,
+    //                     packet.header_alvr.shard_index,
+    //                     packet.header_alvr.shards_count - 1
+    //                 );
+    //             }
+    //             self.process_transmitted_packets(processed_packets, context)
+    //                 .await;
+    //         } else {
+    //             // print!(".");
+    //         }
+    //     }
+    // }
     // New helper method to process transmitted packets
     async fn process_transmitted_packets(
         &mut self,
