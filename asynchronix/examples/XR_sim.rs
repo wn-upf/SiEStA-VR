@@ -240,6 +240,7 @@ fn main() {
     let mut bg_sta_mailboxes = Vec::new();
     let mut bg_sta_addresses = Vec::new();
 
+    let mut emu_addresses = Vec::new();     
 
     let mut all_sta_ids = Vec::new();
    
@@ -280,6 +281,7 @@ fn main() {
 
     let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)));
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
+    print_red!("Emulated patterns: \n{:#?}", emu_effects); 
 
     for i in 0..n_close{ // to set up variable distance scenarios across users
 
@@ -305,6 +307,8 @@ fn main() {
         // all_sta_ids.push(200 + i as i32);
         xr_client_addresses.push(first_vr_pair_distance.mbox_xr_client.address());
         xr_server_addresses.push(first_vr_pair_distance.mbox_xr_server.address());
+        
+        emu_addresses.push(first_vr_pair_distance.mbox_emu_link.address()); 
         vr_pairs.push(first_vr_pair_distance);
     }    
  
@@ -365,8 +369,6 @@ fn main() {
         // all_sta_ids.push(sta_id);
     }
     
-
-
 
     // Connect all STAs to queue
     for vr in vr_pairs.iter_mut() {
@@ -465,6 +467,19 @@ fn main() {
             )
             .unwrap();
     }
+
+    for addr in &emu_addresses {
+
+        scheduler.schedule_event(
+                Duration::from_secs(SIM_START_TIME),
+                EmulatedLink::flush_queue, 
+                (),
+                addr,
+        ).unwrap(); 
+
+    }
+
+
 
     for (i, addr) in xr_server_addresses.iter().enumerate() {
         // let epsilon = Duration::from_secs_f64(exponential(0.3, &mut rng));

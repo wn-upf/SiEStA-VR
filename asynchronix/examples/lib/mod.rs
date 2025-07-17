@@ -59,7 +59,6 @@ pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
 
-
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
@@ -68,6 +67,15 @@ macro_rules! debug_bgprint {
             println!("{}", $color.to_background_fn()(msg));
         }
     };
+}
+#[macro_export]
+macro_rules! db_debug_bgprint {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // if DEBUG_PRINT_ENABLED == true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        }
+    // };
 }
 
 #[macro_export]
