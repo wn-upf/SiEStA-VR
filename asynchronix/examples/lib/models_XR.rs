@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 use std::{mem, vec};
 
 use crate::lib::alvr_control_socket::ProtoControlSocket;
-use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket};
+use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket, EverestCommand,};
 use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
     SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader, CHUNK_DURATION_F64_S,
@@ -92,7 +92,7 @@ pub const HEIGHT_ENCODER: usize = 2160;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.15;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.3;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -119,6 +119,7 @@ pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 pub const ALPHA_THROUGHPUT: f32 = 0.1; 
+
 /// Number of consecutive good matches required to re-establish synchronization
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -137,6 +138,12 @@ pub struct FramePair {
     reference_raw: Option<Vec<u8>>,
     frame_id: usize,
 }
+#[derive(Clone)]
+pub struct PerfectInfoBitrateMessage{
+    bitrate_ladder_bps: Option<Vec<f32>>, 
+    bitrate_mbps: f32, 
+}
+
 
 fn render_text(
     buffer: &mut [u32],
@@ -525,8 +532,6 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
 
     Some(pixels)
 }
-
-
 
 
 
@@ -1449,33 +1454,19 @@ impl SharedParameterSetManager {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 #[allow(unused)]
 pub enum BitrateMode {
     ConstantMbps(f32),
-    // Adaptive {
-    //     saturation_multiplier: f32,
-    //     max_bitrate_mbps: u64,
-    //     min_bitrate_mbps: u64,
-    //     max_network_latency_ms: u64,
-    //     encoder_latency_limiter: EncoderLatencyLimiter,
-    //     decoder_latency_limiter: DecoderLatencyLimiter,
-    // },
-    // NestVr {
-    //     update_interval_nestvr_s: f32,
-    //     max_bitrate_mbps: f32,
-    //     min_bitrate_mbps: f32,
-    //     initial_bitrate_mbps: f32,
 
-    //     step_size_mbps: f32,
-        
-        
-    //     capacity_scaling_factor: f32,
-    //     rtt_explor_prob: f32,
-    //     nfr_thresh: f32,
-    //     rtt_thresh_scaling_factor: f32,
-    //     profile: NestVrProfile, 
-    // },
+
+        EVeREst{
+            // d_upper: f32, 
+            // d_lower: f32, 
+            bitrate_ladder_mbps: Vec<f32>,
+        },
+
+
 
         NestVr{
             averaging_strategy: AveragingStrategy,            
@@ -1509,7 +1500,7 @@ pub enum NestVrProfile {
 }
 
 #[allow(unused)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProfileConfig {
     pub update_interval_nestvr_s: f32,
 
@@ -1571,22 +1562,37 @@ pub struct BitrateManager {
 
     bitrate_average_mbps: SlidingWindowAverage<f32>,
 
-    pub last_target_bitrate_mbps: f32,
     update_interval_s: Duration,
 
     rtt_average: SlidingWindowAverage<Duration>,
     peak_throughput_average: SlidingWindowAverage<f32>,
     frame_interarrival_average: SlidingWindowAverage<f32>,
 
+    everest_last_capacity: f32, 
+    everest_last_throughput: f32, 
+
+    everest_capacity_ewma: f32, 
+    everest_throughput_ewma: f32, 
+    everest_last_dshort: f32, 
+    everest_last_dlong: f32, 
+    everest_time_last_capacity_update: TaiTime<0>, 
+    everest_time_last_throughput_update: TaiTime<0>, 
+    everest_last_order: EverestCommand, 
+
     last_target_bitrate_bps: f32,
+    last_target_bitrate_mbps: f32,
+
     bitrate_ladder_bps: Option<Vec<f32>>, 
     bitrate_step_size_bps: f32,
+
+ 
 }
 
 
 impl BitrateManager {
      pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: bool, nest_vr_profile: &NestVrProfile, 
 ) -> Self {
+        let everest_enabled = false; 
         let decrement = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
             NestVrProfile::Balanced => {1},
@@ -1618,9 +1624,31 @@ impl BitrateManager {
                                         capacity_scaling_factor: 0.9,},
                 }
             }
+            else if everest_enabled{
+
+                let max_bitrate_mbps = 100.0;
+                let min_bitrate_mbps = 10.0;
+                let initial_bitrate_mbps =  50.0;
+
+                let values_original = [10.0, 20.0, 40.0, 60.0, 80.0, 120.0]; 
+                let mut bitrate_ladder_mbps = Vec::new(); 
+                for value in values_original.iter(){
+                    bitrate_ladder_mbps.push(*value as f32); 
+                }
+                // let num_steps = 9; 
+                // let mut value = min_bitrate_mbps; 
+                // for _i in 0..num_steps {
+                //     bitrate_ladder_mbps.push(value); 
+                //     value += ( max_bitrate_mbps - min_bitrate_mbps ) / num_steps as f64; 
+
+                // }
+                
+                BitrateMode::EVeREst { bitrate_ladder_mbps }
+            }
             else{
                 BitrateMode::ConstantMbps(initial_bitrate_mbps)
-        };         
+        };          
+
 
         Self {
             last_frame_instant: TaiTime::EPOCH,
@@ -1642,11 +1670,19 @@ impl BitrateManager {
                 1. / initial_framerate,
                 max_history_size,
             ),
-
+            everest_last_capacity: 0.0, 
+            everest_last_throughput: 0.0, 
+            everest_last_dlong: 0.0, 
+            everest_last_dshort: 0.0,  
+            everest_capacity_ewma: 0.0, 
+            everest_throughput_ewma: 0.0, 
+            everest_time_last_capacity_update: TaiTime::EPOCH, 
+            everest_time_last_throughput_update: TaiTime::EPOCH, 
             bitrate_mode,
             last_target_bitrate_bps: initial_bitrate_mbps * 1e6,
             bitrate_ladder_bps: None, 
             bitrate_step_size_bps: 0.0, 
+            everest_last_order: EverestCommand::CONTINUE, 
         }
     }
     pub fn report_encoded_frame_server(&mut self, now: TaiTime<0>) {
@@ -1662,11 +1698,13 @@ impl BitrateManager {
         self.last_frame_instant = now;
     }
 
-    pub fn report_network_statistics(
+    pub fn report_network_statistics_abr(
         &mut self,
         network_rtt: Duration,
         peak_throughput_bps: f32,
         frame_interarrival_s: f32,
+        network_stats: NetworkStatisticsPacket, 
+        now: TaiTime<0>
     ) {
         self.rtt_average.submit_sample(network_rtt);
 
@@ -1675,18 +1713,91 @@ impl BitrateManager {
 
         self.frame_interarrival_average
             .submit_sample(frame_interarrival_s);
-    }
+
+
+        const T_USER_WIN : f32 = 5.0; // from original paper 
+
+
+
+        let everest_capacity_sample = network_stats.everest_capacity_update; 
+        let everest_throughput_sample = network_stats.everest_throughput_update; 
+
+        if everest_capacity_sample > 0.0 { // we only get one or the other, which is computed is based on frame size. They are initialized to -1.0, only positive samples count 
+            self.everest_last_capacity = everest_capacity_sample;  
+            let last_c_f32 = now.duration_since(self.everest_time_last_capacity_update).as_secs_f32(); 
+            
+            self.everest_capacity_ewma = last_c_f32 / T_USER_WIN * everest_capacity_sample + (1.0 - last_c_f32 / T_USER_WIN ) * self.everest_capacity_ewma; 
+            self.everest_time_last_capacity_update = now; 
+        }
+
+        if everest_throughput_sample > 0.0{
+            self.everest_last_throughput = everest_throughput_sample;  
+            let last_t_f32 = now.duration_since(self.everest_time_last_throughput_update).as_secs_f32(); 
+            
+            self.everest_capacity_ewma = last_t_f32 / T_USER_WIN * everest_throughput_sample + (1.0 - last_t_f32 / T_USER_WIN ) * self.everest_throughput_ewma;  
+            self.everest_time_last_throughput_update = now; 
+        } 
+
+        self.everest_last_dshort = network_stats.everest_dshort; 
+        self.everest_last_dlong = network_stats.everest_dlong; 
+        self.everest_last_order = network_stats.everest_command; 
+
+    }   
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>) -> f32 {
-        let bitrate_bps = match self.bitrate_mode {
+
+        let bitrate_bps = match &self.bitrate_mode {
             BitrateMode::ConstantMbps(bitrate_mbps) => {
-                self.last_target_bitrate_bps = bitrate_mbps as f32 * 1E6;
-                self.last_target_bitrate_mbps = bitrate_mbps as f32;
+                self.last_target_bitrate_bps = *bitrate_mbps as f32 * 1E6;
+                self.last_target_bitrate_mbps = *bitrate_mbps as f32;
 
                 print_prettyy!(DebugColor::Navy, "CBR -> Bitrate = {} Mbps", bitrate_mbps);
 
-                bitrate_mbps as f32 * 1e6
+                *bitrate_mbps as f32 * 1e6
             }
+
+            BitrateMode::EVeREst { bitrate_ladder_mbps }
+                => {
+                    let mut bitrate_bps = self.last_target_bitrate_bps; 
+                    
+                    let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
+                    let new_mbps = match self.everest_last_order {
+                        EverestCommand::CONTINUE => {
+                            // stay on the same rung (or the closest one)
+                            bitrate_ladder_mbps
+                                .iter()
+                                .find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON)
+                                .copied()
+                                .unwrap_or(current_mbps)
+                        }
+                        EverestCommand::SPEED_UP => {
+                            // first entry strictly greater than current
+                            bitrate_ladder_mbps
+                                .iter()
+                                .find(|&&x| x > current_mbps)
+                                .copied()
+                                .unwrap_or(*bitrate_ladder_mbps.last().unwrap())
+                        }
+                        EverestCommand::SLOW_DOWN => {
+                            // last entry strictly less than current
+                            bitrate_ladder_mbps
+                                .iter()
+                                .rfind(|&&x| x < current_mbps)
+                                .copied()
+                                .unwrap_or(bitrate_ladder_mbps[0])
+                        }
+                    };
+                    bitrate_bps = new_mbps * 1e6; 
+
+                    let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma ).ceil() as usize ; 
+                    let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);  
+
+                    bitrate_bps = f32::min(capacity_margin_bps, bitrate_bps ); 
+                    bitrate_bps = upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap()); 
+                    
+                    self.last_target_bitrate_bps = bitrate_bps; 
+                    bitrate_bps
+                }
 
             BitrateMode::NestVr {
                 max_bitrate_mbps,
@@ -1695,41 +1806,6 @@ impl BitrateManager {
                 nest_vr_profile,
                 ..
             } => {
-
-                fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
-                    // Perform binary search to find the largest value less than or equal to `bitrate_bps`
-                    match bitrate_ladder
-                        .binary_search_by(|x| x.partial_cmp(&bitrate_bps).unwrap_or(std::cmp::Ordering::Less))
-                    {
-                        Ok(index) => bitrate_ladder[index], // Exact match found
-                        Err(index) => {
-                            // If not found, `index` is where the value would be inserted to maintain sorted order
-                            if index == 0 {
-                                // If `bitrate_bps` is smaller than the first element, return the first element
-                                bitrate_ladder.first().copied().unwrap_or(bitrate_bps)
-                            } else {
-                                // Otherwise, return the element just before the insertion point (i.e., the largest <= bitrate_bps)
-                                bitrate_ladder[index - 1]
-                            }
-                        }
-                    }
-                }
- 
-                fn minmax_bitrate(
-                    bitrate_bps: f32,
-                    max_bitrate_bps: f32,
-                    min_bitrate_bps: f32,
-                ) -> f32 {
-                    let mut bitrate = bitrate_bps;
-                    bitrate = f32::min(bitrate, max_bitrate_bps);
-                    bitrate = f32::max(bitrate, min_bitrate_bps);
-
-
-                    println!("minmax: bitrate_mbps_orig: {}, final {}", bitrate_bps/1e6, bitrate/1e6); 
-
-
-                    bitrate
-                }
                 
                 print_pink!(
                     // DebugColor::Purple,
@@ -1775,7 +1851,7 @@ impl BitrateManager {
                 let r_rtt = rng.sample(uniform_dist);
                 let r_inc = rng.sample(uniform_dist);
 
-                let frame_interval_s = self.frame_interval_average.get_average().as_secs_f32();
+                let frame_interval_s = f32::max(self.frame_interval_average.get_average().as_secs_f32(), 1e-9);
 
                 let fps_tx_avg = if frame_interval_s != 0.0 {
                     1.0 / frame_interval_s
@@ -1784,7 +1860,7 @@ impl BitrateManager {
                 };
 
                 let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 {
-                    1.0 / self.frame_interarrival_average.get_average()
+                    1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average()) 
                 } else {
                     0.0
                 };
@@ -1792,7 +1868,7 @@ impl BitrateManager {
                 let nfr_avg = fps_rx_avg / fps_tx_avg;
                 let rtt_avg_ms = self.rtt_average.get_average().as_secs_f32() * 1000.0;
 
-                let estimated_capacity_bps = self.peak_throughput_average.get_average();
+                let estimated_capacity_bps = f32::max(self.peak_throughput_average.get_average(), 1e-9);
 
                 let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
 
@@ -1958,7 +2034,7 @@ pub struct XRServer {
     pub intra_refresh: bool, 
     pub abr_enabled: bool, 
 
-    pub output_perfect_information_bitrate: Output<f32>, 
+    pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>, 
 }
 #[allow(unused)]
 impl XRServer {
@@ -2076,17 +2152,19 @@ impl XRServer {
 
                     let (peak_network_throughput_bps, frame_interarrival_s) =
                         self.STATISTICS_MANAGER.report_network_statistics(
-                            network_stats,
+                            network_stats.clone(),
                             rtt,
                             now,
                             self.bitrate_manager.last_target_bitrate_bps,
                         );
 
                     // BITRATE_MANAGER.lock().report_network_statistics
-                    self.bitrate_manager.report_network_statistics(
+                    self.bitrate_manager.report_network_statistics_abr(
                         rtt,
                         peak_network_throughput_bps,
                         frame_interarrival_s,
+                        network_stats,
+                        now,  
                     );
                 }
                 ClientControlPacket::DeadlineShardLossStat(inner) => {
@@ -2365,19 +2443,39 @@ impl XRServer {
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
 
                 // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
+                
+                let duration_abr = Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL * FRAMERATE_WINDOWS as f64 / self.fps as f64); 
 
-                if now.duration_since(self.bitrate_manager.last_update_instant)
-                    >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL * FRAMERATE_WINDOWS as f64 / self.fps as f64)
-                {   
+                if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) {
+                    if (now.duration_since(self.bitrate_manager.last_update_instant) >= duration_abr){
+                       
+                        let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
+                        self.bitrate_manager.last_update_instant = now;
+                        
+
+                        let perfect_info_message = PerfectInfoBitrateMessage{bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),  bitrate_mbps: last_bitrate_mbps }; 
+
+                        self.output_perfect_information_bitrate.send(perfect_info_message).await; // Client knows the bitrate ladder, needed for thresholds computing in HMD. 
+                        
+                        // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
+
+                        print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
+                    }
+                } 
+                else{ // EveRest classic is applied per-frame. 
+
                     let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
-                    self.output_perfect_information_bitrate.send(last_bitrate_mbps).await; // just used for display!
+                    
+                    let perfect_info_message = PerfectInfoBitrateMessage{bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),  bitrate_mbps: last_bitrate_mbps }; 
+                    self.output_perfect_information_bitrate.send(perfect_info_message).await;  // Client knows the bitrate ladder, needed for thresholds computing in HMD. 
                     
                     // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
 
                     print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
-
                 }
+
+               
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_mbps;
 
                 // let max_bitrate_ladder_mbps: f32 = match self.bitrate_manager.bitrate_mode { // only useful for online VQ analysis 
@@ -2941,7 +3039,17 @@ pub struct XRClient {
     last_seen_id: usize, 
 
     last_throughput_avg: f32, 
-    last_bitrate_perfect_info_update: f32, 
+    last_bitrate_perfect_info_update_mbps: f32,
+    bitrate_ladder_perfect_info_update: Vec<f32>, 
+
+    frame_size_exp_avg: f32, 
+    d_short_exp_avg: f32, 
+    d_long_exp_avg: f32, 
+    
+
+
+    // everest_capacity_vec: Vec<f32>, 
+    // everest_throughput_vec: Vec<f32>, 
 }
 
 #[allow(unused)]
@@ -3029,7 +3137,14 @@ impl XRClient {
             last_throughput_avg: 0.0, 
 
             original_decoder: None, 
-            last_bitrate_perfect_info_update: 0.0, 
+            last_bitrate_perfect_info_update_mbps: 0.0, 
+
+            frame_size_exp_avg: 0.0, 
+            d_short_exp_avg: 0.0,
+            d_long_exp_avg: 0.0, 
+            bitrate_ladder_perfect_info_update: Vec::new(), 
+            // everest_capacity_vec: Vec::new() ,
+            // everest_throughput_vec: Vec::new(), 
         }
     }
 
@@ -3414,6 +3529,93 @@ impl XRClient {
                     let mut packets_lost_deadline = 0;
                     let frame_id = data.get_frame_index();
 
+                    let Ok((nal)) = data.get() else {
+                        println!("UNABLE TO GET HEADER NAL? ");
+                        return;
+                    };
+
+                    let sized_vec = nal[..20.min(nal.len())].to_vec();                    
+                    /////////////////////////////////////////////
+                    
+                    pub const EVEREST_CLASSIC : bool = true; 
+                    pub const MPDU_MAX_SIZE: u32 = 1500; 
+                    pub const THETA_EWMA: f32 = 0.01;  // we want the long term expectation for comparison of individual frame sizes. 
+
+                    pub const T_SHORT_EVEREST_S: f32 = 1.0; 
+                    pub const T_LONG_EVEREST_S: f32 = 5.0; 
+
+
+                    let mut everest_throughput: f32 = -1.0;     // initialize, if negative then on rx don't count 
+                    let mut everest_capacity: f32 = -1.0;       // (only one measure per frame of either)
+                    
+                    
+                    if self.frame_size_exp_avg == 0.0 { 
+                        self.frame_size_exp_avg = data.get_bytes_in_frame() as f32; // initialize avg only on first value
+                    }
+                    if self.d_short_exp_avg == 0.0 {
+                        self.d_short_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_SHORT_EVEREST_S; 
+                    }
+                    if self.d_long_exp_avg == 0.0 {
+                        self.d_long_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_LONG_EVEREST_S; 
+                    }
+
+                    if EVEREST_CLASSIC { 
+                        if is_keyframe(&nal){
+
+                            everest_throughput = data.get_bytes_in_frame() as f32 / data.get_frame_span(); 
+
+                        }
+                        else{                   
+                            let frame_size_mtu_portion = data.get_bytes_in_frame() / MPDU_MAX_SIZE ;
+                            // let remainder_size =    data.get_bytes_in_frame() % 1500 ;
+                            everest_capacity = frame_size_mtu_portion as f32 / data.get_frame_span(); 
+                        }
+                    }
+                    else{ // EVEREST-Intra
+                        self.frame_size_exp_avg = ( THETA_EWMA * data.get_bytes_in_frame() as f32 )  + ( 1.0 - THETA_EWMA ) * self.frame_size_exp_avg ; 
+                        
+                        if data.get_bytes_in_frame() as f32 > self.frame_size_exp_avg {
+                            everest_throughput = data.get_bytes_in_frame() as f32 / data.get_frame_span(); 
+                        }
+                        else{
+                            let frame_size_mtu_portion = data.get_bytes_in_frame() / MPDU_MAX_SIZE ;
+                            everest_capacity = frame_size_mtu_portion as f32 / data.get_frame_span();                             
+                        }
+
+                    }
+  
+                    let interarrival = data.get_frame_interarrival(); 
+                    self.d_short_exp_avg = (interarrival / T_SHORT_EVEREST_S * data.get_frame_span() )  + (1.0 - interarrival/ T_SHORT_EVEREST_S) * self.d_short_exp_avg; 
+                    self.d_long_exp_avg =  (interarrival / T_LONG_EVEREST_S  * data.get_frame_span() ) + (1.0 - interarrival/ T_LONG_EVEREST_S) * self.d_long_exp_avg; 
+                    
+                    // let d_lower_everest =  
+                    let mut bitrate_mbps = self.last_bitrate_perfect_info_update_mbps; 
+                    let bitrate_bps_comp = bitrate_mbps / 1e6; 
+                    
+                    // create bitrate ladder here? 
+                    let &value_b2 = self.bitrate_ladder_perfect_info_update.iter().find(|&&x| x > bitrate_bps_comp).unwrap(); 
+                    
+                    
+                    let d_lower_everest = bitrate_bps_comp / value_b2 * (1.0 / self.framerate);   // IFT in average or expectation from fps? assuming FPS
+                    let d_upper_everest = 1.0 / self.framerate; 
+
+                    const T_LOW_EVEREST_S: f32 = 0.005; 
+                    const T_HIGH_EVEREST_S: f32 = 0.020;   
+
+                    let mut command_abr_everest = EverestCommand::CONTINUE; 
+
+                    if self.d_short_exp_avg >= d_upper_everest 
+                    {
+                        self.d_short_exp_avg = T_LOW_EVEREST_S; 
+                        command_abr_everest = EverestCommand::SLOW_DOWN; 
+                    }
+                    if self.d_long_exp_avg < d_lower_everest{
+                        self.d_long_exp_avg = T_HIGH_EVEREST_S; 
+                        command_abr_everest = EverestCommand::SPEED_UP; 
+                    }
+
+                    //////////////////////////////////////////////
+                    
                     let net = NetworkStatisticsPacket {
                         // Frame specific metrics
                         frame_index: frame_id as i32, // index of the current frame
@@ -3439,7 +3641,11 @@ impl XRClient {
                         highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video frame received during the interval between consecutive frames
                         highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video shard received during the interval between consecutive frames
                         lost_shards_deadline: packets_lost_deadline,
-                        // tx_instant: data.get_tx_instant(),
+                        everest_capacity_update: everest_capacity, 
+                        everest_throughput_update: everest_throughput, 
+                        everest_dshort: self.d_short_exp_avg, 
+                        everest_dlong: self.d_long_exp_avg, 
+                        everest_command: command_abr_everest, 
                     };
                     if self.last_throughput_avg == 0.0 {
                         self.last_throughput_avg = net.bytes_in_frame as f32 / net.frame_interarrival;  
@@ -3468,11 +3674,7 @@ impl XRClient {
                         .unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
-                    let Ok((nal)) = data.get() else {
-                        println!("UNABLE TO GET HEADER NAL? ");
-                        return;
-                    };
-                    let sized_vec = nal[..20.min(nal.len())].to_vec();
+          
 
                     debug_print!(
                         DebugColor::Gold,
@@ -4108,7 +4310,7 @@ impl XRClient {
                                             decoder.decoded_frame_counter,
                                             window,
                                             now,
-                                            self.last_bitrate_perfect_info_update,
+                                            self.last_bitrate_perfect_info_update_mbps,
                                             lost_frames_aux.clone(),
                                             &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
                                             &self.test, 
@@ -4155,12 +4357,18 @@ impl XRClient {
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
-    pub async fn input_perfect_information_bitrate(&mut self, bitrate: f32, context: &Context<Self>) {
+    pub async fn input_perfect_information_bitrate(&mut self, bitrate_msg: PerfectInfoBitrateMessage, context: &Context<Self>) {
         
         let now = context.scheduler.time(); 
-        print_brown!("{} - perfect bitrate input: {}", format_elapsed!(now), bitrate); 
 
-        self.last_bitrate_perfect_info_update = bitrate; 
+
+        let bitrate = bitrate_msg.bitrate_mbps; 
+        // if self.bitrate_ladder_perfect_info_update.is_none(){
+        if let Some(veccc) = bitrate_msg.bitrate_ladder_bps{
+            self.bitrate_ladder_perfect_info_update = veccc; 
+        }
+        print_brown!("{} - perfect bitrate input: {} | Bitrate ladder : {:#?}", format_elapsed!(now), bitrate, self.bitrate_ladder_perfect_info_update); 
+        self.last_bitrate_perfect_info_update_mbps = bitrate; 
     }
 
     
@@ -4668,7 +4876,7 @@ impl STA_extended {
 
 impl Model for STA_extended {}
 
-fn extract_br_value(input: &str) -> Option<f32> {
+pub fn extract_br_value(input: &str) -> Option<f32> {
     let re = Regex::new(r"Br(\d+\.\d+)").unwrap(); // Regex to match "Br" followed by a float.
 
     if let Some(captures) = re.captures(input) {
@@ -4677,4 +4885,38 @@ fn extract_br_value(input: &str) -> Option<f32> {
         None
     }
 }
-// Update the process_group function to use the enhanced method
+
+pub fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
+                    // Perform binary search to find the largest value less than or equal to `bitrate_bps`
+                    match bitrate_ladder
+                        .binary_search_by(|x| x.partial_cmp(&bitrate_bps).unwrap_or(std::cmp::Ordering::Less))
+                    {
+                        Ok(index) => bitrate_ladder[index], // Exact match found
+                        Err(index) => {
+                            // If not found, `index` is where the value would be inserted to maintain sorted order
+                            if index == 0 {
+                                // If `bitrate_bps` is smaller than the first element, return the first element
+                                bitrate_ladder.first().copied().unwrap_or(bitrate_bps)
+                            } else {
+                                // Otherwise, return the element just before the insertion point (i.e., the largest <= bitrate_bps)
+                                bitrate_ladder[index - 1]
+                            }
+                        }
+                    }
+                }
+ 
+pub fn minmax_bitrate(
+    bitrate_bps: f32,
+    max_bitrate_bps: f32,
+    min_bitrate_bps: f32,
+) -> f32 {
+    let mut bitrate = bitrate_bps;
+    bitrate = f32::min(bitrate, max_bitrate_bps);
+    bitrate = f32::max(bitrate, min_bitrate_bps);
+
+
+    println!("minmax: bitrate_mbps_orig: {}, final {}", bitrate_bps/1e6, bitrate/1e6); 
+
+
+    bitrate
+}

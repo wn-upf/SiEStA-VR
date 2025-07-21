@@ -204,5 +204,18 @@ pub struct NetworkStatisticsPacket {
     pub highest_rx_shard_index: i32,
 
     pub lost_shards_deadline: usize,
+
+    pub everest_capacity_update: f32, 
+    pub everest_throughput_update: f32, 
+    pub everest_dshort: f32, 
+    pub everest_dlong: f32, 
+    pub everest_command: EverestCommand, 
     // pub tx_instant: f64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub enum EverestCommand{
+    SLOW_DOWN,
+    SPEED_UP,
+    CONTINUE, 
 }

@@ -954,8 +954,8 @@ impl HevcParser {
 
 #[derive(Clone)]
 pub struct SlidingWindowAverage<T> {
-    history_buffer: VecDeque<T>,
-    max_history_size: usize,
+    pub history_buffer: VecDeque<T>,
+    pub max_history_size: usize,
 }
 #[allow(unused)]
 impl<T> SlidingWindowAverage<T> {
@@ -2190,7 +2190,7 @@ impl Clone for CsvTrace {
 }
 
 #[allow(unused)]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum WindowType {
     BySeconds {
         sliding_window_secs: Option<f32>,
@@ -2204,7 +2204,7 @@ pub enum WindowType {
     },
 }
 #[allow(unused)]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum AveragingStrategy {
     SimpleWindowAverage {
         // #[schema(flag = "real-time")]
