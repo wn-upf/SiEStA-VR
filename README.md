@@ -7,7 +7,7 @@
 
 ## Quick guide: 
 
-Simulator for setting up a number of N_XR VR sessions, with configurable distance to an AP.
+Simulator for setting up a number of N_XR VR sessions, with configurable distance to an AP. The VR streaming simulated sessions have the following structure: ![Alt text](assets/VR_emu_pipeline.png)
 
 To run, execute the bash script ```xrun.sh``` in order to iterate over all the combinations of selected scenarios. Via modifying the values assigned to ```SERIAL_EXECUTION``` and ```NUMBER_OF_JOBS``` the degree of parallelism for execution can be controlled.
 
