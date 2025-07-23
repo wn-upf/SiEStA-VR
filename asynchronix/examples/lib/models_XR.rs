@@ -92,7 +92,7 @@ pub const HEIGHT_ENCODER: usize = 2160;
 
 pub const FRAMERATE_WINDOWS: usize = 60;
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.3;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.15;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -1568,6 +1568,9 @@ pub struct BitrateManager {
     peak_throughput_average: SlidingWindowAverage<f32>,
     frame_interarrival_average: SlidingWindowAverage<f32>,
 
+
+
+    everest_enabled: bool, 
     everest_last_capacity: f32, 
     everest_last_throughput: f32, 
 
@@ -1593,7 +1596,7 @@ impl BitrateManager {
      pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: bool, nest_vr_profile: &NestVrProfile, 
 ) -> Self {
         let everest_enabled = false; 
-        let decrement = match nest_vr_profile {
+        let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
             NestVrProfile::Balanced => {1},
             NestVrProfile::Speedy => {2}, 
@@ -1670,6 +1673,7 @@ impl BitrateManager {
                 1. / initial_framerate,
                 max_history_size,
             ),
+            everest_enabled, 
             everest_last_capacity: 0.0, 
             everest_last_throughput: 0.0, 
             everest_last_dlong: 0.0, 
@@ -3537,83 +3541,86 @@ impl XRClient {
                     let sized_vec = nal[..20.min(nal.len())].to_vec();                    
                     /////////////////////////////////////////////
                     
-                    pub const EVEREST_CLASSIC : bool = true; 
-                    pub const MPDU_MAX_SIZE: u32 = 1500; 
-                    pub const THETA_EWMA: f32 = 0.01;  // we want the long term expectation for comparison of individual frame sizes. 
-
-                    pub const T_SHORT_EVEREST_S: f32 = 1.0; 
-                    pub const T_LONG_EVEREST_S: f32 = 5.0; 
-
-
+                    pub const EVEREST_ENABLED : bool = false; 
                     let mut everest_throughput: f32 = -1.0;     // initialize, if negative then on rx don't count 
                     let mut everest_capacity: f32 = -1.0;       // (only one measure per frame of either)
-                    
-                    
-                    if self.frame_size_exp_avg == 0.0 { 
-                        self.frame_size_exp_avg = data.get_bytes_in_frame() as f32; // initialize avg only on first value
-                    }
-                    if self.d_short_exp_avg == 0.0 {
-                        self.d_short_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_SHORT_EVEREST_S; 
-                    }
-                    if self.d_long_exp_avg == 0.0 {
-                        self.d_long_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_LONG_EVEREST_S; 
-                    }
-
-                    if EVEREST_CLASSIC { 
-                        if is_keyframe(&nal){
-
-                            everest_throughput = data.get_bytes_in_frame() as f32 / data.get_frame_span(); 
-
-                        }
-                        else{                   
-                            let frame_size_mtu_portion = data.get_bytes_in_frame() / MPDU_MAX_SIZE ;
-                            // let remainder_size =    data.get_bytes_in_frame() % 1500 ;
-                            everest_capacity = frame_size_mtu_portion as f32 / data.get_frame_span(); 
-                        }
-                    }
-                    else{ // EVEREST-Intra
-                        self.frame_size_exp_avg = ( THETA_EWMA * data.get_bytes_in_frame() as f32 )  + ( 1.0 - THETA_EWMA ) * self.frame_size_exp_avg ; 
-                        
-                        if data.get_bytes_in_frame() as f32 > self.frame_size_exp_avg {
-                            everest_throughput = data.get_bytes_in_frame() as f32 / data.get_frame_span(); 
-                        }
-                        else{
-                            let frame_size_mtu_portion = data.get_bytes_in_frame() / MPDU_MAX_SIZE ;
-                            everest_capacity = frame_size_mtu_portion as f32 / data.get_frame_span();                             
-                        }
-
-                    }
-  
-                    let interarrival = data.get_frame_interarrival(); 
-                    self.d_short_exp_avg = (interarrival / T_SHORT_EVEREST_S * data.get_frame_span() )  + (1.0 - interarrival/ T_SHORT_EVEREST_S) * self.d_short_exp_avg; 
-                    self.d_long_exp_avg =  (interarrival / T_LONG_EVEREST_S  * data.get_frame_span() ) + (1.0 - interarrival/ T_LONG_EVEREST_S) * self.d_long_exp_avg; 
-                    
-                    // let d_lower_everest =  
-                    let mut bitrate_mbps = self.last_bitrate_perfect_info_update_mbps; 
-                    let bitrate_bps_comp = bitrate_mbps / 1e6; 
-                    
-                    // create bitrate ladder here? 
-                    let &value_b2 = self.bitrate_ladder_perfect_info_update.iter().find(|&&x| x > bitrate_bps_comp).unwrap(); 
-                    
-                    
-                    let d_lower_everest = bitrate_bps_comp / value_b2 * (1.0 / self.framerate);   // IFT in average or expectation from fps? assuming FPS
-                    let d_upper_everest = 1.0 / self.framerate; 
-
-                    const T_LOW_EVEREST_S: f32 = 0.005; 
-                    const T_HIGH_EVEREST_S: f32 = 0.020;   
 
                     let mut command_abr_everest = EverestCommand::CONTINUE; 
 
-                    if self.d_short_exp_avg >= d_upper_everest 
-                    {
-                        self.d_short_exp_avg = T_LOW_EVEREST_S; 
-                        command_abr_everest = EverestCommand::SLOW_DOWN; 
-                    }
-                    if self.d_long_exp_avg < d_lower_everest{
-                        self.d_long_exp_avg = T_HIGH_EVEREST_S; 
-                        command_abr_everest = EverestCommand::SPEED_UP; 
-                    }
 
+                    if EVEREST_ENABLED{
+                        pub const EVEREST_CLASSIC : bool = true; 
+                        if self.frame_size_exp_avg == 0.0 { 
+                            self.frame_size_exp_avg = data.get_bytes_in_frame() as f32; // initialize avg only on first value
+                        }
+                        if self.d_short_exp_avg == 0.0 {
+                            self.d_short_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_SHORT_EVEREST_S; 
+                        }
+                        if self.d_long_exp_avg == 0.0 {
+                            self.d_long_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_LONG_EVEREST_S; 
+                        }
+                        pub const MPDU_MAX_SIZE: u32 = 1500; 
+                        pub const THETA_EWMA: f32 = 0.01;  // we want the long term expectation for comparison of individual frame sizes. 
+
+                        pub const T_SHORT_EVEREST_S: f32 = 1.0; 
+                        pub const T_LONG_EVEREST_S: f32 = 5.0; 
+          
+
+
+                        if EVEREST_CLASSIC { 
+                            if is_keyframe(&nal){
+
+                                everest_throughput = data.get_bytes_in_frame() as f32 / data.get_frame_span(); 
+
+                            }
+                            else{                   
+                                let frame_size_mtu_portion = data.get_bytes_in_frame() / MPDU_MAX_SIZE ;
+                                // let remainder_size =    data.get_bytes_in_frame() % 1500 ;
+                                everest_capacity = frame_size_mtu_portion as f32 / data.get_frame_span(); 
+                            }
+                        }
+                        else{ // EVEREST-Intra
+                            self.frame_size_exp_avg = ( THETA_EWMA * data.get_bytes_in_frame() as f32 )  + ( 1.0 - THETA_EWMA ) * self.frame_size_exp_avg ; 
+                            
+                            if data.get_bytes_in_frame() as f32 > self.frame_size_exp_avg {
+                                everest_throughput = data.get_bytes_in_frame() as f32 / data.get_frame_span(); 
+                            }
+                            else{
+                                let frame_size_mtu_portion = data.get_bytes_in_frame() / MPDU_MAX_SIZE ;
+                                everest_capacity = frame_size_mtu_portion as f32 / data.get_frame_span();                             
+                            }
+
+                        }
+    
+                        let interarrival = data.get_frame_interarrival(); 
+                        self.d_short_exp_avg = (interarrival / T_SHORT_EVEREST_S * data.get_frame_span() )  + (1.0 - interarrival/ T_SHORT_EVEREST_S) * self.d_short_exp_avg; 
+                        self.d_long_exp_avg =  (interarrival / T_LONG_EVEREST_S  * data.get_frame_span() ) + (1.0 - interarrival/ T_LONG_EVEREST_S) * self.d_long_exp_avg; 
+                        
+                        // let d_lower_everest =  
+                        let mut bitrate_mbps = self.last_bitrate_perfect_info_update_mbps; 
+                        let bitrate_bps_comp = bitrate_mbps / 1e6; 
+
+
+                        if !self.bitrate_ladder_perfect_info_update.is_empty(){
+                            let &value_b2 = self.bitrate_ladder_perfect_info_update.iter().find(|&&x| x > bitrate_bps_comp).unwrap(); 
+                            let d_lower_everest = bitrate_bps_comp / value_b2 * (1.0 / self.framerate);   // IFT in average or expectation from fps? assuming FPS
+                            let d_upper_everest = 1.0 / self.framerate; 
+
+                            const T_LOW_EVEREST_S: f32 = 0.005; 
+                            const T_HIGH_EVEREST_S: f32 = 0.020;   
+
+                            if self.d_short_exp_avg >= d_upper_everest 
+                            {
+                                self.d_short_exp_avg = T_LOW_EVEREST_S; 
+                                command_abr_everest = EverestCommand::SLOW_DOWN; 
+                            }
+                            if self.d_long_exp_avg < d_lower_everest{
+                                self.d_long_exp_avg = T_HIGH_EVEREST_S; 
+                                command_abr_everest = EverestCommand::SPEED_UP; 
+                            }
+                        }
+                    }
+                    
                     //////////////////////////////////////////////
                     
                     let net = NetworkStatisticsPacket {
@@ -4367,7 +4374,7 @@ impl XRClient {
         if let Some(veccc) = bitrate_msg.bitrate_ladder_bps{
             self.bitrate_ladder_perfect_info_update = veccc; 
         }
-        print_brown!("{} - perfect bitrate input: {} | Bitrate ladder : {:#?}", format_elapsed!(now), bitrate, self.bitrate_ladder_perfect_info_update); 
+        // print_brown!("{} - perfect bitrate input: {} | Bitrate ladder : {:#?}", format_elapsed!(now), bitrate, self.bitrate_ladder_perfect_info_update); 
         self.last_bitrate_perfect_info_update_mbps = bitrate; 
     }
 

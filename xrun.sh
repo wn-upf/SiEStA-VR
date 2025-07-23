@@ -1,34 +1,39 @@
-NUMBER_OF_JOBS=3
-SERIAL_EXECUTION=0
-initial_bitrate_mbps=( 100.0 )
+NUMBER_OF_JOBS=2
+SERIAL_EXECUTION=1
+
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
-simTime=140.0
+TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+
+simTime=30.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 
-distance_list=( 1.5 )
+distance_list=( 2.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-
+N_XR=( 1 2 3 4 5 6 ) 
 PL=0.1
-fps_list=(90.0)
-N_XR=(1)
 
-ABR_ENABLED=( 1 )
-nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
+fps_list=( 60.0 90.0 )
+initial_bitrate_mbps=( 100.0 )
+
+ABR_ENABLED=( 0 )
+nest_profiles=( 1 )
+
+
+# nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
 #                                                  1 => {NestVrProfile::Balanced},
 #                                                  2 => {NestVrProfile::Anxious},
-
-RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
+RANDOM_SEEDS=( 1 )
+# RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")
 N_BGs=(0)
 IS_UL_BG=(0)
 
-intrarefresh_choice=(1)
+intrarefresh_choice=(0 1 )
 GoP_sizes=(90)
 # Define the function to execute on Ctrl+C
 handle_interrupt() {
@@ -38,7 +43,7 @@ handle_interrupt() {
 
 # Set up the trap for SIGINT (Ctrl+C)
 trap handle_interrupt SIGINT
-rm -rf Video_Sink/*
+
 
 temp_file=$(mktemp)
 SIM_COUNT=0                 # counter of simulations, not an input arg
@@ -69,7 +74,7 @@ for test in "${TEST_TYPE[@]}"; do
                                                             mkdir -p "Results/$name_folder"
 
                                                             if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
-                                                                echo "RUNNING SIM: $name_folder\n"
+                                                                echo "RUNNING SIM: $name_folder"
                                                                 echo           ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile >> "$temp_file"
 
                                                             else                                    ## Serial execution
@@ -94,6 +99,8 @@ for test in "${TEST_TYPE[@]}"; do
         done
     done
 done
+
+
 # After writing to temp file
 echo "Contents of temp file:"
 cat "$temp_file"

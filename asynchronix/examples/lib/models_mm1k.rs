@@ -1021,7 +1021,7 @@ impl QueueMechanism {
         let now = context.scheduler.time();
         // print_yellow!("{} Enqueue or transmit? ", format_elapsed!(now)); 
 
-        let mut dbg_reason = "no‑pattern";
+        // let mut dbg_reason = "no‑pattern";
         let mut dbg_delay  = Duration::ZERO;
         let dbg_packet = packet.clone(); 
 
@@ -1036,12 +1036,12 @@ impl QueueMechanism {
         ) {
             Some(delay) if delay == Duration::ZERO => {
                 // Immediate transmission possible
-                dbg_reason = "immediate";
+                // dbg_reason = "immediate";
                 EnqueueResult::Transmitted(packet)
             }
             Some(delay) => {
 
-                dbg_reason = "queued"; 
+                // dbg_reason = "queued"; 
                 dbg_delay = delay; 
 
                 // db_debug_bgprint!(DebugColor::Chocolate, "[DBG Queue NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
@@ -1072,7 +1072,8 @@ impl QueueMechanism {
                     EnqueueResult::Dropped
                 }
             }
-            None => { dbg_reason = "drop";
+            None => { 
+                     // dbg_reason = "drop";
                       EnqueueResult::Dropped
                     },
         }; 
@@ -1861,11 +1862,13 @@ impl QueueModule {
             }
         } else {
             self.blocked_packet_counter += 1;
-            debug_print!(
-                DebugColor::Red,
-                "{} [DBG FULL QUEUE] Packet {} DROPPED from QUEUEMODULE!! , Q_size = {}",
+            print_red!(
+                // DebugColor::Red,
+                "{} [DBG FULL QUEUE] Packet {} (S: {}, D: {})DROPPED from QUEUEMODULE!! , Q_size = {}",
                 format_elapsed!(now),
                 packet.packet_id,
+                packet.sta_src_id,
+                packet.sta_dest_id, 
                 self.queue.len()
             );
         }

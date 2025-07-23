@@ -281,7 +281,10 @@ fn main() {
 
     let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)));
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
-    print_red!("Emulated patterns: \n{:#?}", emu_effects); 
+
+    if !emu_effects.is_empty(){
+        print_red!("Emulated patterns: \n{:#?}", emu_effects); 
+    }
 
     for i in 0..n_close{ // to set up variable distance scenarios across users
 
