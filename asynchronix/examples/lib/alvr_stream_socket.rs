@@ -51,7 +51,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-pub const MAX_HISTORY_SIZE: usize = 256;
+pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
 // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const CHUNK_DURATION_F64_S: f64 = 1.5;
@@ -1887,20 +1887,19 @@ impl<H: Serialize> StreamSender<H> {
         gop_size: usize, 
         intra_refresh: bool, 
     ) -> Result<Buffer<H>> {
-        let id_frame_files_ref = id_frame + 1;
-
-
+        let _id_frame_files_ref = id_frame + 1;
 
         let input_path = &format!(
             "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
         );
 
         let mut buffer: Vec<u8> = Vec::new();
-        print_pretty!(
-            DebugColor::Blue,
-            "[BUFFEREMU] SENDING FRAME {} from SERVER",
-            id_frame_files_ref
-        );
+        // print_pretty!(
+        //     DebugColor::Blue,
+        //     "[BUFFEREMU] SENDING FRAME {} from SERVER",
+        //     // self.
+        //     _id_frame_files_ref
+        // );
 
 
 
@@ -1912,7 +1911,7 @@ impl<H: Serialize> StreamSender<H> {
                 // print_prettyy!(
                 //     DebugColor::Yellow,
                 //     "FRAME {} MAXENCODER EXISTS: {}",
-                //     id_frame_files_ref,
+                //     _id_frame_files_ref,
                 //     self.ffmpeg_maxbitrate_encoder.is_some()
                 // );
 
@@ -2038,10 +2037,10 @@ impl<H: Serialize> StreamSender<H> {
                         // file.write_all(&buffer).unwrap();
                     }
                     None => {
-                        print_pretty!(
-                            DebugColor::SaddleBrown,
-                            "No frame available, restarting encoder",
-                        );
+                        // print_pretty!(
+                        //     DebugColor::SaddleBrown,
+                        //     "No frame available, restarting encoder",
+                        // );
 
                         // Clear ALL buffers before restart
                         encoder.parser.buffer.clear();

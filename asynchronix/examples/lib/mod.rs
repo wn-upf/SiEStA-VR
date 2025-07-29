@@ -188,7 +188,13 @@ macro_rules! print_green {
         println!("{}", DebugColor::ForestGreen.to_background_fn()(msg));
     };
 }
-
+#[macro_export]
+macro_rules! print_blue {
+    ($fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::Blue.to_background_fn()(msg));
+    };
+}
 
 #[macro_export]
 macro_rules! print_pink {

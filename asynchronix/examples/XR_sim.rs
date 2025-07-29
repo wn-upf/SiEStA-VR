@@ -71,7 +71,7 @@ impl VRPair {
         fps: f32, 
         gop_size: usize, 
         intrarefresh: bool, 
-        abr_enabled: bool, 
+        abr_enabled: usize, 
         nest_vr_profile: &NestVrProfile, 
         netem_values_tests: Option<(bool,bool,bool,bool)>
 
@@ -99,7 +99,10 @@ impl VRPair {
             abr_enabled, 
             nest_vr_profile, 
         );
-        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test);
+
+        let everest_enabled = if abr_enabled == 2 { true } else {false}; 
+
+        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, everest_enabled);
 
         let mut sta_server = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -215,7 +218,8 @@ fn main() {
         "STD" // Default suffix if invalid test type provided
     };
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
-    let abr_bool = abr > 0; 
+    // let abr_bool = abr > 0; 
+
     let nest_vr_profile = match nest_vr_choice{
         0 => {NestVrProfile::Speedy},
         1 => {NestVrProfile::Balanced},
@@ -269,7 +273,7 @@ fn main() {
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
     );
     let mbox_queue = Mailbox::new();
-    let queue_address = mbox_queue.address();
+    let _queue_address = mbox_queue.address();
 
     // let csv_data: Arc<Mutex<lib::CsvData>> = queue.csv_metrics.get_data_handle();
     let queue_stats = queue.get_queue_stats_handle();
@@ -302,7 +306,7 @@ fn main() {
             fps,
             gop_size, 
             intra_refresh != 0, 
-            abr_bool, 
+            abr, 
             &nest_vr_profile, 
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
         ); 
@@ -332,7 +336,7 @@ fn main() {
             fps, 
             gop_size, 
             intra_refresh != 0 , 
-            abr_bool, 
+            abr, 
             &nest_vr_profile,
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
 
@@ -451,8 +455,8 @@ fn main() {
 
     // Schedule XR events
     for addr in &xr_client_addresses {
-        let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
-        // let epsilon = Duration::from_secs_f64(0.01);
+        // let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
+        let epsilon = Duration::from_secs_f64(1.0);
         scheduler
             .schedule_event(
                 Duration::from_secs(SIM_START_TIME) + epsilon,
@@ -485,8 +489,8 @@ fn main() {
 
 
     for (i, addr) in xr_server_addresses.iter().enumerate() {
-        // let epsilon = Duration::from_secs_f64(exponential(0.3, &mut rng));
-        let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
+        let epsilon = Duration::from_secs_f64(1.1);
+        // let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
 
         let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
         scheduler

@@ -19,7 +19,7 @@ use tai_time::TaiTime;
 use serde::{Serialize, Deserialize};
 
 
-use crate::db_debug_bgprint;
+// use crate::db_debug_bgprint;
 
 use crate::lib::{
     collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
@@ -1022,8 +1022,8 @@ impl QueueMechanism {
         // print_yellow!("{} Enqueue or transmit? ", format_elapsed!(now)); 
 
         // let mut dbg_reason = "no‑pattern";
-        let mut dbg_delay  = Duration::ZERO;
-        let dbg_packet = packet.clone(); 
+        // let mut _dbg_delay  = Duration::ZERO;
+        // let _dbg_packet = packet.clone(); 
 
         if packet.length_packet == 0 {
             packet.length_packet = packet.data_inner.len();   // fallback for early traffic
@@ -1042,7 +1042,7 @@ impl QueueMechanism {
             Some(delay) => {
 
                 // dbg_reason = "queued"; 
-                dbg_delay = delay; 
+                // _dbg_delay = delay; 
 
                 // db_debug_bgprint!(DebugColor::Chocolate, "[DBG Queue NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
                 //             self.queue.len(),
@@ -2046,7 +2046,8 @@ impl QueueModule {
             // select first packet fairly to ensure channel access with reduced backlog for each user.
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
     
-            debug_schedule!(
+            debug_debug!(
+                DebugColor::Cyan, 
                 "{} | ***************** SCHEDULING *******************",
                 format_elapsed!(now)
             );
@@ -2065,7 +2066,7 @@ impl QueueModule {
                 } else {
                     is_dl = true; 
                 }
-    
+                
                 debug_debug!(
                     DebugColor::Cyan, 
                     "src: {}, dest: {} | UL_FLOW: {} |queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ",
@@ -2105,11 +2106,13 @@ impl QueueModule {
                     // Remove identified packets (from back to front to avoid index issues)
                     for idx in indices_to_remove {
                         if let Some(removed_packet) = self.queue.remove(idx) {
-                            debug_print!(
-                                DebugColor::Red,
-                                "{} [UL PACKET DROPPED] Packet_ID: {}",
+                            print_red!(
+                                // DebugColor::Red,
+                                "{} [UL PACKET DROPPED] Packet_ID: {}, SRC: {}, DST: {}",
                                 format_elapsed!(now),
-                                removed_packet.packet_id
+                                removed_packet.packet_id,
+                                removed_packet.sta_src_id,
+                                removed_packet.sta_dest_id, 
                             );
                             self.blocked_packet_counter += 1;
                         }
@@ -2209,7 +2212,7 @@ impl QueueModule {
                     let T_col = collision_delay(
                         0.0, // parameters can be adjusted as needed
                         0,
-                        self.coords_queue,
+                        self.coords_queue, // (collision delays don't depend on MCS rates)
                         Coords::default(),
                         P_TX,
                     );
@@ -2238,6 +2241,8 @@ impl QueueModule {
                         }
                    
                     let collision_duration = Duration::from_secs_f64(T_col as f64);
+                    // print_red!("{} Collision! T_c:{:.6} ", format_elapsed!(now), T_col as f64); 
+                    
                     context
                         .scheduler
                         .schedule_event(collision_duration, Self::deque_schedule_service, ())

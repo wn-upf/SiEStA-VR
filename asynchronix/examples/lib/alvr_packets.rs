@@ -213,9 +213,9 @@ pub struct NetworkStatisticsPacket {
     // pub tx_instant: f64,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug,)]
 pub enum EverestCommand{
-    SLOW_DOWN,
-    SPEED_UP,
-    CONTINUE, 
+    SlowDown,
+    SpeedUp,
+    Continue, 
 }
