@@ -2196,7 +2196,7 @@ impl Clone for CsvTrace {
 }
 
 #[allow(unused)]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum WindowType {
     BySeconds {
         sliding_window_secs: Option<f32>,
@@ -2210,7 +2210,7 @@ pub enum WindowType {
     },
 }
 #[allow(unused)]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum AveragingStrategy {
     SimpleWindowAverage {
         // #[schema(flag = "real-time")]

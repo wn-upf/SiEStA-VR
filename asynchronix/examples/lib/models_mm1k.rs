@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, debug_debug, print_green, print_pink, print_pretty, print_prettyyyy, print_red, print_yellow};
+use crate::{debug_bgprint, debug_debug, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -86,14 +86,14 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
 
 
-pub const STEP1_TBEGIN: f64 = 15.0;
-pub const STEP1_TEND: f64 =   20.0;
+pub const STEP1_TBEGIN: f64 = 25.0;
+pub const STEP1_TEND: f64 =   35.0;
 
-pub const STEP2_TBEGIN: f64 = 25.0;
-pub const STEP2_TEND: f64 =   30.0;
+pub const STEP2_TBEGIN: f64 = 45.0;
+pub const STEP2_TEND: f64 =   55.0;
 
-pub const STEP3_TBEGIN: f64 = 35.0;
-pub const STEP3_TEND: f64 =   40.0;
+pub const STEP3_TBEGIN: f64 = 65.0;
+pub const STEP3_TEND: f64 =   75.0;
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 90E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 70E6;
