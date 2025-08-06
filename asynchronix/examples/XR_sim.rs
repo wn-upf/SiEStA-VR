@@ -43,6 +43,10 @@ use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 10;
+pub const PREFIX_ID_DOWNLINK: i32 = 100; 
+pub const PREFIX_ID_UPLINK:   i32 = 200; 
+pub const PREFIX_ID_BG:       i32 = 300; 
+
 
 struct VRPair {
     xr_server: XRServer,
@@ -249,16 +253,16 @@ fn main() {
     let mut all_sta_ids = Vec::new();
    
     for i in 0..n_close {
-        all_sta_ids.push(100 + i as i32);
-        all_sta_ids.push(200 + i as i32);
+        all_sta_ids.push( PREFIX_ID_DOWNLINK + i as i32);
+        all_sta_ids.push( PREFIX_ID_UPLINK + i as i32);
     }
     for j in n_close..n_xr {
-        all_sta_ids.push(100 + j as i32);
-        all_sta_ids.push(200 + j as i32);
+        all_sta_ids.push( PREFIX_ID_DOWNLINK + j as i32);
+        all_sta_ids.push( PREFIX_ID_UPLINK + j as i32);
     }
         // 2) Gather all of the BG STA IDs
     for i in 0..n_bg {
-        all_sta_ids.push(300 + i as i32);
+        all_sta_ids.push( PREFIX_ID_BG + i as i32);
     }
 
 

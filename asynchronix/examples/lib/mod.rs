@@ -347,24 +347,7 @@ impl DebugColor {
         }
     }
 }
-// int AccessPoint :: BinaryExponentialBackoff(int attempt)
-// {
-// 	int CW = Random(MIN(pow(2,attempt),pow(2,max_BEB_stages))*(CWmin+1));
-// 	return CW;
-// };
-#[allow(unused)] // to use for non-deterministic backoff
-pub fn time_of_BinaryExponentialBackoff(attempt: i32) -> i32 {
-    let max_beb_stages = 6;
-    let cw_min = 15;
 
-    // Calculate the upper bound for the random range
-    let factor = (2_i32).pow(attempt.min(max_beb_stages) as u32);
-    let upper_bound = factor * (cw_min + 1);
-
-    // Generate a random number in range [0, upper_bound)
-    let mut rng = rand::thread_rng();
-    rng.gen_range(0..upper_bound)
-}
 
 #[derive(Clone)]
 pub struct SlidingWindowWeighted<T> {

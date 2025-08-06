@@ -1,11 +1,11 @@
-NUMBER_OF_JOBS=4
+NUMBER_OF_JOBS=3
 SERIAL_EXECUTION=1
 
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+TEST_TYPE=("STD" "BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=200.0
+simTime=100.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -16,8 +16,8 @@ num_close_users=( 0 )     ## number of users with alternate distance
 N_XR=( 1 ) 
 PL=0.1
 
-fps_list=( 60.0 90.0 )
-initial_bitrate_mbps=( 100.0 )
+fps_list=( 90.0 )
+initial_bitrate_mbps=( 40.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
 
@@ -27,7 +27,7 @@ nest_profiles=( 1 )
 # nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
 #                                                  1 => {NestVrProfile::Balanced},
 #                                                  2 => {NestVrProfile::Anxious},
-RANDOM_SEEDS=( 1 )
+RANDOM_SEEDS=( 1 2 3 )
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")
@@ -68,7 +68,7 @@ for test in "${TEST_TYPE[@]}"; do
                                                         for nest_profile in "${nest_profiles[@]}"; do 
 
                                                             # Create the folder for results saving
-                                                            name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.03f_NXR%.0f_NBG%.0f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f" \
+                                                            name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.1f_NXR%.0f_NBG%.0f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f" \
                                                                         "$simTime" "$distance" "$bitrate" "$PL" "$nxr" "$nbg" "$is_ul" "$test" "$video_sample" "$FPS" "$close_users" "$close_distance" "$seed" "$gop" "$intrarefresh" "$ABR" "$nest_profile")
                                                     
                                                             (( SIM_COUNT++ ))  # ← increment

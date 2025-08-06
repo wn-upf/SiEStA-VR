@@ -1851,7 +1851,6 @@ impl<H> StreamSender<H> {
             sub_buffer[18..22].copy_from_slice(&tx_r_instant.to_be_bytes());
 
             // println!("sending data: \n{:?}", &sub_buffer[..100]);
-
             self.inner
                 .lock()
                 .unwrap()

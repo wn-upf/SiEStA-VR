@@ -5,12 +5,13 @@ use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
+// use std::hash::Hash;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_stream_socket::parse_shard_data;
-use crate::lib::ResultsFrameTXDelay;
+use crate::lib::{ResultsFrameTXDelay, SLOT};
 use crate::lib::DebugColor; 
 use rand::rngs::StdRng;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
@@ -18,12 +19,12 @@ use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 use serde::{Serialize, Deserialize};
 
-
+use rand::seq::SliceRandom;   // brings `choose()` into scope
 // use crate::db_debug_bgprint;
 
 use crate::lib::{
     collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
-    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS, 
+    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS, CW_MIN,
     P_TX,
 };
 use std::collections::HashSet;
@@ -45,10 +46,10 @@ use rand::{SeedableRng};
 #[macro_export]
 macro_rules! debug_schedule {
     ($fmt:expr, $($arg:tt)*) => {
-        if DEBUG_SCHEDULING == true {
+        // if DEBUG_SCHEDULING == true {
             let msg = format!($fmt, $($arg)*);
             println!("{}", DebugColor::Navy.to_background_fn()(msg));
-        }
+        // }
 
     };
 }
@@ -1559,7 +1560,56 @@ pub struct StatsUpdate {
     pub is_collision: bool, 
     pub collision_backoff: f64, 
 
+}
 
+pub struct DcfStats {
+    pub cw: i32,
+    pub backoff_counter: i32, 
+    pub retry_count: u8, 
+    // pub slot_timer_event,
+}
+
+pub const CW_MAX : i32 = 1023; 
+
+pub const MAX_RETRIES_MAC: u8 = 7; 
+
+
+impl DcfStats {
+    pub fn new() -> Self {
+        Self {
+            cw: CW_MIN,
+            backoff_counter: rand::thread_rng().gen_range(0..=CW_MIN),
+            retry_count: 0,
+        }
+    }
+
+    /// Draw a new random back-off inside the current CW.
+    pub fn reload_backoff(&mut self) {
+        self.backoff_counter = rand::thread_rng().gen_range(0..=self.cw);
+    }
+
+    /// Call after a **successful** transmission.
+    pub fn on_success(&mut self) {
+        self.cw          = CW_MIN;
+        self.retry_count = 0;
+        self.reload_backoff();
+    }
+
+    /// Call after a **collision or PHY-error** that requires a retry.
+    pub fn on_failure(&mut self) -> bool {
+        self.retry_count += 1;
+        if self.retry_count > MAX_RETRIES_MAC {
+            // drop MSDU – tell caller to flush the head-of-line
+            self.cw = CW_MIN;
+            self.retry_count = 0;
+            self.reload_backoff();
+            return false;           // “give up”
+        }
+        self.cw = ((self.cw + 1) * 2 ) - 1;          // CW = 2·(CW+1) − 1
+        if self.cw > CW_MAX { self.cw = CW_MAX; }
+        self.reload_backoff();
+        true                                           // keep packet
+    }
 }
 
 #[allow(unused)]
@@ -1599,6 +1649,8 @@ pub struct QueueModule {
 
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
+    pub array_dcf_values: Arc<Mutex<HashMap<i32, DcfStats>>>, 
+
     pub PL_probability: f64,
 
     // pub queue_network_emulator: QueueMechanism,
@@ -1606,18 +1658,35 @@ pub struct QueueModule {
 
     pub ampdu_id: u32, 
 }
+
+
+// int AccessPoint :: BinaryExponentialBackoff(int attempt)
+// {
+// 	int CW = Random(MIN(pow(2,attempt),pow(2,max_BEB_stages))*(CWmin+1));
+// 	return CW;
+// };
+#[allow(unused)] // to use for non-deterministic backoff
+pub fn time_of_BinaryExponentialBackoff(attempt: i32) -> i32 {
+    let max_beb_stages = 6;
+
+    // Calculate the upper bound for the random range
+    let factor = (2_i32).pow(attempt.min(max_beb_stages) as u32);
+    let upper_bound = factor * (CW_MIN + 1);
+
+    // Generate a random number in range [0, upper_bound)
+    let mut rng = rand::thread_rng();
+    rng.gen_range(0..upper_bound)
+}
+
+
 #[allow(unused)]
 impl QueueModule {
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
         self.cumulative_stats_queue.clone()
     }
-
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
-
-    
-
     pub fn new(
         num_stas: usize,
         queue_size: usize,
@@ -1629,6 +1698,7 @@ impl QueueModule {
     ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec = HashMap::new();
+        let mut dcf_stats_vec = HashMap::new(); 
 
         let (stats_tx, stats_rx) = unbounded();
 
@@ -1639,8 +1709,32 @@ impl QueueModule {
                 stats.sta_id = vec_ids[i] as i32;
                 println!("iter: {}, stats id : {:?}", i, stats.sta_id);
                 stats_vec.insert(stats.sta_id.clone() as usize, sta_stats.clone());
-            }
+        
+            }    
         }
+
+        ///////////////////// CREATE BEB QUEUES /////////////////////
+        for id in vec_ids.iter(){
+            if *id >= 100 && *id <= 200{ // Downlink, only one value (or serveral for EDCA). 
+                let mut s = DcfStats { 
+                    cw: CW_MIN, 
+                    retry_count: 0, 
+                    backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
+                };
+                dcf_stats_vec.insert(-1, s); 
+
+            }
+            else{
+                let mut s = DcfStats { 
+                    cw: CW_MIN, 
+                    retry_count: 0, 
+                    backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
+                };
+                dcf_stats_vec.insert(*id, s);
+            }
+           
+        }
+        //////////////////////////////////////////////////////////////////
 
         Self {
             queue: VecDeque::new(),
@@ -1666,6 +1760,8 @@ impl QueueModule {
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
 
+            array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),  
+
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
 
@@ -1675,6 +1771,38 @@ impl QueueModule {
             ampdu_id: 0, 
         }
     }
+
+    fn backoff_tick(&self) -> Vec<(i32,i32)> {
+            let mut ready = Vec::new();
+            if let Ok(mut map) = self.array_dcf_values.lock() {
+                for (sta_id, stats) in map.iter_mut() {
+                    if stats.backoff_counter > 0 {
+                        stats.backoff_counter -= 1;                       // one slot elapsed
+                    }
+                    if stats.backoff_counter == 0 {
+                        // Does this STA actually have something waiting?
+                        if self.queue.iter().any(|p| p.sta_src_id == *sta_id) {
+                            ready.push((*sta_id, /*dest_id set later*/ 0));
+                        }
+                    }
+                }
+            }
+            ready
+        }
+
+    // pub async fn binary_exponential_backoff(&mut self, ) {
+    //     let stas_in_queue = ; 
+    //     if let Ok(array) = self.array_dcf_values.clone().lock(){
+    //         for (sta_id, stats)  in array.iter() {
+    //             if sta_id in stas_in_queue{
+    //                 // if more than one at 0 -> collision 
+    //                 // else decrease their value by 1
+    //                 // if only one at 0, then that one transmits. If transmits, decrease CW to minimum, nº of retries = 0 , 
+    //             }
+    //         }
+    //     }
+    // }
+
 
     pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
         let now = ctx.scheduler.time();
@@ -1691,152 +1819,6 @@ impl QueueModule {
             debug_bgprint!(DebugColor::Green, "[QUEUE FULL] dropping packet {}", pkt.packet_id);
         }
     }
-
-    // pub fn self_scheduled_emu_queue_tx<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-    //     async move {
-    //         let now = context.scheduler.time();
-    //         let processed_packets = self
-    //             .queue_network_emulator
-    //             .process_emu_queued_packets(context);
-    //         // println!("Processing packets. Empty? {}", processed_packets.is_empty());
-
-    //         // Check if we should purge the queue based on bandwidth pattern changes
-    //         if self.queue_network_emulator.should_purge_queue(now) && !self.queue.is_empty() {
-    //             let queue_size = self.queue_network_emulator.queue.len();
-    //             print_pretty!(
-    //             DebugColor::Red,
-    //             "{} [QUEUE PURGE] Bandwidth pattern change at time boundary! Purging {} packets from emulated queue",
-    //             format_elapsed!(now),
-    //             queue_size
-    //         );
-
-    //             // Optional: log details about purged packets
-    //             if queue_size > 0 {
-    //                 print_pretty!(
-    //                     DebugColor::Red,
-    //                     "  First packet: ALVR F_id: {}, shard: {}/{}",
-    //                     self.queue_network_emulator
-    //                         .queue
-    //                         .front()
-    //                         .unwrap()
-    //                         .header_alvr
-    //                         .next_packet_index,
-    //                     self.queue_network_emulator
-    //                         .queue
-    //                         .front()
-    //                         .unwrap()
-    //                         .header_alvr
-    //                         .shard_index,
-    //                     self.queue_network_emulator
-    //                         .queue
-    //                         .front()
-    //                         .unwrap()
-    //                         .header_alvr
-    //                         .shards_count
-    //                         - 1
-    //                 );
-
-    //                 print_pretty!(
-    //                     DebugColor::Red,
-    //                     "  Last packet: ALVR F_id: {}, shard: {}/{}",
-    //                     self.queue_network_emulator
-    //                         .queue
-    //                         .back()
-    //                         .unwrap()
-    //                         .header_alvr
-    //                         .next_packet_index,
-    //                     self.queue_network_emulator
-    //                         .queue
-    //                         .back()
-    //                         .unwrap()
-    //                         .header_alvr
-    //                         .shard_index,
-    //                     self.queue_network_emulator
-    //                         .queue
-    //                         .back()
-    //                         .unwrap()
-    //                         .header_alvr
-    //                         .shards_count
-    //                         - 1
-    //                 );
-    //             }
-    //             for (i, packet) in self.queue_network_emulator.queue.clone().iter().enumerate() {
-    //                 // print!("Packet {} in queue:", i);
-    //                 packet.print(DebugColor::Rose);
-    //             }
-
-    //             // Clear the queue
-    //             self.queue_network_emulator.queue.clear();
-
-    //             // Return an empty vector since we've purged everything
-    //             // return Vec::new();
-    //         }
-
-    //         if !processed_packets.is_empty() {
-    //             debug_bgprint!(
-    //                 DebugColor::Azure,
-    //                 "{} - [DBG PROCESS NETEM] Processed packets:",
-    //                 format_elapsed!(now)
-    //             );
-    //             self.queue_network_emulator.network_emulator.last_update_time = now; 
-    //             // self.network_emulator.last_update_time = now;
-    //             for packet in processed_packets.clone() {
-    //                 debug_bgprint!(
-    //                     DebugColor::Azure,
-    //                     "[DBG PROCESS NETEM] \t\t Packet:  ID: {} (ALVR: frame {} shard: {}/{})",
-    //                     packet.packet_id,
-    //                     packet.header_alvr.next_packet_index,
-    //                     packet.header_alvr.shard_index,
-    //                     packet.header_alvr.shards_count - 1
-    //                 );
-    //             }
-    //             self.process_transmitted_packets(processed_packets, context)
-    //                 .await;
-    //         } else {
-    //             // print!(".");
-    //         }
-    //     }
-    // }
-    // // New helper method to process transmitted packets
-    // async fn process_transmitted_packets(
-    //     &mut self,
-    //     packets: Vec<MpduPacket>,
-    //     context: &Context<Self>,
-    // ) {
-    //     self.arrived_packet_counter += 1;
-    //     self.queue_length_counter += self.queue.len();
-    //     // let id = packet.packet_id.clone();
-    //     // let packet_arg = packet.clone();
-    //     // debug_bgprint!(DebugColor::DarkBlue, "Processing packet from netem", );
-    //     for packet in packets {
-    //         // If can't add to AMPDU, add to queue
-    //         let id = packet.packet_id.clone();
-    //         debug_bgprint!(DebugColor::Indigo, "\t[OUT NETEM] \t\t Packet ID: {} enters network queue (Q_length = {}).  (ALVR: F:{}, S: {}/{})",
-    //          packet.packet_id, self.queue.len(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count -1 );
-
-    //         if self.queue.len() < self.queue_maxsize {
-    //             self.queue.push_back(packet.clone());
-
-    //             if self.queue.len() == 1 && !self.packet_being_served {
-    //                 self.deque_schedule_service((), context).await;
-    //             }
-
-    //             // debug_bgprint!(DebugColor::DarkBlue, "Processing netem. Pushing into queue frame alvr {}, shard {}/{}", packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count - 1 );
-    //         } else {
-    //             self.blocked_packet_counter += 1;
-    //             debug_bgprint!(
-    //                 DebugColor::Red,
-    //                 "[DBG FULL QUEUE] Packet {} DROPPED from QUEUEMODULE process transmit!! , Q_size = {:2.0}",
-    //                 id,
-    //                 self.queue.len()
-    //             );
-    //         }
-    //     }
-    // }
 
     pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
@@ -1891,26 +1873,6 @@ impl QueueModule {
         self.ampdu_id += 1; // increment the AMPDU counter for logging. 
 
         self.packet_being_served = false;
-
-        // match AMPDU_sent.sta_dest_id {
-        //     0 => {
-        //         self.output_port_sta1.send(AMPDU_sent).await;
-        //     }
-        //     1 => {
-        //         self.output_port_sta1.send(AMPDU_sent).await;
-        //     }
-        //     2 => {
-        //         self.output_port_sta1.send(AMPDU_sent).await;
-        //     }
-        //     12 => {
-        //         self.output_port_sta1.send(AMPDU_sent).await;
-        //     }
-
-        //     _ => {
-        //         println!("ERROR!!!! ERROR!!! UNEXPECTED STA ID QUEUE");
-        //     }
-        // }
-        // if AMPDU_sent.is_uplink....
 
         self.output_port_sta1.send(AMPDU_sent).await;
 
@@ -2033,21 +1995,200 @@ impl QueueModule {
         sta_packets
     }
 
+    fn build_new_ampdu<'a>(
+        &mut self,
+        first_packet: &MpduPacket,
+        now: TaiTime<0>,
+    ) -> (AmpduPacket, Duration)  {
+            let mut success_indices: Vec<usize> = Vec::new(); // Original indices of packets successfully transmitted.
+
+            let (sta_src_id, sta_dest_id ) = (first_packet.sta_src_id, first_packet.sta_dest_id) ; 
+
+            self.aux_ampdu_serviced.reset();
+            self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
+            self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
+            self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
+            let mut last_service_duration = Duration::default();
+            let mut packet_index = 0;
+            let mut resultz = ResultsFrameTXDelay::new();
+
+            // ********** Modification: Duplicate packets instead of removing them **********
+            while packet_index < self.queue.len() {
+                if let Some(current_packet) = self.queue.get(packet_index) {
+                    if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
+                        || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
+                    {
+                        packet_index += 1;
+                        continue;
+                    }
+                    let new_total_length =
+                        self.aux_ampdu_serviced.total_length + current_packet.length_packet;
+                    let new_size = self.aux_ampdu_serviced.size + 1;
+                    let is_ul = current_packet.sta_src_id > current_packet.sta_dest_id; // 
+                    
+                    if is_ul{
+                        resultz = frametransmission_delay(
+                        new_total_length as f64,
+                        new_size,
+                        self.coords_queue,
+                        current_packet.sta_src_coords.clone(),
+                        P_TX,
+                        );
+                    }
+                    else{
+                        let dest_coords = self
+                            .STA_coords_map
+                            .get(&(current_packet.sta_dest_id as usize))
+                            .unwrap_or_else(|| panic!(
+                                "no coordinates for STA {}",
+                                current_packet.sta_dest_id
+                            ))
+                            .clone();
+
+                        // println!("DOWNLINK so coords are {:?}", dest_coords.x); 
+                        resultz = frametransmission_delay(
+                            new_total_length as f64,
+                            new_size,
+                            self.coords_queue,
+                            dest_coords,
+                            P_TX,
+                        );
+                    }
+
+            
+                    if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+                        debug_debug!(
+                            DebugColor::DarkRed,
+                            "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
+                            new_size,
+                            MAX_AMPDU_SIZE,
+                            resultz.service_delay * 1000.0,
+                            DEFAULT_TMAX_AGG * 1000.0
+                        );
+                        break;
+                    }
+                    // Instead of removing the packet, clone it and update clone metadata.
+                    let mut cloned_packet = current_packet.clone();
+                    cloned_packet.original_index = packet_index; // record original index
+                    cloned_packet.queue_length_when_out = self.queue.len();
+                    cloned_packet.queue_out_instant = now;
+
+                    cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
+                    
+                    
+                    // Update stats before moving packet
+                    if let Some(stats_tx) = &self.stats_tx {
+                        let stats_update = StatsUpdate {
+                            T_s: resultz.service_delay,
+                            T_q: now
+                                .duration_since(cloned_packet.queue_in_instant)
+                                .as_secs_f64(),
+                            blocked_packet_counter: self.blocked_packet_counter,
+                            arrived_packet_counter: self.arrived_packet_counter,
+                            queue_length_when_out: cloned_packet.queue_length_when_out,
+                            sta_src_id: cloned_packet.sta_src_id as usize,
+                            sta_dest_id: cloned_packet.sta_dest_id as usize,
+                            packet_id: cloned_packet.packet_id as i32,
+                            now,
+                            length_packet: cloned_packet.length_packet,
+                            ampdu_id: self.ampdu_id, 
+
+                            is_collision: false,
+                            collision_backoff: 0.0, 
+                        };
+
+                        
+                        stats_tx
+                            .send(stats_update)
+                            .expect("Failed to send stats update");
+                    }
+
+                    // Add the cloned packet to the AMPDU
+                    self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
+                    self.aux_ampdu_serviced.total_length = new_total_length;
+                    self.aux_ampdu_serviced.size = new_size;
+                    last_service_duration = Duration::from_secs_f64(resultz.service_delay);
+                }
+                packet_index += 1;
+            }
+            // **********************************************************************************
+
+            // Process AMPDU packets: simulate transmission errors
+            let mut new_ampdu_packets: Vec<MpduPacket> = Vec::new();
+            let mut rng = rand::thread_rng();
+            for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
+
+                packet.T_s = Duration::from_secs_f64(resultz.service_delay);   // Assign transmission delay of full AMPDU                       
+                let random_value: f64 = rng.gen();
+
+                if random_value <= self.PL_probability {
+
+                    debug_debug!( DebugColor::SaddleBrown, 
+                        "{:.6} [DBG QUEUE] - packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Index in Q: {}",
+                        format_elapsed!(now),
+                        packet.sta_src_id,
+                        packet.sta_dest_id,
+                        packet.packet_id,
+
+                        packet.header_alvr.shard_index,
+                        packet.header_alvr.shards_count,
+                        packet.header_alvr.next_packet_index, 
+                        packet.original_index
+                    );
+                    self.blocked_packet_counter += 1;
+                    // Packet encountered an error, so we leave its original copy in the queue.
+                    // Optionally, we could log it or mark it.
+                } else {
+                    new_ampdu_packets.push(packet);
+                    
+                }
+            }
+            self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
+                
+            // Now remove from the main queue the packets that were transmitted successfully.
+            // Gather all original indices from the AMPDU (successful ones).
+            for packet in &self.aux_ampdu_serviced.mpdu_packets {
+                success_indices.push(packet.original_index);
+            }
+            // Remove indices in descending order to avoid index shift.
+            success_indices.sort_unstable_by(|a, b| b.cmp(a));
+            for idx in success_indices {
+                // Safety: ensure index is valid.
+                if idx < self.queue.len() {
+                    self.queue.remove(idx);
+                }
+            }
+
+            if DEBUG_PRINT_ENABLED 
+            {
+                print_yellow!(
+                    "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
+                    format_elapsed!(now),
+                    format_elapsed!(now + last_service_duration)
+                );
+                self.aux_ampdu_serviced.print();
+            }
+            self.packet_being_served = true;
+            let ampdu_to_send =
+                std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new()); // clean up self, retrieve obtained ampdu
+            (ampdu_to_send, last_service_duration) 
+        }
+
+
     fn deque_schedule_service<'a>(
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            let mut success_indices: Vec<usize> = Vec::new(); // Original indices of packets successfully transmitted.
             let now = context.scheduler.time();
             let mut lost_packets: Vec<(usize, MpduPacket)> = Vec::new(); // Unused now; kept for debug if needed.
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, 
             // select first packet fairly to ensure channel access with reduced backlog for each user.
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
     
-            debug_debug!(
-                DebugColor::Cyan, 
+            debug_schedule!(
+                // DebugColor::Cyan, 
                 "{} | ***************** SCHEDULING *******************",
                 format_elapsed!(now)
             );
@@ -2119,7 +2260,28 @@ impl QueueModule {
                     }
                 }
             }
-    
+            
+
+            let contenders: Vec<(i32, i32)> = self.backoff_tick();
+
+            if contenders.is_empty() {
+                context.scheduler.schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ()).unwrap(); 
+                return; 
+            }
+            let collision = contenders.len() > 1; 
+            let (winner_src, winner_dest) = if collision {
+                let mut rng = rand::thread_rng(); 
+                if let Some(&(x, y)) = contenders.choose(&mut rng) {
+                    (x,y)
+                }
+                else{
+                    contenders[0]
+                }
+            }
+            else{
+                contenders[0]
+            };
+
             let n_devices_collisions = ul_stas.len() + is_dl as usize; 
             let collision_probability =
                 1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
@@ -2250,8 +2412,9 @@ impl QueueModule {
                 }
             } else {
                 // In non-collision, we build an AMPDU for the selected STA.
-                let mut packet_with_id: Option<&MpduPacket> = self.queue.front();
-                if let Some(_packet) = packet_with_id {
+                let mut packet_with_id: Option<MpduPacket> = self.queue.front().cloned();
+                
+                if let Some(_packet) = packet_with_id.clone() {
                     debug_debug!(
                         DebugColor::SaddleBrown, 
                         "QUEUE FRONT: SRC {}, DEST: {}",
@@ -2263,7 +2426,7 @@ impl QueueModule {
                     if LYAPUNOV_POLICY || SOFTMAX_POLICY {
                         packet_with_id = self.queue.iter().find(|&packet| {
                             packet.sta_src_id == key.0 && packet.sta_dest_id == key.1
-                        });
+                        }).cloned();
                     }
                 }
                 if let Some(first_packet) = packet_with_id {
@@ -2274,187 +2437,15 @@ impl QueueModule {
                         first_packet.sta_dest_id
                     );
                     let now: tai_time::TaiTime<0> = context.scheduler.time();
-                    self.aux_ampdu_serviced.reset();
-                    self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
-                    self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
-                    self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
-                    let mut last_service_duration = Duration::default();
-                    let mut packet_index = 0;
-                    let mut resultz = ResultsFrameTXDelay::new();
-    
-                    // ********** Modification: Duplicate packets instead of removing them **********
-                    while packet_index < self.queue.len() {
-                        if let Some(current_packet) = self.queue.get(packet_index) {
-                            if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
-                                || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                            {
-                                packet_index += 1;
-                                continue;
-                            }
-                            let new_total_length =
-                                self.aux_ampdu_serviced.total_length + current_packet.length_packet;
-                            let new_size = self.aux_ampdu_serviced.size + 1;
-                            
 
-                            let is_ul = current_packet.sta_src_id > current_packet.sta_dest_id; // 
-                            
-                            if is_ul{
-                                resultz = frametransmission_delay(
-                                new_total_length as f64,
-                                new_size,
-                                self.coords_queue,
-                                current_packet.sta_src_coords.clone(),
-                                P_TX,
-                                );
-                            }
-                            else{
-
-
-                                let dest_coords = self
-                                    .STA_coords_map
-                                    .get(&(current_packet.sta_dest_id as usize))
-                                    .unwrap_or_else(|| panic!(
-                                        "no coordinates for STA {}",
-                                        current_packet.sta_dest_id
-                                    ))
-                                    .clone();
-
-                                // println!("DOWNLINK so coords are {:?}", dest_coords.x); 
-                                resultz = frametransmission_delay(
-                                    new_total_length as f64,
-                                    new_size,
-                                    self.coords_queue,
-                                    dest_coords,
-                                    P_TX,
-                                );
-                            }
-
-                 
-                            if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
-                                debug_debug!(
-                                    DebugColor::DarkRed,
-                                    "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
-                                    new_size,
-                                    MAX_AMPDU_SIZE,
-                                    resultz.service_delay * 1000.0,
-                                    DEFAULT_TMAX_AGG * 1000.0
-                                );
-                                break;
-                            }
-                            // Instead of removing the packet, clone it and update clone metadata.
-                            let mut cloned_packet = current_packet.clone();
-                            cloned_packet.original_index = packet_index; // record original index
-                            cloned_packet.queue_length_when_out = self.queue.len();
-                            cloned_packet.queue_out_instant = now;
-
-                            cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
-                            
-
-                            // Update stats before moving packet
-                            if let Some(stats_tx) = &self.stats_tx {
-                                let stats_update = StatsUpdate {
-                                    T_s: resultz.service_delay,
-                                    T_q: now
-                                        .duration_since(cloned_packet.queue_in_instant)
-                                        .as_secs_f64(),
-                                    blocked_packet_counter: self.blocked_packet_counter,
-                                    arrived_packet_counter: self.arrived_packet_counter,
-                                    queue_length_when_out: cloned_packet.queue_length_when_out,
-                                    sta_src_id: cloned_packet.sta_src_id as usize,
-                                    sta_dest_id: cloned_packet.sta_dest_id as usize,
-                                    packet_id: cloned_packet.packet_id as i32,
-                                    now,
-                                    length_packet: cloned_packet.length_packet,
-                                    ampdu_id: self.ampdu_id, 
-
-                                    is_collision: false,
-                                    collision_backoff: 0.0, 
-                                };
-
-                                
-                                stats_tx
-                                    .send(stats_update)
-                                    .expect("Failed to send stats update");
-                            }
-
-                            // Add the cloned packet to the AMPDU
-                            self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
-                            self.aux_ampdu_serviced.total_length = new_total_length;
-                            self.aux_ampdu_serviced.size = new_size;
-                            last_service_duration = Duration::from_secs_f64(resultz.service_delay);
-                        }
-                        packet_index += 1;
-                    }
-                    // **********************************************************************************
-    
-                    // Process AMPDU packets: simulate transmission errors
-                    let mut new_ampdu_packets: Vec<MpduPacket> = Vec::new();
-                    let mut rng = rand::thread_rng();
-                    for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
-
-                        packet.T_s = Duration::from_secs_f64(resultz.service_delay);   // Assign transmission delay of full AMPDU                       
-                        let random_value: f64 = rng.gen();
-
-                        if random_value <= self.PL_probability {
-
-                            debug_debug!( DebugColor::SaddleBrown, 
-                                "{:.6} [DBG QUEUE] - packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Index in Q: {}",
-                                format_elapsed!(now),
-                                packet.sta_src_id,
-                                packet.sta_dest_id,
-                                packet.packet_id,
-
-                                packet.header_alvr.shard_index,
-                                packet.header_alvr.shards_count,
-                                packet.header_alvr.next_packet_index, 
-                                packet.original_index
-                            );
-                            self.blocked_packet_counter += 1;
-                            // Packet encountered an error, so we leave its original copy in the queue.
-                            // Optionally, we could log it or mark it.
-                        } else {
-                            new_ampdu_packets.push(packet);
-                            
-                        }
-                    }
-                    self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
-
-    
-                    // Now remove from the main queue the packets that were transmitted successfully.
-                    // Gather all original indices from the AMPDU (successful ones).
-                    for packet in &self.aux_ampdu_serviced.mpdu_packets {
-                        success_indices.push(packet.original_index);
-                    }
-                    // Remove indices in descending order to avoid index shift.
-                    success_indices.sort_unstable_by(|a, b| b.cmp(a));
-                    for idx in success_indices {
-                        // Safety: ensure index is valid.
-                        if idx < self.queue.len() {
-                            self.queue.remove(idx);
-                        }
-                    }
-    
-                    // Debug print: show remaining queue after removals.
-                
-                    if DEBUG_PRINT_ENABLED 
-                    {
-                        print_yellow!(
-                            "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                            format_elapsed!(now),
-                            format_elapsed!(now + last_service_duration)
-                        );
-                        self.aux_ampdu_serviced.print();
-                    }
-                    self.packet_being_served = true;
-                    let ampdu_to_send =
-                        std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
-
+                    /// BUILD AMPDU based on STA selection
+                    let (ampdu_to_send, ampdu_service_duration) = self.build_new_ampdu(&first_packet, now); 
 
                     context
                         .scheduler
-                        .schedule_event(last_service_duration, Self::send_ampdu, ampdu_to_send)
+                        .schedule_event(ampdu_service_duration, Self::send_ampdu, ampdu_to_send)
                         .unwrap();
-                }
+                    }
             }
         }
     }   
