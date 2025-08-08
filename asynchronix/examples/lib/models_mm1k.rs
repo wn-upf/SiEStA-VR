@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, debug_debug, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
+use crate::{debug_bgprint, debug_debug, print_brown, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -11,7 +11,7 @@ use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_stream_socket::parse_shard_data;
-use crate::lib::{ResultsFrameTXDelay, SLOT};
+use crate::lib::{ResultsFrameTXDelay, SLOT, PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, MacKey};
 use crate::lib::DebugColor; 
 use rand::rngs::StdRng;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
@@ -23,7 +23,7 @@ use rand::seq::SliceRandom;   // brings `choose()` into scope
 // use crate::db_debug_bgprint;
 
 use crate::lib::{
-    collision_delay, exponential, frametransmission_delay, perStaLockStats, AmpduPacket, Coords,
+    collision_delay, exponential, frametransmission_delay, airtime_ampdu, perStaLockStats, AmpduPacket, Coords,
     CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS, CW_MIN,
     P_TX,
 };
@@ -1561,25 +1561,55 @@ pub struct StatsUpdate {
     pub collision_backoff: f64, 
 
 }
+#[derive(Clone, Copy, Debug, Hash)]
+pub struct EdcaParam {
+    pub cw_min: i32,
+    pub cw_max: i32,
+    pub aifsn: u8,            // slots added to DIFS
+    pub txop_limit_us: u16,   // 0 = no TXOP
+}
+const SIFS_US: u64 = 16;  // 16 µs
+const SLOT_TIME_US: u64 = 9;  // 9 µs for OFDM
 
+fn aifs(p: EdcaParam) -> Duration {
+    Duration::from_micros(SIFS_US + p.aifsn as u64 * SLOT_TIME_US)
+}
+
+pub const EDCA_TABLE: [EdcaParam; 4] = [
+    /* VO */ EdcaParam { cw_min:  3,  cw_max:  7,  aifsn: 2, txop_limit_us:  820 },
+    /* VI */ EdcaParam { cw_min:  7,  cw_max: 15, aifsn: 2, txop_limit_us:  820 },
+    /* BE */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 3, txop_limit_us:    0 },
+    /* BK */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 7, txop_limit_us:    0 },
+];
+
+#[derive(Hash, Clone, Copy)]
 pub struct DcfStats {
     pub cw: i32,
     pub backoff_counter: i32, 
     pub retry_count: u8, 
+    pub param: EdcaParam,          // <-- NEW (static per AC)
+    pub medium_free_since: TaiTime<0>,   // NEW – 
+    pub backoff_frozen: bool,            // NEW
     // pub slot_timer_event,
 }
+ 
+
 
 pub const CW_MAX : i32 = 1023; 
 
 pub const MAX_RETRIES_MAC: u8 = 7; 
-
+use crate::lib::EdcaAc;
 
 impl DcfStats {
-    pub fn new() -> Self {
+     pub fn new(ac: EdcaAc) -> Self {
+        let p = EDCA_TABLE[ac as usize];
         Self {
-            cw: CW_MIN,
-            backoff_counter: rand::thread_rng().gen_range(0..=CW_MIN),
+            cw: p.cw_min,
+            backoff_counter: rand::thread_rng().gen_range(0..=p.cw_min),
             retry_count: 0,
+            param: p,
+            medium_free_since: TaiTime::EPOCH, 
+            backoff_frozen: false, 
         }
     }
 
@@ -1589,8 +1619,8 @@ impl DcfStats {
     }
 
     /// Call after a **successful** transmission.
-    pub fn on_success(&mut self) {
-        self.cw          = CW_MIN;
+    pub fn on_success(&mut self, cw_min: i32) {
+        self.cw          = cw_min;
         self.retry_count = 0;
         self.reload_backoff();
     }
@@ -1606,7 +1636,7 @@ impl DcfStats {
             return false;           // “give up”
         }
         self.cw = ((self.cw + 1) * 2 ) - 1;          // CW = 2·(CW+1) − 1
-        if self.cw > CW_MAX { self.cw = CW_MAX; }
+        if self.cw > self.param.cw_max { self.cw = self.param.cw_max; }
         self.reload_backoff();
         true                                           // keep packet
     }
@@ -1649,7 +1679,7 @@ pub struct QueueModule {
 
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
-    pub array_dcf_values: Arc<Mutex<HashMap<i32, DcfStats>>>, 
+    pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
 
     pub PL_probability: f64,
 
@@ -1657,6 +1687,8 @@ pub struct QueueModule {
     pub ul_capacity_queue_device: usize,
 
     pub ampdu_id: u32, 
+
+    pub airtime_busy_until: TaiTime<0>,
 }
 
 
@@ -1677,6 +1709,28 @@ pub fn time_of_BinaryExponentialBackoff(attempt: i32) -> i32 {
     let mut rng = rand::thread_rng();
     rng.gen_range(0..upper_bound)
 }
+fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool 
+{ let tid = if p.sta_src_id > p.sta_dest_id 
+    { p.sta_src_id } else { -1 };
+    
+     (*id, p.edca_ac) == (*id, *ac) }
+
+
+fn ac_needs_tick(
+    key:  &MacKey,
+    st:   &DcfStats,
+    q:    &VecDeque<MpduPacket>,
+    now:  TaiTime<0>,
+) -> bool {
+    // Does the queue hold a packet that maps to this virtual MAC?
+    let has_pkts = q.iter().any(|p| maps_to(key, p));
+    if !has_pkts { return false; }
+
+    // Still inside AIFS window or back-off not yet zero?
+    let aifs_done = st.medium_free_since + aifs(st.param) <= now;
+    !aifs_done || st.backoff_counter > 0
+}
+
 
 
 #[allow(unused)]
@@ -1714,26 +1768,37 @@ impl QueueModule {
         }
 
         ///////////////////// CREATE BEB QUEUES /////////////////////
-        for id in vec_ids.iter(){
-            if *id >= 100 && *id <= 200{ // Downlink, only one value (or serveral for EDCA). 
-                let mut s = DcfStats { 
-                    cw: CW_MIN, 
-                    retry_count: 0, 
-                    backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
-                };
-                dcf_stats_vec.insert(-1, s); 
-
-            }
-            else{
-                let mut s = DcfStats { 
-                    cw: CW_MIN, 
-                    retry_count: 0, 
-                    backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
-                };
-                dcf_stats_vec.insert(*id, s);
-            }
-           
+   
+        // AP gets four virtual MACs (one per AC)
+        for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
+            dcf_stats_vec.insert((-1, ac), DcfStats::new(ac));
         }
+
+        // Every uplink STA keeps **one** MAC – attach its “default” AC_BE
+        for sta_id in vec_ids {
+            dcf_stats_vec.insert((sta_id, EdcaAc::BestEffort), DcfStats::new(EdcaAc::BestEffort));
+        }
+   
+   
+        // for id in vec_ids.iter(){
+        //     if *id >= PREFIX_ID_DOWNLINK && *id <= PREFIX_ID_UPLINK { // Downlink, only one value (or serveral for EDCA). 
+        //         let mut s = DcfStats { 
+        //             cw: CW_MIN, 
+        //             retry_count: 0, 
+        //             backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
+        //         };
+        //         dcf_stats_vec.insert(-1, s); 
+        //     }
+        //     else{
+        //         let mut s: DcfStats = DcfStats { 
+        //             cw: CW_MIN, 
+        //             retry_count: 0, 
+        //             backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
+        //             param: EdcaParam::, 
+        //         };
+        //         dcf_stats_vec.insert(*id, s);
+        //     }
+        // }
         //////////////////////////////////////////////////////////////////
 
         Self {
@@ -1769,40 +1834,80 @@ impl QueueModule {
             // queue_network_emulator: queue_mechanism,
             ul_capacity_queue_device: ul_size,
             ampdu_id: 0, 
+            airtime_busy_until: TaiTime::EPOCH, 
         }
     }
 
-    fn backoff_tick(&self) -> Vec<(i32,i32)> {
-            let mut ready = Vec::new();
-            if let Ok(mut map) = self.array_dcf_values.lock() {
-                for (sta_id, stats) in map.iter_mut() {
-                    if stats.backoff_counter > 0 {
-                        stats.backoff_counter -= 1;                       // one slot elapsed
-                    }
-                    if stats.backoff_counter == 0 {
-                        // Does this STA actually have something waiting?
-                        if self.queue.iter().any(|p| p.sta_src_id == *sta_id) {
-                            ready.push((*sta_id, /*dest_id set later*/ 0));
-                        }
-                    }
+
+
+    fn tick_backoff(&mut self, now: TaiTime<0>, idle_slot: bool, ) -> Vec<MacKey> {
+        let mut ready = Vec::new();
+
+        let slot_duration  = Duration::from_secs_f64(SLOT);           // 9 µs OFDM slot
+
+        for (key, st) in self.array_dcf_values.lock().unwrap().iter_mut() {
+            // If queue empty keep state but don’t contend
+            if !self.queue.iter().any(|p| maps_to(key, p)) { continue; }
+
+            // (1) Handle AIFS
+            if idle_slot && st.medium_free_since + aifs(st.param) <= now {
+                st.backoff_frozen = false;
+            } else if !idle_slot {
+                st.medium_free_since = now;                 // last time medium became busy
+                st.backoff_frozen    = true;
+            }
+
+            // (2) Back-off countdown when not frozen
+            if idle_slot && !st.backoff_frozen && st.backoff_counter > 0 {
+                st.backoff_counter -= 1;
+            }
+
+            // (3) Ready to transmit this very slot
+            if st.backoff_counter == 0 && !st.backoff_frozen {
+                ready.push(*key);
+            }
+        }
+        ready
+    }
+
+    fn resolve_virtual_collision(&mut self, mut ready: Vec<MacKey>) -> Vec<MacKey> {  // Collisions when same STA has several ACs winning backoff  
+
+        let mut winner = HashMap::<i32, MacKey>::new();  // sta_id → winning AC
+
+        ready.sort_by_key(|k| k.1);                      // AC enum is VO<VI<BE<BK
+        for key in ready {                               // iterate lowest to highest value
+            let sta = key.0;                             // -1 for AP
+            if !winner.contains_key(&sta) {
+                winner.insert(sta, key);                 // first (=highest-prio) wins
+            } else {
+                // “virtual collision” for this lower-prio AC
+                if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
+                    st.on_failure();
                 }
             }
-            ready
         }
+        winner.into_values().collect()
+    }
 
-    // pub async fn binary_exponential_backoff(&mut self, ) {
-    //     let stas_in_queue = ; 
-    //     if let Ok(array) = self.array_dcf_values.clone().lock(){
-    //         for (sta_id, stats)  in array.iter() {
-    //             if sta_id in stas_in_queue{
-    //                 // if more than one at 0 -> collision 
-    //                 // else decrease their value by 1
-    //                 // if only one at 0, then that one transmits. If transmits, decrease CW to minimum, nº of retries = 0 , 
+
+    // fn backoff_tick(&self) -> Vec<MacKey> {
+    //     let mut ready = Vec::new();
+    //     if let Ok(mut map) = self.array_dcf_values.lock() {
+    //         for (key, stats) in map.iter_mut() {
+    //             if stats.backoff_counter > 0 { stats.backoff_counter -= 1; }
+    //             if stats.backoff_counter == 0 {
+    //                 // For the AP we must check both src_id and AC match packets in queue
+    //                 if self.queue.iter().any(|p| {
+    //                     let tid = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
+    //                     (tid, p.edca_ac) == *key
+    //                 }) {
+    //                     ready.push(*key);
+    //                 }
     //             }
     //         }
     //     }
+    //     ready
     // }
-
 
     pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
         let now = ctx.scheduler.time();
@@ -1874,12 +1979,14 @@ impl QueueModule {
 
         self.packet_being_served = false;
 
+        let mac_key = AMPDU_sent.mac_key; 
         self.output_port_sta1.send(AMPDU_sent).await;
 
         if self.queue.len() > 0 {
             self.deque_schedule_service((), context).await;
             // context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
         }
+        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&mac_key) { st.on_success(st.param.cw_min); }
 
         if let Some(stats_rx) = self.stats_rx.as_mut() {
             // print!("OK1,");
@@ -1927,7 +2034,7 @@ impl QueueModule {
             let key = (packet.sta_src_id, packet.sta_dest_id);
 
             // Calculate transmission delay for a single packet
-            let resultz = frametransmission_delay(
+            let resultz = airtime_ampdu(
                 packet.length_packet as f64,
                 1,
                 self.coords_queue,
@@ -1939,7 +2046,7 @@ impl QueueModule {
             let mut low = 1;
             let mut high = MAX_AMPDU_SIZE;
             let mut optimal_n_packets = 0;
-            let mut resultz_full_ampdu = frametransmission_delay(
+            let mut resultz_full_ampdu = airtime_ampdu(
                 packet.length_packet as f64 * high as f64,
                 high,
                 self.coords_queue,
@@ -1949,7 +2056,7 @@ impl QueueModule {
 
             while low <= high {
                 let mid = (low + high) / 2;
-                let test_resultz = frametransmission_delay(
+                let test_resultz = airtime_ampdu(
                     packet.length_packet as f64 * mid as f64,
                     mid,
                     self.coords_queue,
@@ -1957,7 +2064,7 @@ impl QueueModule {
                     self.p_tx,
                 );
 
-                if test_resultz.service_delay <= DEFAULT_TMAX_AGG {
+                if test_resultz <= DEFAULT_TMAX_AGG {
                     optimal_n_packets = mid;
                     resultz_full_ampdu = test_resultz;
                     low = mid + 1;
@@ -1978,14 +2085,14 @@ impl QueueModule {
                 expected_queue_delivery_ms: 0.0,
             });
 
-            entry.total_transmission_delay_single = resultz.service_delay;
-            entry.total_transmission_delay_fullampdu = resultz_full_ampdu.service_delay;
+            entry.total_transmission_delay_single = resultz;
+            entry.total_transmission_delay_fullampdu = resultz_full_ampdu;
             entry.fullampdu_max_size = optimal_n_packets as usize;
             entry.packet_count += 1;
             entry.weighted_rate_single =
-                0.2 * resultz.service_delay + 0.8 * entry.weighted_rate_single;
+                0.2 * resultz + 0.8 * entry.weighted_rate_single;
             entry.weighted_rate_fullampdu =
-                0.2 * resultz_full_ampdu.service_delay + 0.8 * entry.weighted_rate_fullampdu;
+                0.2 * resultz_full_ampdu+ 0.8 * entry.weighted_rate_fullampdu;
             entry.per_packet_channel_access_efficiency =
                 entry.total_transmission_delay_fullampdu / entry.fullampdu_max_size as f64;
             entry.expected_queue_delivery_ms =
@@ -2000,6 +2107,9 @@ impl QueueModule {
         first_packet: &MpduPacket,
         now: TaiTime<0>,
     ) -> (AmpduPacket, Duration)  {
+
+
+
             let mut success_indices: Vec<usize> = Vec::new(); // Original indices of packets successfully transmitted.
 
             let (sta_src_id, sta_dest_id ) = (first_packet.sta_src_id, first_packet.sta_dest_id) ; 
@@ -2008,9 +2118,14 @@ impl QueueModule {
             self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
             self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
             self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
+
+            self.aux_ampdu_serviced.mac_key = (first_packet.sta_src_id, first_packet.edca_ac); 
+            let key      = (first_packet.sta_src_id, first_packet.edca_ac);
+            let txop_us  = self.array_dcf_values.lock().unwrap()[&key].param.txop_limit_us as f64;
+
             let mut last_service_duration = Duration::default();
             let mut packet_index = 0;
-            let mut resultz = ResultsFrameTXDelay::new();
+            let mut resultz = 0.0;
 
             // ********** Modification: Duplicate packets instead of removing them **********
             while packet_index < self.queue.len() {
@@ -2027,7 +2142,7 @@ impl QueueModule {
                     let is_ul = current_packet.sta_src_id > current_packet.sta_dest_id; // 
                     
                     if is_ul{
-                        resultz = frametransmission_delay(
+                        resultz = airtime_ampdu(
                         new_total_length as f64,
                         new_size,
                         self.coords_queue,
@@ -2046,7 +2161,7 @@ impl QueueModule {
                             .clone();
 
                         // println!("DOWNLINK so coords are {:?}", dest_coords.x); 
-                        resultz = frametransmission_delay(
+                        resultz = airtime_ampdu(
                             new_total_length as f64,
                             new_size,
                             self.coords_queue,
@@ -2056,13 +2171,13 @@ impl QueueModule {
                     }
 
             
-                    if resultz.service_delay >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+                    if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
                         debug_debug!(
                             DebugColor::DarkRed,
                             "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
                             new_size,
                             MAX_AMPDU_SIZE,
-                            resultz.service_delay * 1000.0,
+                            resultz * 1000.0,
                             DEFAULT_TMAX_AGG * 1000.0
                         );
                         break;
@@ -2079,7 +2194,7 @@ impl QueueModule {
                     // Update stats before moving packet
                     if let Some(stats_tx) = &self.stats_tx {
                         let stats_update = StatsUpdate {
-                            T_s: resultz.service_delay,
+                            T_s: resultz,
                             T_q: now
                                 .duration_since(cloned_packet.queue_in_instant)
                                 .as_secs_f64(),
@@ -2107,7 +2222,7 @@ impl QueueModule {
                     self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
                     self.aux_ampdu_serviced.total_length = new_total_length;
                     self.aux_ampdu_serviced.size = new_size;
-                    last_service_duration = Duration::from_secs_f64(resultz.service_delay);
+                    last_service_duration = Duration::from_secs_f64(resultz);
                 }
                 packet_index += 1;
             }
@@ -2118,7 +2233,7 @@ impl QueueModule {
             let mut rng = rand::thread_rng();
             for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
 
-                packet.T_s = Duration::from_secs_f64(resultz.service_delay);   // Assign transmission delay of full AMPDU                       
+                packet.T_s = Duration::from_secs_f64(resultz);   // Assign transmission delay of full AMPDU                       
                 let random_value: f64 = rng.gen();
 
                 if random_value <= self.PL_probability {
@@ -2168,6 +2283,8 @@ impl QueueModule {
                 );
                 self.aux_ampdu_serviced.print();
             }
+
+
             self.packet_being_served = true;
             let ampdu_to_send =
                 std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new()); // clean up self, retrieve obtained ampdu
@@ -2261,44 +2378,42 @@ impl QueueModule {
                 }
             }
             
+            let is_idle_slot = now >= self.airtime_busy_until; 
+            let mut contenders: Vec<MacKey> = self.tick_backoff(now, is_idle_slot);
 
-            let contenders: Vec<(i32, i32)> = self.backoff_tick();
+            if !contenders.is_empty() {
+                print_brown!("Initial contenders: {:?}", contenders); 
+            }  
 
-            if contenders.is_empty() {
-                context.scheduler.schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ()).unwrap(); 
-                return; 
+            // First resolve virtual collisions (same STA different ACs)
+            contenders = self.resolve_virtual_collision(contenders);
+            
+            if !contenders.is_empty() {
+                print_brown!("After virtual collision resolution: {:?}", contenders); 
             }
-            let collision = contenders.len() > 1; 
-            let (winner_src, winner_dest) = if collision {
-                let mut rng = rand::thread_rng(); 
-                if let Some(&(x, y)) = contenders.choose(&mut rng) {
-                    (x,y)
-                }
-                else{
-                    contenders[0]
-                }
-            }
-            else{
-                contenders[0]
-            };
 
-            let n_devices_collisions = ul_stas.len() + is_dl as usize; 
-            let collision_probability =
-                1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
+            // Now handle physical collisions between different STAs
+            let collision_now = contenders.len() > 1;
+            
 
-            let mut rng = rand::thread_rng();
-            let random_value: f32 = rng.gen();
-            let collision_now: bool = random_value < collision_probability;
+
+            // let n_devices_collisions = ul_stas.len() + is_dl as usize; 
+            // let collision_probability =
+            //     1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
+
+            // let mut rng = rand::thread_rng();
+            // let random_value: f32 = rng.gen();
+            // let collision_now: bool = random_value < collision_probability;
     
-            debug_schedule!(
-                "Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}",
-                ul_stas.len(),
-                is_dl, 
-                n_devices_collisions,
-                collision_probability,
-                random_value,
-                collision_now
-            );
+            // debug_schedule!(
+            //     "Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}",
+            //     ul_stas.len(),
+            //     is_dl as usize, 
+            //     n_devices_collisions,
+            //     collision_probability,
+            //     random_value,
+            //     collision_now
+            // );
     
             let mut selected_sta = None;
             if LYAPUNOV_POLICY == true {
@@ -2360,8 +2475,13 @@ impl QueueModule {
             } else {
                 // NORMAL POLICY: FIFO
             }
+
+
+
     
             if collision_now {
+
+
                 if let Some(key) = selected_sta {
                     selected_sta = Some(key);
                 } else if !self.queue.is_empty() {
@@ -2369,6 +2489,7 @@ impl QueueModule {
                     selected_sta = Some((first.sta_src_id, first.sta_dest_id));
                 }
                 if let Some(_sta_key) = selected_sta {
+
                     // In collision, we do not remove or duplicate any packets.
                     // Instead, we simply schedule a retransmission backoff.
                     let T_col = collision_delay(
@@ -2440,13 +2561,34 @@ impl QueueModule {
 
                     /// BUILD AMPDU based on STA selection
                     let (ampdu_to_send, ampdu_service_duration) = self.build_new_ampdu(&first_packet, now); 
-
+                    self.airtime_busy_until = now + (ampdu_service_duration);
+                    
                     context
                         .scheduler
                         .schedule_event(ampdu_service_duration, Self::send_ampdu, ampdu_to_send)
                         .unwrap();
                     }
             }
+        
+            let mut need_next_slot = false;
+            if let Ok(map) = self.array_dcf_values.lock() {
+                for (key, st) in map.iter() {
+                    if ac_needs_tick(key, st, &self.queue, now) {
+                        need_next_slot = true;
+                        break;
+                    }
+                }
+            }
+
+            if need_next_slot {
+                context.scheduler
+                    .schedule_event(Duration::from_secs_f64(SLOT),
+                                    Self::deque_schedule_service,
+                                    ())
+                    .unwrap();
+            }
+        
+        
         }
     }   
 }

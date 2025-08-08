@@ -5,8 +5,7 @@
 ///
 ///     Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
 ///     
-///
-///
+
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::NetworkPattern;
@@ -25,6 +24,7 @@ mod lib; // for calling m own local library
 use crate::lib::models_mm1k::{EmulatedLink, QueueModule, MAX_EMULATED_QUEUE_PACKETS};
 use crate::lib::{
     exponential,
+    PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, PREFIX_ID_BG, 
     // frametransmission_delay,
     // AmpduPacket,
     Coords,
@@ -43,9 +43,7 @@ use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 10;
-pub const PREFIX_ID_DOWNLINK: i32 = 100; 
-pub const PREFIX_ID_UPLINK:   i32 = 200; 
-pub const PREFIX_ID_BG:       i32 = 300; 
+
 
 
 struct VRPair {
@@ -80,8 +78,8 @@ impl VRPair {
         netem_values_tests: Option<(bool,bool,bool,bool)>
 
     ) -> Self {
-        let server_id = 100 + pair_index as i32;
-        let client_id = 200 + pair_index as i32;
+        let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
+        let client_id = PREFIX_ID_UPLINK + pair_index as i32;
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 

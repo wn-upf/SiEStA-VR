@@ -39,6 +39,10 @@ pub const NUMBER_OF_RANDOM_EVENTS: usize = 20;
 
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
 
+pub const PREFIX_ID_DOWNLINK: i32 = 100; 
+pub const PREFIX_ID_UPLINK:   i32 = 200; 
+pub const PREFIX_ID_BG:       i32 = 300; 
+
 // Define a constant to control debugging
 
 pub mod alvr_packets;
@@ -1558,8 +1562,17 @@ pub struct MpduPacket {
     pub emulated_added_delay_deadline: Option<TaiTime<0>>,
 
     pub original_index: usize, 
+    pub edca_ac: EdcaAc,          
     // pub is_alvr_control_packet: bool,
 }
+#[repr(u8)]
+#[allow(unused)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EdcaAc { Voice = 0, Video = 1, BestEffort = 2, Background = 3 }
+impl Default for EdcaAc { fn default() -> Self { EdcaAc::BestEffort }}
+
+
+
 
 #[allow(unused)]
 impl MpduPacket {
@@ -1582,6 +1595,7 @@ impl MpduPacket {
             has_consumed_emu_tokens: false,
             emulated_added_delay_deadline: None,
             original_index: 0, 
+            edca_ac: EdcaAc::BestEffort , 
             // is_alvr_control_packet: false,
         }
     }
@@ -1611,6 +1625,9 @@ impl MpduPacket {
         a
     }
 }
+
+type MacKey = (i32, EdcaAc);      // e.g. (AP_ID, AC_VO) or (sta_id, AC_BE)
+
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {
     pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
@@ -1619,6 +1636,7 @@ pub struct AmpduPacket {
     pub sta_dest_id: i32, // ID for the destination STA
     pub size: i32,
     pub coordinates: Coords,
+    pub mac_key: MacKey, 
 }
 
 impl AmpduPacket {
@@ -1635,6 +1653,7 @@ impl AmpduPacket {
                 y: 0.0,
                 z: 0.0,
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
+            mac_key: MacKey::default(), 
         }
     }
     // Method to print AMPDU_packet values
@@ -1932,6 +1951,96 @@ pub fn frametransmission_delay(
         data_service_delay: T_DATA,
     }
 }
+
+pub fn airtime_ampdu(
+    total_bits_transmitted: f64,
+    n_mpdus: i32,
+    coords_src: Coords,
+    coords_dest: Coords,
+    p_tx: f64,
+) -> f64 {
+    let mut effPt = p_tx;
+
+    let SU_spatial_streams = 2.0;
+
+    if SU_spatial_streams > 1.0 {
+        effPt = effPt - 3.0 * SU_spatial_streams
+    };
+
+    let channel_width: usize = CHANNEL_WIDTH;
+
+    // Effective Pt
+
+    if channel_width > 20 {
+        effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
+    }
+    let distance = calculate_distance(
+        coords_src.x,
+        coords_src.y,
+        coords_src.z,
+        coords_dest.x,
+        coords_dest.y,
+        coords_dest.z,
+    );
+    // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance); 
+    let PL = path_loss(distance);
+    let Pr = effPt - PL;
+
+    // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
+
+    let (bits_symbol, coding_rate) = match Pr {
+        _ if Pr < -82.0 => (1, 1.0 / 2.0),
+        _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0),
+        _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0),
+        _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0),
+        _ if Pr >= -74.0 && Pr < -70.0 => (4, 1.0 / 2.0),
+        _ if Pr >= -70.0 && Pr < -66.0 => (4, 3.0 / 4.0),
+        _ if Pr >= -66.0 && Pr < -65.0 => (6, 1.0 / 2.0),
+        _ if Pr >= -65.0 && Pr < -64.0 => (6, 2.0 / 3.0),
+        _ if Pr >= -64.0 && Pr < -59.0 => (6, 3.0 / 4.0),
+        _ if Pr >= -59.0 && Pr < -57.0 => (8, 3.0 / 4.0),
+        _ if Pr >= -57.0 && Pr < -55.0 => (6, 5.0 / 6.0),
+        _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
+        _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
+        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
+        _ if Pr >= -46.0 => (12, 5.0 / 6.0),               // MCS 13
+        _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
+    };
+
+    // println!("P_rx = {}", Pr); 
+
+    let Subcarriers = match channel_width {
+        // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
+        80 => 980,
+        40 => 468,
+        20 => 234,
+        _ => 0, // Default case,  fallback
+    };
+
+    let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+
+    let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+
+    let L: f64 = total_bits_transmitted / n_mpdus as f64;
+
+    let SF = 16.0;
+    let TB = 18.0;
+    let MD = 32.0;
+    let MAC_H_size = 240.0;
+
+    let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
+    let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    let T_DATA: f64 =
+        PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6;
+    let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+
+    // let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
+    //                                                                   // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
+    let phy_time =
+        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK;   // ⬅  removed DIFS + SLOT + BO
+    phy_time
+}
+
 
 #[allow(unused)] // as it's shared with other sims than XR.
 pub fn write_all_sta_csvs(
