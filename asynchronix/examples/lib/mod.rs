@@ -1764,70 +1764,7 @@ pub fn path_loss(d: f64) -> f64 {
     54.12 + 10.0 * gamma * (d).log10() + 5.25 * 0.1467 * d
 }
 
-pub fn collision_delay(
-    _total_bits_transmitted: f64,
-    _n_mpdus: i32,
-    coords_src: Coords,
-    coords_dest: Coords,
-    p_tx: f64,
-) -> f32 {
-    let mut effPt = p_tx;
-
-    let SU_spatial_streams = 2.0;
-
-    if SU_spatial_streams > 1.0 {
-        effPt = effPt - 3.0 * SU_spatial_streams
-    };
-
-    let channel_width: usize = CHANNEL_WIDTH;
-
-    // Effective Pt
-
-    if channel_width > 20 {
-        effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
-    }
-    let distance = calculate_distance(
-        coords_src.x,
-        coords_src.y,
-        coords_src.z,
-        coords_dest.x,
-        coords_dest.y,
-        coords_dest.z,
-    );
-
-    let PL = path_loss(distance);
-    let Pr = effPt - PL;
-
-    // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
-
-    let (bits_symbol, coding_rate) = match Pr {
-        _ if Pr < -82.0 => (1, 1.0 / 2.0),
-        _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0),
-        _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0),
-        _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0),
-        _ if Pr >= -74.0 && Pr < -70.0 => (4, 1.0 / 2.0),
-        _ if Pr >= -70.0 && Pr < -66.0 => (4, 3.0 / 4.0),
-        _ if Pr >= -66.0 && Pr < -65.0 => (6, 1.0 / 2.0),
-        _ if Pr >= -65.0 && Pr < -64.0 => (6, 2.0 / 3.0),
-        _ if Pr >= -64.0 && Pr < -59.0 => (6, 3.0 / 4.0),
-        _ if Pr >= -59.0 && Pr < -57.0 => (8, 3.0 / 4.0),
-        _ if Pr >= -57.0 && Pr < -55.0 => (6, 5.0 / 6.0),
-        _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
-        _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
-        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
-        _ if Pr >= -46.0 => (12, 5.0 / 6.0),               // MCS 13
-        _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
-    };
-
-    let Subcarriers = match channel_width {
-        // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
-        80 => 980,
-        40 => 468,
-        20 => 234,
-        _ => 0, // Default case,  fallback
-    };
-
-    let _ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+pub fn collision_delay() -> f32 {
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
 
@@ -1844,13 +1781,13 @@ pub fn collision_delay(
     //     PHY_DURATION + ((SF + n_mpdus as f64 * (_MD + _MAC_H_size + _L) + TB) / _ORate).ceil() * 16E-6;
     // let _T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
-    let T_DETERMINISTIC_BACKOFF = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
-                                                                      // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
-
     // let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
 
-    let T_collision = T_RTS + SIFS + T_CTS + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
+    let T_collision = T_RTS + SIFS + T_CTS;
+    //  + DIFS + SLOT + T_DETERMINISTIC_BACKOFF; // 
+
     T_collision as f32
+    
 }
 
 pub fn frametransmission_delay(

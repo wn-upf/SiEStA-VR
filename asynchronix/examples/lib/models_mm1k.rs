@@ -24,7 +24,7 @@ use rand::seq::SliceRandom;   // brings `choose()` into scope
 
 use crate::lib::{
     collision_delay, exponential, frametransmission_delay, airtime_ampdu, perStaLockStats, AmpduPacket, Coords,
-    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS, CW_MIN,
+    CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS,
     P_TX,
 };
 use std::collections::HashSet;
@@ -1630,7 +1630,7 @@ impl DcfStats {
         self.retry_count += 1;
         if self.retry_count > MAX_RETRIES_MAC {
             // drop MSDU – tell caller to flush the head-of-line
-            self.cw = CW_MIN;
+            self.cw = self.param.cw_min;
             self.retry_count = 0;
             self.reload_backoff();
             return false;           // “give up”
@@ -1640,6 +1640,41 @@ impl DcfStats {
         self.reload_backoff();
         true                                           // keep packet
     }
+}
+
+fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
+    // AP (downlink) contends with id = -1; UL STA contends with its own id
+    let mac_id = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
+    (mac_id, p.edca_ac) == (*id, *ac)
+}
+
+
+fn ac_needs_tick(
+    key:  &MacKey,
+    st:   &DcfStats,
+    q:    &VecDeque<MpduPacket>,
+    now:  TaiTime<0>,
+) -> bool {
+    // Does the queue hold a packet that maps to this virtual MAC?
+    let has_pkts = q.iter().any(|p| maps_to(key, p));
+    if !has_pkts { return false; }
+
+    // Still inside AIFS window or back-off not yet zero?
+    let aifs_done = st.medium_free_since + aifs(st.param) <= now;
+    !aifs_done || st.backoff_counter > 0
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Medium {
+    busy_until: TaiTime<0>,     // actual airtime occupied
+    nav_until: TaiTime<0>,      // virtual carrier sense (from Duration fields)
+    tx_owner: Option<MacKey>,   // who currently holds TXOP
+}
+impl Medium {
+    #[inline] pub fn is_idle(&self, now: TaiTime<0>) -> bool {
+        now >= self.busy_until && now >= self.nav_until
+    }
+    #[inline] pub fn occupy_until(&mut self, t: TaiTime<0>) { self.busy_until = t; }
 }
 
 #[allow(unused)]
@@ -1688,49 +1723,8 @@ pub struct QueueModule {
 
     pub ampdu_id: u32, 
 
-    pub airtime_busy_until: TaiTime<0>,
+    pub shared_medium: Medium, 
 }
-
-
-// int AccessPoint :: BinaryExponentialBackoff(int attempt)
-// {
-// 	int CW = Random(MIN(pow(2,attempt),pow(2,max_BEB_stages))*(CWmin+1));
-// 	return CW;
-// };
-#[allow(unused)] // to use for non-deterministic backoff
-pub fn time_of_BinaryExponentialBackoff(attempt: i32) -> i32 {
-    let max_beb_stages = 6;
-
-    // Calculate the upper bound for the random range
-    let factor = (2_i32).pow(attempt.min(max_beb_stages) as u32);
-    let upper_bound = factor * (CW_MIN + 1);
-
-    // Generate a random number in range [0, upper_bound)
-    let mut rng = rand::thread_rng();
-    rng.gen_range(0..upper_bound)
-}
-fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool 
-{ let tid = if p.sta_src_id > p.sta_dest_id 
-    { p.sta_src_id } else { -1 };
-    
-     (*id, p.edca_ac) == (*id, *ac) }
-
-
-fn ac_needs_tick(
-    key:  &MacKey,
-    st:   &DcfStats,
-    q:    &VecDeque<MpduPacket>,
-    now:  TaiTime<0>,
-) -> bool {
-    // Does the queue hold a packet that maps to this virtual MAC?
-    let has_pkts = q.iter().any(|p| maps_to(key, p));
-    if !has_pkts { return false; }
-
-    // Still inside AIFS window or back-off not yet zero?
-    let aifs_done = st.medium_free_since + aifs(st.param) <= now;
-    !aifs_done || st.backoff_counter > 0
-}
-
 
 
 #[allow(unused)]
@@ -1834,35 +1828,33 @@ impl QueueModule {
             // queue_network_emulator: queue_mechanism,
             ul_capacity_queue_device: ul_size,
             ampdu_id: 0, 
-            airtime_busy_until: TaiTime::EPOCH, 
+
+            shared_medium: Medium::default(), 
         }
     }
 
 
 
-    fn tick_backoff(&mut self, now: TaiTime<0>, idle_slot: bool, ) -> Vec<MacKey> {
+   fn tick_backoff(&mut self, now: TaiTime<0>) -> Vec<MacKey> {
         let mut ready = Vec::new();
-
-        let slot_duration  = Duration::from_secs_f64(SLOT);           // 9 µs OFDM slot
-
+        let idle_slot = self.shared_medium.is_idle(now);
         for (key, st) in self.array_dcf_values.lock().unwrap().iter_mut() {
-            // If queue empty keep state but don’t contend
             if !self.queue.iter().any(|p| maps_to(key, p)) { continue; }
 
-            // (1) Handle AIFS
+            // AIFS gating
             if idle_slot && st.medium_free_since + aifs(st.param) <= now {
                 st.backoff_frozen = false;
-            } else if !idle_slot {
-                st.medium_free_since = now;                 // last time medium became busy
-                st.backoff_frozen    = true;
-            }
+            } 
+            // else if !idle_slot {
+                // st.medium_free_since = now;
+                // st.backoff_frozen = true;
+            // }
 
-            // (2) Back-off countdown when not frozen
+            // Backoff countdown (one slot per call of deque_schedule_service)
             if idle_slot && !st.backoff_frozen && st.backoff_counter > 0 {
                 st.backoff_counter -= 1;
             }
 
-            // (3) Ready to transmit this very slot
             if st.backoff_counter == 0 && !st.backoff_frozen {
                 ready.push(*key);
             }
@@ -1870,11 +1862,28 @@ impl QueueModule {
         ready
     }
 
+    fn txop_cap_secs(&self, key: &MacKey) -> f64 {
+        let p = self.array_dcf_values.lock().unwrap()[key].param;
+        if p.txop_limit_us == 0 { f64::INFINITY } else { p.txop_limit_us as f64 * 1e-6 }
+    }
+
+    fn ac_needs_tick(key: &MacKey, st: &DcfStats, q: &VecDeque<MpduPacket>, now: TaiTime<0>) -> bool {
+        let has_pkts = q.iter().any(|p| maps_to(key, p));
+        if !has_pkts { return false; }
+        let aifs_done = st.medium_free_since + aifs(st.param) <= now;
+        !aifs_done || st.backoff_counter > 0
+    }
+
+    fn ac_prio(&mut self, ac: EdcaAc) -> u8 { match ac {
+        EdcaAc::Voice => 0, EdcaAc::Video => 1, EdcaAc::BestEffort => 2, EdcaAc::Background => 3
+    }}
+
+
     fn resolve_virtual_collision(&mut self, mut ready: Vec<MacKey>) -> Vec<MacKey> {  // Collisions when same STA has several ACs winning backoff  
 
         let mut winner = HashMap::<i32, MacKey>::new();  // sta_id → winning AC
 
-        ready.sort_by_key(|k| k.1);                      // AC enum is VO<VI<BE<BK
+        ready.sort_by_key(|k| self.ac_prio(k.1));
         for key in ready {                               // iterate lowest to highest value
             let sta = key.0;                             // -1 for AP
             if !winner.contains_key(&sta) {
@@ -1916,7 +1925,7 @@ impl QueueModule {
 
         if self.queue.len() < self.queue_maxsize {
             self.queue.push_back(pkt);
-            if !self.packet_being_served {
+            if !self.packet_being_served && self.shared_medium.is_idle(now) {
                 self.deque_schedule_service((), ctx).await;
             }
         } else {
@@ -1944,7 +1953,7 @@ impl QueueModule {
                 self.queue.len()
             );
 
-            if self.queue.len() == 1 && !self.packet_being_served {
+            if self.queue.len() == 1 && !self.packet_being_served && self.shared_medium.is_idle(now){
                 self.deque_schedule_service((), context).await;
             }
         } else {
@@ -2170,8 +2179,8 @@ impl QueueModule {
                         );
                     }
 
-            
-                    if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE {
+                    let cap_s = self.txop_cap_secs(&key);
+                    if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s {
                         debug_debug!(
                             DebugColor::DarkRed,
                             "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
@@ -2313,9 +2322,7 @@ impl QueueModule {
             let mut ul_stas = HashSet::new();
             let mut is_dl : bool = false; 
 
-    
-            const TAU_COLLISIONS: f32 = 2.0 / 9.0;
-    
+        
             for ((sta_src, sta_dest), packets) in sta_packets.iter() {
                
                 let is_ul = sta_src > sta_dest;
@@ -2378,43 +2385,34 @@ impl QueueModule {
                 }
             }
             
-            let is_idle_slot = now >= self.airtime_busy_until; 
-            let mut contenders: Vec<MacKey> = self.tick_backoff(now, is_idle_slot);
-
-            if !contenders.is_empty() {
-                print_brown!("Initial contenders: {:?}", contenders); 
-            }  
+            let mut pre_contenders: Vec<MacKey> = self.tick_backoff(now);
 
             // First resolve virtual collisions (same STA different ACs)
-            contenders = self.resolve_virtual_collision(contenders);
+            let contenders = self.resolve_virtual_collision(pre_contenders);
             
-            if !contenders.is_empty() {
-                print_brown!("After virtual collision resolution: {:?}", contenders); 
+            if contenders.is_empty() {
+                // Only tick per-slot if the medium is idle (otherwise we already scheduled at busy end)
+                if self.shared_medium.is_idle(now) {
+                    let mut need_next_slot = false;
+                    if let Ok(map) = self.array_dcf_values.lock() {
+                        for (key, st) in map.iter() {
+                            if ac_needs_tick(key, st, &self.queue, now) { need_next_slot = true; break; }
+                        }
+                    }
+                    if need_next_slot {
+                        context.scheduler
+                            .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
+                            .unwrap();
+                    }
+                }
+                return;
             }
+
 
             // Now handle physical collisions between different STAs
             let collision_now = contenders.len() > 1;
             
-
-
-            // let n_devices_collisions = ul_stas.len() + is_dl as usize; 
-            // let collision_probability =
-            //     1.0 - (1.0 - TAU_COLLISIONS).powf(n_devices_collisions as f32 - 1.0);
-
-            // let mut rng = rand::thread_rng();
-            // let random_value: f32 = rng.gen();
-            // let collision_now: bool = random_value < collision_probability;
-    
-            // debug_schedule!(
-            //     "Number of devices: {} + {} =  {} | P_collision = {} | sampled: {} | Collide? {}",
-            //     ul_stas.len(),
-            //     is_dl as usize, 
-            //     n_devices_collisions,
-            //     collision_probability,
-            //     random_value,
-            //     collision_now
-            // );
-    
+                
             let mut selected_sta = None;
             if LYAPUNOV_POLICY == true {
                 let mut min_priority = f64::MAX;
@@ -2476,12 +2474,7 @@ impl QueueModule {
                 // NORMAL POLICY: FIFO
             }
 
-
-
-    
             if collision_now {
-
-
                 if let Some(key) = selected_sta {
                     selected_sta = Some(key);
                 } else if !self.queue.is_empty() {
@@ -2492,13 +2485,16 @@ impl QueueModule {
 
                     // In collision, we do not remove or duplicate any packets.
                     // Instead, we simply schedule a retransmission backoff.
-                    let T_col = collision_delay(
-                        0.0, // parameters can be adjusted as needed
-                        0,
-                        self.coords_queue, // (collision delays don't depend on MCS rates)
-                        Coords::default(),
-                        P_TX,
-                    );
+                    let T_col: f32 = collision_delay(); 
+                    let T_col_dur = Duration::from_secs_f32(T_col);
+
+                    self.shared_medium.occupy_until(now + T_col_dur);
+
+                    for key in contenders {
+                       if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
+                           st.on_failure(); // increases CW and redraws backoff
+                       }
+                    }       
 
                     if let Some(stats_tx) = &self.stats_tx {
                             let stats_update = StatsUpdate {
@@ -2522,52 +2518,60 @@ impl QueueModule {
                                 .send(stats_update)
                                 .expect("Failed to send stats update");                    
                         }
-                   
-                    let collision_duration = Duration::from_secs_f64(T_col as f64);
-                    // print_red!("{} Collision! T_c:{:.6} ", format_elapsed!(now), T_col as f64); 
                     
+                    if let Ok(mut map) = self.array_dcf_values.lock() {
+                        for (_, st) in map.iter_mut() {
+                            st.backoff_frozen    = true;
+                            st.medium_free_since = now + T_col_dur;   // AIFS will start from here
+                        }
+                    }
+
+
                     context
                         .scheduler
-                        .schedule_event(collision_duration, Self::deque_schedule_service, ())
+                        .schedule_event(T_col_dur, Self::deque_schedule_service, ())
                         .unwrap();
+                    return; 
                 }
             } else {
-                // In non-collision, we build an AMPDU for the selected STA.
-                let mut packet_with_id: Option<MpduPacket> = self.queue.front().cloned();
-                
-                if let Some(_packet) = packet_with_id.clone() {
-                    debug_debug!(
-                        DebugColor::SaddleBrown, 
-                        "QUEUE FRONT: SRC {}, DEST: {}",
-                        _packet.sta_src_id,
-                        _packet.sta_dest_id
-                    );
-                }
-                if let Some(key) = selected_sta {
-                    if LYAPUNOV_POLICY || SOFTMAX_POLICY {
-                        packet_with_id = self.queue.iter().find(|&packet| {
-                            packet.sta_src_id == key.0 && packet.sta_dest_id == key.1
-                        }).cloned();
-                    }
-                }
-                if let Some(first_packet) = packet_with_id {
-                    debug_debug!(
-                        DebugColor::SaddleBrown, 
-                        "Selected STA: Src{:.0} ,Dest: {:.0}",
-                        first_packet.sta_src_id,
-                        first_packet.sta_dest_id
-                    );
-                    let now: tai_time::TaiTime<0> = context.scheduler.time();
 
-                    /// BUILD AMPDU based on STA selection
-                    let (ampdu_to_send, ampdu_service_duration) = self.build_new_ampdu(&first_packet, now); 
-                    self.airtime_busy_until = now + (ampdu_service_duration);
-                    
-                    context
-                        .scheduler
-                        .schedule_event(ampdu_service_duration, Self::send_ampdu, ampdu_to_send)
-                        .unwrap();
+                let winner_key = contenders[0];
+                let first_ix = match self.queue.iter().position(|p| maps_to(&winner_key, p)) {
+                    Some(ix) => ix,
+                    None => {
+                        // Defensive: redraw backoff and try next slot
+                        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key) {
+                            st.on_success(st.param.cw_min); // post-backoff reload
+                        }
+                        print_red!("Not supposed to happn!!!!!", ); 
+                        context.scheduler
+                            .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
+                            .unwrap();
+                        return;
                     }
+                };
+                let first_packet = self.queue.get(first_ix).cloned().unwrap();
+                // Build AMPDU **only** from packets that map to the same MacKey
+                let (ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, now);
+
+                // Occupy the medium for the TXOP airtime
+                self.shared_medium.occupy_until(now + ampdu_airtime);
+
+                // Freeze everyone while TXOP is in progress and record when medium will stop being busy
+                if let Ok(mut map) = self.array_dcf_values.lock() {
+                    for (_, st) in map.iter_mut() {
+                        st.backoff_frozen = true;
+                        st.medium_free_since = now + ampdu_airtime;
+                    }
+                }
+
+                                // Schedule the TX completion and the next contention exactly at TX end
+                context.scheduler
+                    .schedule_event(ampdu_airtime, Self::send_ampdu, ampdu_to_send)
+                    .unwrap();
+
+                return; 
+
             }
         
             let mut need_next_slot = false;
@@ -2592,10 +2596,11 @@ impl QueueModule {
         }
     }   
 }
-
-
-
 impl Model for QueueModule {}
+
+fn tid_to_ac(tid: u8) -> EdcaAc { match tid {
+    6|7 => EdcaAc::Voice, 4|5 => EdcaAc::Video, 1|2 => EdcaAc::Background, _ => EdcaAc::BestEffort
+}}
 
 #[derive(Clone, Default)]
 #[allow(unused)]
