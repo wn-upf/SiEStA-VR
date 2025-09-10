@@ -1404,7 +1404,7 @@ impl StreamSocket {
         }
 
         if ALVR_ORIGINAL_SOCKETRX_BEHAVIOR{
-
+            
              // Keep only shards with later packet index (using wrapping logic)
              while let Some((idx, inprog)) = components.in_progress_packets.iter().find(|(idx, _)| {
                 wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less

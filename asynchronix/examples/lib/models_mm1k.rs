@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, debug_debug, print_brown, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
+use crate::{debug_bgprint, debug_debug, print_blue, print_brown, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -1597,7 +1597,7 @@ pub struct DcfStats {
 
 pub const CW_MAX : i32 = 1023; 
 
-pub const MAX_RETRIES_MAC: u8 = 7; 
+pub const MAX_RETRIES_MAC: u8 = 10; 
 use crate::lib::EdcaAc;
 
 impl DcfStats {
@@ -1641,6 +1641,35 @@ impl DcfStats {
         true                                           // keep packet
     }
 }
+
+
+
+#[inline]
+fn ac_short(ac: EdcaAc) -> &'static str {
+    match ac {
+        EdcaAc::Voice => "VO",
+        EdcaAc::Video => "VI",
+        EdcaAc::BestEffort => "BE",
+        EdcaAc::Background => "BK",
+    }
+}
+
+#[inline]
+fn fmt_key(key: &MacKey) -> String {
+    // key: (sta_id, EdcaAc)
+    let sta = key.0;
+    let ac  = ac_short(key.1);
+    // AP uses -1 in your code — keep it visible:
+    format!("STA={:>2} AC={}", sta, ac)
+}
+
+#[inline]
+fn log_edca(now: TaiTime<0>, key: &MacKey, msg: &str) {
+    // Keep it short and grep-friendly
+    print_blue!("-----contenders: {} | {}", fmt_key(key), msg);
+}
+
+
 
 fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
     // AP (downlink) contends with id = -1; UL STA contends with its own id
@@ -1770,10 +1799,10 @@ impl QueueModule {
 
         // Every uplink STA keeps **one** MAC – attach its “default” AC_BE
         for sta_id in vec_ids {
-            dcf_stats_vec.insert((sta_id, EdcaAc::BestEffort), DcfStats::new(EdcaAc::BestEffort));
+            for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
+                dcf_stats_vec.insert((sta_id, ac), DcfStats::new(ac));
+            }
         }
-   
-   
         // for id in vec_ids.iter(){
         //     if *id >= PREFIX_ID_DOWNLINK && *id <= PREFIX_ID_UPLINK { // Downlink, only one value (or serveral for EDCA). 
         //         let mut s = DcfStats { 
@@ -1836,15 +1865,38 @@ impl QueueModule {
 
 
    fn tick_backoff(&mut self, now: TaiTime<0>) -> Vec<MacKey> {
+        
+        
         let mut ready = Vec::new();
         let idle_slot = self.shared_medium.is_idle(now);
+
+        // crate::print_pink!("states array dcf: ",); 
+        // for state in self.array_dcf_values.lock().unwrap().keys(){
+        //     crate::print_pink!("{:?}", state); 
+        // }
+
+
+        print_blue!(
+            "[EDCA][{}] medium_idle={} |  q_size={} | ac_states={}",
+            format_elapsed!(now),
+            idle_slot,
+            self.queue.len(),
+            self.array_dcf_values.lock().unwrap().len()
+        );
         for (key, st) in self.array_dcf_values.lock().unwrap().iter_mut() {
-            if !self.queue.iter().any(|p| maps_to(key, p)) { continue; }
+            if !self.queue.iter().any(|p| maps_to(key, p)) { 
+                // log_edca(now, key, "no_pkts_for_AC -> skip");
+                continue; 
+            }
 
             // AIFS gating
             if idle_slot && st.medium_free_since + aifs(st.param) <= now {
+                print_blue!("[{} AIFS satisfied] -> unfreeze", key.0);
                 st.backoff_frozen = false;
-            } 
+            }
+            else{
+                crate::print_dblue!("[{} WAIT AIFS] {} < {}",key.0, format_elapsed!(now)  , format_elapsed!(now + aifs(st.param))); 
+            }
             // else if !idle_slot {
                 // st.medium_free_since = now;
                 // st.backoff_frozen = true;
@@ -1852,10 +1904,18 @@ impl QueueModule {
 
             // Backoff countdown (one slot per call of deque_schedule_service)
             if idle_slot && !st.backoff_frozen && st.backoff_counter > 0 {
+
+                let prev = st.backoff_counter;
                 st.backoff_counter -= 1;
+                log_edca(
+                    now,
+                    key,
+                    &format!("countdown {} -> {}", prev, st.backoff_counter)
+                );
             }
 
             if st.backoff_counter == 0 && !st.backoff_frozen {
+                print_green!("{} [ {} -> AC {:?}] READY (backoff==0 & unfrozen)", format_elapsed!(now), key.0, key.1);
                 ready.push(*key);
             }
         }
@@ -1922,6 +1982,7 @@ impl QueueModule {
         let now = ctx.scheduler.time();
         pkt.queue_in_instant = now;
         self.arrived_packet_counter += 1;
+
 
         if self.queue.len() < self.queue_maxsize {
             self.queue.push_back(pkt);
@@ -2128,9 +2189,25 @@ impl QueueModule {
             self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
             self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
 
-            self.aux_ampdu_serviced.mac_key = (first_packet.sta_src_id, first_packet.edca_ac); 
+
+            let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id; 
+
+            let mac_key: MacKey = if is_ul {
+                (first_packet.sta_src_id, EdcaAc::BestEffort)
+            } else {
+                (-1, first_packet.edca_ac)
+            };
+            self.aux_ampdu_serviced.mac_key = mac_key;
+            
+
             let key      = (first_packet.sta_src_id, first_packet.edca_ac);
-            let txop_us  = self.array_dcf_values.lock().unwrap()[&key].param.txop_limit_us as f64;
+            print_red!("Building AMPDU for key = {:?}", key); 
+
+            let txop_us: f64 = self.array_dcf_values
+                .lock().unwrap()
+                .get(&mac_key)
+                .map(|st| st.param.txop_limit_us as f64)
+                .unwrap_or(0.0);
 
             let mut last_service_duration = Duration::default();
             let mut packet_index = 0;
@@ -2283,15 +2360,15 @@ impl QueueModule {
                 }
             }
 
-            if DEBUG_PRINT_ENABLED 
-            {
+            // if DEBUG_PRINT_ENABLED 
+            // {
                 print_yellow!(
                     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
                     format_elapsed!(now),
                     format_elapsed!(now + last_service_duration)
                 );
                 self.aux_ampdu_serviced.print();
-            }
+            // }
 
 
             self.packet_being_served = true;
@@ -2411,8 +2488,7 @@ impl QueueModule {
 
             // Now handle physical collisions between different STAs
             let collision_now = contenders.len() > 1;
-            
-                
+                            
             let mut selected_sta = None;
             if LYAPUNOV_POLICY == true {
                 let mut min_priority = f64::MAX;

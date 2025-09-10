@@ -16,7 +16,7 @@ use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{HevcParser, AveragingStrategy, WindowType};
+use crate::lib::{AveragingStrategy, EdcaAc, HevcParser, WindowType};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -1780,7 +1780,7 @@ impl BitrateManager {
 
         const TIME_WARMUP_ABR: u64 = 13; 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
-            print_red!("No ABR (warmup) {} -> {}", format_elapsed!(now), TIME_WARMUP_ABR); 
+            println!("No ABR (warmup) {} -> {}", format_elapsed!(now), TIME_WARMUP_ABR); 
             let bitrate_bps = self.last_target_bitrate_bps; 
             bitrate_bps 
         }
@@ -2305,6 +2305,13 @@ impl XRServer {
                                     // );
                                 }
                                 if stream_id == VIDEO || stream_id == AUDIO {
+                                    
+                                    if stream_id == VIDEO{
+                                        packet.edca_ac = EdcaAc::Video; 
+                                    }
+                                    else if stream_id == AUDIO {
+                                        packet.edca_ac = EdcaAc::Voice; 
+                                    }
                                     self.outport_videoapp_network.send(packet).await;
                                 }
 
@@ -3258,6 +3265,8 @@ impl XRClient {
             .await; // FUNCTION TO HANDLE NETWORK PACKETS!
         }
     }
+
+
     fn read_app_send_network_interface<'a>(
         &'a mut self,
         _: (),
@@ -3320,6 +3329,7 @@ impl XRClient {
                                 let elapsed_tracking =
                                     now.duration_since(self.last_tracking_time).as_secs_f32();
 
+                                // println!("[Client {} read ]: {} packet ", self.server_ip, str_id); 
                                 if stream_id == TRACKING {
                                     debug_print!(
                                         DebugColor::ForestGreen,
@@ -3354,6 +3364,8 @@ impl XRClient {
                                     // );
                                 }
                                 if stream_id == TRACKING {
+
+                                    packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering. 
                                     self.outport_tracking_network.send(packet).await;
                                 }
                             } else {
@@ -3364,6 +3376,7 @@ impl XRClient {
                                     ))
                                 );
                                 stop = true;
+                                panic!("IS THIS HAPPENING"); 
                                 break;
                             }
                         }
@@ -3388,6 +3401,12 @@ impl XRClient {
         context: &Context<Self>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // println!("FRAMEDSEND!");
+
+        // match category{
+
+
+        // }
+
         let mut buffer = vec![0; MAX_PACKET_SIZE_RECV];
 
         let serialized_size = bincode::serialized_size(&packet)? as usize;
@@ -3430,14 +3449,16 @@ impl XRClient {
         packet: ClientControlPacket,
         context: &Context<Self>,
     ) -> () {
-        // Sends directly TCP packets related to Control. For now, just NetworkStatistics
+        // Sends directly TCP packets related to Control.
         // println!("output_control");
         let pack = packet.clone();
         match packet {
+
             ClientControlPacket::NetworkStatistics(inner) => {
                 // println!("sending stats packet!");
                 let result = Self::framed_send(self, &pack, context).await;
                 // println!("result of output control: {:?}", result);
+
             }
             ClientControlPacket::DeadlineShardLossStat(inner) => {
                 // println!("Shardloss packet sent");
@@ -3461,6 +3482,7 @@ impl XRClient {
         let net = DeadlineShardlossStatPacket {
             frame_indexes: frames.clone(),
             shards_lost: shards_lost,
+            edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking. 
         };
 
         for frame in frames{
@@ -3648,7 +3670,9 @@ impl XRClient {
                         everest_dshort: self.d_short_exp_avg, 
                         everest_dlong: self.d_long_exp_avg, 
                         everest_command: command_abr_everest, 
+                        edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
                     };
+
                     if self.last_throughput_avg == 0.0 {
                         self.last_throughput_avg = net.bytes_in_frame as f32 / net.frame_interarrival;  
                     }

@@ -182,7 +182,7 @@ macro_rules! print_red {
 macro_rules! print_yellow {
     ($fmt:expr, $($arg:tt)*) => {
         let msg = format!($fmt, $($arg)*);
-        println!("{}", DebugColor::Yellow.to_background_fn()(msg));
+        println!("{}", DebugColor::Yellow.to_color_fn()(msg));
     };
 }
 #[macro_export]
@@ -199,7 +199,13 @@ macro_rules! print_blue {
         println!("{}", DebugColor::Blue.to_background_fn()(msg));
     };
 }
-
+#[macro_export]
+macro_rules! print_dblue {
+    ($fmt:expr, $($arg:tt)*) => {
+        let msg = format!($fmt, $($arg)*);
+        println!("{}", DebugColor::DarkBlue.to_background_fn()(msg));
+    };
+}
 #[macro_export]
 macro_rules! print_pink {
     ($fmt:expr, $($arg:tt)*) => {
@@ -1567,7 +1573,7 @@ pub struct MpduPacket {
 }
 #[repr(u8)]
 #[allow(unused)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EdcaAc { Voice = 0, Video = 1, BestEffort = 2, Background = 3 }
 impl Default for EdcaAc { fn default() -> Self { EdcaAc::BestEffort }}
 

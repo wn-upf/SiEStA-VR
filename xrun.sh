@@ -3,7 +3,7 @@ SERIAL_EXECUTION=1
 
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
 simTime=100.0
 k_queue=10000
@@ -13,7 +13,7 @@ rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=( 3 ) 
+N_XR=( 2 ) 
 PL=0.1
 
 fps_list=( 90.0 )
@@ -21,7 +21,7 @@ initial_bitrate_mbps=( 40.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
 
-ABR_ENABLED=( 2 )
+ABR_ENABLED=( 0 )
 nest_profiles=( 1 )
 
 # nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},

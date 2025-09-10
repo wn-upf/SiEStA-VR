@@ -3,6 +3,8 @@ use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+use crate::lib::EdcaAc;
 /// A 2-dimensional vector.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 // #[cfg_attr(feature = "cuda", repr(align(8)))]
@@ -177,6 +179,7 @@ pub struct ClientStatistics {
 pub struct DeadlineShardlossStatPacket {
     pub frame_indexes: Vec<u32>,
     pub shards_lost: Vec<usize>,
+    pub edca_ac: EdcaAc, 
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -210,6 +213,8 @@ pub struct NetworkStatisticsPacket {
     pub everest_dshort: f32, 
     pub everest_dlong: f32, 
     pub everest_command: EverestCommand, 
+
+    pub edca_ac: EdcaAc, 
     // pub tx_instant: f64,
 }
 
