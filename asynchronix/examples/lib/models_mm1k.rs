@@ -43,6 +43,19 @@ use rand::{SeedableRng};
 //     }
 // }
 
+const DEBUG_EDCA: bool = false; 
+
+#[macro_export]
+macro_rules! debug_edca {
+    ($fmt:expr, $($arg:tt)*) => {
+        if DEBUG_EDCA {
+            let msg = format!($fmt, $($arg)*);
+             println!("{}", DebugColor::Blue.to_background_fn()(msg));
+        }
+
+    };
+}
+
 #[macro_export]
 macro_rules! debug_schedule {
     ($fmt:expr, $($arg:tt)*) => {
@@ -1576,8 +1589,8 @@ fn aifs(p: EdcaParam) -> Duration {
 }
 
 pub const EDCA_TABLE: [EdcaParam; 4] = [
-    /* VO */ EdcaParam { cw_min:  3,  cw_max:  7,  aifsn: 2, txop_limit_us:  820 },
-    /* VI */ EdcaParam { cw_min:  7,  cw_max: 15, aifsn: 2, txop_limit_us:  820 },
+    /* VO */ EdcaParam { cw_min:  3,  cw_max:  7,  aifsn: 2, txop_limit_us:  1504 },
+    /* VI */ EdcaParam { cw_min:  7,  cw_max: 15, aifsn: 2, txop_limit_us:  3008 },
     /* BE */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 3, txop_limit_us:    0 },
     /* BK */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 7, txop_limit_us:    0 },
 ];
@@ -1774,7 +1787,7 @@ impl QueueModule {
         emulated_tests: Option<(bool, bool, bool, bool)>, // BW, Jitter, PL
     ) -> Self {
         // Create a vector of perStaLockStats with initialized sta_ids
-        let mut stats_vec = HashMap::new();
+        let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
         let mut dcf_stats_vec = HashMap::new(); 
 
         let (stats_tx, stats_rx) = unbounded();
@@ -1876,7 +1889,7 @@ impl QueueModule {
         // }
 
 
-        print_blue!(
+        debug_edca!(
             "[EDCA][{}] medium_idle={} |  q_size={} | ac_states={}",
             format_elapsed!(now),
             idle_slot,
@@ -1891,11 +1904,11 @@ impl QueueModule {
 
             // AIFS gating
             if idle_slot && st.medium_free_since + aifs(st.param) <= now {
-                print_blue!("[{} AIFS satisfied] -> unfreeze", key.0);
+                debug_edca!("[{} AIFS satisfied] -> unfreeze", key.0);
                 st.backoff_frozen = false;
             }
             else{
-                crate::print_dblue!("[{} WAIT AIFS] {} < {}",key.0, format_elapsed!(now)  , format_elapsed!(now + aifs(st.param))); 
+                debug_edca!("[{} WAIT AIFS] {} < {}",key.0, format_elapsed!(now)  , format_elapsed!(now + aifs(st.param))); 
             }
             // else if !idle_slot {
                 // st.medium_free_since = now;
@@ -1907,15 +1920,17 @@ impl QueueModule {
 
                 let prev = st.backoff_counter;
                 st.backoff_counter -= 1;
-                log_edca(
-                    now,
-                    key,
-                    &format!("countdown {} -> {}", prev, st.backoff_counter)
+                if DEBUG_EDCA {
+                    log_edca(
+                        now,
+                        key,
+                        &format!("countdown {} -> {}", prev, st.backoff_counter)
                 );
+                }
             }
 
             if st.backoff_counter == 0 && !st.backoff_frozen {
-                print_green!("{} [ {} -> AC {:?}] READY (backoff==0 & unfrozen)", format_elapsed!(now), key.0, key.1);
+                if DEBUG_EDCA{print_green!("{} [ {} -> AC {:?}] READY (backoff==0 & unfrozen)", format_elapsed!(now), key.0, key.1);}
                 ready.push(*key);
             }
         }
@@ -2191,17 +2206,15 @@ impl QueueModule {
 
 
             let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id; 
-
             let mac_key: MacKey = if is_ul {
-                (first_packet.sta_src_id, EdcaAc::BestEffort)
+                (first_packet.sta_src_id, first_packet.edca_ac)
             } else {
                 (-1, first_packet.edca_ac)
             };
             self.aux_ampdu_serviced.mac_key = mac_key;
             
-
-            let key      = (first_packet.sta_src_id, first_packet.edca_ac);
-            print_red!("Building AMPDU for key = {:?}", key); 
+            // let key      = (first_packet.sta_src_id, first_packet.edca_ac);
+            if DEBUG_EDCA{print_red!("Building AMPDU for key = {:?}", mac_key);} 
 
             let txop_us: f64 = self.array_dcf_values
                 .lock().unwrap()
@@ -2256,7 +2269,8 @@ impl QueueModule {
                         );
                     }
 
-                    let cap_s = self.txop_cap_secs(&key);
+                    let cap_s = self.txop_cap_secs(&mac_key);
+
                     if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s {
                         debug_debug!(
                             DebugColor::DarkRed,
@@ -2360,15 +2374,15 @@ impl QueueModule {
                 }
             }
 
-            // if DEBUG_PRINT_ENABLED 
-            // {
+            if DEBUG_PRINT_ENABLED 
+            {
                 print_yellow!(
                     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
                     format_elapsed!(now),
                     format_elapsed!(now + last_service_duration)
                 );
                 self.aux_ampdu_serviced.print();
-            // }
+            }
 
 
             self.packet_being_served = true;
@@ -2390,11 +2404,11 @@ impl QueueModule {
             // select first packet fairly to ensure channel access with reduced backlog for each user.
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
     
-            debug_schedule!(
-                // DebugColor::Cyan, 
-                "{} | ***************** SCHEDULING *******************",
-                format_elapsed!(now)
-            );
+            // debug_schedule!(
+            //     // DebugColor::Cyan, 
+            //     "{} | ***************** SCHEDULING *******************",
+            //     format_elapsed!(now)
+            // );
     
             let mut ul_stas = HashSet::new();
             let mut is_dl : bool = false; 

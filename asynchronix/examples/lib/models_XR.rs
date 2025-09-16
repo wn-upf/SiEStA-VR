@@ -5,7 +5,7 @@ use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats};
 // use nix::libc::LOCK_EX;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::{thread_rng, Rng};
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
 use crate::{debug_debug,
@@ -1591,8 +1591,54 @@ pub struct BitrateManager {
 
 
 impl BitrateManager {
+     pub fn reset(&mut self) {
+        // Reset timestamps and counters
+        self.last_frame_instant = TaiTime::EPOCH;
+        self.last_update_instant = TaiTime::EPOCH;
+        self.frame_index = 0;
+
+        // Clear sliding window averages
+        self.frame_interval_average.clear();
+        self.encoder_latency_average.clear();
+        self.network_latency_average.clear();
+        self.rtt_average.clear();
+        self.peak_throughput_average.clear();
+        self.frame_interarrival_average.clear();
+        self.bitrate_average_mbps.clear();
+
+        // Reset bitrate state
+        match &self.bitrate_mode {
+            BitrateMode::ConstantMbps(init_mbps) => {
+                self.last_target_bitrate_bps = *init_mbps * 1e6;
+            }
+            BitrateMode::EVeREst { bitrate_ladder_mbps } => {
+                // Pick the lowest rung as a safe restart point
+                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
+            }
+            BitrateMode::NestVr { min_bitrate_mbps, .. } => {
+                self.last_target_bitrate_bps = min_bitrate_mbps * 1e6;
+            }
+        }
+
+        // Reset Everest/Nest state
+        self.everest_last_capacity = 0.0;
+        self.everest_last_throughput = 0.0;
+        self.everest_last_dlong = 0.0;
+        self.everest_last_dshort = 0.0;
+        self.everest_capacity_ewma = 0.0;
+        self.everest_throughput_ewma = 0.0;
+        self.everest_time_last_capacity_update = TaiTime::EPOCH;
+        self.everest_time_last_throughput_update = TaiTime::EPOCH;
+        self.everest_last_order = EverestCommand::Continue;
+
+        crate::print_blue!(
+            "[BitrateManager] Reset complete -> bitrate = {:.2} Mbps",
+            self.last_target_bitrate_bps / 1e6
+        );
+    }
+     
      pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, 
-) -> Self {
+        ) -> Self {
     
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -2105,6 +2151,35 @@ impl XRServer {
             abr_enabled, 
             output_perfect_information_bitrate: Output::default(),
         }
+    }
+
+    pub fn session_end(&mut self, _delay: f64, context: &Context<Self>) {
+        let now = context.scheduler.time();
+        print_red!(
+            "[XRServer {}] Ending session at {:.3}s",
+            self.ip_self,
+            format_elapsed!(now), 
+        );
+
+        // Stop streaming
+        self.is_streaming = false;
+
+        // Drop or reset senders/receivers
+        self.video_app_sender = None;
+        self.audio_app_sender = None;
+        self.tracking_app_receiver = None;
+        self.statistics_app_receiver = None;
+        self.control_socket_sender = None;
+        self.control_socket_receiver = None;
+
+        // Reset counters/trackers
+        self.frames_sent_counter = 0;
+        self.map_rtt.clear();
+
+        // reset bitrate manager & statistics manager
+        self.bitrate_manager.reset();
+        self.STATISTICS_MANAGER.clear();
+        
     }
 
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>) {
@@ -2633,6 +2708,13 @@ impl<T> DroppingVecDeque<T> {
             enqued_frame_counter: 0,
         }
     }
+    pub fn clear(&mut self){
+        self.deque.clear(); 
+        self.dropped_frame_counter  = 0; 
+        self.ok_dequed_frame_counter = 0; 
+        self.enqued_frame_counter   = 0; 
+
+    }
     fn push(&mut self, item: T) {
         // If we are at capacity, pop the oldest frame from the front
         self.enqued_frame_counter += 1;
@@ -3141,6 +3223,76 @@ impl XRClient {
             // everest_throughput_vec: Vec::new(), 
         }
     }
+
+        pub async fn session_end(&mut self, pause_time: f64, context: &Context<Self>) {
+            let now = context.scheduler.time();
+            println!("[XRClient {}] Ending session at {:.3}s", self.server_ip, format_elapsed!(now));
+
+            self.is_streaming = false;
+            self.input_app_video = None;
+            self.input_app_audio = None;
+            self.input_app_haptics = None;
+            self.output_app_tracking_sender = None;
+            self.streamsocket_clone = None;
+            self.decoder_queue.clear();
+
+            // Schedule reboot after pause_time
+            let delay = Duration::from_secs_f64(pause_time);
+            context.scheduler
+                .schedule_event(delay, Self::session_reboot, ())
+                .unwrap();
+    }
+
+    pub async fn session_reboot(&mut self, _: (), context: &Context<Self>) {
+        let now = context.scheduler.time();
+        println!("[XRClient {}] Rebooting session at {:.3}s", self.server_ip, format_elapsed!(now));
+
+        let packet_size = 1400; // or pass from args/config
+        self.t_0 = now;
+        self.last_tracking_time = now;
+        self.is_decoder_ready = false;
+        self.is_ref_decoder_ready = false;
+
+        // Re-establish streams
+        self.configure_streams(packet_size, context).await;
+
+        // Restart periodic tasks
+        context.scheduler
+            .schedule_event(Duration::from_millis(10), Self::video_receive_thread, ())
+            .unwrap();
+
+        context.scheduler
+            .schedule_event(Duration::from_secs_f64(1.0 / self.framerate as f64), Self::vsync, () )
+            .unwrap();
+
+    }
+
+
+    /// Truncated exponential sampler with mean `mean` before truncation and hard bounds [a,b].
+    /// We adjust lambda to match the target mean approximately after truncation.
+    fn truncated_exponential_seconds<R: Rng>(&mut self, rng: &mut R, mean: f64, a: f64, b: f64) -> f64 {
+        // Guard rails
+        let a = a.max(0.0);
+        let b = b.max(a + 1e-6);
+        // Simple fixed-point refinement for λ so E[X|a<=X<=b]≈mean (good enough here).
+        let mut lambda = 1.0 / mean.max(1e-6);
+        for _ in 0..6 {
+            let ea = (-lambda * a).exp();
+            let eb = (-lambda * b).exp();
+            let z  = ea - eb;
+            // E[X | a<=X<=b] for Exp(λ) truncated to [a,b]
+            let ex_trunc = (1.0 / lambda) + (a * ea - b * eb) / z;
+            lambda *= ex_trunc / mean;
+        }
+        // Inverse CDF for truncated exp
+        let u: f64 = rng.gen();
+        let ea = (-lambda * a).exp();
+        let eb = (-lambda * b).exp();
+        let x = - ( (u * (eb - ea) + ea).ln() ) / lambda;
+        x.clamp(a, b)
+    }
+
+
 
     pub async fn configure_streams(&mut self, packet_size: usize, context: &Context<Self>) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
@@ -4697,7 +4849,7 @@ pub struct TimedFrame {
 
 #[allow(non_camel_case_types)]
 #[allow(unused)]
-
+// #[derive(Clone)]
 pub struct STA_extended {
     // extended class to PoissonGen
     pub output_network_port: Output<MpduPacket>,
@@ -4756,6 +4908,69 @@ impl STA_extended {
             is_bg_sta,
         }
     }
+
+
+    // To simulate the channel changes, simulate the HMD moving at a
+    // constant speed of 5 m/s according to a random direction model within 1m² around
+    // initial position. In this way, we approximate the channel changes caused
+    // by a VR gamer standing still but rapidly moving around. 
+ pub fn move_coordinates_everest<'a>(&'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move{
+
+            let mut rng = rand::thread_rng();
+
+            let delta_t = 0.1; // 0.1 seconds dt is reasonable? 
+
+            // Step length = speed * delta_t
+            let step = 5.0 * delta_t;
+
+            // Pick a random direction in 2D plane (azimuth only)
+            let theta = rng.gen_range(0.0..2.0 * PI);
+            let dx = step * theta.cos();
+            let dy = step * theta.sin();
+
+            // println!("[MOVE EVEREST] Before: {:?}", self.sta_coordinates);
+
+            // New candidate position
+            let new_x = self.sta_coordinates.x + dx;
+            let new_y = self.sta_coordinates.y + dy;
+
+            // Boundaries: within ±0.5 m around initial position
+            let min_x = self.sta_coordinates.x - 0.5;
+            let max_x = self.sta_coordinates.x + 0.5;
+            let min_y = self.sta_coordinates.y - 0.5;
+            let max_y = self.sta_coordinates.y + 0.5;
+
+            // Reflect if out of bounds
+            self.sta_coordinates.x = if new_x < min_x {
+                min_x + (min_x - new_x) // reflect back
+            } else if new_x > max_x {
+                max_x - (new_x - max_x)
+            } else {
+                new_x
+            };
+
+            self.sta_coordinates.y = if new_y < min_y {
+                min_y + (min_y - new_y)
+            } else if new_y > max_y {
+                max_y - (new_y - max_y)
+            } else {
+                new_y
+            };
+
+            // z stays constant (HMD height)
+            // println!("Coordinates After dt: {:?}", self.sta_coordinates);
+
+            context
+                .scheduler
+                .schedule_event(Duration::from_secs_f64(delta_t), Self::move_coordinates_everest, () , )
+                .unwrap();
+        }
+    }
+
 
     pub fn move_coordinates(&mut self, distance_to_move: f64) {
         // brownian movement for STA

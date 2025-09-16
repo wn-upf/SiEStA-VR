@@ -59,7 +59,7 @@ pub mod taitime_serde;
 //     Lazy::new(|| Mutex::new(None))
 // }
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 pub const USE_FFMPEG: bool = true;
 
@@ -199,6 +199,10 @@ macro_rules! print_blue {
         println!("{}", DebugColor::Blue.to_background_fn()(msg));
     };
 }
+
+
+
+
 #[macro_export]
 macro_rules! print_dblue {
     ($fmt:expr, $($arg:tt)*) => {
@@ -371,6 +375,10 @@ impl<T> SlidingWindowWeighted<T> {
             history_buffer: [initial_value].into_iter().collect(),
             interval_buffer: [initial_interval].into_iter().collect(),
         }
+    }
+    pub fn clear(&mut self) {
+        self.history_buffer.clear(); 
+        self.interval_buffer.clear();  
     }
 
     pub fn submit_sample(&mut self, sample: T, interval: f32) {
@@ -639,6 +647,11 @@ impl<T> SlidingWindowTimely<T> {
             interval_buffer: [initial_interval].into_iter().collect(),
             max_window_duration,
         }
+    }
+    pub fn clear(&mut self) {
+        self.history_buffer.clear();
+        self.interval_buffer.clear(); 
+
     }
 
     pub fn submit_sample(&mut self, sample: T, interval: f32) {
@@ -958,6 +971,11 @@ pub struct SlidingWindowAverage<T> {
 }
 #[allow(unused)]
 impl<T> SlidingWindowAverage<T> {
+
+    pub fn clear(&mut self,){
+        self.history_buffer.clear(); 
+    }
+
     pub fn new(initial_value: T, max_history_size: usize) -> Self {
         Self {
             history_buffer: [initial_value].into_iter().collect(),

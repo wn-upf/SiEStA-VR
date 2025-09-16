@@ -5,6 +5,7 @@ use crate::lib::SlidingWindowAverage;
 use crate::lib::{
     GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted,
 };
+use crate::DebugColor;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -107,6 +108,8 @@ pub struct StatisticsManager {
 
 #[allow(unused)]
 impl StatisticsManager {
+
+    
     pub fn new(
         max_history_size: usize,
         nominal_server_frame_interval: Duration,
@@ -197,7 +200,69 @@ impl StatisticsManager {
             id_XR: ip_self,
         }
     }
-    // This statistics are reported for every succesfully received frame
+
+        
+    pub fn clear(&mut self) {
+        // Clear history
+        self.history_buffer.clear();
+        self.stats_history_buffer.clear();
+        self.map_frames_spf.clear();
+        self.battery_gauges.clear();
+
+        // Reset running counters
+        self.video_packets_total = 0;
+        self.video_packets_partial_sum = 0;
+        self.video_bytes_total = 0;
+        self.video_bytes_partial_sum = 0;
+        self.received_video_bytes_partial_sum = 0.0;
+        self.frame_interarrival_partial_sum = 0.0;
+        self.packets_dropped_total = 0;
+        self.packets_dropped_partial_sum = 0;
+        self.packets_skipped_total = 0;
+        self.packets_skipped_partial_sum = 0;
+
+        // Reset frame tracking
+        self.prev_highest_shard = -1;
+        self.prev_highest_frame = 0;
+
+        // Reset averages
+        self.total_pipeline_latency_average.clear();
+        self.game_delay_average.clear();
+        self.server_compositor_average.clear();
+        self.encode_delay_average.clear();
+        self.network_delay_average.clear();
+        self.decode_delay_average.clear();
+        self.decoder_queue_delay_average.clear();
+        self.client_compositor_average.clear();
+        self.vsync_queue_delay_average.clear();
+        self.frame_interval_average.clear();
+        self.client_frame_interval_average.clear();
+        self.frame_interarrival_average.clear();
+        self.server_frames_moving.clear();
+        self.client_frames_moving.clear();
+        self.history_throughput_weighted.clear();
+
+        // Reset instant stats
+        self.last_full_report_instant = Instant::now();
+        self.last_nominal_bitrate_stats = NominalBitrateStats::default();
+        self.last_frame_present_instant = Instant::now();
+        self.last_frame_present_interval = Duration::ZERO;
+        self.last_vsync_time = Instant::now();
+
+        self.instant_weighted_avg_prev = TaiTime::EPOCH;
+        self.interval_avg_plot_throughput = 0.0;
+
+        // Reset last stats
+        self.last_stats = GraphNetworkStatisticsCsv::default();
+        self.is_first_stats = true;
+
+        crate::print_blue!(
+            "[StatisticsManager] Cleared all state for new session (id={:?})",
+            self.id_XR, 
+        );
+    }
+
+    // These statistics are reported for every succesfully received frame
     pub fn report_network_statistics(
         &mut self,
         network_stats: NetworkStatisticsPacket,

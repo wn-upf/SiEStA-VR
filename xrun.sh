@@ -5,7 +5,7 @@ SERIAL_EXECUTION=1
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=100.0
+simTime=500.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -13,11 +13,11 @@ rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=( 2 ) 
+N_XR=( 1 ) 
 PL=0.1
 
 fps_list=( 90.0 )
-initial_bitrate_mbps=( 40.0 )
+initial_bitrate_mbps=( 80.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
 
@@ -36,6 +36,9 @@ IS_UL_BG=(0)
 
 intrarefresh_choice=(0 1 )
 GoP_sizes=(90)
+
+
+everest_tests=1
 # Define the function to execute on Ctrl+C
 handle_interrupt() {
     echo "Simulation interrupted."
@@ -76,10 +79,10 @@ for test in "${TEST_TYPE[@]}"; do
 
                                                             if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder"
-                                                                echo           ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile >> "$temp_file"
+                                                                echo           ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                script -c "cargo run --release --example XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile" "out_log.ans"
+                                                                script -c "cargo run --release --example XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests" "out_log.ans"
                                                                 sleep 1
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*

@@ -15,9 +15,10 @@ use lib::models_mm1k::NetworkPattern;
 
 // use tai_time::TaiTime;
 
-use rand::{SeedableRng};
+use rand::{thread_rng, SeedableRng};
 use rand::rngs::StdRng;
 
+use rand::Rng;
 
 mod lib; // for calling m own local library
 
@@ -59,6 +60,22 @@ struct VRPair {
     mbox_emu_link:  Mailbox<EmulatedLink>, 
 }
 
+
+
+const ROOM_W: f64 = 24.0;
+const ROOM_H: f64 = 12.0;
+
+/// Access Point at room center (if you need the coords elsewhere)
+pub const AP_X: f64 = ROOM_W / 2.0;
+pub const AP_Y: f64 = ROOM_H / 2.0;
+
+/// Draw a uniform random starting point inside the room.
+fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
+    let x = rng.gen_range(0.0..ROOM_W);
+    let y = rng.gen_range(0.0..ROOM_H);
+    Coords::with_coords(x, y, 0.0)
+}
+
 impl VRPair {
     fn new(
         pair_index: usize,
@@ -75,7 +92,9 @@ impl VRPair {
         intrarefresh: bool, 
         abr_enabled: usize, 
         nest_vr_profile: &NestVrProfile, 
-        netem_values_tests: Option<(bool,bool,bool,bool)>
+        netem_values_tests: Option<(bool,bool,bool,bool)>,
+        test_distances_everest_bool: bool, 
+
 
     ) -> Self {
         let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
@@ -83,9 +102,15 @@ impl VRPair {
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let server_coords = Coords::with_coords(0.0, 0.0, 0.0);
-        let client_coords = Coords::with_coords(distance, 0.0, 0.0);
-
+        let mut server_coords = Coords::with_coords(AP_X, AP_Y, 0.0);
+        let mut client_coords = Coords::with_coords(distance, 0.0, 0.0);
+        if !test_distances_everest_bool{
+        }
+        else{
+            
+            let mut rng = thread_rng(); 
+            client_coords = random_room_coords(&mut rng); 
+        }
 
         let mut xr_server = XRServer::new(
             server_ip,
@@ -155,6 +180,7 @@ impl VRPair {
         xr_client
             .output_app_network
             .connect(STA_extended::input_XR_app, &mbox_sta_client);
+        
         sta_client
             .to_app_socket
             .connect(XRClient::in_from_network, &mbox_xr_client);
@@ -174,12 +200,59 @@ impl VRPair {
     }
 }
 
+
+/// Truncated exponential sampler with mean `mean` before truncation and hard bounds [a,b].
+/// We adjust lambda to match the target mean approximately after truncation.
+fn truncated_exponential_seconds<R: Rng>(rng: &mut R, mean: f64, a: f64, b: f64) -> f64 {
+    // Guard rails
+    let a = a.max(0.0);
+    let b = b.max(a + 1e-6);
+    // Simple fixed-point refinement for λ so E[X|a<=X<=b]≈mean (good enough here).
+    let mut lambda = 1.0 / mean.max(1e-6);
+    for _ in 0..6 {
+        let ea = (-lambda * a).exp();
+        let eb = (-lambda * b).exp();
+        let z  = ea - eb;
+        // E[X | a<=X<=b] for Exp(λ) truncated to [a,b]
+        let ex_trunc = (1.0 / lambda) + (a * ea - b * eb) / z;
+        lambda *= ex_trunc / mean;
+    }
+    // Inverse CDF for truncated exp
+    let u: f64 = rng.gen();
+    let ea = (-lambda * a).exp();
+    let eb = (-lambda * b).exp();
+    let x = - ( (u * (eb - ea) + ea).ln() ) / lambda;
+    x.clamp(a, b)
+}
+
+fn generate_session_timeline<R: Rng>(
+    rng: &mut R,
+    sim_init_time: f64, 
+    stoptime: f64,
+) -> Vec<(f64, f64)> {
+    let mut t = sim_init_time;
+    let mut sessions = Vec::new();
+
+    while t < stoptime {
+        let dur = rng.gen_range(90.0..=110.0);
+        let pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
+
+        let start = t;
+        let end = (t + dur).min(stoptime);
+        sessions.push((start, end));
+
+        t += dur + pause;
+    }
+
+    sessions
+}
+
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 21 {
+    if args.len() != 22 {
         eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue>
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled> <ABR enabled> <nest-vr_profile>", args[0]);
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test>", args[0]);
         return;
     }
 
@@ -204,7 +277,11 @@ fn main() {
     let intra_refresh: usize    =       args[18].parse().expect("Invalid intra-refresh (0 or 1)"); 
     let abr: usize              =       args[19].parse().expect("Invalid ABR (0 or 1) "); 
     let nest_vr_choice     =       args[20].parse().expect("Invalid NeSt profile"); 
+    let test_distances_everest: usize =        args[21].parse().expect("Invalid Coordinates option"); 
+    
+    let test_distances_everest_bool = test_distances_everest != 0;
 
+    
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
         "BW" => (true, false, false, false),
@@ -288,6 +365,7 @@ fn main() {
     let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)));
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
+
     if !emu_effects.is_empty(){
         print_red!("Emulated patterns: \n{:#?}", emu_effects); 
     }
@@ -311,6 +389,7 @@ fn main() {
             abr, 
             &nest_vr_profile, 
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
+            test_distances_everest_bool, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -320,6 +399,7 @@ fn main() {
         emu_addresses.push(first_vr_pair_distance.mbox_emu_link.address()); 
         vr_pairs.push(first_vr_pair_distance);
     }    
+
  
     // Create extra XR pairs
     for i in n_close..n_xr {
@@ -341,6 +421,7 @@ fn main() {
             abr, 
             &nest_vr_profile,
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
+            test_distances_everest_bool, 
 
         );
         // all_sta_ids.push(100 + i as i32);
@@ -348,6 +429,11 @@ fn main() {
         xr_client_addresses.push(vr.mbox_xr_client.address());
         xr_server_addresses.push(vr.mbox_xr_server.address());
         vr_pairs.push(vr);
+    }
+
+    let mut sta_client_addrs = Vec::new();
+    for vr in &vr_pairs{
+        sta_client_addrs.push(vr.mbox_sta_client.address()); 
     }
 
     // Create background STAs   TODO: SEPARATE UL/DL TRAFFIC for BG STAs!!!!
@@ -456,27 +542,6 @@ fn main() {
     let packet_size = 1400;
 
     // Schedule XR events
-    for addr in &xr_client_addresses {
-        // let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
-        let epsilon = Duration::from_secs_f64(1.0);
-        scheduler
-            .schedule_event(
-                Duration::from_secs(SIM_START_TIME) + epsilon,
-                XRClient::configure_streams,
-                packet_size,
-                addr,
-            )
-            .unwrap(); // Why pass packet_size? -> compiler complains if no other arg is found when context is needed:)
-        scheduler
-            .schedule_event(
-                Duration::from_secs(SIM_START_TIME) + epsilon,
-                XRClient::vsync,
-                (),
-                addr,
-            )
-            .unwrap();
-    }
-
     for addr in &emu_addresses {
 
         scheduler.schedule_event(
@@ -485,25 +550,80 @@ fn main() {
                 (),
                 addr,
         ).unwrap(); 
-
     }
 
+    for (i, (addr_client, addr_server)) in xr_client_addresses.iter().zip(&xr_server_addresses).enumerate() {
+        let init: f64 = SIM_START_TIME as f64; 
+        let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
+        for (start, end) in sessions {
+            // Schedule client start
+            scheduler.schedule_event(
+                Duration::from_secs_f64(start),
+                XRClient::configure_streams,
+                packet_size,
+                addr_client,
+            ).unwrap();
 
-    for (i, addr) in xr_server_addresses.iter().enumerate() {
-        let epsilon = Duration::from_secs_f64(1.1);
-        // let epsilon = Duration::from_secs_f64(exponential(0.5, &mut rng));
+            // Schedule vsync start alongside
+            scheduler.schedule_event(
+                Duration::from_secs_f64(start),
+                XRClient::vsync,
+                (),
+                addr_client,
+            ).unwrap();
 
-        let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
-        scheduler
-            .schedule_event(
-                Duration::from_secs(SIM_START_TIME) + epsilon,
+            // Schedule client end
+            let pause = end - start;
+            scheduler.schedule_event(
+                Duration::from_secs_f64(end),
+                XRClient::session_end,
+                pause,
+                addr_client,
+            ).unwrap();
+
+            // Schedule server start
+            let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
+            scheduler.schedule_event(
+                Duration::from_secs_f64(start),
                 XRServer::connection_pipeline,
                 dest_ip,
-                addr,
-            )
-            .unwrap();
+                addr_server,
+            ).unwrap();
+
+            scheduler.schedule_event(
+                Duration::from_secs_f64(end),
+                XRServer::session_end,
+                pause,
+                addr_server,
+            ).unwrap();
+        }
+    }    
+    // Use saved addresses for movement
+    if test_distances_everest_bool{
+        for (i, sta_client_addr) in sta_client_addrs.iter().enumerate() {
+            scheduler.schedule_event(
+                Duration::from_secs(SIM_START_TIME),
+                STA_extended::move_coordinates_everest,
+                (),
+                sta_client_addr,
+            ).unwrap();
+        }
     }
+   
+    // for (i, vr) in vr_pairs.into_iter().enumerate() {
+    //     for vr_sta_client in vr.sta_client{
+    //         scheduler.schedule_event(
+    //             Duration::from_secs(SIM_START_TIME),
+    //             STA_extended::move_coordinates_everest, 
+    //             (), 
+    //             addr_client, 
+    //         ).unwrap(); 
+
+
+    //     }
+
+    // }
 
     // Schedule background STA events
     for address in &bg_sta_addresses {
@@ -512,19 +632,6 @@ fn main() {
             .schedule_event(epsilon, STA_extended::send_packet_BG, (), address)
             .unwrap();
     }
-
-    // scheduler
-    //     .schedule_event(
-    //         Duration::from_secs(SIM_START_TIME),
-    //         QueueModule::self_scheduled_emu_queue_tx,
-    //         (),
-    //         &queue_address,
-    //     )
-    //     .unwrap();
-
-
-
-
     // Run simulation
     simu.step_by(Duration::from_secs_f64(stoptime));
 
