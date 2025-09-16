@@ -234,8 +234,7 @@ fn generate_session_timeline<R: Rng>(
     let mut sessions = Vec::new();
 
     while t < stoptime {
-        // let dur = rng.gen_range(90.0..=110.0);
-        let dur = rng.gen_range(10.0..=15.0);
+        let dur = rng.gen_range(90.0..=110.0);
 
         let pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
 
