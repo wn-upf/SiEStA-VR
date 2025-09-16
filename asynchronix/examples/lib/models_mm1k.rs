@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, debug_debug, print_blue, print_brown, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
+use crate::{debug_bgprint, debug_debug, print_blue, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -11,7 +11,7 @@ use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_stream_socket::parse_shard_data;
-use crate::lib::{ResultsFrameTXDelay, SLOT, PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, MacKey};
+use crate::lib::{ SLOT, MacKey};
 use crate::lib::DebugColor; 
 use rand::rngs::StdRng;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
@@ -19,11 +19,10 @@ use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 use serde::{Serialize, Deserialize};
 
-use rand::seq::SliceRandom;   // brings `choose()` into scope
 // use crate::db_debug_bgprint;
 
 use crate::lib::{
-    collision_delay, exponential, frametransmission_delay, airtime_ampdu, perStaLockStats, AmpduPacket, Coords,
+    collision_delay, exponential,  airtime_ampdu, perStaLockStats, AmpduPacket, Coords,
     CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS,
     P_TX,
 };
@@ -43,7 +42,7 @@ use rand::{SeedableRng};
 //     }
 // }
 
-const DEBUG_EDCA: bool = false; 
+const DEBUG_EDCA: bool = true; 
 
 #[macro_export]
 macro_rules! debug_edca {
@@ -67,7 +66,7 @@ macro_rules! debug_schedule {
     };
 }
 
-pub const DEBUG_SCHEDULING: bool = false;
+// pub const DEBUG_SCHEDULING: bool = false;
 
 pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_POLICY: bool = false;
@@ -1595,7 +1594,7 @@ pub const EDCA_TABLE: [EdcaParam; 4] = [
     /* BK */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 7, txop_limit_us:    0 },
 ];
 
-#[derive(Hash, Clone, Copy)]
+#[derive(Hash, Clone, Copy, Debug)]
 pub struct DcfStats {
     pub cw: i32,
     pub backoff_counter: i32, 
@@ -1606,10 +1605,6 @@ pub struct DcfStats {
     // pub slot_timer_event,
 }
  
-
-
-pub const CW_MAX : i32 = 1023; 
-
 pub const MAX_RETRIES_MAC: u8 = 10; 
 use crate::lib::EdcaAc;
 
@@ -1640,6 +1635,8 @@ impl DcfStats {
 
     /// Call after a **collision or PHY-error** that requires a retry.
     pub fn on_failure(&mut self) -> bool {
+
+        print_red!("PHY collision or err: {:#?}", self); 
         self.retry_count += 1;
         if self.retry_count > MAX_RETRIES_MAC {
             // drop MSDU – tell caller to flush the head-of-line
@@ -1677,9 +1674,9 @@ fn fmt_key(key: &MacKey) -> String {
 }
 
 #[inline]
-fn log_edca(now: TaiTime<0>, key: &MacKey, msg: &str) {
+fn log_edca(key: &MacKey, msg: &str) {
     // Keep it short and grep-friendly
-    print_blue!("-----contenders: {} | {}", fmt_key(key), msg);
+    print_blue!("\t\t-----contenders: {} | {}", fmt_key(key), msg);
 }
 
 
@@ -1707,16 +1704,48 @@ fn ac_needs_tick(
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct Medium {
+pub struct Medium {
     busy_until: TaiTime<0>,     // actual airtime occupied
     nav_until: TaiTime<0>,      // virtual carrier sense (from Duration fields)
-    tx_owner: Option<MacKey>,   // who currently holds TXOP
-}
+    tx_owner: Option<MacKey>,     // who currently holds TXOP (only while busy)
+    last_txop_owner: Option<MacKey>, // who last held a TXOP (sticky for logging)
+    last_txop_end: TaiTime<0>,    // when that TXOP ended}
+   }
 impl Medium {
     #[inline] pub fn is_idle(&self, now: TaiTime<0>) -> bool {
         now >= self.busy_until && now >= self.nav_until
     }
-    #[inline] pub fn occupy_until(&mut self, t: TaiTime<0>) { self.busy_until = t; }
+    #[inline] pub fn start_txop(&mut self, t: TaiTime<0>, owner: MacKey) { 
+        self.busy_until = t;
+        self.tx_owner = Some(owner)
+     }
+     /// Busy due to collision/backoff/NAV (no owner)
+    #[inline] pub fn occupy_collision(&mut self, until: TaiTime<0>) {
+        self.tx_owner = None;
+        self.busy_until = until;
+    }
+    #[inline] pub fn set_nav_until(&mut self, t: TaiTime<0>) { self.nav_until = t; }
+
+    /// Release an owned TXOP at `now` (called exactly when TX completes)
+    #[inline] pub fn release_txop(&mut self, now: TaiTime<0>) {
+        if let Some(owner) = self.tx_owner {
+            self.last_txop_owner = Some(owner);
+            self.last_txop_end = now;
+        }
+        self.tx_owner = None;
+        // keep busy_until as-is; caller may immediately schedule contention next
+    }
+
+    /// Clear stale owner if medium is idle (safety net)
+    #[inline] pub fn clear_if_idle(&mut self, now: TaiTime<0>) {
+        if self.is_idle(now) { self.tx_owner = None; }
+    }
+
+    #[inline] pub fn current_owner(&self) -> Option<MacKey> { self.tx_owner }
+    #[inline] pub fn last_owner(&self) -> Option<MacKey> { self.last_txop_owner }
+    #[inline] pub fn last_end(&self) -> TaiTime<0> { self.last_txop_end }
+
+
 }
 
 #[allow(unused)]
@@ -1816,26 +1845,6 @@ impl QueueModule {
                 dcf_stats_vec.insert((sta_id, ac), DcfStats::new(ac));
             }
         }
-        // for id in vec_ids.iter(){
-        //     if *id >= PREFIX_ID_DOWNLINK && *id <= PREFIX_ID_UPLINK { // Downlink, only one value (or serveral for EDCA). 
-        //         let mut s = DcfStats { 
-        //             cw: CW_MIN, 
-        //             retry_count: 0, 
-        //             backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
-        //         };
-        //         dcf_stats_vec.insert(-1, s); 
-        //     }
-        //     else{
-        //         let mut s: DcfStats = DcfStats { 
-        //             cw: CW_MIN, 
-        //             retry_count: 0, 
-        //             backoff_counter: rand::thread_rng().gen_range(0..= CW_MIN as i32),
-        //             param: EdcaParam::, 
-        //         };
-        //         dcf_stats_vec.insert(*id, s);
-        //     }
-        // }
-        //////////////////////////////////////////////////////////////////
 
         Self {
             queue: VecDeque::new(),
@@ -1879,6 +1888,7 @@ impl QueueModule {
 
    fn tick_backoff(&mut self, now: TaiTime<0>) -> Vec<MacKey> {
         
+        self.shared_medium.clear_if_idle(now);
         
         let mut ready = Vec::new();
         let idle_slot = self.shared_medium.is_idle(now);
@@ -1890,7 +1900,7 @@ impl QueueModule {
 
 
         debug_edca!(
-            "[EDCA][{}] medium_idle={} |  q_size={} | ac_states={}",
+            "{} | [EDCA] medium_idle={} |  q_size={} | ac_states={}",
             format_elapsed!(now),
             idle_slot,
             self.queue.len(),
@@ -1904,11 +1914,11 @@ impl QueueModule {
 
             // AIFS gating
             if idle_slot && st.medium_free_since + aifs(st.param) <= now {
-                debug_edca!("[{} AIFS satisfied] -> unfreeze", key.0);
+                debug_edca!("\t[{} AIFS satisfied] -> unfreeze", key.0);
                 st.backoff_frozen = false;
             }
             else{
-                debug_edca!("[{} WAIT AIFS] {} < {}",key.0, format_elapsed!(now)  , format_elapsed!(now + aifs(st.param))); 
+                debug_edca!("\t[{} WAIT AIFS] {} < {}",key.0, format_elapsed!(now)  , format_elapsed!(now + aifs(st.param))); 
             }
             // else if !idle_slot {
                 // st.medium_free_since = now;
@@ -1922,9 +1932,8 @@ impl QueueModule {
                 st.backoff_counter -= 1;
                 if DEBUG_EDCA {
                     log_edca(
-                        now,
                         key,
-                        &format!("countdown {} -> {}", prev, st.backoff_counter)
+                        &format!("\tcountdown {} -> {}", prev, st.backoff_counter)
                 );
                 }
             }
@@ -2048,7 +2057,10 @@ impl QueueModule {
 
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
+        self.shared_medium.release_txop(elapsed);
 
+        crate::print_brown!("{} | [TXOP END] last_owner={:?}",
+                format_elapsed!(elapsed), self.shared_medium.last_owner());
         debug_debug!(
             DebugColor::Red,
             "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
@@ -2192,8 +2204,6 @@ impl QueueModule {
         first_packet: &MpduPacket,
         now: TaiTime<0>,
     ) -> (AmpduPacket, Duration)  {
-
-
 
             let mut success_indices: Vec<usize> = Vec::new(); // Original indices of packets successfully transmitted.
 
@@ -2578,8 +2588,13 @@ impl QueueModule {
                     let T_col: f32 = collision_delay(); 
                     let T_col_dur = Duration::from_secs_f32(T_col);
 
-                    self.shared_medium.occupy_until(now + T_col_dur);
-
+                    self.shared_medium.occupy_collision(now + T_col_dur);
+                  
+                    print_red!("{} | **************[COLLISION]**********\ncontenders={} -> busy_until={}, owner=None",
+                        format_elapsed!(now),
+                        contenders.len(),
+                        format_elapsed!(now + T_col_dur));
+                  
                     for key in contenders {
                        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
                            st.on_failure(); // increases CW and redraws backoff
@@ -2645,7 +2660,11 @@ impl QueueModule {
                 let (ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, now);
 
                 // Occupy the medium for the TXOP airtime
-                self.shared_medium.occupy_until(now + ampdu_airtime);
+                // self.shared_medium.occupy_until(now + ampdu_airtime);
+
+                self.shared_medium.start_txop( now + ampdu_airtime, winner_key);
+                crate::print_green!("{} | [TXOP START] owner={:?} until={}",
+                    format_elapsed!(now), winner_key, format_elapsed!(now + ampdu_airtime));
 
                 // Freeze everyone while TXOP is in progress and record when medium will stop being busy
                 if let Ok(mut map) = self.array_dcf_values.lock() {
@@ -2688,9 +2707,6 @@ impl QueueModule {
 }
 impl Model for QueueModule {}
 
-fn tid_to_ac(tid: u8) -> EdcaAc { match tid {
-    6|7 => EdcaAc::Voice, 4|5 => EdcaAc::Video, 1|2 => EdcaAc::Background, _ => EdcaAc::BestEffort
-}}
 
 #[derive(Clone, Default)]
 #[allow(unused)]

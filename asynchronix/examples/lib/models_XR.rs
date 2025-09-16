@@ -5,7 +5,7 @@ use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats};
 // use nix::libc::LOCK_EX;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
-use rand::{thread_rng, Rng};
+use rand::{Rng};
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
 use crate::{debug_debug,
@@ -1678,12 +1678,12 @@ impl BitrateManager {
 
                         bitrate_ladder_std_bps = vec_bitrates.clone(); 
 
-                        let bitrate_step_size_bps = bitrate_step_size_bps;
+                        // let bitrate_step_size_bps = bitrate_step_size_bps;
                             
-                        let last_target_bitrate_bps = upper_bound_bitrate(
-                            initial_bitrate_mbps * 1e6,
-                            &vec_bitrates, 
-                        );
+                        // let last_target_bitrate_bps = upper_bound_bitrate(
+                        //     initial_bitrate_mbps * 1e6,
+                        //     &vec_bitrates, 
+                        // );
                     }
                 BitrateMode::NestVr { 
                     //     NestVr{
@@ -4932,7 +4932,7 @@ impl STA_extended {
             let dx = step * theta.cos();
             let dy = step * theta.sin();
 
-            // println!("[MOVE EVEREST] Before: {:?}", self.sta_coordinates);
+            println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
 
             // New candidate position
             let new_x = self.sta_coordinates.x + dx;
@@ -4962,7 +4962,7 @@ impl STA_extended {
             };
 
             // z stays constant (HMD height)
-            // println!("Coordinates After dt: {:?}", self.sta_coordinates);
+            println!("Coordinates After dt: {:?}", self.sta_coordinates);
 
             context
                 .scheduler

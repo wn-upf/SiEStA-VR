@@ -102,7 +102,7 @@ impl VRPair {
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let mut server_coords = Coords::with_coords(AP_X, AP_Y, 0.0);
+        let server_coords = Coords::with_coords(AP_X, AP_Y, 0.0);
         let mut client_coords = Coords::with_coords(distance, 0.0, 0.0);
         if !test_distances_everest_bool{
         }
@@ -601,7 +601,7 @@ fn main() {
     }    
     // Use saved addresses for movement
     if test_distances_everest_bool{
-        for (i, sta_client_addr) in sta_client_addrs.iter().enumerate() {
+        for sta_client_addr in sta_client_addrs.iter() {
             scheduler.schedule_event(
                 Duration::from_secs(SIM_START_TIME),
                 STA_extended::move_coordinates_everest,

@@ -30,7 +30,7 @@ use std::{
     // net::{TcpListener, UdpSocket},
     time::Duration,
 };
-use crate::lib::models_XR::{XRDevice, FRAMERATE_WINDOWS, HEIGHT_ENCODER, WIDTH_ENCODER};
+use crate::lib::models_XR::{XRDevice, HEIGHT_ENCODER, WIDTH_ENCODER};
 use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 // use crate::lib::DebugColor;
 use anyhow::{anyhow, Result};
@@ -85,8 +85,6 @@ pub struct ChunkedHevcEncoder {
     frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
-
-    framerate: f32, 
     gop_size: usize, 
     intra_refresh: bool, 
 }
@@ -105,7 +103,7 @@ impl ChunkedHevcEncoder {
         intra_refresh: bool, 
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
-        let (frame_tx, frame_rx) = bounded(100);
+        let (frame_tx, frame_rx) = bounded(300);
 
         Self {
             input: input.to_string(),
@@ -119,7 +117,6 @@ impl ChunkedHevcEncoder {
             frame_queue: VecDeque::new(),
             parser: HevcParser::new(),
             encoder_str: string.clone(),
-            framerate, 
             gop_size, 
             intra_refresh, 
         }
@@ -135,7 +132,9 @@ impl ChunkedHevcEncoder {
     /// Each complete frame is sent via the async channel.
 
     pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
-        let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
+        // let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
+        
+        let bitrate_adjusted_fps = bitrate_mbps; 
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
@@ -1888,9 +1887,31 @@ impl<H: Serialize> StreamSender<H> {
     ) -> Result<Buffer<H>> {
         let _id_frame_files_ref = id_frame + 1;
 
+         // Decide the suffix based on framerate
+        let fps_suffix: &'static str = match framerate.round() as u32 {
+            60  => "_60fps",
+            90  => "_90fps",
+            120 => "_120fps",
+            _   => "", // default: leave as-is if unexpected fps
+        };
+         // Compose filename with suffix
+        let file_with_fps;
+
+        if final_file == "snow"{
+            file_with_fps  = format!("{final_file}{fps_suffix}"); 
+        }
+        else{
+            file_with_fps = final_file.to_string(); 
+        }
+
         let input_path = &format!(
-            "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{final_file}.mp4"
+            "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{file_with_fps}.mp4"
         );
+        // Check existence
+        if !std::path::Path::new(&input_path).exists() {
+            return Err(anyhow::anyhow!("Input file does not exist: {}", input_path));
+        }
+        // println!("[DBG FILENAME] IS {}", file_with_fps); 
 
         let mut buffer: Vec<u8> = Vec::new();
         // print_pretty!(
@@ -1899,8 +1920,6 @@ impl<H: Serialize> StreamSender<H> {
         //     // self.
         //     _id_frame_files_ref
         // );
-
-
 
         if USE_FFMPEG {
             if self.ffmpeg_encoder.is_none() {
