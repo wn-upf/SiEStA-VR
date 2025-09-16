@@ -16,12 +16,12 @@ num_close_users=( 0 )     ## number of users with alternate distance
 N_XR=( 1 ) 
 PL=0.1
 
-fps_list=( 90.0 )
+fps_list=( 120.0 90.0 )
 initial_bitrate_mbps=( 80.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
 
-ABR_ENABLED=( 0 )
+ABR_ENABLED=( 0 1 2)
 nest_profiles=( 1 )
 
 # nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
@@ -34,9 +34,8 @@ video_samples=("snow")
 N_BGs=(0)
 IS_UL_BG=(0)
 
-intrarefresh_choice=(0 1 )
+intrarefresh_choice=( 1 )
 GoP_sizes=(90)
-
 
 everest_tests=1
 # Define the function to execute on Ctrl+C

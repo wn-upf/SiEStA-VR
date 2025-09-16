@@ -8,7 +8,7 @@ use rand::rngs::StdRng;
 use rand::{Rng};
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
-use crate::{debug_debug,
+use crate::{debug_debug, print_magenta,
     //  print_brown
     };
 use image::{ImageBuffer, Rgb};
@@ -2156,7 +2156,7 @@ impl XRServer {
     pub fn session_end(&mut self, _delay: f64, context: &Context<Self>) {
         let now = context.scheduler.time();
         print_red!(
-            "[XRServer {}] Ending session at {:.3}s",
+            "[XRServer {}] Ending session at {:.8}s",
             self.ip_self,
             format_elapsed!(now), 
         );
@@ -2496,6 +2496,12 @@ impl XRServer {
             // let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
 
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
+            
+            if self.video_app_sender.is_none(){
+                        println!("CATCH NO VIDEO APP SENDER"); 
+                        return;
+                    }
+            
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
 
@@ -3226,7 +3232,7 @@ impl XRClient {
 
         pub async fn session_end(&mut self, pause_time: f64, context: &Context<Self>) {
             let now = context.scheduler.time();
-            println!("[XRClient {}] Ending session at {:.3}s", self.server_ip, format_elapsed!(now));
+            println!("[XRClient {}] Ending session at {:.8}s", self.server_ip, format_elapsed!(now));
 
             self.is_streaming = false;
             self.input_app_video = None;
@@ -3238,14 +3244,17 @@ impl XRClient {
 
             // Schedule reboot after pause_time
             let delay = Duration::from_secs_f64(pause_time);
+            
+            print_magenta!("[session_end_schedule] delay: {}, now + delay: {} ", delay.as_secs_f64(), format_elapsed!(now + delay), ); 
+            
             context.scheduler
-                .schedule_event(delay, Self::session_reboot, ())
+                .schedule_event(now + delay, Self::session_reboot, ())
                 .unwrap();
     }
 
     pub async fn session_reboot(&mut self, _: (), context: &Context<Self>) {
         let now = context.scheduler.time();
-        println!("[XRClient {}] Rebooting session at {:.3}s", self.server_ip, format_elapsed!(now));
+        println!("[XRClient {}] Rebooting session at {:.7}s", self.server_ip, format_elapsed!(now));
 
         let packet_size = 1400; // or pass from args/config
         self.t_0 = now;
@@ -4865,6 +4874,7 @@ pub struct STA_extended {
     pub received_packet_counter: usize,
 
     pub sta_coordinates: Coords,
+    pub orig_sta_coordinates: Coords, 
     pub does_sta_tx: bool,
 
     pub is_bg_sta: bool,
@@ -4901,7 +4911,7 @@ impl STA_extended {
             mean_length_packets_BG: mean_length_BG,
             num_packets_sent: 0,
             sta_coordinates: coordinates,
-
+            orig_sta_coordinates: coordinates, 
             received_packet_counter: 0,
             does_sta_tx: does_sta_transmit,
             t_0: t0_sim,
@@ -4932,17 +4942,17 @@ impl STA_extended {
             let dx = step * theta.cos();
             let dy = step * theta.sin();
 
-            println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
+            // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
 
             // New candidate position
             let new_x = self.sta_coordinates.x + dx;
             let new_y = self.sta_coordinates.y + dy;
 
             // Boundaries: within ±0.5 m around initial position
-            let min_x = self.sta_coordinates.x - 0.5;
-            let max_x = self.sta_coordinates.x + 0.5;
-            let min_y = self.sta_coordinates.y - 0.5;
-            let max_y = self.sta_coordinates.y + 0.5;
+            let min_x = self.orig_sta_coordinates.x - 0.5;
+            let max_x = self.orig_sta_coordinates.x + 0.5;
+            let min_y = self.orig_sta_coordinates.y - 0.5;
+            let max_y = self.orig_sta_coordinates.y + 0.5;
 
             // Reflect if out of bounds
             self.sta_coordinates.x = if new_x < min_x {

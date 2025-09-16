@@ -42,7 +42,7 @@ use rand::{SeedableRng};
 //     }
 // }
 
-const DEBUG_EDCA: bool = true; 
+const DEBUG_EDCA: bool = false; 
 
 #[macro_export]
 macro_rules! debug_edca {
@@ -1636,7 +1636,7 @@ impl DcfStats {
     /// Call after a **collision or PHY-error** that requires a retry.
     pub fn on_failure(&mut self) -> bool {
 
-        print_red!("PHY collision or err: {:#?}", self); 
+        // print_red!("PHY collision or err: {:#?}", self); 
         self.retry_count += 1;
         if self.retry_count > MAX_RETRIES_MAC {
             // drop MSDU – tell caller to flush the head-of-line
@@ -1933,7 +1933,7 @@ impl QueueModule {
                 if DEBUG_EDCA {
                     log_edca(
                         key,
-                        &format!("\tcountdown {} -> {}", prev, st.backoff_counter)
+                        &format!(" countdown {} -> {}", prev, st.backoff_counter)
                 );
                 }
             }

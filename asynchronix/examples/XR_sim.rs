@@ -234,7 +234,9 @@ fn generate_session_timeline<R: Rng>(
     let mut sessions = Vec::new();
 
     while t < stoptime {
-        let dur = rng.gen_range(90.0..=110.0);
+        // let dur = rng.gen_range(90.0..=110.0);
+        let dur = rng.gen_range(10.0..=15.0);
+
         let pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
 
         let start = t;
@@ -556,8 +558,12 @@ fn main() {
         let init: f64 = SIM_START_TIME as f64; 
         let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
-        for (start, end) in sessions {
-            // Schedule client start
+        print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
+        let mut sessions = sessions;
+        sessions.sort_by(|a,b| a.0.partial_cmp(&b.0).unwrap());
+
+        for (idx, (start, end)) in sessions.iter().copied().enumerate() {
+            // ---- Schedule client start ----
             scheduler.schedule_event(
                 Duration::from_secs_f64(start),
                 XRClient::configure_streams,
@@ -565,7 +571,6 @@ fn main() {
                 addr_client,
             ).unwrap();
 
-            // Schedule vsync start alongside
             scheduler.schedule_event(
                 Duration::from_secs_f64(start),
                 XRClient::vsync,
@@ -573,31 +578,52 @@ fn main() {
                 addr_client,
             ).unwrap();
 
-            // Schedule client end
-            let pause = end - start;
-            scheduler.schedule_event(
-                Duration::from_secs_f64(end),
-                XRClient::session_end,
-                pause,
-                addr_client,
-            ).unwrap();
+            // ---- Look ahead to compute the reboot pause AFTER this session ----
+            let pause_after = if let Some((next_start, _next_end)) = sessions.get(idx + 1) {
+                let gap = next_start - end;
+                if gap < 0.0 {
+                    eprintln!("[warn] Overlapping sessions: end {:.3} > next start {:.3}, clamping gap to 0.", end, next_start);
+                    0.0
+                } else {
+                    gap
+                }
+            } else {
+                // Last session: choose what “pause” means.
+                // Use 0.0 if your session_end handler doesn’t need trailing idle,
+                // or stoptime - end if you want the final idle time as the pause.
+                // 0.0 is safest:
+                0.0
+                // or: (stoptime - end).max(0.0)
+            };
 
-            // Schedule server start
-            let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, i as u8, 2));
-            scheduler.schedule_event(
-                Duration::from_secs_f64(start),
-                XRServer::connection_pipeline,
-                dest_ip,
-                addr_server,
-            ).unwrap();
+            println!("START AND END: {} and {} -> PauseAfter: {}", start, end, pause_after);
 
-            scheduler.schedule_event(
-                Duration::from_secs_f64(end),
-                XRServer::session_end,
-                pause,
-                addr_server,
-            ).unwrap();
-        }
+                // ---- Schedule client end with the correct pause_after ----
+                scheduler.schedule_event(
+                    Duration::from_secs_f64(end),
+                    XRClient::session_end,
+                    pause_after,
+                    addr_client,
+                ).unwrap();
+
+                // ---- Server: start and end mirroring client ----
+                let dest_ip = IpAddr::V4(Ipv4Addr::new(127, 0, idx as u8, 2));
+                scheduler.schedule_event(
+                    Duration::from_secs_f64(start),
+                    XRServer::connection_pipeline,
+                    dest_ip,
+                    addr_server,
+                ).unwrap();
+
+                scheduler.schedule_event(
+                    Duration::from_secs_f64(end),
+                    XRServer::session_end,
+                    pause_after,
+                    addr_server,
+                ).unwrap();
+            }
+       
+
     }    
     // Use saved addresses for movement
     if test_distances_everest_bool{
