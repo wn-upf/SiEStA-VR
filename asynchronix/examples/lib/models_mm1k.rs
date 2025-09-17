@@ -1589,7 +1589,7 @@ fn aifs(p: EdcaParam) -> Duration {
 
 pub const EDCA_TABLE: [EdcaParam; 4] = [
     /* VO */ EdcaParam { cw_min:  3,  cw_max:  7,  aifsn: 2, txop_limit_us:  1504 },
-    /* VI */ EdcaParam { cw_min:  7,  cw_max: 15, aifsn: 2, txop_limit_us:  3008 },
+    /* VI */ EdcaParam { cw_min:  7,  cw_max: 15, aifsn: 2,   txop_limit_us:  3008 },
     /* BE */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 3, txop_limit_us:    0 },
     /* BK */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 7, txop_limit_us:    0 },
 ];
@@ -1962,7 +1962,6 @@ impl QueueModule {
         EdcaAc::Voice => 0, EdcaAc::Video => 1, EdcaAc::BestEffort => 2, EdcaAc::Background => 3
     }}
 
-
     fn resolve_virtual_collision(&mut self, mut ready: Vec<MacKey>) -> Vec<MacKey> {  // Collisions when same STA has several ACs winning backoff  
 
         let mut winner = HashMap::<i32, MacKey>::new();  // sta_id → winning AC
@@ -2059,11 +2058,10 @@ impl QueueModule {
         let elapsed = context.scheduler.time();
         self.shared_medium.release_txop(elapsed);
 
-        crate::print_brown!("{} | [TXOP END] last_owner={:?}",
-                format_elapsed!(elapsed), self.shared_medium.last_owner());
+        // crate::print_brown!("{} | [TXOP END] last_owner={:?}", format_elapsed!(elapsed), self.shared_medium.last_owner());
         debug_debug!(
             DebugColor::Red,
-            "{} [DBG TX]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
+            "{} [DBG TXOP]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
             format_elapsed!(elapsed),
             AMPDU_sent.sta_dest_id,
             AMPDU_sent.mpdu_packets.len(),
@@ -2129,6 +2127,13 @@ impl QueueModule {
         // Iterate over packets in the queue to compute STA metrics
         for packet in self.queue.iter() {
             let key = (packet.sta_src_id, packet.sta_dest_id);
+            
+            let is_ul = packet.sta_src_id > packet.sta_dest_id; 
+            let mac_key_edca = if is_ul {
+                (packet.sta_src_id, packet.edca_ac)
+            } else {
+                (-1, packet.edca_ac)
+            };
 
             // Calculate transmission delay for a single packet
             let resultz = airtime_ampdu(
@@ -2138,6 +2143,8 @@ impl QueueModule {
                 packet.sta_src_coords,
                 self.p_tx,
             );
+            
+            let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
 
             // Binary search to find the maximum number of packets that fit within T_MAX_AGG
             let mut low = 1;
@@ -2161,7 +2168,7 @@ impl QueueModule {
                     self.p_tx,
                 );
 
-                if test_resultz <= DEFAULT_TMAX_AGG {
+                if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca {
                     optimal_n_packets = mid;
                     resultz_full_ampdu = test_resultz;
                     low = mid + 1;
@@ -2195,7 +2202,6 @@ impl QueueModule {
             entry.expected_queue_delivery_ms =
                 entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
         }
-
         sta_packets
     }
 
@@ -2278,28 +2284,27 @@ impl QueueModule {
                             P_TX,
                         );
                     }
+                    let cap_s_edca = self.txop_cap_secs(&mac_key);
 
-                    let cap_s = self.txop_cap_secs(&mac_key);
-
-                    if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s {
-                        debug_debug!(
-                            DebugColor::DarkRed,
-                            "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3}",
-                            new_size,
-                            MAX_AMPDU_SIZE,
-                            resultz * 1000.0,
-                            DEFAULT_TMAX_AGG * 1000.0
-                        );
+                    if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s_edca {
+                        // print_red!(
+                        //     // DebugColor::DarkRed,
+                        //     "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3} ms (EDCA_AC: {:?} )",
+                        //     new_size,
+                        //     MAX_AMPDU_SIZE,
+                        //     resultz * 1000.0,
+                        //     f64::min(DEFAULT_TMAX_AGG * 1000.0, cap_s_edca * 1000.0), 
+                        //     mac_key.1, 
+                        // );
                         break;
                     }
+
                     // Instead of removing the packet, clone it and update clone metadata.
                     let mut cloned_packet = current_packet.clone();
                     cloned_packet.original_index = packet_index; // record original index
                     cloned_packet.queue_length_when_out = self.queue.len();
                     cloned_packet.queue_out_instant = now;
-
                     cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
-                    
                     
                     // Update stats before moving packet
                     if let Some(stats_tx) = &self.stats_tx {
@@ -2590,10 +2595,10 @@ impl QueueModule {
 
                     self.shared_medium.occupy_collision(now + T_col_dur);
                   
-                    print_red!("{} | **************[COLLISION]**********\ncontenders={} -> busy_until={}, owner=None",
-                        format_elapsed!(now),
-                        contenders.len(),
-                        format_elapsed!(now + T_col_dur));
+                    // print_red!("{} | **************[COLLISION]**********\ncontenders={} -> busy_until={}, owner=None",
+                    //     format_elapsed!(now),
+                    //     contenders.len(),
+                    //     format_elapsed!(now + T_col_dur));
                   
                     for key in contenders {
                        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
@@ -2663,8 +2668,7 @@ impl QueueModule {
                 // self.shared_medium.occupy_until(now + ampdu_airtime);
 
                 self.shared_medium.start_txop( now + ampdu_airtime, winner_key);
-                crate::print_green!("{} | [TXOP START] owner={:?} until={}",
-                    format_elapsed!(now), winner_key, format_elapsed!(now + ampdu_airtime));
+                // crate::print_green!("{} | [TXOP START] owner={:?} until={}", format_elapsed!(now), winner_key, format_elapsed!(now + ampdu_airtime));
 
                 // Freeze everyone while TXOP is in progress and record when medium will stop being busy
                 if let Ok(mut map) = self.array_dcf_values.lock() {

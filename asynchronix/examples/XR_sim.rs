@@ -557,7 +557,7 @@ fn main() {
         let init: f64 = SIM_START_TIME as f64; 
         let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
-        print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
+        // print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
         let mut sessions = sessions;
         sessions.sort_by(|a,b| a.0.partial_cmp(&b.0).unwrap());
 
@@ -595,7 +595,7 @@ fn main() {
                 // or: (stoptime - end).max(0.0)
             };
 
-            println!("START AND END: {} and {} -> PauseAfter: {}", start, end, pause_after);
+            // println!("START AND END: {} and {} -> PauseAfter: {}", start, end, pause_after);
 
                 // ---- Schedule client end with the correct pause_after ----
                 scheduler.schedule_event(

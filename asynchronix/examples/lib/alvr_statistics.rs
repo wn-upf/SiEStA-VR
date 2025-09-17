@@ -407,6 +407,7 @@ impl StatisticsManager {
             requested_bps: current_bitrate_target_mbps,
 
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
+            decoder_jitterbuffer_level: network_stats.buffer_level_decoder, 
         };
 
         // debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);
@@ -438,13 +439,13 @@ impl StatisticsManager {
         if file.metadata()?.len() == 0 {
             writeln!(
                 file,
-                "timestamp,frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput"
+                "timestamp,frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput,decoder_jitterbuffer_level"
             )?;
         }
 
         // Prepare the data line to write to the CSV
         let data_line = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.last_stats.timestamp,                      // frame_index
             self.last_stats.frame_index,                    // frame_index
             self.last_stats.frame_size_bytes,               // frame_size_bytes
@@ -464,6 +465,7 @@ impl StatisticsManager {
             self.last_stats.peak_network_throughput_bps,    // peak_network_throughput_bps
             self.last_stats.requested_bps,                  // nominal_bitrate
             self.interval_avg_plot_throughput,              // interval_avg_plot_throughput
+            self.last_stats.decoder_jitterbuffer_level,     // Frames in Jitter buffer on RX (right before pushing current frame)
         );
 
         // Write the data line to the CSV file

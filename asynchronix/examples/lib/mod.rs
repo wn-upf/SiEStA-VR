@@ -2157,6 +2157,7 @@ pub struct GraphNetworkStatisticsCsv {
     pub requested_bps: f32,
 
     pub interval_avg_plot_throughput: f32,
+    pub decoder_jitterbuffer_level: u8, 
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

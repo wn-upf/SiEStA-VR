@@ -213,6 +213,7 @@ pub struct NetworkStatisticsPacket {
     pub everest_dshort: f32, 
     pub everest_dlong: f32, 
     pub everest_command: EverestCommand, 
+    pub buffer_level_decoder: u8, 
 
     pub edca_ac: EdcaAc, 
     // pub tx_instant: f64,

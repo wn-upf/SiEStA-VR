@@ -54,7 +54,7 @@ pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 
 pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
 // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-pub const CHUNK_DURATION_F64_S: f64 = 1.5;
+pub const CHUNK_DURATION_F64_S: f64 = 1.0;
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 80.0;

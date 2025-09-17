@@ -112,7 +112,7 @@ pub const CAPACITY_RX_BUFFER: usize = 2000;
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
-pub const DECODER_BUFFERING_FRAMES: usize = 10;
+pub const DECODER_BUFFERING_FRAMES: usize = 3;
 pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
 
 #[allow(unused)]                                                                                    
@@ -1824,7 +1824,7 @@ impl BitrateManager {
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>) -> f32 {
 
-        const TIME_WARMUP_ABR: u64 = 13; 
+        const TIME_WARMUP_ABR: u64 = 11; 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
             println!("No ABR (warmup) {} -> {}", format_elapsed!(now), TIME_WARMUP_ABR); 
             let bitrate_bps = self.last_target_bitrate_bps; 
@@ -1936,7 +1936,7 @@ impl BitrateManager {
 
                     let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
 
-                    print_yellow!("nfr_avg = {}, rtt_avg = {} ms, r_inc = {}, r_rtt = {}, STEP SIZE = {} Mbps", nfr_avg, rtt_avg_ms, r_inc, r_rtt, self.bitrate_step_size_bps_nest / 1e6 ); 
+                    // print_yellow!("nfr_avg = {}, rtt_avg = {} ms, r_inc = {}, r_rtt = {}, STEP SIZE = {} Mbps", nfr_avg, rtt_avg_ms, r_inc, r_rtt, self.bitrate_step_size_bps_nest / 1e6 ); 
 
                     if nfr_avg < profile_config.nfr_thresh {
                         // decrease
@@ -1963,7 +1963,7 @@ impl BitrateManager {
                             }
                         }
                     }
-                    print_pink!("bitrate in Mbps after Nest: {}", bitrate_bps / 1e6); 
+                    print_pink!("bitrate after Nest: {} Mbps", bitrate_bps / 1e6); 
                     // Ensure bitrate is below the estimated network capacity
                     let capacity_upper_limit =
                         profile_config.capacity_scaling_factor * estimated_capacity_bps;
@@ -2512,7 +2512,9 @@ impl XRServer {
 
                 // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
                 
-                let duration_abr = Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL * FRAMERATE_WINDOWS as f64 / self.fps as f64); 
+                let duration_abr = Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL); 
+
+                // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32()); 
 
                 let count = get_counter().fetch_add(1, Ordering::Relaxed);
    
@@ -3830,8 +3832,10 @@ impl XRClient {
                         everest_throughput_update: everest_throughput, 
                         everest_dshort: self.d_short_exp_avg, 
                         everest_dlong: self.d_long_exp_avg, 
-                        everest_command: command_abr_everest, 
+                        everest_command: command_abr_everest,
+                        buffer_level_decoder: self.decoder_queue.len() as u8,  
                         edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
+                        
                     };
 
                     if self.last_throughput_avg == 0.0 {
@@ -4420,16 +4424,16 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            debug_debug!(
-                                DebugColor::Violet,
-                                "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
-                                format_elapsed!(now),
-                                ip_client,
-                                id_f,
-                                video_frame.len(),
-                                self.decoder_queue.len(),
-                                interarrival.as_secs_f32(),
-                            );
+                            // crate::print_magenta!(
+                            //     // DebugColor::Violet,
+                            //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                            //     format_elapsed!(now),
+                            //     ip_client,
+                            //     id_f,
+                            //     video_frame.len(),
+                            //     self.decoder_queue.len(),
+                            //     interarrival.as_secs_f32(),
+                            // );
                         }
 
                         if let Some(decoder_arc) = self.original_decoder.clone(){
@@ -4534,9 +4538,9 @@ impl XRClient {
                  self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
             } else { // Decoder queue was empty
-                print_pretty!(
-                    DebugColor::Yellow,
-                    "Decoder queue empty. T_VSYNC: {:.3} ms", T_vsync.as_secs_f32() * 1000.0
+                print_red!(
+                    // DebugColor::Yellow,
+                    "[CLIENT {}] Decoder queue empty. T_VSYNC: {:.3} ms", self.server_ip,  T_vsync.as_secs_f32() * 1000.0
                 );
 
             } // End if let Some((id_f, video_frame))
@@ -4972,7 +4976,7 @@ impl STA_extended {
             };
 
             // z stays constant (HMD height)
-            println!("Coordinates After dt: {:?}", self.sta_coordinates);
+            // println!("Coordinates After dt: {:?}", self.sta_coordinates);
 
             context
                 .scheduler
