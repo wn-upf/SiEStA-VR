@@ -160,7 +160,9 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                .args(&["-preset", "fast"])
+                // .args(&["-preset", "fast"])
+                .args(&["-preset", "llhq"])
+
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
@@ -190,7 +192,9 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                .args(&["-preset", "fast"])
+                // .args(&["-preset", "fast"])
+                .args(&["-preset", "llhq"])
+
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
