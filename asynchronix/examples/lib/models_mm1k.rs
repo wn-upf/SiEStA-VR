@@ -2389,8 +2389,7 @@ impl QueueModule {
                 }
             }
 
-            if DEBUG_PRINT_ENABLED 
-            {
+            if DEBUG_PRINT_ENABLED {
                 print_yellow!(
                     "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
                     format_elapsed!(now),

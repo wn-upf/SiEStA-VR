@@ -90,6 +90,46 @@ use super::get_third_octet;
 // use async_process::Child;
 
 
+
+fn hide_by_title_with_wmctrl(title: &str) {
+    let _ = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg(format!("wmctrl -r \"{}\" -b add,hidden", title))
+        .status();
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn send_window_to_background(win: &minifb::Window) {
+    // On X11: minimize the window right after creation.
+    // This avoids focus-stealing distractions while your script runs.
+    unsafe {
+        use std::ptr;
+        use x11::xlib::{
+            XOpenDisplay, XDefaultScreen, XIconifyWindow, XFlush, XCloseDisplay,
+            Window as XWindow,
+        };
+
+        // minifb returns the OS handle as *mut c_void. For X11 it's the XWindow (an integer)
+        // casted to a pointer. Convert back via usize -> XWindow.
+        let w: XWindow = (win.get_window_handle() as usize) as XWindow;
+
+        let display = XOpenDisplay(ptr::null());
+        if !display.is_null() {
+            let screen = XDefaultScreen(display);
+            // Ask the WM to iconify (minimize) this window
+            XIconifyWindow(display, w, screen);
+            XFlush(display);
+            XCloseDisplay(display);
+        }
+    }
+}
+
+
+
+
+
+
+
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
 
@@ -1963,7 +2003,7 @@ impl BitrateManager {
                             }
                         }
                     }
-                    print_pink!("bitrate after Nest: {} Mbps", bitrate_bps / 1e6); 
+                    print_pink!("bitrate after Nest: {} Mbps", f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps )); 
                     // Ensure bitrate is below the estimated network capacity
                     let capacity_upper_limit =
                         profile_config.capacity_scaling_factor * estimated_capacity_bps;
@@ -4473,6 +4513,7 @@ impl XRClient {
                                                 WindowOptions::default()
                                             ) {
                                                 Ok(window) => {
+                                                    // hide_by_title_with_wmctrl(&window_title);
                                                     windows.insert(self.server_ip.clone(), window);
                                                     print_pretty!(DebugColor::Green,
                                                         "Created display window for {} ({} x {})", 
@@ -4936,7 +4977,7 @@ impl STA_extended {
 
             let mut rng = rand::thread_rng();
 
-            let delta_t = 0.1; // 0.1 seconds dt is reasonable? 
+            let delta_t = 0.01; //  is reasonable? 
 
             // Step length = speed * delta_t
             let step = 5.0 * delta_t;

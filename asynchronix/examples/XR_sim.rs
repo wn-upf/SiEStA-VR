@@ -230,9 +230,11 @@ fn generate_session_timeline<R: Rng>(
     sim_init_time: f64, 
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
-    let mut t = sim_init_time;
-    let mut sessions = Vec::new();
+    let start_time_pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
 
+    let mut t = start_time_pause;
+    let mut sessions = Vec::new();
+    
     while t < stoptime {
         let dur = rng.gen_range(90.0..=110.0);
 
@@ -557,7 +559,7 @@ fn main() {
         let init: f64 = SIM_START_TIME as f64; 
         let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
-        // print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
+        print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
         let mut sessions = sessions;
         sessions.sort_by(|a,b| a.0.partial_cmp(&b.0).unwrap());
 

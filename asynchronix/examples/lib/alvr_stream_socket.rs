@@ -48,7 +48,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 // use super::alvr_packets::NetworkStatisticsPacket;
 
 
-pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 from input args to simulator
+pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring these 2 from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
@@ -1407,7 +1407,6 @@ impl StreamSocket {
         }
 
         if ALVR_ORIGINAL_SOCKETRX_BEHAVIOR{
-            
              // Keep only shards with later packet index (using wrapping logic)
              while let Some((idx, inprog)) = components.in_progress_packets.iter().find(|(idx, _)| {
                 wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
@@ -1424,11 +1423,8 @@ impl StreamSocket {
                 components.used_buffer_sender.send(packet.buffer).ok();
             }
         }
-
-
         // Mark current shard as read and allow for a new shard to be read
         self.shard_recv_state = None;
-
         Ok(())
     }
 }
