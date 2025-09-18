@@ -2,18 +2,35 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
-#SBATCH --gres=gpu:1             # request 1 GPU
+#SBATCH --gres=gpu:1              
 #SBATCH --ntasks=1               # total number of tasks
 #SBATCH --tasks-per-node=1       # tasks per node
-#SBATCH --mem=128G                # memory
-#SBATCH --time=48:00:00          # max walltime (adjust!)
-
+#SBATCH --mem=128G               # memory
+#SBATCH --time=24:00:00          # max walltime (adjust!)
+#SBATCH --constraint=nvenc
 # Optional: log files
-#SBATCH -o logs/%x_%j.out
-#SBATCH -e logs/%x_%j.err
+#SBATCH -o logs_hpc/%x_%j.out
+#SBATCH -e logs_hpc/%x_%j.err
 
-NUMBER_OF_JOBS=2
-SERIAL_EXECUTION=1
+source ~/.bashrc
+module load CUDA
+module load x265
+module load x264
+
+
+
+echo "=== Allocation debug ==="
+hostname
+which nvidia-smi || true
+nvidia-smi || true
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-unset}"
+echo "SLURM_STEP_GPUS=${SLURM_STEP_GPUS:-unset}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+ls -l /dev/nvidia* || true
+echo "========================"
+
+NUMBER_OF_JOBS=4
+SERIAL_EXECUTION=0
 
 # initial_bitrate_mbps=( 100.0 )
 
@@ -95,8 +112,8 @@ for test in "${TEST_TYPE[@]}"; do
                                                                 echo           ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                script -c "cargo run --release --example XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests" "out_log.ans"
-                                                                sleep 1
+                                                                cargo run --release --example XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
+                                                                sleep 5
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*
                                                             

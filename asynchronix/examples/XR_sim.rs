@@ -252,6 +252,9 @@ fn generate_session_timeline<R: Rng>(
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
+
+    // println!("CUDA_VISIBLE_DEVICES={:?}", std::env::var("CUDA_VISIBLE_DEVICES"));
+
     let args: Vec<String> = env::args().collect();
     if args.len() != 22 {
         eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue>
