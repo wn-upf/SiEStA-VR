@@ -2,12 +2,12 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
-#SBATCH --gres=gpu:1              
+#SBATCH --gres=gpu:1 
+#SBATCH --constraint=nvenc
 #SBATCH --ntasks=1               # total number of tasks
 #SBATCH --tasks-per-node=1       # tasks per node
 #SBATCH --mem=128G               # memory
 #SBATCH --time=24:00:00          # max walltime (adjust!)
-#SBATCH --constraint=nvenc
 # Optional: log files
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
@@ -109,10 +109,10 @@ for test in "${TEST_TYPE[@]}"; do
 
                                                             if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder"
-                                                                echo           ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests >> "$temp_file"
+                                                                echo srun ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                cargo run --release --example XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
+                                                                srun ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
                                                                 sleep 5
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*
@@ -140,7 +140,7 @@ echo "Contents of temp file:"
 cat "$temp_file"
 echo " --- Number of simulations: $SIM_COUNT --- \n"
 
-shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS"
+shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
 # parallel -j "$NUMBER_OF_JOBS" < "$temp_file"
 rm "$temp_file"
 

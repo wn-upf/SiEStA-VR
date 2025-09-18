@@ -1816,7 +1816,7 @@ impl HevcParser {
 
 // use super::alvr_packets::NetworkStatisticsPacket;
 
-pub struct ChunkedHevcEncoder {
+pub struct ChunkedOldHevcEncoder {
     input: String,
     width: u32,
     height: u32,
@@ -1836,7 +1836,7 @@ pub struct ChunkedHevcEncoder {
 
 }
 #[allow(unused)]
-impl ChunkedHevcEncoder {
+impl ChunkedOldHevcEncoder {
     pub fn new(
         input: &str,
         width: u32,
@@ -1849,7 +1849,7 @@ impl ChunkedHevcEncoder {
         fps_desired: f32, 
 
     ) -> Self {
-        println!("Initializing chunkedhevcencoder");
+        println!("Initializing ChunkedOldHevcEncoder");
         let (frame_tx, frame_rx) = bounded(100);
 
         Self {
@@ -2068,7 +2068,7 @@ fn make_encoder_task(
 ) {
     task::spawn(async move {
         // 1️⃣ Create your encoder
-        let mut enc = ChunkedHevcEncoder::new(
+        let mut enc = ChunkedOldHevcEncoder::new(
             &video_path,
             WIDTH_ENCODER as u32,
             HEIGHT_ENCODER as u32,
