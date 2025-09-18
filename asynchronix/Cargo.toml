@@ -109,7 +109,6 @@ dashmap = "6.1.0"
 sdl2 = "0.35"
 minifb = "0.22"
 tokio = { version = "1.0", features = ["full"]}
-ffmpeg-next = "7.1.0"
 
 [target.'cfg(asynchronix_loom)'.dev-dependencies]
 loom = "0.5"

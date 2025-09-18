@@ -1,3 +1,17 @@
+#!/bin/bash
+#SBATCH -J xr_sims               # job name
+#SBATCH --partition=high         # partition
+#SBATCH --nodes=1                # number of nodes
+#SBATCH --gres=gpu:1             # request 1 GPU
+#SBATCH --ntasks=1               # total number of tasks
+#SBATCH --tasks-per-node=1       # tasks per node
+#SBATCH --mem=128G                # memory
+#SBATCH --time=48:00:00          # max walltime (adjust!)
+
+# Optional: log files
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+
 NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 

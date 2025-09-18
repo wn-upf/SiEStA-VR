@@ -4467,16 +4467,16 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            // crate::print_magenta!(
-                            //     // DebugColor::Violet,
-                            //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
-                            //     format_elapsed!(now),
-                            //     ip_client,
-                            //     id_f,
-                            //     video_frame.len(),
-                            //     self.decoder_queue.len(),
-                            //     interarrival.as_secs_f32(),
-                            // );
+                            crate::print_magenta!(
+                                // DebugColor::Violet,
+                                "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                                format_elapsed!(now),
+                                ip_client,
+                                id_f,
+                                video_frame.len(),
+                                self.decoder_queue.len(),
+                                interarrival.as_secs_f32(),
+                            );
                         }
 
                         if let Some(decoder_arc) = self.original_decoder.clone(){
