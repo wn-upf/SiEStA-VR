@@ -1,4 +1,4 @@
-NUMBER_OF_JOBS=3
+NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 
 # initial_bitrate_mbps=( 100.0 )
@@ -13,28 +13,28 @@ rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=( 1 ) 
+N_XR=( 2 4 6 8 ) 
 PL=0.1
 
-fps_list=( 120.0 90.0 )
-initial_bitrate_mbps=( 80.0 )
+fps_list=( 90.0 )
+initial_bitrate_mbps=( 10.0 20.0 40.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
 
-ABR_ENABLED=( 0 1 2)
-nest_profiles=( 1 )
+ABR_ENABLED=( 0 )
+nest_profiles=( 1 ) ## balanced and that's it
 
 # nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
 #                                                  1 => {NestVrProfile::Balanced},
 #                                                  2 => {NestVrProfile::Anxious},
-RANDOM_SEEDS=( 1 2 3 )
+RANDOM_SEEDS=( 1 2 3 4 5)
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")
 N_BGs=(0)
 IS_UL_BG=(0)
 
-intrarefresh_choice=( 1 )
+intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
 GoP_sizes=(90)
 
 everest_tests=1

@@ -238,6 +238,24 @@ macro_rules! print_brown {
 }
 
 
+use std::env; 
+
+
+fn get_prefix_path(directory: &str) -> String{
+
+   let home = env::var("HOME").unwrap_or_default();
+
+    if home.contains("fmaura") {
+        // HPC user
+        format!("{}/simulator_asynchronix/asynchronix/{}", home, directory)
+    } else if home.contains("boris") {
+        // Local Ubuntu user
+        format!("{}/Desktop/Rust_MG1/asynchronix/{}", home, directory)
+    } else {
+        panic!("Unknown environment, cannot set input path");
+    }
+}
+
 
 // use crate::lib::alvr_stream_socket::ConResult;
 #[allow(unused)]

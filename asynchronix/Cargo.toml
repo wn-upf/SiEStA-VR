@@ -84,6 +84,8 @@ image-compare = "0.4.1"
 image = "0.25.5"
 async-semaphore = "1.2.1"
 walkdir = "2.5.0"
+raw-window-handle = "0.6.2"
+x11 = "2.21.0"
 
 
 [dev-dependencies]

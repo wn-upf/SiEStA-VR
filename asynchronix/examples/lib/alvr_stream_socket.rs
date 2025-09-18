@@ -6,7 +6,7 @@ use std::io::{Read};
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use crate::lib::{get_third_octet, HevcParser};
+use crate::lib::{get_third_octet, HevcParser, get_prefix_path};
 use crate::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use std::io::BufReader;
@@ -46,6 +46,10 @@ use csv::Writer;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 // use super::alvr_packets::NetworkStatisticsPacket;
+use std::env;
+
+
+
 
 
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring these 2 from input args to simulator
@@ -1889,9 +1893,9 @@ impl<H: Serialize> StreamSender<H> {
 
          // Decide the suffix based on framerate
         let fps_suffix: &'static str = match framerate.round() as u32 {
-            60  => "_60fps",
-            90  => "_90fps",
-            120 => "_120fps",
+            60  =>  "_60fps.mp4",
+            90  =>  "_90fps.mp4",
+            120 => "_120fps.mp4",
             _   => "", // default: leave as-is if unexpected fps
         };
          // Compose filename with suffix
@@ -1904,9 +1908,12 @@ impl<H: Serialize> StreamSender<H> {
             file_with_fps = final_file.to_string(); 
         }
 
-        let input_path = &format!(
-            "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{file_with_fps}.mp4"
-        );
+        
+        let input_path = get_prefix_path(&format!("video_samples_vmaf/{}", file_with_fps)); 
+
+        // let input_path = &format!(
+        //     "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{file_with_fps}.mp4"
+        // );
         // Check existence
         if !std::path::Path::new(&input_path).exists() {
             return Err(anyhow::anyhow!("Input file does not exist: {}", input_path));
@@ -1940,19 +1947,19 @@ impl<H: Serialize> StreamSender<H> {
 
                 if self.csv_trace.path.as_os_str().is_empty() {
                     // one CSV per run – put it next to the hevc files, but anywhere is fine
-                    let csv_path = format!(
-                        "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_offline_video{}.csv",
+                    let csv_path = get_prefix_path( &format!("/Results/{}/trace_offline_video{}.csv",
                         name_folder,
-                        third_octet,
+                        third_octet,)
                     );
 
 
-                    let csv_path_emu = format!(
-                        "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_emu_effects{}.csv",
+                    let csv_path_emu = 
+                    
+                        get_prefix_path(&format!(
+                            "Results/{}/trace_emu_effects{}.csv",
                         name_folder,
                         third_octet,
-                    );
-
+                        ));
                     print_green!("Creating OFFLINE CSV at: {csv_path}", ); 
 
                     let mut wtr = Writer::from_path(&csv_path)?;
@@ -1997,7 +2004,7 @@ impl<H: Serialize> StreamSender<H> {
     
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
-                    input_path,
+                    &input_path,
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
                     &bitrate_cmd,

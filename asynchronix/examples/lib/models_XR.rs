@@ -16,7 +16,7 @@ use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{AveragingStrategy, EdcaAc, HevcParser, WindowType};
+use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc, HevcParser, WindowType};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -4157,10 +4157,10 @@ impl XRClient {
         }
 
         let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
-        let base_dir = &format!(
-            "/home/boris/Desktop/Rust_MG1/asynchronix/Sink_for_video/{}",
+
+        let base_dir = get_prefix_path(&format!("Sink_for_video/{}",
             &self.name_folder
-        );
+        )); 
 
         // Define path to hevc_ref directory
         let hevc_ref_dir = format!("{}/{}/hevc_ref", base_dir, ip);
@@ -4303,12 +4303,15 @@ impl XRClient {
             }
 
             let third_octet = get_third_octet(self.server_ip).unwrap();                 
-            let csv_path = format!(
-                "/home/boris/Desktop/Rust_MG1/asynchronix/Results/{}/trace_offline_video{}.csv",
+
+
+            let csv_path = get_prefix_path(&format!(
+                "Results/{}/trace_offline_video{}.csv",
                 self.name_folder,
                 third_octet,
                 // format_elapsed!(now), 
-            );
+            ));
+
 
             // --------------Initialize offline CSV tracker for frames ------------- 
             if self.offline_csv_trace.writer.is_none() {
@@ -4581,7 +4584,7 @@ impl XRClient {
             } else { // Decoder queue was empty
                 print_red!(
                     // DebugColor::Yellow,
-                    "[CLIENT {}] Decoder queue empty. T_VSYNC: {:.3} ms", self.server_ip,  T_vsync.as_secs_f32() * 1000.0
+                    "[CLIENT {}] Decoder queue empty. T_VSYNC: {:.3} ms", self.server_ip,  now.checked_duration_since(self.last_decoded_frame_instant).unwrap().as_secs_f32() * 1000.0
                 );
 
             } // End if let Some((id_f, video_frame))
