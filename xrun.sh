@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --export=ALL
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
@@ -17,7 +18,7 @@ module load CUDA
 module load x265
 module load x264
 
-
+export PATH=$HOME/.local/bin:$PATH
 
 echo "=== Allocation debug ==="
 hostname
@@ -26,11 +27,14 @@ nvidia-smi || true
 echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-unset}"
 echo "SLURM_STEP_GPUS=${SLURM_STEP_GPUS:-unset}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
-ls -l /dev/nvidia* || true
-echo "========================"
+echo "***********************************"
+echo "Current working directory: $(pwd)"
+
+
+echo "***********************************"
 
 NUMBER_OF_JOBS=4
-SERIAL_EXECUTION=0
+SERIAL_EXECUTION=1
 
 # initial_bitrate_mbps=( 100.0 )
 
@@ -83,7 +87,7 @@ temp_file=$(mktemp)
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
 cargo build --release --example XR_sim
-sleep 2
+sleep 1
 for test in "${TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
         for nxr in "${N_XR[@]}"; do
@@ -112,7 +116,7 @@ for test in "${TEST_TYPE[@]}"; do
                                                                 echo srun ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                srun ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
+                                                                ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
                                                                 sleep 5
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*

@@ -148,6 +148,8 @@ impl ChunkedHevcEncoder {
             self.encoder_str, bitrate_mbps
         );
         self.parser.buffer.clear();
+        // println!("**** AAAA INPUT IS {} *****", self.input);
+
         let mut command = FfmpegCommand::new();
         if self.intra_refresh {
             command
@@ -217,20 +219,22 @@ impl ChunkedHevcEncoder {
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
 
-        if let Some(stderr) = child.take_stderr() {
-            let mut err_reader = std::io::BufReader::new(stderr);
-            std::thread::spawn(move || {
-                for line in err_reader.lines() {
-                    match line {
-                        Ok(l) => println!("ffmpeg stderr: {}", l),
-                        Err(e) => {
-                            eprintln!("Error reading ffmpeg stderr: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
+
+
+        // if let Some(stderr) = child.take_stderr() {
+        //     let mut err_reader = std::io::BufReader::new(stderr);
+        //     std::thread::spawn(move || {
+        //         for line in err_reader.lines() {
+        //             match line {
+        //                 Ok(l) => println!("ffmpeg stderr: {}", l),
+        //                 Err(e) => {
+        //                     eprintln!("Error reading ffmpeg stderr: {}", e);
+        //                     break;
+        //                 }
+        //             }
+        //         }
+        //     });
+        // }
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];
@@ -1947,7 +1951,7 @@ impl<H: Serialize> StreamSender<H> {
 
                 if self.csv_trace.path.as_os_str().is_empty() {
                     // one CSV per run – put it next to the hevc files, but anywhere is fine
-                    let csv_path = get_prefix_path( &format!("/Results/{}/trace_offline_video{}.csv",
+                    let csv_path = get_prefix_path( &format!("Results/{}/trace_offline_video{}.csv",
                         name_folder,
                         third_octet,)
                     );

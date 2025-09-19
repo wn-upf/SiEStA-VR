@@ -252,7 +252,7 @@ fn get_prefix_path(directory: &str) -> String{
         // Local Ubuntu user
         format!("{}/Desktop/Rust_MG1/asynchronix/{}", home, directory)
     } else {
-        format!("/home/fmaura/simulator_asynchronix/asynchronix/{}", directory) // still in HPC, absolute path
+        format!("/gpfs/home/fmaura/simulator_asynchronix/asynchronix/{}", directory) // still in HPC, absolute path
     }
 }
 
