@@ -104,6 +104,97 @@ pub struct StatisticsManager {
     last_stats: GraphNetworkStatisticsCsv,
 
     id_XR: IpAddr,
+
+    csv_sink: CsvSink,
+    // optional: only log every N frames
+    // stats_stride: usize,
+    frame_counter: usize,
+
+
+}
+
+use std::{fs::{ create_dir_all}, io::{BufWriter}, thread,};
+use crossbeam_channel::{bounded, Sender};
+use csv::Writer;
+
+#[derive(serde::Serialize, Clone)]
+struct StatsRow {
+    timestamp: f64,
+    frame_index: usize,
+    frame_size_bytes: usize,
+    server_fps: f32,
+    client_fps: f32,
+    frame_span_ms: f32,
+    interarrival_jitter_ms: f32,
+    ow_delay_ms: f32,
+    filtered_ow_delay_ms: f32,
+    rtt_ms: f32,
+    frame_interarrival_ms: f32,
+    frame_jitter_ms: f32,
+    frames_skipped: u32,
+    shards_lost: isize,
+    shards_duplicated: u32,
+    instant_network_throughput_bps: f32,
+    peak_network_throughput_bps: f32,
+    nominal_bitrate: f32,
+    interval_avg_plot_throughput: f32,
+    decoder_jitterbuffer_level: u8,
+}
+
+struct CsvSink {
+    tx: Sender<StatsRow>,
+}
+
+impl CsvSink {
+    fn new(folder: &str, file_stem: &str) -> std::io::Result<Self> {
+        let dir = Path::new("Results").join(folder);
+        create_dir_all(&dir)?;
+        let path = dir.join(format!("{file_stem}.csv"));
+        // Open once; append without truncation
+        let mut file = OpenOptions::new().create(true).append(true).read(true).open(&path)?;
+        let is_empty = file.metadata()?.len() == 0;
+        let mut wtr = Writer::from_writer(BufWriter::with_capacity(1 << 22, file)); // 4–8 MiB
+
+        // Write header if new file
+        if is_empty {
+            wtr.write_record([
+                "timestamp","frame_index","frame_size_bytes","server_fps","client_fps",
+                "frame_span_ms","interarrival_jitter_ms","ow_delay_ms","filtered_ow_delay_ms",
+                "rtt_ms","frame_interarrival_ms","frame_jitter_ms","frames_skipped",
+                "shards_lost","shards_duplicated","instant_network_throughput_bps",
+                "peak_network_throughput_bps","nominal_bitrate","interval_avg_plot_throughput",
+                "decoder_jitterbuffer_level"
+            ])?;
+            wtr.flush()?;
+        }
+
+        let (tx, rx) = bounded::<StatsRow>(8192); // backpressure instead of swap
+        thread::spawn(move || {
+            // writer thread: batch + timed flush
+            let mut wtr = wtr;
+            let mut since_flush = std::time::Instant::now();
+            let mut batch = 0usize;
+            while let Ok(row) = rx.recv() {
+                // serialize without heap strings
+                if wtr.serialize(row).is_err() { break; }
+                batch += 1;
+                if batch >= 1024 || since_flush.elapsed() >= Duration::from_millis(250) {
+                    let _ = wtr.flush();
+                    batch = 0;
+                    since_flush = std::time::Instant::now();
+                }
+            }
+            let _ = wtr.flush();
+        });
+
+        Ok(Self { tx })
+    }
+
+    #[inline]
+    fn write(&self, row: StatsRow) {
+        // Fast, lock-free path; drops on full queue if you prefer lossy:
+        let _ = self.tx.send(row);
+    }
 }
 
 #[allow(unused)]
@@ -117,6 +208,16 @@ impl StatisticsManager {
         folder: &str,
         ip_self: IpAddr,
     ) -> Self {
+
+
+         fn get_4_octet(ip: IpAddr) -> u8 { match ip { IpAddr::V4(v4) => v4.octets()[2], IpAddr::V6(_) => 0 } }
+        let num = get_4_octet(ip_self);
+        let file_stem = format!("XR_stats_{num:?}");
+
+        let csv_sink = CsvSink::new(folder, &file_stem)
+            .expect("failed to init CSV sink");
+
+
         Self {
             history_buffer: VecDeque::new(),
             max_history_size,
@@ -198,6 +299,8 @@ impl StatisticsManager {
             last_stats: GraphNetworkStatisticsCsv::default(),
 
             id_XR: ip_self,
+            csv_sink,
+            frame_counter: 0,
         }
     }
 
@@ -412,67 +515,93 @@ impl StatisticsManager {
 
         // debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);
 
-        // Call method to save data to CSV
-        if self.save_network_stats_to_csv().is_err() {
-            println!("ERROR HERE CSV!!");
-        }
+        self.frame_counter += 1;
+
+        let row = StatsRow {
+                timestamp: self.last_stats.timestamp,
+                frame_index: self.last_stats.frame_index,
+                frame_size_bytes: self.last_stats.frame_size_bytes,
+                server_fps: self.last_stats.server_fps,
+                client_fps: self.last_stats.client_fps,
+                frame_span_ms: self.last_stats.frame_span_ms,
+                interarrival_jitter_ms: self.last_stats.interarrival_jitter_ms,
+                ow_delay_ms: self.last_stats.ow_delay_ms,
+                filtered_ow_delay_ms: self.last_stats.filtered_ow_delay_ms,
+                rtt_ms: self.last_stats.rtt_ms,
+                frame_interarrival_ms: self.last_stats.frame_interarrival_ms,
+                frame_jitter_ms: self.last_stats.frame_jitter_ms,
+                frames_skipped: self.last_stats.frames_skipped,
+                shards_lost: self.last_stats.shards_lost,
+                shards_duplicated: self.last_stats.shards_duplicated,
+                instant_network_throughput_bps: self.last_stats.instant_network_throughput_bps,
+                peak_network_throughput_bps: self.last_stats.peak_network_throughput_bps,
+                nominal_bitrate: current_bitrate_target_mbps,
+                interval_avg_plot_throughput: self.interval_avg_plot_throughput,
+                decoder_jitterbuffer_level: self.last_stats.decoder_jitterbuffer_level,
+            };
+        self.csv_sink.write(row);
+
+        // // Call method to save data to CSV
+        // if self.save_network_stats_to_csv().is_err() {
+        //     println!("ERROR HERE CSV!!");
+        // }
         return (peak_network_throughput_bps, frame_interarrival);
     }
     // Add a method to save stats to CSV
 
-    pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
-        fn get_4_octet(ip: IpAddr) -> Option<u8> {
-            match ip {
-                IpAddr::V4(ipv4) => Some(ipv4.octets()[2]),
-                IpAddr::V6(_) => None, // Return None for IPv6
-            }
-        }
-        let num = get_4_octet(self.id_XR).unwrap();
-        let file_path = format!("Results/{}/XR_stats_{:?}.csv", self.folder, num);
+    // pub fn save_network_stats_to_csv(&self) -> io::Result<()> {
+    //     fn get_4_octet(ip: IpAddr) -> Option<u8> {
+    //         match ip {
+    //             IpAddr::V4(ipv4) => Some(ipv4.octets()[2]),
+    //             IpAddr::V6(_) => None, // Return None for IPv6
+    //         }
+    //     }
+    //     let num = get_4_octet(self.id_XR).unwrap();
+    //     let file_path = format!("Results/{}/XR_stats_{:?}.csv", self.folder, num);
 
-        let path = Path::new(&file_path);
+    //     let path = Path::new(&file_path);
 
-        // Open the CSV file in append mode or create it if it doesn't exist
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    //     // Open the CSV file in append mode or create it if it doesn't exist
+    //     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
-        // Prepare the header if the file is empty
-        if file.metadata()?.len() == 0 {
-            writeln!(
-                file,
-                "timestamp,frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput,decoder_jitterbuffer_level"
-            )?;
-        }
+    //     // Prepare the header if the file is empty
+    //     if file.metadata()?.len() == 0 {
+    //         writeln!(
+    //             file,
+    //             "timestamp,frame_index,frame_size_bytes,server_fps,client_fps,frame_span_ms,interarrival_jitter_ms,ow_delay_ms,filtered_ow_delay_ms,rtt_ms,frame_interarrival_ms,frame_jitter_ms,frames_skipped,shards_lost,shards_duplicated,instant_network_throughput_bps,peak_network_throughput_bps,nominal_bitrate,interval_avg_plot_throughput,decoder_jitterbuffer_level"
+    //         )?;
+    //     }
 
-        // Prepare the data line to write to the CSV
-        let data_line = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            self.last_stats.timestamp,                      // frame_index
-            self.last_stats.frame_index,                    // frame_index
-            self.last_stats.frame_size_bytes,               // frame_size_bytes
-            self.last_stats.server_fps,                     // server_fps
-            self.last_stats.client_fps,                     // client_fps
-            self.last_stats.frame_span_ms,                  // frame_span_ms
-            self.last_stats.interarrival_jitter_ms,         // interarrival_jitter_ms
-            self.last_stats.ow_delay_ms,                    // ow_delay_ms
-            self.last_stats.filtered_ow_delay_ms,           // filtered_ow_delay_ms
-            self.last_stats.rtt_ms,                         // rtt_ms
-            self.last_stats.frame_interarrival_ms,          // frame_interarrival_ms
-            self.last_stats.frame_jitter_ms,                // frame_jitter_ms
-            self.last_stats.frames_skipped,                 // frames_skipped
-            self.last_stats.shards_lost,                    // shards_lost
-            self.last_stats.shards_duplicated,              // shards_duplicated
-            self.last_stats.instant_network_throughput_bps, // instant_network_throughput_bps
-            self.last_stats.peak_network_throughput_bps,    // peak_network_throughput_bps
-            self.last_stats.requested_bps,                  // nominal_bitrate
-            self.interval_avg_plot_throughput,              // interval_avg_plot_throughput
-            self.last_stats.decoder_jitterbuffer_level,     // Frames in Jitter buffer on RX (right before pushing current frame)
-        );
+    //     // Prepare the data line to write to the CSV
+    //     let data_line = format!(
+    //         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+    //         self.last_stats.timestamp,                      // frame_index
+    //         self.last_stats.frame_index,                    // frame_index
+    //         self.last_stats.frame_size_bytes,               // frame_size_bytes
+    //         self.last_stats.server_fps,                     // server_fps
+    //         self.last_stats.client_fps,                     // client_fps
+    //         self.last_stats.frame_span_ms,                  // frame_span_ms
+    //         self.last_stats.interarrival_jitter_ms,         // interarrival_jitter_ms
+    //         self.last_stats.ow_delay_ms,                    // ow_delay_ms
+    //         self.last_stats.filtered_ow_delay_ms,           // filtered_ow_delay_ms
+    //         self.last_stats.rtt_ms,                         // rtt_ms
+    //         self.last_stats.frame_interarrival_ms,          // frame_interarrival_ms
+    //         self.last_stats.frame_jitter_ms,                // frame_jitter_ms
+    //         self.last_stats.frames_skipped,                 // frames_skipped
+    //         self.last_stats.shards_lost,                    // shards_lost
+    //         self.last_stats.shards_duplicated,              // shards_duplicated
+    //         self.last_stats.instant_network_throughput_bps, // instant_network_throughput_bps
+    //         self.last_stats.peak_network_throughput_bps,    // peak_network_throughput_bps
+    //         self.last_stats.requested_bps,                  // nominal_bitrate
+    //         self.interval_avg_plot_throughput,              // interval_avg_plot_throughput
+    //         self.last_stats.decoder_jitterbuffer_level,     // Frames in Jitter buffer on RX (right before pushing current frame)
+    //     );
 
-        // Write the data line to the CSV file
-        writeln!(file, "{}", data_line)?;
+    //     // Write the data line to the CSV file
+    //     writeln!(file, "{}", data_line)?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     pub fn report_input_acquired(&mut self, target_timestamp: Duration) {
         if !self

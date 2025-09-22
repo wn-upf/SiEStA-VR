@@ -10,7 +10,7 @@ use crate::lib::{get_third_octet, HevcParser, get_prefix_path};
 use crate::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use std::io::BufReader;
-use crate::lib::CsvTrace;
+use crate::lib::OldCsvTrace;
 use crate::print_green;
 use crate::lib::models_mm1k::NetworkPattern;
 #[allow(unused)]
@@ -156,7 +156,10 @@ impl ChunkedHevcEncoder {
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
-                .args(&["-re"]) // read at real-time speed
+                .args(&["-threads", "2"])
+                .args(&["-hide_banner", "-nostats", "-loglevel", "error"]) 
+                .args(&["-stats_period", "20"])
+                // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
                     "-vf",
@@ -188,7 +191,12 @@ impl ChunkedHevcEncoder {
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
-                .args(&["-re"]) // read at realtime speed
+                // .args(&["-re"]) // read at realtime speed
+                .args(&["-threads", "2"])
+                .args(&["-hide_banner", "-nostats", "-loglevel", "error"]) 
+                .args(&["-stats_period", "5"])
+
+
                 .input(&self.input)
                 .args(&[
                     "-vf",
@@ -909,7 +917,7 @@ impl StreamSocket {
             // ffmpeg_maxbitrate_encoder: None,
             // chunk_frames: VecDeque::new(),
             time_since_last_update: t0,
-            csv_trace: CsvTrace::default(), 
+            csv_trace: OldCsvTrace::default(), 
         }
     }
 
@@ -1805,8 +1813,11 @@ pub struct StreamSender<H> {
     // Keep the initialization flag:
     pub time_since_last_update: TaiTime<0>,
 
-    csv_trace: CsvTrace, 
+    csv_trace: OldCsvTrace, 
 }
+
+
+
 
 #[allow(unused)]
 impl<H> StreamSender<H> {
@@ -1958,11 +1969,10 @@ impl<H: Serialize> StreamSender<H> {
 
 
                     let csv_path_emu = 
-                    
                         get_prefix_path(&format!(
                             "Results/{}/trace_emu_effects{}.csv",
-                        name_folder,
-                        third_octet,
+                            name_folder,
+                            third_octet,
                         ));
                     print_green!("Creating OFFLINE CSV at: {csv_path}", ); 
 
@@ -1987,7 +1997,6 @@ impl<H: Serialize> StreamSender<H> {
 
                         wtr2.write_record(emu.to_csv_row())?;
                         // wtr2.write_record(&[ format!("{:#?}", emu) ] )?; 
-
                     }
 
                     wtr.write_record(&[

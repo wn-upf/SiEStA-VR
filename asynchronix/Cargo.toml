@@ -86,6 +86,7 @@ async-semaphore = "1.2.1"
 walkdir = "2.5.0"
 raw-window-handle = "0.6.2"
 x11 = "2.21.0"
+crossbeam-channel = "0.5.15"
 
 
 [dev-dependencies]

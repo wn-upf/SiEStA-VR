@@ -1127,7 +1127,7 @@ impl CsvType {
     /// Creates a new CsvType with a buffered writer and specified batch size.
     pub fn new(folder_name: &str) -> io::Result<Self> {
 
-        const BATCH_SIZE : usize = 64; 
+        const BATCH_SIZE : usize = 1024; 
 
 
         let dir = format!("Results/{}", folder_name);
@@ -2262,18 +2262,85 @@ fn get_third_octet(ip: IpAddr) -> Option<u8> {
     }
 }
 
+
+
+
+
+
+#[derive(Default)]
+struct OldCsvTrace 
+{ 
+    path: PathBuf,
+    writer: Option<csv::Writer<std::fs::File>>, 
+}
+impl Clone for OldCsvTrace 
+{ fn clone(&self) -> Self {
+     OldCsvTrace { path: self.path.clone(), writer: None, }
+     } 
+}
+
+
+
+use std::fs::{File};
+
+
+
+use async_std::sync::Mutex as aMutex;
+
 #[derive(Default)]
 struct CsvTrace {
     path:   PathBuf,
-    writer: Option<csv::Writer<std::fs::File>>,
+    writer: Option<Arc<aMutex<csv::Writer<BufWriter<File>>>>>,
 }
 
 impl Clone for CsvTrace {
     fn clone(&self) -> Self {
         CsvTrace {
             path:   self.path.clone(),
-            writer: None,
+            writer: None, // cloned instance will re-init its own writer
         }
+    }
+}
+
+impl CsvTrace {
+    /// Open in append mode with buffering
+    fn init_writer(&mut self) -> anyhow::Result<()> {
+        if self.path.as_os_str().is_empty() {
+            anyhow::bail!("CsvTrace path not set");
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let buf = BufWriter::with_capacity(256 * 1024, file); // 256KB buffer
+        let wtr = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(buf);
+
+        self.writer = Some(Arc::new(aMutex::new(wtr)));
+        Ok(())
+    }
+
+    /// Append a record safely from multiple async tasks
+    async fn write_record<I, T>(&self, record: I) -> anyhow::Result<()>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]>,
+    {
+        if let Some(wtr) = &self.writer {
+            let mut w = wtr.lock().await;
+            w.write_record(record)?;
+        }
+        Ok(())
+    }
+
+    /// Flush manually if needed (e.g. at sim end)
+    async fn flush(&self) -> anyhow::Result<()> {
+        if let Some(wtr) = &self.writer {
+            let mut w = wtr.lock().await;
+            w.flush()?;
+        }
+        Ok(())
     }
 }
 

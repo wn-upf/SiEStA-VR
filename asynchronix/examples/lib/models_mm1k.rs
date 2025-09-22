@@ -2040,15 +2040,15 @@ impl QueueModule {
             }
         } else {
             self.blocked_packet_counter += 1;
-            print_red!(
-                // DebugColor::Red,
-                "{} [DBG FULL QUEUE] Packet {} (S: {}, D: {})DROPPED from QUEUEMODULE!! , Q_size = {}",
-                format_elapsed!(now),
-                packet.packet_id,
-                packet.sta_src_id,
-                packet.sta_dest_id, 
-                self.queue.len()
-            );
+            // print_red!(
+            //     // DebugColor::Red,
+            //     "{} [DBG FULL QUEUE] Packet {} (S: {}, D: {})DROPPED from QUEUEMODULE!! , Q_size = {}",
+            //     format_elapsed!(now),
+            //     packet.packet_id,
+            //     packet.sta_src_id,
+            //     packet.sta_dest_id, 
+            //     self.queue.len()
+            // );
         }
     }
 

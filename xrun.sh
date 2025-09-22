@@ -3,10 +3,9 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --constraint=nvenc
-#SBATCH --ntasks=2
-#SBATCH --tasks-per-node=2      # tasks per node
+#SBATCH --ntasks=8
 #SBATCH --mem=128G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
 # Optional: log files
@@ -144,41 +143,41 @@ done
 echo "Contents of temp file:"
 # cat "$temp_file"
 echo " --- Number of simulations: $SIM_COUNT --- \n"
-# shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
 
+shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
+
+##########################################################################################################
 # Sort temp_file lines by the NXR value (field with "_NXR<val>_")
 # - Extract NXR using sed/grep, then sort numerically in reverse (largest first).
 # - Then shuffle within each group of equal NXR.
 
-sorted_file=$(mktemp)
+# sorted_file=$(mktemp)
+# 
+# awk '{print $7, $0}' "$temp_file" \
+#   | sort -k1,1 -n -r \
+#   | cut -d' ' -f2- \
+#   > "$sorted_file"
+# 
 
-awk '{print $7, $0}' "$temp_file" \
-  | sort -k1,1 -n -r \
-  | cut -d' ' -f2- \
-  > "$sorted_file"
 
+# echo "=== Sorted file head ==="
+# head -n 10 "$sorted_file"
 
-
-echo "=== Sorted file head ==="
-head -n 10 "$sorted_file"
-
-echo "Ordered (largest NXR first, still randomized within each group):"
-cat "$sorted_file"
-echo " --- Number of simulations: $SIM_COUNT ---"
+# echo "Ordered (largest NXR first, still randomized within each group):"
+# cat "$sorted_file"
+# echo " --- Number of simulations: $SIM_COUNT ---"
 
 # parallel -j "$NUMBER_OF_JOBS" < "$sorted_file"
 
-split -n l/2 "$sorted_file" scenario_part_
-srun --ntasks=2 bash -c '
-  part="scenario_part_$(printf %02d $SLURM_PROCID)"
-  while read cmd; do
-      echo "[$(hostname)] task $SLURM_PROCID running on GPU=$CUDA_VISIBLE_DEVICES: $cmd"
-      eval "$cmd"
-  done < "$part"
-'
-
-
-# parallel -j "$NUMBER_OF_JOBS" < "$temp_file"
+# split -n l/2 "$sorted_file" scenario_part_
+# srun --ntasks=2 bash -c '
+#   part="scenario_part_$(printf %02d $SLURM_PROCID)"
+#   while read cmd; do
+#       echo "[$(hostname)] task $SLURM_PROCID running on GPU=$CUDA_VISIBLE_DEVICES: $cmd"
+#       eval "$cmd"
+#   done < "$part"
+# '
+##########################################################################################################
 rm "$temp_file"
 rm "$sorted_file"
 

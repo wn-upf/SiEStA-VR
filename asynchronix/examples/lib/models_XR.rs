@@ -4314,30 +4314,19 @@ impl XRClient {
 
 
             // --------------Initialize offline CSV tracker for frames ------------- 
-            if self.offline_csv_trace.writer.is_none() {
+           if self.offline_csv_trace.writer.is_none() {
                 if !Path::new(&csv_path).exists() {
-                    // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                    // println!("waiting until offline CSV created {}", csv_path ); 
-                }
-                else{
-                    print_green!("Read from: {}", csv_path); 
-                
+                    // Encoder hasn’t created the file yet – keep your wait/log if you want
+                    println!("waiting until offline CSV created");
+                } else {
+                    print_green!("Read from: {}", csv_path);
+
+                    // just set the path and let CsvTrace open (append) with BufWriter
                     self.offline_csv_trace.path = csv_path.clone().into();
-
-                    // open for *append* so we keep the first row
-                    let file = OpenOptions::new()
-                        .write(true)
-                        .append(true)
-                        .open(&self.offline_csv_trace.path)
+                    self.offline_csv_trace
+                        .init_writer()
                         .expect("CSV trace created by encoder is missing!");
-                    self.offline_csv_trace.writer = Some(
-                        csv::WriterBuilder::new()
-                            .has_headers(false)
-                            .from_writer(file),
-                    );
-
                 }
-                
             }
 
             // Clean up older processed frames from tracking buffer
@@ -4363,20 +4352,23 @@ impl XRClient {
 
                     // emu effects part here? 
 
-                    let csv_writer = self.offline_csv_trace.writer.as_mut().unwrap();
-                
-                    csv_writer.write_record(&[
-                        "",                     // offset column (only first row uses it)
-                        "",                     // source column (only first row uses it)
-                        "",                     // IDR_freq
-                        // "",                     // network emulation effects
-                        &format!("{:.6}", timestamp),
-                        &id_f.to_string(),
-                        &lost.to_string(),
-                        &format!("{:.3}", self.last_throughput_avg), 
-                    ]).unwrap();         // propagate or log the error as you prefer
-                    csv_writer.flush().unwrap();        // or buffer: up to you
-    
+                   self.offline_csv_trace
+                        .write_record(&[
+                            "", // offset (preamble only)
+                            "", // source (preamble only)
+                            "", // IDR_freq (preamble only)
+                            &format!("{:.6}", timestamp),
+                            &id_f.to_string(),
+                            &lost.to_string(),
+                            &format!("{:.3}", self.last_throughput_avg),
+                        ])
+                        .await
+                        .expect("failed to append offline csv row");
+
+                    // Optional cheap periodic flush (avoid flushing every row)
+                    if id_f % 1024 == 0 {
+                        let _ = self.offline_csv_trace.flush().await;
+                    }
                 }
                 let mut ip_client = self.server_ip; 
                 if let IpAddr::V4(ip4) = ip_client {
@@ -4467,16 +4459,16 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            crate::print_magenta!(
-                                // DebugColor::Violet,
-                                "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
-                                format_elapsed!(now),
-                                ip_client,
-                                id_f,
-                                video_frame.len(),
-                                self.decoder_queue.len(),
-                                interarrival.as_secs_f32(),
-                            );
+                            // crate::print_magenta!(
+                            //     // DebugColor::Violet,
+                            //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                            //     format_elapsed!(now),
+                            //     ip_client,
+                            //     id_f,
+                            //     video_frame.len(),
+                            //     self.decoder_queue.len(),
+                            //     interarrival.as_secs_f32(),
+                            // );
                         }
 
                         if let Some(decoder_arc) = self.original_decoder.clone(){
