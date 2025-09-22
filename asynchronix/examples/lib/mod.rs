@@ -21,6 +21,9 @@ use std::time::Duration;
 use std::io::{self, Write};
 use std::path::{PathBuf};
 
+
+pub const BATCH_SIZE_CSV : usize = 1024 * 4; 
+
 const CHANNEL_WIDTH: usize = 80; //MHz
 
 const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
@@ -1127,7 +1130,6 @@ impl CsvType {
     /// Creates a new CsvType with a buffered writer and specified batch size.
     pub fn new(folder_name: &str) -> io::Result<Self> {
 
-        const BATCH_SIZE : usize = 1024; 
 
 
         let dir = format!("Results/{}", folder_name);
@@ -1143,7 +1145,7 @@ impl CsvType {
         Ok(Self {
             csv_data: Arc::new(Mutex::new(CsvData::new())),
             writer: Arc::new(Mutex::new(buf)),
-            batch_size: BATCH_SIZE,
+            batch_size: BATCH_SIZE_CSV,
         })
     }
 

@@ -178,7 +178,7 @@ impl CsvSink {
                 // serialize without heap strings
                 if wtr.serialize(row).is_err() { break; }
                 batch += 1;
-                if batch >= 1024 || since_flush.elapsed() >= Duration::from_millis(250) {
+                if batch >= BATCH_SIZE_CSV {
                     let _ = wtr.flush();
                     batch = 0;
                     since_flush = std::time::Instant::now();

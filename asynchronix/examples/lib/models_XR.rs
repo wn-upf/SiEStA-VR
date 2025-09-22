@@ -4366,7 +4366,7 @@ impl XRClient {
                         .expect("failed to append offline csv row");
 
                     // Optional cheap periodic flush (avoid flushing every row)
-                    if id_f % 1024 == 0 {
+                    if id_f % BATCH_SIZE_CSV == 0 {
                         let _ = self.offline_csv_trace.flush().await;
                     }
                 }
