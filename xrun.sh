@@ -3,12 +3,12 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
-#SBATCH --gres=gpu:1 
+#SBATCH --gres=gpu:2
 #SBATCH --constraint=nvenc
-#SBATCH --ntasks=1               # total number of tasks
-#SBATCH --tasks-per-node=1       # tasks per node
+#SBATCH --ntasks=2
+#SBATCH --tasks-per-node=2      # tasks per node
 #SBATCH --mem=128G               # memory
-#SBATCH --time=24:00:00          # max walltime (adjust!)
+#SBATCH --time=48:00:00          # max walltime (adjust!)
 # Optional: log files
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
@@ -33,14 +33,14 @@ echo "Current working directory: $(pwd)"
 
 echo "***********************************"
 
-NUMBER_OF_JOBS=4
-SERIAL_EXECUTION=1
+NUMBER_OF_JOBS=8
+SERIAL_EXECUTION=0
 
 # initial_bitrate_mbps=( 100.0 )
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=500.0
+simTime=150.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -113,7 +113,8 @@ for test in "${TEST_TYPE[@]}"; do
 
                                                             if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder"
-                                                                echo srun ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests >> "$temp_file"
+
+                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
 
                                                             else                                    ## Serial execution
                                                                 ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
@@ -141,12 +142,45 @@ done
 
 # After writing to temp file
 echo "Contents of temp file:"
-cat "$temp_file"
+# cat "$temp_file"
 echo " --- Number of simulations: $SIM_COUNT --- \n"
+# shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
 
-shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
+# Sort temp_file lines by the NXR value (field with "_NXR<val>_")
+# - Extract NXR using sed/grep, then sort numerically in reverse (largest first).
+# - Then shuffle within each group of equal NXR.
+
+sorted_file=$(mktemp)
+
+awk '{print $7, $0}' "$temp_file" \
+  | sort -k1,1 -n -r \
+  | cut -d' ' -f2- \
+  > "$sorted_file"
+
+
+
+echo "=== Sorted file head ==="
+head -n 10 "$sorted_file"
+
+echo "Ordered (largest NXR first, still randomized within each group):"
+cat "$sorted_file"
+echo " --- Number of simulations: $SIM_COUNT ---"
+
+# parallel -j "$NUMBER_OF_JOBS" < "$sorted_file"
+
+split -n l/2 "$sorted_file" scenario_part_
+srun --ntasks=2 bash -c '
+  part="scenario_part_$(printf %02d $SLURM_PROCID)"
+  while read cmd; do
+      echo "[$(hostname)] task $SLURM_PROCID running on GPU=$CUDA_VISIBLE_DEVICES: $cmd"
+      eval "$cmd"
+  done < "$part"
+'
+
+
 # parallel -j "$NUMBER_OF_JOBS" < "$temp_file"
 rm "$temp_file"
+rm "$sorted_file"
 
 echo "ALL JOBS FINISHED!!!"
 

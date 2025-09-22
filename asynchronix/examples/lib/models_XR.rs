@@ -2587,9 +2587,9 @@ impl XRServer {
                     // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;   
                 
                 }
-                if count % 30 == 0 {
-                    print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
-                }
+                // if count % 30 == 0 {
+                //     print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
+                // }
 
                
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_bps / 1e6;
@@ -3289,9 +3289,9 @@ impl XRClient {
             
             print_magenta!("[session_end_schedule] delay: {}, now + delay: {} ", delay.as_secs_f64(), format_elapsed!(now + delay), ); 
             
-            context.scheduler
-                .schedule_event(now + delay, Self::session_reboot, ())
-                .unwrap();
+            let epsilon = Duration::from_nanos(1);
+            let target = now + delay.max(epsilon);
+            context.scheduler.schedule_event(target, Self::session_reboot, ()).unwrap();
     }
 
     pub async fn session_reboot(&mut self, _: (), context: &Context<Self>) {
@@ -4582,10 +4582,10 @@ impl XRClient {
                  self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
             } else { // Decoder queue was empty
-                print_red!(
-                    // DebugColor::Yellow,
-                    "[CLIENT {}] Decoder queue empty. T_VSYNC: {:.3} ms", self.server_ip,  now.checked_duration_since(self.last_decoded_frame_instant).unwrap().as_secs_f32() * 1000.0
-                );
+                // print_red!(
+                //     // DebugColor::Yellow,
+                //     "[CLIENT {}] Decoder queue empty. T_VSYNC: {:.3} ms", self.server_ip,  now.checked_duration_since(self.last_decoded_frame_instant).unwrap().as_secs_f32() * 1000.0
+                // );
 
             } // End if let Some((id_f, video_frame))
 

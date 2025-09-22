@@ -1886,10 +1886,10 @@ impl ChunkedOldHevcEncoder {
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
-        println!(
-            "{} CHUNKING with bitrate {} Mbps",
-            self.encoder_str, bitrate_mbps
-        );
+        // println!(
+        //     "{} CHUNKING with bitrate {} Mbps",
+        //     self.encoder_str, bitrate_mbps
+        // );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
         

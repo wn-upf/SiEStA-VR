@@ -166,8 +166,8 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                // .args(&["-preset", "fast"])
-                .args(&["-preset", "llhq"])
+                .args(&["-preset", "fast"])
+                // .args(&["-preset", "llhq"])
 
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
@@ -198,8 +198,8 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                // .args(&["-preset", "fast"])
-                .args(&["-preset", "llhq"])
+                .args(&["-preset", "fast"])  // TODO : llhq is preferrable but deprecated on some of the HPC GPUs. 
+                // .args(&["-preset", "llhq"])
 
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
@@ -221,20 +221,20 @@ impl ChunkedHevcEncoder {
 
 
 
-        // if let Some(stderr) = child.take_stderr() {
-        //     let mut err_reader = std::io::BufReader::new(stderr);
-        //     std::thread::spawn(move || {
-        //         for line in err_reader.lines() {
-        //             match line {
-        //                 Ok(l) => println!("ffmpeg stderr: {}", l),
-        //                 Err(e) => {
-        //                     eprintln!("Error reading ffmpeg stderr: {}", e);
-        //                     break;
-        //                 }
-        //             }
-        //         }
-        //     });
-        // }
+        if let Some(stderr) = child.take_stderr() {
+            let mut err_reader = std::io::BufReader::new(stderr);
+            std::thread::spawn(move || {
+                for line in err_reader.lines() {
+                    match line {
+                        Ok(l) => println!("ffmpeg stderr: {}", l),
+                        Err(e) => {
+                            eprintln!("Error reading ffmpeg stderr: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // let mut parser = HevcParser::new();
         let mut buf = [0u8; 4096];

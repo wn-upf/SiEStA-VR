@@ -1744,8 +1744,6 @@ impl Medium {
     #[inline] pub fn current_owner(&self) -> Option<MacKey> { self.tx_owner }
     #[inline] pub fn last_owner(&self) -> Option<MacKey> { self.last_txop_owner }
     #[inline] pub fn last_end(&self) -> TaiTime<0> { self.last_txop_end }
-
-
 }
 
 #[allow(unused)]
