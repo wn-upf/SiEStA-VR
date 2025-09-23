@@ -471,7 +471,7 @@ impl VideoPacketHeader {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct FaceData {
     pub eye_gazes: [Option<Pose>; 2],
     pub fb_face_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 63]
@@ -480,7 +480,7 @@ pub struct FaceData {
 }
 
 // Note: face_data does not respect target_timestamp.
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Tracking {
     pub target_timestamp: Duration,
     pub device_motions: Vec<(u64, DeviceMotion)>,

@@ -199,8 +199,6 @@ impl CsvSink {
 
 #[allow(unused)]
 impl StatisticsManager {
-
-    
     pub fn new(
         max_history_size: usize,
         nominal_server_frame_interval: Duration,
@@ -210,8 +208,7 @@ impl StatisticsManager {
     ) -> Self {
 
 
-         fn get_4_octet(ip: IpAddr) -> u8 { match ip { IpAddr::V4(v4) => v4.octets()[2], IpAddr::V6(_) => 0 } }
-        let num = get_4_octet(ip_self);
+        let num = crate::lib::get_4_octet(ip_self);
         let file_stem = format!("XR_stats_{num:?}");
 
         let csv_sink = CsvSink::new(folder, &file_stem)
@@ -510,8 +507,7 @@ impl StatisticsManager {
 
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
             decoder_jitterbuffer_level: network_stats.buffer_level_decoder, 
-
-            client_coordinates: 
+ 
         };
 
         // debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);

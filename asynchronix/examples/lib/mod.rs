@@ -426,6 +426,9 @@ impl<T> SlidingWindowWeighted<T> {
         self.interval_buffer.iter().sum::<f32>()
     }
 }
+
+fn get_4_octet(ip: IpAddr) -> u8 { match ip { IpAddr::V4(v4) => v4.octets()[2], IpAddr::V6(_) => 0 } } // get the 4th octet of IpAddr (for tagging CSVs)
+
 #[allow(unused)]
 // Renders ASCII text into the minifb window with coordinates.
 pub fn render_text(

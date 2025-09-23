@@ -495,6 +495,8 @@ fn main() {
         vr.xr_server.output_perfect_information_bitrate
                 .connect(XRClient::input_perfect_information_bitrate, &vr.mbox_xr_client.address()); 
 
+
+        vr.sta_client.outport_coords_xrclient.connect(XRClient::input_coordinates_STA, &vr.mbox_xr_client.address()); 
         
         queue
             .output_port_sta1
@@ -630,7 +632,7 @@ fn main() {
        
 
     }    
-    // Use saved addresses for movement
+    // Use saved addresses for movement, only in Client STAs! Will also share coords messages with connected XRClient
     if test_distances_everest_bool{
         for sta_client_addr in sta_client_addrs.iter() {
             scheduler.schedule_event(

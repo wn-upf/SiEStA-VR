@@ -6,6 +6,7 @@ use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
+
 use rand::SeedableRng;
 // use std::process::{ChildStdin, ChildStdout};
 use crate::{debug_debug, print_magenta,
@@ -16,7 +17,7 @@ use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc, HevcParser, WindowType};
+use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc, HevcParser, WindowType, render_text};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -195,226 +196,6 @@ fn get_counter() -> &'static AtomicUsize {
     PRINT_COUNTER.get_or_init(|| AtomicUsize::new(0))
 }
 
-fn render_text(
-    buffer: &mut [u32],
-    text: &str,
-    x: usize,
-    y: usize,
-    stride: usize,
-    color: u32,
-    scale: usize,
-) {
-    // Simple 5x7 pixel font (common for basic bitmap fonts)
-    // Each character is represented as an array of 7 bytes, where each byte represents a row
-    // and the bits in each byte represent the pixels in that row
-    const FONT_WIDTH: usize = 5;
-    const FONT_HEIGHT: usize = 7;
-    const CHAR_SPACING: usize = 1;
-
-    // Apply scaling
-    let scaled_font_width = FONT_WIDTH * scale;
-    let scaled_char_spacing = CHAR_SPACING * scale;
-
-    // Define a simple bitmap font (only uppercase letters and some basic characters)
-    // Each character is 5x7 pixels
-    let font = [
-        // Space
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        // !
-        [0x04, 0x04, 0x04, 0x04, 0x00, 0x04, 0x00],
-        // "
-        [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00],
-        // #
-        [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
-        // $
-        [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
-        // %
-        [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
-        // &
-        [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
-        // '
-        [0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
-        // (
-        [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-        // )
-        [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-        // *
-        [0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00],
-        // +
-        [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
-        // ,
-        [0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08],
-        // -
-        [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
-        // .
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
-        // /
-        [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
-        // 0
-        [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        // 1
-        [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        // 2
-        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
-        // 3
-        [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
-        // 4
-        [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        // 5
-        [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        // 6
-        [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-        // 7
-        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        // 8
-        [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        // 9
-        [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
-        // :
-        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
-        // ;
-        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08],
-        // <
-        [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
-        // =
-        [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
-        // >
-        [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
-        // ?
-        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
-        // @
-        [0x0E, 0x11, 0x01, 0x0D, 0x15, 0x15, 0x0E],
-        // A
-        [0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11],
-        // B
-        [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        // C
-        [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        // D
-        [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
-        // E
-        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        // F
-        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        // G
-        [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        // H
-        [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        // I
-        [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        // J
-        [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-        // K
-        [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        // L
-        [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        // M
-        [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        // N
-        [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
-        // O
-        [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        // P
-        [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        // Q
-        [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        // R
-        [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        // S
-        [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-        // T
-        [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        // U
-        [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        // V
-        [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        // W
-        [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
-        // X
-        [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        // Y
-        [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
-        // Z
-        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        // [
-        [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
-        // \
-        [0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00],
-        // ]
-        [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
-        // ^
-        [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
-        // _
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
-    ];
-
-    let mut char_x = x;
-
-    for c in text.chars() {
-        let index = match c {
-            ' ' => 0,
-            '!' => 1,
-            '"' => 2,
-            '#' => 3,
-            '$' => 4,
-            '%' => 5,
-            '&' => 6,
-            '\'' => 7,
-            '(' => 8,
-            ')' => 9,
-            '*' => 10,
-            '+' => 11,
-            ',' => 12,
-            '-' => 13,
-            '.' => 14,
-            '/' => 15,
-            '0'..='9' => (c as usize) - ('0' as usize) + 16,
-            ':' => 26,
-            ';' => 27,
-            '<' => 28,
-            '=' => 29,
-            '>' => 30,
-            '?' => 31,
-            '@' => 32,
-            'A'..='Z' => (c as usize) - ('A' as usize) + 33,
-            'a'..='z' => (c as usize) - ('a' as usize) + 33, // Map lowercase to uppercase
-            '[' => 59,
-            '\\' => 60,
-            ']' => 61,
-            '^' => 62,
-            '_' => 63,
-            _ => 0, // Default to space for unknown characters
-        };
-
-        // Draw the character with scaling
-        for row in 0..FONT_HEIGHT {
-            for scaled_row in 0..scale {
-                let buffer_y = y + (row * scale) + scaled_row;
-
-                for col in 0..FONT_WIDTH {
-                    // Check if the current pixel is set in the font bitmap
-                    if (font[index][row] & (1 << (FONT_WIDTH - 1 - col))) != 0 {
-                        for scaled_col in 0..scale {
-                            let buffer_x = char_x + (col * scale) + scaled_col;
-
-                            // Calculate buffer index and check bounds
-                            if buffer_y < buffer.len() / stride && buffer_x < stride {
-                                let buffer_index = buffer_y * stride + buffer_x;
-                                if buffer_index < buffer.len() {
-                                    buffer[buffer_index] = color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Move to the next character position
-        char_x += scaled_font_width + scaled_char_spacing;
-    }
-}
-
 
 pub fn is_keyframe(frame: &[u8]) -> bool {
     // Check for start code
@@ -440,103 +221,6 @@ pub fn is_keyframe(frame: &[u8]) -> bool {
 }
 
 
-
-// // Advanced frame similarity computation with configurable thresholds
-// // Implements perceptual frame comparison techniques with multi-scale analysis
-// fn compute_enhanced_frame_similarity(
-//     frame1: &[u8],
-//     frame2: &[u8],
-//     width: usize,
-//     height: usize,
-// ) -> f64 {
-//     // Return maximum difference if frames are incompatible
-//     if frame1.len() != frame2.len() || frame1.len() != width * height * 3 {
-//         return 1.0;
-//     }
-
-//     // Configuration parameters for multi-scale analysis
-//     const BLOCK_SIZES: [usize; 3] = [4, 16, 64]; // Multi-scale block sizes
-//     const WEIGHTS: [f64; 3] = [0.5, 0.3, 0.2]; // Relative importance of each scale
-//     const PERCEPTUAL_WEIGHTS: [f64; 3] = [0.3, 0.6, 0.1]; // R,G,B perceptual importance
-
-//     // Initialize accumulators for each scale
-//     let mut scale_diffs = [0.0; 3];
-//     let mut scale_samples = [0; 3];
-
-//     // Multi-scale analysis
-//     for (scale_idx, &block_size) in BLOCK_SIZES.iter().enumerate() {
-//         // Overlapping block steps: step by half the block size.
-//         let step_x = (block_size / 2).max(1);
-//         let step_y = (block_size / 2).max(1);
-
-//         // Process each overlapping block
-//         for by in (0..height).step_by(step_y) {
-//             for bx in (0..width).step_by(step_x) {
-//                 let block_end_x = (bx + block_size).min(width);
-//                 let block_end_y = (by + block_size).min(height);
-
-//                 // Initialize block statistics.
-//                 let mut block_diff_r = 0.0;
-//                 let mut block_diff_g = 0.0;
-//                 let mut block_diff_b = 0.0;
-//                 let mut block_samples = 0;
-
-//                 // Increased sampling density: sample every pixel (step of 1).
-//                 for y in by..block_end_y {
-//                     for x in bx..block_end_x {
-//                         let idx = (y * width + x) * 3;
-//                         if idx + 2 < frame1.len() && idx + 2 < frame2.len() {
-//                             let r_diff = (frame1[idx] as i32 - frame2[idx] as i32).abs() as f64;
-//                             let g_diff = (frame1[idx + 1] as i32 - frame2[idx + 1] as i32).abs() as f64;
-//                             let b_diff = (frame1[idx + 2] as i32 - frame2[idx + 2] as i32).abs() as f64;
-
-//                             block_diff_r += r_diff;
-//                             block_diff_g += g_diff;
-//                             block_diff_b += b_diff;
-//                             block_samples += 1;
-//                         }
-//                     }
-//                 }
-
-//                 if block_samples > 0 {
-//                     let avg_diff = (block_diff_r * PERCEPTUAL_WEIGHTS[0]
-//                         + block_diff_g * PERCEPTUAL_WEIGHTS[1]
-//                         + block_diff_b * PERCEPTUAL_WEIGHTS[2])
-//                         / (block_samples as f64 * 255.0);
-//                     scale_diffs[scale_idx] += avg_diff;
-//                     scale_samples[scale_idx] += 1;
-//                 }
-//             }
-//         }
-//     }
-
-//     // Calculate weighted average across scales
-//     let mut final_diff = 0.0;
-//     let mut weight_sum = 0.0;
-
-//     for i in 0..BLOCK_SIZES.len() {
-//         if scale_samples[i] > 0 {
-//             let scale_avg = scale_diffs[i] / scale_samples[i] as f64;
-//             final_diff += scale_avg * WEIGHTS[i];
-//             weight_sum += WEIGHTS[i];
-//         }
-//     }
-
-//     // Normalize result
-//     if weight_sum > 0.0 {
-//         final_diff /= weight_sum;
-//     }
-
-//     // Apply non-linear transformation to enhance sensitivity
-//     // This emphasizes small differences, which is crucial for detecting
-//     // subtle temporal misalignments in nearly-identical frames
-//     let enhanced_diff = 1.0 - ((1.0 - final_diff).powf(0.5));
-
-//     // Scale final similarity measure to emphasize high similarity
-//     // This creates a more sensitive metric where 99% similar frames
-//     // are distinguished from 99.9% similar frames
-//     enhanced_diff
-// }
 #[allow(unused)]
 fn compute_enhanced_frame_similarity(
     frame1: &[u8],
@@ -2078,6 +1762,123 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
 
+use async_std::sync::Mutex as aMutex;
+use async_std::io::prelude::*; // brings AsyncWriteExt (write_all, flush)
+use async_std::{
+    fs::{self, OpenOptions as aOpenOptions, File as aFile},   // <-- use async_std::fs types
+};
+use std::io::BufWriter; 
+
+#[derive(Default)]
+struct TrackingData {
+    v_timestamp: Vec<String>,
+    v_device_id: Vec<u64>,
+    v_pos_x: Vec<f32>,
+    v_pos_y: Vec<f32>,
+    v_pos_z: Vec<f32>,
+    v_interarrival: Vec<f32>,
+}
+
+pub struct CsvTracking {
+    csv_data: Arc<Mutex<TrackingData>>,
+    writer: Arc<Mutex<BufWriter<std::fs::File>>>,
+    batch_size: usize,
+}
+
+impl CsvTracking {
+    pub fn new(folder_name: &str, num_id: u8) -> std::io::Result<Self> {
+        let dir = format!("Results/{}", folder_name);
+        std::fs::create_dir_all(&dir);
+
+        let file_path = format!("{}/TRACKING_stats{}.csv", dir, num_id);
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)?;
+        let mut buf = BufWriter::new(file);
+
+        // Write header if file is empty
+        if Path::new(&file_path).metadata()?.len() == 0 {
+            buf.write_all(
+                b"timestamp,device_id,pos_x,pos_y,pos_z,interarrival_ms\n",
+            )?;
+            buf.flush()?;
+        }
+
+        Ok(Self {
+            csv_data: Arc::new(Mutex::new(TrackingData::default())),
+            writer: Arc::new(Mutex::new(buf)),
+            batch_size: 100,
+        })
+    }
+
+    pub fn update_stats(
+        &self,
+        now: TaiTime<0>,
+        device_id: u64,
+        pos: [f32; 3],
+        interarrival_ms: f32,
+    ) {
+        let ts_str = format_elapsed!(now);
+
+        {
+            let mut data = self.csv_data.lock().unwrap();
+            data.v_timestamp.push(ts_str);
+            data.v_device_id.push(device_id);
+            data.v_pos_x.push(pos[0]);
+            data.v_pos_y.push(pos[1]);
+            data.v_pos_z.push(pos[2]);
+            data.v_interarrival.push(interarrival_ms);
+
+            if data.v_timestamp.len() >= self.batch_size {
+                // flush while holding data, but drop it before writing
+                drop(data);
+                if let Err(e) = self.flush_batch() {
+                    eprintln!("[TRACKING] Error flushing batch: {}", e);
+                }
+            }
+        }
+    }
+
+    pub fn flush_batch(&self) -> std::io::Result<()> {
+        let mut data = self.csv_data.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap();
+
+        for i in 0..data.v_timestamp.len() {
+            let row = format!(
+                "{},{},{},{},{},{}\n",
+                data.v_timestamp[i],
+                data.v_device_id[i],
+                data.v_pos_x[i],
+                data.v_pos_y[i],
+                data.v_pos_z[i],
+                data.v_interarrival[i]
+            );
+            writer.write_all(row.as_bytes())?;
+        }
+        writer.flush()?;
+
+        // Clear buffer
+        data.v_timestamp.clear();
+        data.v_device_id.clear();
+        data.v_pos_x.clear();
+        data.v_pos_y.clear();
+        data.v_pos_z.clear();
+        data.v_interarrival.clear();
+
+        Ok(())
+    }
+}
+
+
+#[derive(Debug)]
+struct TrackingLog {
+    device_id: u64,
+    position: Vec3,
+    orientation: Quat,
+    linear_velocity: Vec3,
+}
 #[allow(unused)]
 pub struct XRServer {
     pub ip_self: IpAddr,
@@ -2105,6 +1906,10 @@ pub struct XRServer {
     pub abr_enabled: usize, 
 
     pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>, 
+    pub last_tracking_rx_instant: TaiTime<0>, 
+
+    pub csv_tracking: CsvTracking, 
+
 }
 #[allow(unused)]
 impl XRServer {
@@ -2145,7 +1950,7 @@ impl XRServer {
             final_file = file_name_video; 
         }
 
-
+        let num = crate::lib::get_4_octet(ip_self);
         let history_interval = BITRATE_UPDATE_INTERVAL;
 
         Self {
@@ -2192,6 +1997,9 @@ impl XRServer {
             intra_refresh, 
             abr_enabled, 
             output_perfect_information_bitrate: Output::default(),
+            
+            last_tracking_rx_instant: t0_sim, 
+            csv_tracking: CsvTracking::new(name_folder, num).unwrap(), 
         }
     }
 
@@ -2285,7 +2093,14 @@ impl XRServer {
             }
         }
     }
+    fn decode_tracking_from_bytes(&self, buf: &[u8]) -> Result<Tracking> {
+        anyhow::ensure!(buf.len() >= SHARD_PREFIX_SIZE, "buffer too small");
 
+        let serialized = &buf[SHARD_PREFIX_SIZE..];
+        let track: Tracking = bincode::deserialize::<Tracking>(serialized)?;
+            // .unwrap()?; 
+        Ok(track)
+    }
     pub async fn in_from_network(&mut self, frame: TimedFrame) {
         let packet_vec = frame.vec;
         let now = frame.timestamp;
@@ -2302,6 +2117,47 @@ impl XRServer {
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
 
+                         match self.decode_tracking_from_bytes(&new_buffer) {
+                            Ok(track) => {
+                                for (device_id, motion) in track.device_motions {
+                                    let log_entry = TrackingLog {
+                                        device_id,
+                                        position: motion.pose.position,
+                                        orientation: motion.pose.orientation,
+                                        linear_velocity: motion.linear_velocity,
+                                    };
+
+                                    // Just print for now
+                                    println!(
+                                        "[TRACKING] device={} pos={:?} vel={:?}",
+                                        log_entry.device_id,
+                                        log_entry.position,
+                                        // log_entry.orientation,
+                                        log_entry.linear_velocity
+                                    );
+                                    let interarrival_tracking_ms = now.duration_since(self.last_tracking_rx_instant).as_secs_f32() * 1000.0; 
+                                    self.csv_tracking.update_stats(
+                                        now,
+                                        log_entry.device_id,
+                                        [
+                                            log_entry.position.x,
+                                            log_entry.position.y,
+                                            log_entry.position.z,
+                                        ],
+                                        interarrival_tracking_ms,
+                                    );
+                                    self.last_tracking_rx_instant = now; 
+
+
+
+                                    // later: push to CSV logger
+                                    // self.csv_logger.write_tracking(&log_entry);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[TRACKING] decode error: {e:?}");
+                            }
+                         }
                         // println!("TODO: THE REST of tracking server!!");
                     }
                 }
@@ -3082,7 +2938,8 @@ pub struct XRClient {
 
     pub output_app_network: Output<MpduPacket>,
 
-    pub coordinates: Coords,
+    pub current_coordinates_tracking: Vec3,
+    pub last_coordinates_tracking: Vec3, 
     pub is_streaming: bool,
 
     pub frames_dropped_counter: usize,
@@ -3202,7 +3059,9 @@ impl XRClient {
             last_decoded_frame_instant: TaiTime::EPOCH,
             output_app_network: Output::default(),
             // output_tracking: Output::default(),
-            coordinates: Coords::new(),
+            current_coordinates_tracking: Vec3::ZERO,
+            last_coordinates_tracking: Vec3::ZERO,
+
             is_streaming: false,
             frames_dropped_counter: 0,
             server_ip,
@@ -3390,8 +3249,7 @@ impl XRClient {
         const HEAD_ID: u64 = 555;
 
         async move {
-            let now = context.scheduler.time();
-
+            let now = context.scheduler.time();        
             let mut position_offset = Vec3::ZERO;
 
             // let mut loop_deadline = now;
@@ -3399,17 +3257,27 @@ impl XRClient {
 
             // if let Some(tracking_send_socket) = self.output_app_tracking_sender.clone() {
             if self.is_streaming {
-                let mut rng = StdRng::from_entropy();
+            
+                let actual_position = self.current_coordinates_tracking;
+                let last_position = self.last_coordinates_tracking;  
+                
+                let delta = actual_position - last_position; 
 
-                let yaw: f32 = rng.gen_range((-PI as f32)..(PI as f32));
-                let pitch: f32 = rng.gen_range((-PI as f32)..(PI as f32));
+                let dt = now.duration_since(self.last_tracking_time); 
+                let linear_velocity = if dt.as_secs_f32() > 0.0 {
+                    delta / dt.as_secs_f32()
+                } else {
+                    Vec3::ZERO
+                };
 
-                let orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
-                let position_offset = (Vec3::new(rand::random(), rand::random(), rand::random())
-                    - Vec3::ONE / 0.5)
-                    * 1.0;
-                let position = Vec3::new(0.0, 1.82, 0.0) + position_offset;
-
+                let orientation = if delta.length_squared() > 1e-9 {
+                    let yaw = delta.y.atan2(delta.x); 
+                    Quat::from_rotation_y(yaw)
+                }
+                else{
+                    Quat::IDENTITY
+                }; 
+                 // --- tracking packet ---
                 let track = Tracking {
                     target_timestamp: TARGET_TIMESTAMP_TRACKING,
                     device_motions: vec![(
@@ -3417,14 +3285,16 @@ impl XRClient {
                         DeviceMotion {
                             pose: Pose {
                                 orientation,
-                                position,
+                                position: actual_position,
                             },
-                            linear_velocity: Vec3::ZERO,
-                            angular_velocity: Vec3::ZERO,
+                            linear_velocity,
+                            angular_velocity: Vec3::ZERO, // could derive from orientation diff if needed (not needed)
                         },
                     )],
                     ..Default::default()
                 };
+                // print_yellow!("Generating tracking packet| dt: {}, data: {:#?}", dt.as_secs_f32(), track.device_motions); 
+
 
                 if let Some(mut sender) = self.output_app_tracking_sender.clone() {
                     let arc_inner_app_receiver = sender.app_network_interface.clone();
@@ -3445,12 +3315,24 @@ impl XRClient {
                 // println!("CLIENT FRAMERATE = {}", self.framerate);
                 let loop_deadline = Duration::from_secs_f32(1.0 / self.framerate / 3.0);
 
+                self.last_coordinates_tracking = self.current_coordinates_tracking; 
+                self.last_tracking_time = now;
+
                 context
                     .scheduler
                     .schedule_event(loop_deadline, Self::generate_tracking_data, ())
                     .unwrap();
             }
         }
+    }
+
+    fn coords_to_vec3(&mut self, coords: Coords) -> Vec3 {
+        let vecc = Vec3::new(coords.x as f32, coords.y as f32, coords.z as f32);
+        vecc
+    }
+    fn vec3_to_coords(&mut self, vec: Vec3) -> Coords {
+        let vecc = Coords::with_coords(vec.x as f64, vec.y as f64, vec.z as f64);
+        vecc
     }
 
     pub async fn send_tracking(&mut self, tracking: Tracking, now: TaiTime<0>) {
@@ -3535,18 +3417,16 @@ impl XRClient {
                                     now.duration_since(self.last_tracking_time).as_secs_f32();
 
                                 // println!("[Client {} read ]: {} packet ", self.server_ip, str_id); 
-                                if stream_id == TRACKING {
-                                    debug_print!(
-                                        DebugColor::ForestGreen,
-                                        "{} UL TRACKING [{}]-> Δt_tracking:{:.4} |length: {}| Stream ID: {}|",
-                                        format_elapsed!(now),
-                                        self.server_ip, 
-                                        elapsed_tracking,
-                                        packet_length,
-                                        str_id,
-                                    );
-                                }
-                                self.last_tracking_time = now;
+                                // if stream_id == TRACKING {
+                                //     print_yellow!(
+                                //         "{} UL TRACKING [{}]-> Δt_tracking:{:.4} |length: {}| Stream ID: {}|",
+                                //         format_elapsed!(now),
+                                //         self.server_ip, 
+                                //         elapsed_tracking,
+                                //         packet_length,
+                                //         str_id,
+                                //     );
+                                // }
 
                                 let mut packet = MpduPacket::new();
 
@@ -4589,6 +4469,7 @@ impl XRClient {
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
+
     pub async fn input_perfect_information_bitrate(&mut self, bitrate_msg: PerfectInfoBitrateMessage, context: &Context<Self>) {
         
         let now = context.scheduler.time(); 
@@ -4602,7 +4483,11 @@ impl XRClient {
         self.last_bitrate_perfect_info_update_mbps = bitrate; 
     }
 
-    
+
+    pub async fn input_coordinates_STA(&mut self, coords: Coords, context: &Context<Self>){
+        self.current_coordinates_tracking = self.coords_to_vec3(coords); // not much else to do, tracking output will just use the last value 3*FPS. Angular velocities might be considered in future, but not yet; TODO 
+    }
+
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
         let packet_vec = frame.vec;
         let now = frame.timestamp;
@@ -4898,7 +4783,7 @@ impl XRDevice for XRServer {
 #[derive(Clone)]
 pub struct TimedFrame {
     vec: Vec<MpduPacket>,
-    timestamp: TaiTime<0>,
+    timestamp: TaiTime<0>,  // this timestamp corresponds to the receive instant of an A-MPDU by any STA
 }
 
 #[allow(non_camel_case_types)]
@@ -4907,6 +4792,8 @@ pub struct TimedFrame {
 pub struct STA_extended {
     // extended class to PoissonGen
     pub output_network_port: Output<MpduPacket>,
+
+    pub outport_coords_xrclient: Output<Coords>, // only used so the XRClient can know its coordinates in real time, will be input in Tracking packets! 
 
     pub to_app_socket: Output<TimedFrame>,
     // pub to_app_socket_end_ampdu: Output<bool>,
@@ -4947,7 +4834,7 @@ impl STA_extended {
 
         Self {
             output_network_port: Default::default(),
-
+            outport_coords_xrclient: Default::default(),  
             to_app_socket: Default::default(),
             // to_app_socket_end_ampdu: Default::default(),
             sta_id: src,
@@ -4968,57 +4855,61 @@ impl STA_extended {
     // To simulate the channel changes, simulate the HMD moving at a
     // constant speed of 5 m/s according to a random direction model within 1m² around
     // initial position. In this way, we approximate the channel changes caused
-    // by a VR gamer standing still but rapidly moving around. 
+    // by a VR gamer standing still but rapidly moving around. src: How to model cloud VR, khorov et al. 
  pub fn move_coordinates_everest<'a>(&'a mut self,
         _: (),
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move{
 
-            let mut rng = rand::thread_rng();
 
             let delta_t = 0.01; //  is reasonable? 
 
             // Step length = speed * delta_t
             let step = 5.0 * delta_t;
 
-            // Pick a random direction in 2D plane (azimuth only)
-            let theta = rng.gen_range(0.0..2.0 * PI);
-            let dx = step * theta.cos();
-            let dy = step * theta.sin();
+            {              
+                let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth. 
 
-            // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
+                // Pick a random direction in 2D plane (azimuth only)
+                let theta = rng.gen_range(0.0..2.0 * PI);
+                let dx = step * theta.cos();
+                let dy = step * theta.sin();
 
-            // New candidate position
-            let new_x = self.sta_coordinates.x + dx;
-            let new_y = self.sta_coordinates.y + dy;
+                // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
 
-            // Boundaries: within ±0.5 m around initial position
-            let min_x = self.orig_sta_coordinates.x - 0.5;
-            let max_x = self.orig_sta_coordinates.x + 0.5;
-            let min_y = self.orig_sta_coordinates.y - 0.5;
-            let max_y = self.orig_sta_coordinates.y + 0.5;
+                // New candidate position
+                let new_x = self.sta_coordinates.x + dx;
+                let new_y = self.sta_coordinates.y + dy;
 
-            // Reflect if out of bounds
-            self.sta_coordinates.x = if new_x < min_x {
-                min_x + (min_x - new_x) // reflect back
-            } else if new_x > max_x {
-                max_x - (new_x - max_x)
-            } else {
-                new_x
-            };
+                // Boundaries: within ±0.5 m around initial position
+                let min_x = self.orig_sta_coordinates.x - 0.5;
+                let max_x = self.orig_sta_coordinates.x + 0.5;
+                let min_y = self.orig_sta_coordinates.y - 0.5;
+                let max_y = self.orig_sta_coordinates.y + 0.5;
 
-            self.sta_coordinates.y = if new_y < min_y {
-                min_y + (min_y - new_y)
-            } else if new_y > max_y {
-                max_y - (new_y - max_y)
-            } else {
-                new_y
-            };
+                // Reflect if out of bounds
+                self.sta_coordinates.x = if new_x < min_x {
+                    min_x + (min_x - new_x) // reflect back
+                } else if new_x > max_x {
+                    max_x - (new_x - max_x)
+                } else {
+                    new_x
+                };
 
+                self.sta_coordinates.y = if new_y < min_y {
+                    min_y + (min_y - new_y)
+                } else if new_y > max_y {
+                    max_y - (new_y - max_y)
+                } else {
+                    new_y
+                };
+            }
             // z stays constant (HMD height)
             // println!("Coordinates After dt: {:?}", self.sta_coordinates);
             
+            self.outport_coords_xrclient.send( self.sta_coordinates.clone()).await; 
+
             context
                 .scheduler
                 .schedule_event(Duration::from_secs_f64(delta_t), Self::move_coordinates_everest, () , )
@@ -5076,7 +4967,7 @@ impl STA_extended {
 
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let mut packet_batch = Vec::new(); // Create a batch to hold packets
-        let now = context.scheduler.time();
+        let now: TaiTime<0> = context.scheduler.time();
         // println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
         if ampdu_packet.sta_dest_id == self.sta_id {
             // make sure we ignore packets not corresponding to STA
