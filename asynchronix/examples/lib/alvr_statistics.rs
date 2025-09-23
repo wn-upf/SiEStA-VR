@@ -217,7 +217,6 @@ impl StatisticsManager {
         let csv_sink = CsvSink::new(folder, &file_stem)
             .expect("failed to init CSV sink");
 
-
         Self {
             history_buffer: VecDeque::new(),
             max_history_size,
@@ -511,6 +510,8 @@ impl StatisticsManager {
 
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
             decoder_jitterbuffer_level: network_stats.buffer_level_decoder, 
+
+            client_coordinates: 
         };
 
         // debug_bgprint!(DebugColor::Magenta, "\t{:#?}", self.last_stats);

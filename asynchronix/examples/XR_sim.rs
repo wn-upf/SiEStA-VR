@@ -231,6 +231,7 @@ fn generate_session_timeline<R: Rng>(
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
     let start_time_pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
+    // let start_time_pause = sim_init_time; 
 
     let mut t = start_time_pause;
     let mut sessions = Vec::new();

@@ -3726,8 +3726,9 @@ impl XRClient {
 
                         if !frames_lost.is_empty() {
                             println!(
-                                "{} - FRAMES LOST {:?}, SHARDS LOST {:?}",
+                                "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
                                 format_elapsed!(now), 
+                                self.server_ip, 
                                 &frames_lost[..],
                                 &shards_lost[..]
                             );
@@ -5017,7 +5018,7 @@ impl STA_extended {
 
             // z stays constant (HMD height)
             // println!("Coordinates After dt: {:?}", self.sta_coordinates);
-
+            
             context
                 .scheduler
                 .schedule_event(Duration::from_secs_f64(delta_t), Self::move_coordinates_everest, () , )
