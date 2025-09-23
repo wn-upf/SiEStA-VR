@@ -1,6 +1,6 @@
 use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::alvr_packets::NetworkStatisticsPacket;
-use crate::lib::SlidingWindowAverage;
+use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV};
 
 use crate::lib::{
     GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted,
@@ -155,7 +155,7 @@ impl CsvSink {
         let is_empty = file.metadata()?.len() == 0;
         let mut wtr = Writer::from_writer(BufWriter::with_capacity(1 << 22, file)); // 4–8 MiB
 
-        // Write header if new file
+        // // Write header if new file
         if is_empty {
             wtr.write_record([
                 "timestamp","frame_index","frame_size_bytes","server_fps","client_fps",

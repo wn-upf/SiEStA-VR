@@ -22,7 +22,7 @@ use std::io::{self, Write};
 use std::path::{PathBuf};
 
 
-pub const BATCH_SIZE_CSV : usize = 1024 * 4; 
+pub const BATCH_SIZE_CSV : usize = 256*2; 
 
 const CHANNEL_WIDTH: usize = 80; //MHz
 

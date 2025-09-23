@@ -135,7 +135,7 @@ impl ChunkedHevcEncoder {
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
 
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, ) {
         // let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
         
         let bitrate_adjusted_fps = bitrate_mbps; 
@@ -144,8 +144,8 @@ impl ChunkedHevcEncoder {
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
         println!(
-            "{} CHUNKING with bitrate {} Mbps",
-            self.encoder_str, bitrate_mbps
+            "{} - {} CHUNKING with bitrate {} Mbps",
+            crate::format_elapsed!(now),self.encoder_str, bitrate_mbps,
         );
         self.parser.buffer.clear();
         // println!("**** AAAA INPUT IS {} *****", self.input);
@@ -158,7 +158,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-t", &self.chunk_duration.to_string()])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"]) 
-                .args(&["-stats_period", "20"])
+                .args(&["-stats_period", "8"])
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
@@ -2043,7 +2043,7 @@ impl<H: Serialize> StreamSender<H> {
                 {
                     let mut encoder: async_std::sync::MutexGuard<'_, ChunkedHevcEncoder> =
                         encoder_arc.lock().await;
-                    encoder.start_chunking(current_bitrate_mbps).await;
+                    encoder.start_chunking(current_bitrate_mbps, now).await;
                 } // Lock is dropped here
 
                 // Store the initialized encoder
@@ -2085,7 +2085,7 @@ impl<H: Serialize> StreamSender<H> {
                         encoder.frame_queue.clear();
 
                         // Restart chunking
-                        encoder.start_chunking(current_bitrate_mbps).await;
+                        encoder.start_chunking(current_bitrate_mbps, now).await;
 
                         // Wait for encoder to produce frames
                         // task::sleep(Duration::from_millis(100)).await;

@@ -5,7 +5,6 @@
 #SBATCH --nodes=1                # number of nodes
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=nvenc
-#SBATCH --ntasks=8
 #SBATCH --mem=128G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
 # Optional: log files
@@ -33,7 +32,7 @@ echo "Current working directory: $(pwd)"
 echo "***********************************"
 
 NUMBER_OF_JOBS=6
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 
 # initial_bitrate_mbps=( 100.0 )
 
@@ -51,11 +50,11 @@ N_XR=( 2 4 6 8 )
 PL=0.1
 
 fps_list=( 90.0 )
-initial_bitrate_mbps=( 10.0 20.0 40.0 )
+initial_bitrate_mbps=( 40.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
 
-ABR_ENABLED=( 0 )
+ABR_ENABLED=( 1 2 )
 nest_profiles=( 1 ) ## balanced and that's it
 
 # nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},
@@ -143,7 +142,6 @@ done
 echo "Contents of temp file:"
 # cat "$temp_file"
 echo " --- Number of simulations: $SIM_COUNT --- \n"
-
 shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
 
 ##########################################################################################################
@@ -186,3 +184,4 @@ echo "ALL JOBS FINISHED!!!"
 # cargo run --release --example two_bitrates_tests
 
 echo "XRUN FINALLY FINISHED!!!"
+

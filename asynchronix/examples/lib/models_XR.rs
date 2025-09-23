@@ -1,7 +1,7 @@
 use crate::lib::alvr_control_socket::{
-    framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
+    framed_recv_vec, ControlSocketReceiver, ControlSocketSender
 };
-use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats};
+use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_CSV};
 // use nix::libc::LOCK_EX;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
@@ -651,8 +651,10 @@ impl HevcDecoder {
         let decoder_string = decoder_str.to_string();
 
         let mut child = FfmpegCommand::new()
-            .hwaccel("cuda")
+            // .hwaccel("cuda")
+            .args(&["-c:v", "hevc"])     // ✅ force software decoder
             .args(&["-f", "hevc", "-i", "-"])
+            // .args(&["-c:v", "libx265"])              // force software HEVC encoder
             // .args(&["-vf", &format!("fps={}", framerate)])
             .args(&["-pix_fmt", "rgb24"])
             .args(&["-tune", "zerolatency"])
@@ -3711,6 +3713,7 @@ impl XRClient {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
+            let now = context.scheduler.time(); 
             if self.is_streaming {
                 // println!("RECEIVING VIDEO!!");
                 if let Some(mut receiver) = self.input_app_video.clone() {
@@ -3723,7 +3726,8 @@ impl XRClient {
 
                         if !frames_lost.is_empty() {
                             println!(
-                                "FRAMES LOST {:?}, SHARDS LOST {:?}",
+                                "{} - FRAMES LOST {:?}, SHARDS LOST {:?}",
+                                format_elapsed!(now), 
                                 &frames_lost[..],
                                 &shards_lost[..]
                             );
@@ -4459,16 +4463,16 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            // crate::print_magenta!(
-                            //     // DebugColor::Violet,
-                            //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
-                            //     format_elapsed!(now),
-                            //     ip_client,
-                            //     id_f,
-                            //     video_frame.len(),
-                            //     self.decoder_queue.len(),
-                            //     interarrival.as_secs_f32(),
-                            // );
+                            crate::print_magenta!(
+                                // DebugColor::Violet,
+                                "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                                format_elapsed!(now),
+                                ip_client,
+                                id_f,
+                                video_frame.len(),
+                                self.decoder_queue.len(),
+                                interarrival.as_secs_f32(),
+                            );
                         }
 
                         if let Some(decoder_arc) = self.original_decoder.clone(){
