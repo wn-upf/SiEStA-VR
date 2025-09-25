@@ -53,9 +53,9 @@ PL=0.1
 fps_list=( 90.0 )
 initial_bitrate_mbps=( 10.0 20.0 40.0 )
 
-# ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest
+# ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach.
 
-ABR_ENABLED=( 0 )
+ABR_ENABLED=( 3 )
 nest_profiles=( 1 ) ## balanced and that's it
 
 # nest_profiles=( 0 1 2 ) ## Nest-VR profiles:       0 => {NestVrProfile::Speedy},

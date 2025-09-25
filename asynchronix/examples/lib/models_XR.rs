@@ -2,13 +2,10 @@ use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender
 };
 use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_CSV};
-// use nix::libc::LOCK_EX;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
-
 use rand::SeedableRng;
-// use std::process::{ChildStdin, ChildStdout};
 use crate::{debug_debug, print_magenta,
     //  print_brown
     };
@@ -22,7 +19,7 @@ use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
 use std::fs::{OpenOptions};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read, Write, BufWriter};
 use std::net::Ipv4Addr;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -33,6 +30,7 @@ use tokio::sync::Semaphore;
 use std::path::Path;
 use minifb::{Window, WindowOptions};
 use std::{fs::File};
+
 use crate::lib::models_mm1k::NetworkPattern;
 
 use crate::{format_elapsed, print_green};
@@ -47,7 +45,7 @@ use core::f64;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use glam::{Quat, Vec3};
 use once_cell::sync::Lazy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::net::IpAddr;
 use std::thread::yield_now;
@@ -1190,7 +1188,7 @@ impl SharedParameterSetManager {
 
 
 
-#[derive(Clone, PartialEq, Debug)]
+// #[derive(Clone, PartialEq, Debug)]
 #[allow(unused)]
 pub enum BitrateMode {
     ConstantMbps(f32),
@@ -1209,8 +1207,135 @@ pub enum BitrateMode {
 
             nest_vr_profile: ProfileConfig,
 
+        },
+
+        ReinforcementLearner {
+            bitrate_ladder_mbps: Vec<f32>, 
+            step_interval: Duration, 
+            connector: Arc<Mutex<Box<dyn RLConnector + Send>>>,
+            last_action_idx: Arc<Mutex<usize>>,
+            last_decision_instant: Arc<Mutex<TaiTime<0>>>,
+            pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
         }
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct RLObservation {
+    pub t_elapsed_s: f32, 
+    pub last_target_bitrate_mbps: f32, 
+    pub rtt_ms_avg_s: f32, 
+    // pub frame_size_mb_avg_s: f32, 
+    pub bandwidth_mbps_avg_s: f32,
+    pub bandwidth_mbps_std_s: f32, 
+    pub frame_interarrival_avg_s: f32, 
+    pub flr_avg_s: f32, 
+    pub buffer_level_avg_s: f32, 
+    pub rebuffer_event_sum: u8, 
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RLObservationVector{
+    observations: Vec<RLObservation>, 
+    max_len: u8, 
+}
+
+impl RLObservationVector{
+    pub fn new(max_len: u8) -> Self { Self{ observations: Vec::new(), max_len}}
+
+    pub fn push(&mut self, o: RLObservation){
+        self.observations.push(o); 
+        if self.observations.len() as u8 > self.max_len {
+            self.observations.remove(0); 
+        }
+    } 
+}
+
+
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RLStep {
+    pub obs: RLObservationVector, 
+    pub reward: f32, 
+    pub done: bool, 
+}
+pub trait RLConnector {
+    fn select_action(&mut self, obs: &RLObservationVector) -> usize; // returns the chosen action, or continuous bitrate choice. 
+
+    fn post_reward(&mut self, feedback_reward: &RLStep); 
+
+}
+
+
+
+
+
+pub struct ZmqConnector{
+    socket: zmq::Socket, 
+    last_obs: Option<RLObservationVector>, 
+    last_action_idx: usize, 
+    last_decision_time: TaiTime<0>, 
+}
+
+impl ZmqConnector{
+    pub fn new(addr: &str, ctx: &zmq::Context) -> Self {
+        let socket = ctx.socket(zmq::REQ).unwrap(); 
+        socket.connect(addr).unwrap(); 
+        socket.set_rcvtimeo(1500).ok(); 
+        socket.set_sndtimeo(1500).ok(); 
+        Self{socket, last_obs: None, last_action_idx: 0, last_decision_time: TaiTime::EPOCH, } 
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RLRequest{ pub obs: RLObservationVector}
+#[derive(Serialize, Deserialize)]
+pub struct RLResponse{pub action_idx: usize}
+
+
+impl RLConnector for ZmqConnector {
+    // fn select_action(&mut self, obs: &RLObservationVector) -> usize {
+    //     let wire = obs.clone();
+    //     let req = bincode::serialize(&RLRequest { obs: wire }).unwrap();
+
+    //     if self.socket.send(req, 0).is_ok() {
+    //         if let Ok(msg) = self.socket.recv_msg(0) {
+    //             if let Ok(RLResponse { action_idx }) = bincode::deserialize(msg.as_ref()) {
+    //                 self.last_obs = Some(obs.clone());
+    //                 self.last_action_idx = action_idx;
+    //                 return action_idx;
+    //             } else {
+    //                 return self.last_action_idx; // fallback
+    //             }
+    //         } else {
+    //             return self.last_action_idx; // fallback
+    //         }
+    //     }
+    //     self.last_action_idx
+    // }    
+    fn select_action(&mut self, obs: &RLObservationVector) -> usize {
+        let req = serde_json::to_vec(&RLRequest { obs: obs.clone() }).unwrap();
+
+        if self.socket.send(req, 0).is_ok() {
+            if let Ok(msg) = self.socket.recv_msg(0) {
+                if let Ok(resp) = serde_json::from_slice::<RLResponse>(msg.as_ref()) {
+                    self.last_obs = Some(obs.clone());
+                    self.last_action_idx = resp.action_idx;
+                    return resp.action_idx;
+                }
+            }
+        }
+        self.last_action_idx
+    }
+
+
+    fn post_reward(&mut self, step: &RLStep) {
+        // Optional: send reward back for off-policy algos that separate selection/reward.
+        // Or piggyback reward on the next select_action call.
+        let _ = (step,); // no-op for the minimal version
+    }
+}
+
+
+
 #[allow(unused)]
 #[derive(Clone, PartialEq)]
 pub enum NestVrProfile {
@@ -1277,9 +1402,100 @@ impl Default for ProfileConfig {
 }
 
 
+#[derive(Clone)]
+pub struct TimedVecFLR{
+    vec_flr: VecDeque<(f32,usize)>,
+    vec_shard_loss: VecDeque<(f32, usize)>, 
+    period: f32, // how long to keep values 
+}
+
+impl TimedVecFLR{
+    pub fn new(period: f32) -> Self {
+        Self {
+            vec_flr: VecDeque::new(),
+            vec_shard_loss: VecDeque::new(),
+            period,
+        }
+    }
+    pub fn push_new(&mut self, fl_report: usize, sl_report: usize, time_f32: f32) {
+        // Insert new values
+        self.vec_flr.push_back((time_f32, fl_report));
+        self.vec_shard_loss.push_back((time_f32, sl_report));
+
+        // Prune old values outside the time window
+        let cutoff = time_f32 - self.period;
+
+        while let Some(&(t, _)) = self.vec_flr.front() {
+            if t < cutoff {
+                self.vec_flr.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        while let Some(&(t, _)) = self.vec_shard_loss.front() {
+            if t < cutoff {
+                self.vec_shard_loss.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn sum_flr(&self) -> usize {
+        self.vec_flr.iter().map(|&(_, v)| v).sum()
+    }
+
+    pub fn sum_shard_loss(&self) -> usize {
+        self.vec_shard_loss.iter().map(|&(_, v)| v).sum()
+    }
+}
+
+
+
+#[derive(Clone)]
+pub struct TimedVecBuffer{
+    vec_buflevel: VecDeque<(f32,usize)>,
+    period: f32, // how long to keep values 
+}
+
+impl TimedVecBuffer{
+    pub fn new(period: f32) -> Self {
+        Self {
+            vec_buflevel: VecDeque::new(),
+            period,
+        }
+    }
+    pub fn push_new(&mut self, buflevel_report: usize, time_f32: f32) {
+        // Insert new values
+        self.vec_buflevel.push_back((time_f32, buflevel_report));
+
+        // Prune old values outside the time window
+        let cutoff = time_f32 - self.period;
+
+        while let Some(&(t, _)) = self.vec_buflevel.front() {
+            if t < cutoff {
+                self.vec_buflevel.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+    pub fn avg_buffer_level_period(&self) -> f32 {
+        if self.vec_buflevel.is_empty() {
+            return 0.0;
+        }
+
+        let sum: f32 = self.vec_buflevel.iter().map(|&(_, v)| v as f32).sum();
+        sum / self.vec_buflevel.len() as f32
+    }
+
+}
+
+
 
 #[allow(unused)]
-#[derive(Clone)]
+// #[derive(Clone)]
 pub struct BitrateManager {
     last_frame_instant: TaiTime<0>,
     last_update_instant: TaiTime<0>,
@@ -1313,7 +1529,11 @@ pub struct BitrateManager {
 
     bitrate_ladder_bps: Option<Vec<f32>>, 
     bitrate_step_size_bps_nest: f32, 
+    flr_shardloss_count: TimedVecFLR,  
+    jitbuf_avg_count: TimedVecBuffer,
+    last_rebuffer_avg_sum: u8,   
 }
+
 
 
 impl BitrateManager {
@@ -1344,6 +1564,12 @@ impl BitrateManager {
             BitrateMode::NestVr { min_bitrate_mbps, .. } => {
                 self.last_target_bitrate_bps = min_bitrate_mbps * 1e6;
             }
+             BitrateMode::ReinforcementLearner { last_action_idx, last_decision_instant, pending_obs, bitrate_ladder_mbps,  .. } => {        
+                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;  // start at lowest
+               *last_action_idx.lock().unwrap() = 0;
+                *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
+                *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
+            }
         }
 
         // Reset Everest/Nest state
@@ -1361,10 +1587,8 @@ impl BitrateManager {
             "[BitrateManager] Reset complete -> bitrate = {:.2} Mbps",
             self.last_target_bitrate_bps / 1e6
         );
-    }
-     
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, 
-        ) -> Self {
+    }     
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, ) -> Self {
     
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -1446,9 +1670,24 @@ impl BitrateManager {
                     
                     BitrateMode::EVeREst { bitrate_ladder_mbps }
                 }
+            3 => {
+                let ladder_mbps = (10..=100).step_by(10).map(|x| x as f32).collect::<Vec<_>>();
+                let ctx = zmq::Context::new();
+
+                BitrateMode::ReinforcementLearner {
+                    bitrate_ladder_mbps: ladder_mbps,
+                    step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new("tcp://127.0.0.1:5555", &ctx)))),
+                    last_action_idx: Arc::new(Mutex::new(0)),
+                    last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
+                    pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
+                } 
+            }
             _ => BitrateMode::ConstantMbps(initial_bitrate_mbps)
-            };          
-        crate::print_blue!("BITRATE MODE: {:?}", bitrate_mode); 
+        };          
+
+        let flr_vec: TimedVecFLR = TimedVecFLR::new( BITRATE_UPDATE_INTERVAL as f32); 
+        let buflevel_vec =  TimedVecBuffer::new( BITRATE_UPDATE_INTERVAL as f32); 
 
         Self {
             last_frame_instant: TaiTime::EPOCH,
@@ -1484,6 +1723,10 @@ impl BitrateManager {
             bitrate_ladder_bps: Some(bitrate_ladder_std_bps) , 
             bitrate_step_size_bps_nest, 
             everest_last_order: EverestCommand::Continue, 
+            flr_shardloss_count: flr_vec, 
+            jitbuf_avg_count: buflevel_vec, 
+            last_rebuffer_avg_sum: 0, 
+
         }
     }
     pub fn report_encoded_frame_server(&mut self, now: TaiTime<0>) {
@@ -1505,7 +1748,7 @@ impl BitrateManager {
         peak_throughput_bps: f32,
         frame_interarrival_s: f32,
         network_stats: NetworkStatisticsPacket, 
-        now: TaiTime<0>
+        now: TaiTime<0>,
     ) {
         self.rtt_average.submit_sample(network_rtt);
 
@@ -1515,10 +1758,12 @@ impl BitrateManager {
         self.frame_interarrival_average
             .submit_sample(frame_interarrival_s);
 
+        self.jitbuf_avg_count.push_new(network_stats.buffer_level_decoder as usize, now.duration_since(TaiTime::EPOCH).as_secs_f32());
+        
+        self.last_rebuffer_avg_sum = network_stats.rebuffering_events_last_s; // discrete, no averaging. It's counted on the XRClient and sent over UL messages.
+
 
         const T_USER_WIN : f32 = 5.0; // from original paper 
-
-
 
         let everest_capacity_sample = network_stats.everest_capacity_update; 
         let everest_throughput_sample = network_stats.everest_throughput_update; 
@@ -1547,6 +1792,11 @@ impl BitrateManager {
             print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  ); 
         }
     }   
+
+    pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
+     
+        self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
+    }
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>) -> f32 {
 
@@ -1739,6 +1989,46 @@ impl BitrateManager {
                     // self.last_target_bitrate_mbps = bitrate_bps / 1E6; 
                     bitrate_bps
                 }
+            
+                BitrateMode::ReinforcementLearner {
+                    bitrate_ladder_mbps,
+                    step_interval,
+                    connector,
+                    last_action_idx,
+                    last_decision_instant,
+                    pending_obs,
+                } => {
+            
+                    if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
+                        return self.last_target_bitrate_bps;
+                    }
+
+                    if let Some(prev_obs) = pending_obs.lock().unwrap().take() {
+                        let cur_obs = self.build_rl_observation(now);
+                        let r = self.rl_reward_function(&cur_obs);
+                        connector.lock().unwrap().post_reward(&RLStep {
+                            obs: prev_obs.clone(),
+                            reward: r,
+                            done: false,
+                        });
+                    }
+
+                    let mut obs_vec = pending_obs.lock().unwrap().take().unwrap_or_else(|| RLObservationVector::new(8));
+                    obs_vec.push(self.build_rl_observation(now));
+
+                    let idx = connector.lock().unwrap()
+                        .select_action(&obs_vec)
+                        .min(bitrate_ladder_mbps.len().saturating_sub(1));
+
+                    *last_action_idx.lock().unwrap() = idx;
+                    *last_decision_instant.lock().unwrap() = now;
+                    *pending_obs.lock().unwrap() = Some(obs_vec);
+
+                    let target_mbps = bitrate_ladder_mbps[idx];
+                    self.last_target_bitrate_bps = target_mbps * 1e6;
+                    self.last_target_bitrate_bps
+                
+                }
             };
             print_prettyy!(
                 DebugColor::Purple,
@@ -1748,6 +2038,50 @@ impl BitrateManager {
             );
             bitrate_bps
         }
+    }
+
+
+
+    fn build_rl_observation (&self, now: TaiTime<0>) -> RLObservation{
+
+        let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6; 
+        let rtt_ms_avg_s = self.rtt_average.get_average().as_secs_f32(); 
+        let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average(); 
+        let bandwidth_mbps_std_s =      self.peak_throughput_average.get_std(); 
+        let frame_interarrival_avg_s = self.frame_interarrival_average.get_average(); 
+
+        let flr_avg_s = self.flr_shardloss_count.sum_flr() as f32 / 
+                (1.0 / self.frame_interval_average.get_average().as_secs_f32()); // percentage according to encoded frames window average, 
+                                                                                // (not in the same period though, watch out)
+
+        let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
+
+        let rebuffer_event_sum = self.last_rebuffer_avg_sum; 
+        RLObservation{
+            t_elapsed_s,
+            last_target_bitrate_mbps,
+            rtt_ms_avg_s,
+            bandwidth_mbps_avg_s,
+            bandwidth_mbps_std_s,
+            frame_interarrival_avg_s, 
+            flr_avg_s,
+            buffer_level_avg_s, 
+            rebuffer_event_sum, 
+        }
+
+    }
+
+    fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
+
+        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
+        let beta = 1.0;   // flr 0 to 1
+        let gamma = -0.02;       // rtt ~2 to 50 ms -> 0 to - 1
+        let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
+        let reward = alpha * obs.last_target_bitrate_mbps + beta * (1.0 - obs.flr_avg_s) + gamma * obs.rtt_ms_avg_s + omega * obs.rebuffer_event_sum as f32; 
+        // this expression could be negative if bitrate is very low and flr very high
+
+        reward
     }
 }
 
@@ -1762,12 +2096,6 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
 
-use async_std::sync::Mutex as aMutex;
-use async_std::io::prelude::*; // brings AsyncWriteExt (write_all, flush)
-use async_std::{
-    fs::{self, OpenOptions as aOpenOptions, File as aFile},   // <-- use async_std::fs types
-};
-use std::io::BufWriter; 
 
 #[derive(Default)]
 struct TrackingData {
@@ -2084,6 +2412,9 @@ impl XRServer {
                             frame,
                             shard
                         );
+                        let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+
+                        self.bitrate_manager.report_shard_and_frame_loss(*frame as usize, *shard, time_elapsed); 
                     }
                 }
 
@@ -2128,13 +2459,13 @@ impl XRServer {
                                     };
 
                                     // Just print for now
-                                    println!(
-                                        "[TRACKING] device={} pos={:?} vel={:?}",
-                                        log_entry.device_id,
-                                        log_entry.position,
-                                        // log_entry.orientation,
-                                        log_entry.linear_velocity
-                                    );
+                                    // println!(
+                                    //     "[TRACKING] device={} pos={:?} vel={:?}",
+                                    //     log_entry.device_id,
+                                    //     log_entry.position,
+                                    //     // log_entry.orientation,
+                                    //     log_entry.linear_velocity
+                                    // );
                                     let interarrival_tracking_ms = now.duration_since(self.last_tracking_rx_instant).as_secs_f32() * 1000.0; 
                                     self.csv_tracking.update_stats(
                                         now,
@@ -2919,6 +3250,45 @@ impl MetricsLogger {
 }
 // Add to your struct
 
+
+
+
+#[derive(Clone)]
+pub struct TimedRebufferCounter{
+    vec_buflevel: VecDeque<(f32,usize)>,
+    period: f32, // how long to keep values 
+}
+
+impl TimedRebufferCounter{
+    pub fn new(period: f32) -> Self {
+        Self {
+            vec_buflevel: VecDeque::new(),
+            period,
+        }
+    }
+    pub fn add_one(&mut self, now: TaiTime<0>) {
+        // Insert new values
+        let time_f32 = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        self.vec_buflevel.push_back((time_f32, 1)); // one rebuffer event per call
+
+        // Prune old values outside the time window
+        let cutoff = time_f32 - self.period;
+
+        while let Some(&(t, _)) = self.vec_buflevel.front() {
+            if t < cutoff {
+                self.vec_buflevel.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn sum_in_period(&self) -> usize {
+        self.vec_buflevel.iter().map(|&(_, v)| v).sum()
+    }
+
+}
+
 #[allow(unused)]
 pub struct XRClient {
     pub decoder_queue: DroppingVecDeque<(usize, Vec<u8>)>,
@@ -3029,6 +3399,8 @@ pub struct XRClient {
     d_long_exp_avg: f32, 
 
     everest_enabled: bool, 
+
+    rebuffer_event_counter: TimedRebufferCounter, 
     // everest_capacity_vec: Vec<f32>, 
     // everest_throughput_vec: Vec<f32>, 
 }
@@ -3128,6 +3500,8 @@ impl XRClient {
             d_long_exp_avg: 0.0, 
             bitrate_ladder_perfect_info_update: Vec::new(), 
             everest_enabled, 
+
+            rebuffer_event_counter: TimedRebufferCounter::new( BITRATE_UPDATE_INTERVAL as f32), 
             // everest_capacity_vec: Vec::new() ,
             // everest_throughput_vec: Vec::new(), 
         }
@@ -3759,6 +4133,7 @@ impl XRClient {
                         everest_dlong: self.d_long_exp_avg, 
                         everest_command: command_abr_everest,
                         buffer_level_decoder: self.decoder_queue.len() as u8,  
+                        rebuffering_events_last_s: self.rebuffer_event_counter.sum_in_period() as u8, // should be impossible to overflow unless FPS > 256 (not planned, makes no sense) 
                         edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
                         
                     };
@@ -4459,11 +4834,8 @@ impl XRClient {
                  self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
             } else { // Decoder queue was empty
-                // print_red!(
-                //     // DebugColor::Yellow,
-                //     "[CLIENT {}] Decoder queue empty. T_VSYNC: {:.3} ms", self.server_ip,  now.checked_duration_since(self.last_decoded_frame_instant).unwrap().as_secs_f32() * 1000.0
-                // );
 
+                self.rebuffer_event_counter.add_one(now); 
             } // End if let Some((id_f, video_frame))
 
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
