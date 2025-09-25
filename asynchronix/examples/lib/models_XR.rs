@@ -1292,25 +1292,7 @@ pub struct RLResponse{pub action_idx: usize}
 
 
 impl RLConnector for ZmqConnector {
-    // fn select_action(&mut self, obs: &RLObservationVector) -> usize {
-    //     let wire = obs.clone();
-    //     let req = bincode::serialize(&RLRequest { obs: wire }).unwrap();
 
-    //     if self.socket.send(req, 0).is_ok() {
-    //         if let Ok(msg) = self.socket.recv_msg(0) {
-    //             if let Ok(RLResponse { action_idx }) = bincode::deserialize(msg.as_ref()) {
-    //                 self.last_obs = Some(obs.clone());
-    //                 self.last_action_idx = action_idx;
-    //                 return action_idx;
-    //             } else {
-    //                 return self.last_action_idx; // fallback
-    //             }
-    //         } else {
-    //             return self.last_action_idx; // fallback
-    //         }
-    //     }
-    //     self.last_action_idx
-    // }    
     fn select_action(&mut self, obs: &RLObservationVector) -> usize {
         let req = serde_json::to_vec(&RLRequest { obs: obs.clone() }).unwrap();
 
@@ -1566,7 +1548,7 @@ impl BitrateManager {
             }
              BitrateMode::ReinforcementLearner { last_action_idx, last_decision_instant, pending_obs, bitrate_ladder_mbps,  .. } => {        
                 self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;  // start at lowest
-               *last_action_idx.lock().unwrap() = 0;
+                *last_action_idx.lock().unwrap() = 0;
                 *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
                 *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
             }
@@ -2000,12 +1982,16 @@ impl BitrateManager {
                 } => {
             
                     if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
+                        print_red!("TOO SOON!!!", ); 
+
                         return self.last_target_bitrate_bps;
                     }
 
                     if let Some(prev_obs) = pending_obs.lock().unwrap().take() {
                         let cur_obs = self.build_rl_observation(now);
                         let r = self.rl_reward_function(&cur_obs);
+                        print_pink!("Observation: {:?}, reward: {:?}", cur_obs, r); 
+
                         connector.lock().unwrap().post_reward(&RLStep {
                             obs: prev_obs.clone(),
                             reward: r,
@@ -2013,7 +1999,7 @@ impl BitrateManager {
                         });
                     }
 
-                    let mut obs_vec = pending_obs.lock().unwrap().take().unwrap_or_else(|| RLObservationVector::new(8));
+                    let mut obs_vec = pending_obs.lock().unwrap().take().unwrap_or_else(|| RLObservationVector::new(5));
                     obs_vec.push(self.build_rl_observation(now));
 
                     let idx = connector.lock().unwrap()
@@ -2026,8 +2012,8 @@ impl BitrateManager {
 
                     let target_mbps = bitrate_ladder_mbps[idx];
                     self.last_target_bitrate_bps = target_mbps * 1e6;
+                    print_green!("[RL] target_mbps: {:?}", target_mbps); 
                     self.last_target_bitrate_bps
-                
                 }
             };
             print_prettyy!(
@@ -2041,8 +2027,7 @@ impl BitrateManager {
     }
 
 
-
-    fn build_rl_observation (&self, now: TaiTime<0>) -> RLObservation{
+    pub fn build_rl_observation (&self, now: TaiTime<0>) -> RLObservation{
 
         let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
         let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6; 
@@ -2072,7 +2057,7 @@ impl BitrateManager {
 
     }
 
-    fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
+    pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
 
         let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
         let beta = 1.0;   // flr 0 to 1

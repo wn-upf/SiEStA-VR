@@ -9,7 +9,7 @@
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::NetworkPattern;
-
+use crate::lib::models_XR::BitrateMode;
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
@@ -40,7 +40,7 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer};
+use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer, BITRATE_UPDATE_INTERVAL};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 10;
@@ -643,20 +643,6 @@ fn main() {
             ).unwrap();
         }
     }
-   
-    // for (i, vr) in vr_pairs.into_iter().enumerate() {
-    //     for vr_sta_client in vr.sta_client{
-    //         scheduler.schedule_event(
-    //             Duration::from_secs(SIM_START_TIME),
-    //             STA_extended::move_coordinates_everest, 
-    //             (), 
-    //             addr_client, 
-    //         ).unwrap(); 
-
-
-    //     }
-
-    // }
 
     // Schedule background STA events
     for address in &bg_sta_addresses {
@@ -667,6 +653,29 @@ fn main() {
     }
     // Run simulation
     simu.step_by(Duration::from_secs_f64(stoptime));
+
+    // let step_interval = Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL); 
+    // let mut t = Duration::ZERO; 
+    // while t < Duration::from_secs_f64(stoptime)
+    // {
+        
+
+    //     simu.step_by(step_interval);
+        
+    //     for pair in vr_pairs{
+    //         if let BitrateMode::ReinforcementLearner { connector, ..} = pair.xr_server.bitrate_manager.bitrate_mode{
+    //             let obs = pair.xr_server.bitrate_manager.build_rl_observation(simu.time()); 
+    //             let reward = pair.xr_server.bitrate_manager.rl_reward_function(&obs);
+
+    //             let done = t >= Duration::from_secs_f64(stoptime); 
+
+    //             connector.lock().unwrap().select_action(&obs); 
+    //         }
+    //     }
+        
+        
+    //     t += step_interval; 
+    // }
 
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
