@@ -2,6 +2,7 @@ use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender
 };
 use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_CSV};
+use async_std::future::pending;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
@@ -1219,7 +1220,7 @@ pub enum BitrateMode {
         }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 pub struct RLObservation {
     pub t_elapsed_s: f32, 
     pub last_target_bitrate_mbps: f32, 
@@ -1252,15 +1253,26 @@ impl RLObservationVector{
 
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RLStep {
-    pub obs: RLObservationVector, 
-    pub reward: f32, 
-    pub done: bool, 
+pub struct RLTransition {
+    pub prev_obs: RLObservation,
+    pub action: usize,
+    pub reward: f32,
+    pub next_obs: RLObservation,
+    pub done: bool,
 }
-pub trait RLConnector {
-    fn select_action(&mut self, obs: &RLObservationVector) -> usize; // returns the chosen action, or continuous bitrate choice. 
 
-    fn post_reward(&mut self, feedback_reward: &RLStep); 
+
+// pub struct RLStep {
+    // pub obs: RLObservationVector, 
+    // pub reward: f32, 
+    // pub done: bool, 
+// }
+pub trait RLConnector {
+    fn select_action(&mut self, obs: &RLObservation) -> usize; // returns the chosen action, or continuous bitrate choice. 
+
+    fn post_reward(&mut self, feedback_reward: &RLTransition); 
+
+    fn post_transition(&mut self, transition: &RLTransition);
 
 }
 
@@ -1269,50 +1281,111 @@ pub trait RLConnector {
 
 
 pub struct ZmqConnector{
-    socket: zmq::Socket, 
-    last_obs: Option<RLObservationVector>, 
-    last_action_idx: usize, 
-    last_decision_time: TaiTime<0>, 
+    action_socket: zmq::Socket, // REQ socket for blocking action selection
+    step_socket: zmq::Socket,   // PUSH socket for sending (obs, reward, done) steps
 }
 
 impl ZmqConnector{
-    pub fn new(addr: &str, ctx: &zmq::Context) -> Self {
-        let socket = ctx.socket(zmq::REQ).unwrap(); 
-        socket.connect(addr).unwrap(); 
-        socket.set_rcvtimeo(1500).ok(); 
-        socket.set_sndtimeo(1500).ok(); 
-        Self{socket, last_obs: None, last_action_idx: 0, last_decision_time: TaiTime::EPOCH, } 
+    // pub fn new(addr: &str, ctx: &zmq::Context) -> Self {
+    //     let socket = ctx.socket(zmq::REQ).unwrap(); 
+    //     socket.connect(addr).unwrap(); 
+    //     socket.set_rcvtimeo(1500).ok(); 
+    //     socket.set_sndtimeo(1500).ok(); 
+    //     Self{socket, last_obs: None, last_action_idx: 0, last_decision_time: TaiTime::EPOCH, } 
+    // }
+    pub fn new(action_endpoint: &str, reward_endpoint: &str, ctx: &zmq::Context) -> Self {
+        // --- Action Socket (REQ) ---
+        let action_socket = ctx.socket(zmq::REQ).expect("Failed to create REQ socket");
+        // Set a receive timeout (e.g., 5 seconds) to prevent infinite blocking
+        // if the Python script crashes.
+        action_socket
+            .set_rcvtimeo(5000)
+            .expect("Failed to set receive timeout");
+        action_socket
+            .connect(action_endpoint)
+            .expect("Failed to connect REQ socket");
+        println!("[ZmqConnector] Action socket connected to {}", action_endpoint);
+
+        // --- Reward Socket (PUSH) ---
+        let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
+        reward_socket
+            .connect(reward_endpoint)
+            .expect("Failed to connect PUSH socket");
+        println!("[ZmqConnector] Reward socket connected to {}", reward_endpoint);
+
+        Self {
+            action_socket,
+            step_socket: reward_socket,
+        }
     }
+
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct RLRequest{ pub obs: RLObservationVector}
+pub struct RLRequest{ pub obs: RLObservation}
 #[derive(Serialize, Deserialize)]
 pub struct RLResponse{pub action_idx: usize}
 
 
 impl RLConnector for ZmqConnector {
 
-    fn select_action(&mut self, obs: &RLObservationVector) -> usize {
-        let req = serde_json::to_vec(&RLRequest { obs: obs.clone() }).unwrap();
+    fn select_action(&mut self, obs: &RLObservation) -> usize {
+        let request = RLRequest { obs: obs.clone() };
+        let request_json = serde_json::to_string(&request).expect("Failed to serialize observation");
 
-        if self.socket.send(req, 0).is_ok() {
-            if let Ok(msg) = self.socket.recv_msg(0) {
-                if let Ok(resp) = serde_json::from_slice::<RLResponse>(msg.as_ref()) {
-                    self.last_obs = Some(obs.clone());
-                    self.last_action_idx = resp.action_idx;
-                    return resp.action_idx;
-                }
+        // 1. Send the observation to the Python agent
+        println!("RUST: Sending action request...");
+        self.action_socket
+            .send(&request_json, 0)
+            .expect("Failed to send observation");
+
+        // 2. Block and wait for the action, handling all possible outcomes
+        println!("RUST: Waiting for action reply...");
+        match self.action_socket.recv_bytes(0) {
+            Ok(response_bytes) => {
+                // This is the success path. All success logic goes here.
+                println!("RUST: Action reply received.");
+
+                // Deserialize the raw bytes into our RLResponse struct
+                let response: RLResponse =
+                    serde_json::from_slice(&response_bytes).expect("Failed to deserialize action response");
+
+                // Return the action index directly
+                response.action_idx
+            }
+            Err(zmq::Error::EAGAIN) => {
+                // This error means the timeout was reached
+                eprintln!("RUST ERROR: Timed out waiting for action from Python agent!");
+                // For now, we will panic, but you could also return a default action
+                // or attempt to resend the request.
+                panic!("ZMQ Timeout");
+            }
+            Err(e) => {
+                // Some other ZMQ error occurred
+                panic!("ZMQ Error: {}", e);
             }
         }
-        self.last_action_idx
+    }
+
+    fn post_reward(&mut self, step: &RLTransition) {
+        // Optional: send reward back for off-policy algos that separate selection/reward.
+        // Or piggyback reward on the next select_action call.
+        // let _ = (step,); // no-op for the minimal version
+        panic!("TODO POST REWARD"); 
     }
 
 
-    fn post_reward(&mut self, step: &RLStep) {
-        // Optional: send reward back for off-policy algos that separate selection/reward.
-        // Or piggyback reward on the next select_action call.
-        let _ = (step,); // no-op for the minimal version
+    fn post_transition(&mut self, transition: &RLTransition) {
+        let transition_json = serde_json::to_string(transition)
+            .expect("Failed to serialize RLTransition");
+
+        println!("Sending transition: action {}, reward {:.2}", transition.action, transition.reward);
+
+        self.step_socket
+            .send(&transition_json, 0)
+            .expect("Failed to send transition");
+
+        println!("RUST: Transition data sent."); 
     }
 }
 
@@ -1514,6 +1587,7 @@ pub struct BitrateManager {
     flr_shardloss_count: TimedVecFLR,  
     jitbuf_avg_count: TimedVecBuffer,
     last_rebuffer_avg_sum: u8,   
+    t_end_simulation: f64, 
 }
 
 
@@ -1570,7 +1644,7 @@ impl BitrateManager {
             self.last_target_bitrate_bps / 1e6
         );
     }     
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, ) -> Self {
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64) -> Self {
     
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -1659,7 +1733,7 @@ impl BitrateManager {
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new("tcp://127.0.0.1:5555", &ctx)))),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new("tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556",  &ctx)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
@@ -1708,6 +1782,7 @@ impl BitrateManager {
             flr_shardloss_count: flr_vec, 
             jitbuf_avg_count: buflevel_vec, 
             last_rebuffer_avg_sum: 0, 
+            t_end_simulation: t_end_simu, 
 
         }
     }
@@ -1980,40 +2055,57 @@ impl BitrateManager {
                     last_decision_instant,
                     pending_obs,
                 } => {
-            
-                    if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
-                        print_red!("TOO SOON!!!", ); 
+                        if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
+                            return self.last_target_bitrate_bps;
+                        }
 
-                        return self.last_target_bitrate_bps;
-                    }
+                        let current_obs = self.build_rl_observation(now);
 
-                    if let Some(prev_obs) = pending_obs.lock().unwrap().take() {
-                        let cur_obs = self.build_rl_observation(now);
-                        let r = self.rl_reward_function(&cur_obs);
-                        print_pink!("Observation: {:?}, reward: {:?}", cur_obs, r); 
+                        // Take the old history. If it's the first step, it will be None.
+                        let mut obs_history_vec = pending_obs.lock().unwrap().take();
 
-                        connector.lock().unwrap().post_reward(&RLStep {
-                            obs: prev_obs.clone(),
-                            reward: r,
-                            done: false,
-                        });
-                    }
+                        // If there was a previous state, send the transition
+                        if let Some(ref mut history) = obs_history_vec {
+                            if let Some(prev_obs) = history.observations.last() {
+                                let prev_action = *last_action_idx.lock().unwrap();
+                                let reward = self.rl_reward_function(&current_obs);
+                                let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
 
-                    let mut obs_vec = pending_obs.lock().unwrap().take().unwrap_or_else(|| RLObservationVector::new(5));
-                    obs_vec.push(self.build_rl_observation(now));
+                                let transition = RLTransition {
+                                    prev_obs: prev_obs.clone(),
+                                    action: prev_action,
+                                    reward,
+                                    next_obs: current_obs.clone(),
+                                    done,
+                                };
+                                connector.lock().unwrap().post_transition(&transition);
+                            }
+                        }
 
-                    let idx = connector.lock().unwrap()
-                        .select_action(&obs_vec)
-                        .min(bitrate_ladder_mbps.len().saturating_sub(1));
+                        // Get the next action from the agent
+                        println!("before selecting action");
+                        let next_action_idx = connector
+                            .lock()
+                            .unwrap()
+                            .select_action(&current_obs)
+                            .min(bitrate_ladder_mbps.len().saturating_sub(1));
 
-                    *last_action_idx.lock().unwrap() = idx;
-                    *last_decision_instant.lock().unwrap() = now;
-                    *pending_obs.lock().unwrap() = Some(obs_vec);
+                        // Update the history vector (or create it if it was the first step)
+                        let mut history = obs_history_vec.unwrap_or_else(|| RLObservationVector::new(8));
+                        history.push(current_obs);
 
-                    let target_mbps = bitrate_ladder_mbps[idx];
-                    self.last_target_bitrate_bps = target_mbps * 1e6;
-                    print_green!("[RL] target_mbps: {:?}", target_mbps); 
-                    self.last_target_bitrate_bps
+                        // CRITICAL: Put the updated history back for the next step
+                        *pending_obs.lock().unwrap() = Some(history);
+                        *last_action_idx.lock().unwrap() = next_action_idx;
+                        *last_decision_instant.lock().unwrap() = now;
+
+                        // Apply action
+                        let target_mbps = bitrate_ladder_mbps[next_action_idx];
+                        self.last_target_bitrate_bps = target_mbps * 1e6;
+                        print_green!("[RL] New Action: {}, Target Bitrate: {:.2} Mbps", next_action_idx, target_mbps);
+                        
+                        self.last_target_bitrate_bps
+                                        
                 }
             };
             print_prettyy!(
@@ -2239,6 +2331,7 @@ impl XRServer {
         intra_refresh: bool, 
         abr_enabled: usize, 
         nest_vr_profile: &NestVrProfile, 
+        t_end_simu: f64, 
 
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
@@ -2277,6 +2370,7 @@ impl XRServer {
                 initial_bitrate,
                 abr_enabled, 
                 nest_vr_profile, 
+                t_end_simu, 
             ),
 
             video_app_sender: None,

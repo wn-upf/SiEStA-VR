@@ -9,6 +9,8 @@
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::NetworkPattern;
+use tai_time::TaiTime;
+use xkbcommon::xkb::Table;
 use crate::lib::models_XR::BitrateMode;
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
@@ -94,7 +96,7 @@ impl VRPair {
         nest_vr_profile: &NestVrProfile, 
         netem_values_tests: Option<(bool,bool,bool,bool)>,
         test_distances_everest_bool: bool, 
-
+        t_end_simu: f64, 
 
     ) -> Self {
         let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
@@ -125,6 +127,7 @@ impl VRPair {
             intrarefresh, 
             abr_enabled, 
             nest_vr_profile, 
+            t_end_simu, 
         );
 
         let everest_enabled = if abr_enabled == 2 { true } else {false}; 
@@ -397,6 +400,7 @@ fn main() {
             &nest_vr_profile, 
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
             test_distances_everest_bool, 
+            stoptime, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -429,6 +433,7 @@ fn main() {
             &nest_vr_profile,
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
             test_distances_everest_bool, 
+            stoptime, 
 
         );
         // all_sta_ids.push(100 + i as i32);
