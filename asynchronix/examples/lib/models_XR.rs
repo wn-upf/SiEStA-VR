@@ -1220,6 +1220,16 @@ pub enum BitrateMode {
         }
 }
 
+impl BitrateMode{
+    fn variant_name(&self) -> String {
+        match self {
+            BitrateMode::ConstantMbps(val) =>       format!("CBR {} Mbps", val),      
+            BitrateMode::EVeREst { .. } =>                "EVeREst".to_string(),
+            BitrateMode::NestVr { .. } =>                 "NeSt-VR".to_string(), 
+            BitrateMode::ReinforcementLearner { .. } =>   "ReinforcementLearner".to_string(),
+        }
+    }
+}
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 pub struct RLObservation {
     pub t_elapsed_s: f32, 
@@ -1269,8 +1279,6 @@ pub struct RLTransition {
 // }
 pub trait RLConnector {
     fn select_action(&mut self, obs: &RLObservation) -> usize; // returns the chosen action, or continuous bitrate choice. 
-
-    fn post_reward(&mut self, feedback_reward: &RLTransition); 
 
     fn post_transition(&mut self, transition: &RLTransition);
 
@@ -1334,17 +1342,17 @@ impl RLConnector for ZmqConnector {
         let request_json = serde_json::to_string(&request).expect("Failed to serialize observation");
 
         // 1. Send the observation to the Python agent
-        println!("RUST: Sending action request...");
+        // println!("RUST: Sending action request...");
         self.action_socket
             .send(&request_json, 0)
             .expect("Failed to send observation");
 
         // 2. Block and wait for the action, handling all possible outcomes
-        println!("RUST: Waiting for action reply...");
+        // println!("RUST: Waiting for action reply...");
         match self.action_socket.recv_bytes(0) {
             Ok(response_bytes) => {
                 // This is the success path. All success logic goes here.
-                println!("RUST: Action reply received.");
+                // println!("RUST: Action reply received.");
 
                 // Deserialize the raw bytes into our RLResponse struct
                 let response: RLResponse =
@@ -1367,12 +1375,6 @@ impl RLConnector for ZmqConnector {
         }
     }
 
-    fn post_reward(&mut self, step: &RLTransition) {
-        // Optional: send reward back for off-policy algos that separate selection/reward.
-        // Or piggyback reward on the next select_action call.
-        // let _ = (step,); // no-op for the minimal version
-        panic!("TODO POST REWARD"); 
-    }
 
 
     fn post_transition(&mut self, transition: &RLTransition) {
@@ -1385,7 +1387,7 @@ impl RLConnector for ZmqConnector {
             .send(&transition_json, 0)
             .expect("Failed to send transition");
 
-        println!("RUST: Transition data sent."); 
+        // println!("RUST: Transition data sent."); 
     }
 }
 
@@ -1644,7 +1646,7 @@ impl BitrateManager {
             self.last_target_bitrate_bps / 1e6
         );
     }     
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64) -> Self {
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr) -> Self {
     
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -1729,8 +1731,6 @@ impl BitrateManager {
             3 => {
                 let ladder_mbps = (10..=100).step_by(10).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
-
-
                 print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
@@ -1743,6 +1743,8 @@ impl BitrateManager {
             }
             _ => BitrateMode::ConstantMbps(initial_bitrate_mbps)
         };          
+
+        print_green!("Server {} has BitrateMode => {:?}", ip_server, bitrate_mode.variant_name());
 
         let flr_vec: TimedVecFLR = TimedVecFLR::new( BITRATE_UPDATE_INTERVAL as f32); 
         let buflevel_vec =  TimedVecBuffer::new( BITRATE_UPDATE_INTERVAL as f32); 
@@ -1857,7 +1859,7 @@ impl BitrateManager {
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
-    pub fn one_pass_abr(&mut self, now: TaiTime<0>) -> f32 {
+    pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
 
         const TIME_WARMUP_ABR: u64 = 11; 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
@@ -1871,7 +1873,7 @@ impl BitrateManager {
                     self.last_target_bitrate_bps = *bitrate_mbps as f32 * 1E6;
                     // self.last_target_bitrate_mbps = *bitrate_mbps as f32;
 
-                    print_prettyy!(DebugColor::Navy, "CBR -> Bitrate = {} Mbps", bitrate_mbps);
+                    print_prettyy!(DebugColor::Navy, "[{}] CBR -> Bitrate = {} Mbps", ip_server ,bitrate_mbps);
 
                     *bitrate_mbps as f32 * 1e6
                 }
@@ -1879,7 +1881,7 @@ impl BitrateManager {
                 BitrateMode::EVeREst { bitrate_ladder_mbps }
                     => {
                         let mut bitrate_bps = self.last_target_bitrate_bps; 
-                        print_red!("bitrate first: {} Mbps", bitrate_bps / 1e6);  
+                        // print_red!("bitrate first: {} Mbps", bitrate_bps / 1e6);  
                         
                         let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
                         let new_mbps = match self.everest_last_order {
@@ -1920,7 +1922,7 @@ impl BitrateManager {
                         else{
                             print_red!( "t: {:.6} -> no bitrate ladder? ", format_elapsed!(now)); 
                         }
-                        print_pink!("[Everest] N_users= {} / {} == {}, Capacity_margin={}\nBitrate={:.3}", self.everest_capacity_ewma, self.everest_throughput_ewma, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
+                        print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
                         self.last_target_bitrate_bps = bitrate_bps; 
                         
                         bitrate_bps
@@ -1934,11 +1936,11 @@ impl BitrateManager {
                     ..
                 } => {
                     
-                    print_pink!(
-                        // DebugColor::Purple,
-                        "{} ONE PASS OF NEST-VR! Bitrate: {} Mbps",
-                        format_elapsed!(now), self.last_target_bitrate_bps / 1e6,  
-                    );
+                    // print_pink!(
+                    //     // DebugColor::Purple,
+                    //     "{} ONE PASS OF NEST-VR! Bitrate: {} Mbps",
+                    //     format_elapsed!(now), self.last_target_bitrate_bps / 1e6,  
+                    // );
 
                     let (max_bps, min_bps) = (max_bitrate_mbps * 1e6, min_bitrate_mbps * 1e6); 
 
@@ -1975,7 +1977,7 @@ impl BitrateManager {
 
                     if nfr_avg < profile_config.nfr_thresh {
                         // decrease
-                        print_yellow!("decrease (nfr_thresh)",); 
+                        // print_yellow!("decrease (nfr_thresh)",); 
 
                         bitrate_bps -=
                             profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps_nest;
@@ -1983,7 +1985,7 @@ impl BitrateManager {
                         if rtt_avg_ms > profile_config.rtt_thresh_ms {
                             if r_rtt <= profile_config.rtt_adj_prob {
                                 // decrease
-                                print_yellow!("decrease (rtt prob)",); 
+                                // print_yellow!("decrease (rtt prob)",); 
 
                                 bitrate_bps -= profile_config.bitrate_dec_steps as f32
                                     * self.bitrate_step_size_bps_nest;
@@ -1991,7 +1993,7 @@ impl BitrateManager {
                         } else {
                             if r_inc <= profile_config.bitrate_inc_prob {
                                 // increase
-                                print_yellow!("INCREASE (rtt prob)",); 
+                                // print_yellow!("INCREASE (rtt prob)",); 
 
                                 bitrate_bps += profile_config.bitrate_inc_steps as f32
                                     * self.bitrate_step_size_bps_nest;
@@ -2041,7 +2043,8 @@ impl BitrateManager {
 
                     print_pink!(
                         // DebugColor::Purple,
-                        " ------NeSt-VR STATS-------: {:#?}",
+                        "[{}]NeSt-VR STATS-------: {:#?}",
+                        ip_server, 
                         heur_stats
                     );
                     self.last_target_bitrate_bps = bitrate_bps;
@@ -2085,7 +2088,7 @@ impl BitrateManager {
                         }
 
                         // Get the next action from the agent
-                        println!("before selecting action");
+                        // println!("before selecting action");
                         let next_action_idx = connector
                             .lock()
                             .unwrap()
@@ -2104,7 +2107,7 @@ impl BitrateManager {
                         // Apply action
                         let target_mbps = bitrate_ladder_mbps[next_action_idx];
                         self.last_target_bitrate_bps = target_mbps * 1e6;
-                        print_green!("[RL] New Action: {}, Target Bitrate: {:.2} Mbps", next_action_idx, target_mbps);
+                        print_green!("[RL {}] New Action: {}, Target Bitrate: {:.2} Mbps", ip_server,  next_action_idx, target_mbps);
                         
                         self.last_target_bitrate_bps
                                         
@@ -2373,6 +2376,7 @@ impl XRServer {
                 abr_enabled, 
                 nest_vr_profile, 
                 t_end_simu, 
+                ip_self, 
             ),
 
             video_app_sender: None,
@@ -2870,7 +2874,7 @@ impl XRServer {
                 if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) {
                     if (now.duration_since(self.bitrate_manager.last_update_instant) >= duration_abr){
                        
-                        let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
+                        let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                         self.bitrate_manager.last_update_instant = now;
                         
 
@@ -2885,7 +2889,7 @@ impl XRServer {
                 } 
                 else{ // EveRest classic is applied per-frame. 
 
-                    let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now) / 1e6;
+                    let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
                     
                     let perfect_info_message = PerfectInfoBitrateMessage{bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),  bitrate_mbps: last_bitrate_mbps }; 
@@ -3675,32 +3679,6 @@ impl XRClient {
     }
 
 
-    /// Truncated exponential sampler with mean `mean` before truncation and hard bounds [a,b].
-    /// We adjust lambda to match the target mean approximately after truncation.
-    fn truncated_exponential_seconds<R: Rng>(&mut self, rng: &mut R, mean: f64, a: f64, b: f64) -> f64 {
-        // Guard rails
-        let a = a.max(0.0);
-        let b = b.max(a + 1e-6);
-        // Simple fixed-point refinement for λ so E[X|a<=X<=b]≈mean (good enough here).
-        let mut lambda = 1.0 / mean.max(1e-6);
-        for _ in 0..6 {
-            let ea = (-lambda * a).exp();
-            let eb = (-lambda * b).exp();
-            let z  = ea - eb;
-            // E[X | a<=X<=b] for Exp(λ) truncated to [a,b]
-            let ex_trunc = (1.0 / lambda) + (a * ea - b * eb) / z;
-            lambda *= ex_trunc / mean;
-        }
-        // Inverse CDF for truncated exp
-        let u: f64 = rng.gen();
-        let ea = (-lambda * a).exp();
-        let eb = (-lambda * b).exp();
-        let x = - ( (u * (eb - ea) + ea).ln() ) / lambda;
-        x.clamp(a, b)
-    }
-
-
-
     pub async fn configure_streams(&mut self, packet_size: usize, context: &Context<Self>) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
         let stream_port: u16 = 9944;
@@ -4204,7 +4182,7 @@ impl XRClient {
                             });
                             let d_lower_everest = bitrate_bps_comp / value_b2 * (1.0 / self.framerate);   // IFT in average or expectation from fps? assuming FPS
                             
-                            print_yellow!("b1 = {}, b2 = {} , 1/FPS = {}", bitrate_bps_comp, value_b2, 1.0/self.framerate); 
+                            // print_yellow!("b1 = {}, b2 = {} , 1/FPS = {}", bitrate_bps_comp, value_b2, 1.0/self.framerate); 
                             
                             let d_upper_everest = 1.0 / self.framerate; 
 
@@ -4222,8 +4200,8 @@ impl XRClient {
                                 command_abr_everest = EverestCommand::SpeedUp; 
                             }
 
-                            crate::print_blue!("[CLIENT EVEREST]------------------------------\nIs D_short({}) >= D_upper({})? -> {}\nIs D_long({}) < D_lower({})? -> {}\nCMD={:?}",
-                                     self.d_short_exp_avg, d_upper_everest, self.d_short_exp_avg >= d_upper_everest , self.d_long_exp_avg, d_lower_everest,  self.d_long_exp_avg < d_lower_everest, command_abr_everest ); 
+                            // crate::print_blue!("[CLIENT EVEREST ]------------------------------\nIs D_short({}) >= D_upper({})? -> {}\nIs D_long({}) < D_lower({})? -> {}\nCMD={:?}",
+                            //          self.d_short_exp_avg, d_upper_everest, self.d_short_exp_avg >= d_upper_everest , self.d_long_exp_avg, d_lower_everest,  self.d_long_exp_avg < d_lower_everest, command_abr_everest ); 
 
 
                         }
@@ -4840,16 +4818,16 @@ impl XRClient {
                          
                          if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
                             let miin: usize = usize::min(video_frame.len(), 50);
-                            crate::print_magenta!(
-                                // DebugColor::Violet,
-                                "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
-                                format_elapsed!(now),
-                                ip_client,
-                                id_f,
-                                video_frame.len(),
-                                self.decoder_queue.len(),
-                                interarrival.as_secs_f32(),
-                            );
+                            // crate::print_magenta!(
+                            //     // DebugColor::Violet,
+                            //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                            //     format_elapsed!(now),
+                            //     ip_client,
+                            //     id_f,
+                            //     video_frame.len(),
+                            //     self.decoder_queue.len(),
+                            //     interarrival.as_secs_f32(),
+                            // );
                         }
 
                         if let Some(decoder_arc) = self.original_decoder.clone(){
@@ -4955,7 +4933,7 @@ impl XRClient {
                  self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
             } else { // Decoder queue was empty
-                print_red!("REBUFFER EVENT!!", ); 
+                print_red!("[{}] REBUFFER EVENT!!", self.server_ip ); 
                 self.rebuffer_event_counter.add_one(now); 
 
             } // End if let Some((id_f, video_frame))

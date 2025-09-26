@@ -3,9 +3,17 @@ import json
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from pprint import pprint
-
+import pprint  # <-- CORRECTED IMPORT
 from stable_baselines3 import DQN
+
+
+class Colors:
+    """ANSI color codes"""
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    ENDC = '\033[0m' # Resets the color
+
 
 # The observation shape should match the flattened array from your Rust struct.
 # Your RLObservation has 9 fields.
@@ -16,18 +24,6 @@ ACTION_DIM = 10  # Your bitrate ladder size
 ACTION_ENDPOINT = "tcp://*:5555"  # Python BINDs a REP socket here
 STEP_ENDPOINT = "tcp://*:5556"    # Python BINDs a PULL socket here
 
-import zmq
-import json
-import numpy as np
-import gymnasium as gym
-from gymnasium import spaces
-from pprint import pprint
-
-# Constants remain the same
-OBSERVATION_SHAPE = (9,)
-ACTION_DIM = 10
-ACTION_ENDPOINT = "tcp://*:5555"
-STEP_ENDPOINT = "tcp://*:5556"
 
 class ZmqEnvServer(gym.Env):
     metadata = {"render_modes": []}
@@ -55,13 +51,14 @@ class ZmqEnvServer(gym.Env):
         Handles the start of a new episode.
         """
         super().reset(seed=seed)
-        print("\n--- Episode boundary ---")
+        print(f"\n{Colors.YELLOW}--- Episode boundary ---{Colors.ENDC}")
         print("PY: Waiting for the FIRST action request from Rust to start the episode...")
         
         # 1. Wait for Rust's very first 'select_action' request.
         # This provides the initial observation for the episode.
         request = self.rep_socket.recv_json()
-        initial_obs = self._obs_from_json(request["obs"])
+        initial_obs_dict = request["obs"]      
+        initial_obs_arr = self._obs_from_json(initial_obs_dict)
 
         # 2. Rust's REQ socket REQUIRES a reply to unblock.
         # We send a dummy/default action (e.g., action 0) just to complete the ZMQ cycle.
@@ -69,10 +66,13 @@ class ZmqEnvServer(gym.Env):
         # handled by the first call to step().
         self.rep_socket.send_json({"action_idx": 0})
         
-        print("PY: Initial observation received. Sent dummy action 0 to unblock Rust.")
-        
+        print(f"{Colors.BLUE}PY: Initial observation received:{Colors.ENDC}")
+        # This line will now work correctly
+        print(f"{Colors.BLUE}{pprint.pformat(initial_obs_dict)}{Colors.ENDC}") 
+        print(f"{Colors.GREEN}PY: Sent dummy action 0 to unblock Rust.{Colors.ENDC}")
+
         # 3. Return the initial observation to the Stable Baselines 3 agent.
-        return initial_obs, {}
+        return initial_obs_arr, {}
 
     def step(self, action):
         """
@@ -88,9 +88,19 @@ class ZmqEnvServer(gym.Env):
         
         reward = transition["reward"]
         done = transition["done"]
-        next_obs = self._obs_from_json(transition["next_obs"])
+        next_obs_dict = transition["next_obs"] 
+        next_obs_arr = self._obs_from_json(next_obs_dict)
         truncated = False 
         info = {}
+
+        print(f"{Colors.BLUE}PY: Received Step Data:{Colors.ENDC}")
+        step_data_to_print = {
+            "reward": reward,
+            "done": done,
+            "next_obs": next_obs_dict
+        }
+        # This line will also work correctly now
+        print(f"{Colors.BLUE}{pprint.pformat(step_data_to_print)}{Colors.ENDC}")
 
         # 2. If the episode is not over, Rust is now waiting for its next action.
         # We must complete the REQ/REP cycle by receiving its request and
@@ -101,14 +111,14 @@ class ZmqEnvServer(gym.Env):
             _ = self.rep_socket.recv_json()
             
             # Reply with the agent's chosen action to unblock Rust.
-            print(f"PY: Replying with agent's chosen action: {action}")
+            print(f"{Colors.GREEN}PY: Replying with agent's chosen action: {action}{Colors.ENDC}")
             self.rep_socket.send_json({"action_idx": int(action)})
         else:
             # If the episode IS done, we do nothing. The training loop will call
             # `reset`, which will handle the start of the next episode.
-            print("PY: Episode finished (done=True).")
+            print(f"{Colors.YELLOW}PY: Episode finished (done=True).{Colors.ENDC}")
 
-        return next_obs, reward, done, truncated, info
+        return next_obs_arr, reward, done, truncated, info
 
     def close(self):
         self.rep_socket.close()

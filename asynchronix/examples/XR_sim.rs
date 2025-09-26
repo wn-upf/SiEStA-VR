@@ -99,6 +99,25 @@ impl VRPair {
         t_end_simu: f64, 
 
     ) -> Self {
+
+
+        let abr_choice; 
+    
+        if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
+
+            if pair_index == 0{
+                abr_choice = 3; 
+                // do nothing, it's correct
+            }
+            else{
+                let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
+                abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2
+            }
+        }
+        else{
+            abr_choice = abr_enabled; 
+        }
+
         let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
         let client_id = PREFIX_ID_UPLINK + pair_index as i32;
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
@@ -125,12 +144,12 @@ impl VRPair {
             file_name_video, 
             gop_size, 
             intrarefresh, 
-            abr_enabled, 
+            abr_choice, 
             nest_vr_profile, 
             t_end_simu, 
         );
 
-        let everest_enabled = if abr_enabled == 2 { true } else {false}; 
+        let everest_enabled = if abr_choice == 2 { true } else {false}; 
 
         let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, everest_enabled);
 
@@ -300,13 +319,12 @@ fn main() {
     let seed: u64               =       args[16].parse().unwrap();
     let gop_size: usize         =       args[17].parse().expect("Invalid GoP size"); 
     let intra_refresh: usize    =       args[18].parse().expect("Invalid intra-refresh (0 or 1)"); 
-    let abr: usize              =       args[19].parse().expect("Invalid ABR (0 or 1) "); 
+    let abr: usize              =       args[19].parse().expect("Invalid ABR: 0 -> CBR | 1 -> Nest-VR | 2 -> Everest | 3 -> ReinforcementLearner "); 
     let nest_vr_choice     =       args[20].parse().expect("Invalid NeSt profile"); 
-    let test_distances_everest: usize =        args[21].parse().expect("Invalid Coordinates option"); 
+    let test_distances_everest: usize = args[21].parse().expect("Invalid Coordinates option"); 
     
-    let test_distances_everest_bool = test_distances_everest != 0;
+    let test_distances_everest_bool = test_distances_everest != 0; 
 
-    
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
         "BW" => (true, false, false, false),
@@ -394,6 +412,9 @@ fn main() {
     if !emu_effects.is_empty(){
         print_red!("Emulated patterns: \n{:#?}", emu_effects); 
     }
+
+   
+
 
     for i in 0..n_close{ // to set up variable distance scenarios across users
 
@@ -583,7 +604,9 @@ fn main() {
 
     for (i, (addr_client, addr_server)) in xr_client_addresses.iter().zip(&xr_server_addresses).enumerate() {
         let init: f64 = SIM_START_TIME as f64; 
-        let sessions = if test_distances_everest_bool 
+        
+        
+        let mut sessions = if test_distances_everest_bool 
             {
                 generate_session_timeline(&mut rng, init, stoptime)
             }
@@ -591,6 +614,9 @@ fn main() {
                 generate_session_timeline_basic(init, stoptime)
         }; 
 
+        if i == 0 && abr == 3 {
+            sessions = generate_session_timeline_basic(init, stoptime); // Force the ReinforcementLearner to be active all across the simulation. 
+        }
         // let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
         print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 

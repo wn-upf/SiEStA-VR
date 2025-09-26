@@ -37,7 +37,7 @@ SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=20.0
+simTime=90.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -45,7 +45,7 @@ rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=( 1 ) 
+N_XR=( 3 ) 
 PL=0.1
 
 fps_list=( 90.0 )
@@ -65,30 +65,40 @@ IS_UL_BG=(0)
 intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
 GoP_sizes=(90)
 
-everest_tests=0
-# Define the function to execute on Ctrl+C
-handle_interrupt() {
-    echo "Simulation interrupted."
-    exit 1;
-}
-
-# Set up the trap for SIGINT (Ctrl+C)
-trap handle_interrupt SIGINT
-
+everest_tests=1
 
 temp_file=$(mktemp)
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
 # Open a new terminal and run the Python training script
-gnome-terminal -- bash -c "
+gnome-terminal --disable-factory -- bash -c "
     cd ~/Desktop/Rust_MG1/asynchronix/python_RL;
     python gym_train_DQN.py;
-    exec bash"   # keeps terminal open afterwards
+    exec bash" &
+PY_TERM_PID=$!   # capture terminal PID
 
+
+
+
+PY_TERM_PID=$!   # capture terminal PID
+# Define the function to execute on Ctrl+C
+handle_interrupt() {
+    echo "Simulation interrupted."
     
+    kill -9 -$(ps -o pgid= $PY_TERM_PID | grep -o '[0-9]*') 2>/dev/null
+    exit 1
+}
+# Set up the trap for SIGINT (Ctrl+C)
+trap handle_interrupt SIGINT
+
 cargo build --release --example XR_sim
+
+
+
+
 sleep 1
+
 
 
 
@@ -132,7 +142,7 @@ for test in "${TEST_TYPE[@]}"; do
                                                                 echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests
+                                                                 script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests" "out_log.ans"
                                                                 sleep 5
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*
