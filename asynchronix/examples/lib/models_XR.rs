@@ -1228,7 +1228,7 @@ pub struct RLObservation {
     // pub frame_size_mb_avg_s: f32, 
     pub bandwidth_mbps_avg_s: f32,
     pub bandwidth_mbps_std_s: f32, 
-    pub frame_interarrival_avg_s: f32, 
+    pub frame_interarrival_avg_ms: f32, 
     pub flr_avg_s: f32, 
     pub buffer_level_avg_s: f32, 
     pub rebuffer_event_sum: u8, 
@@ -1299,7 +1299,7 @@ impl ZmqConnector{
         // Set a receive timeout (e.g., 5 seconds) to prevent infinite blocking
         // if the Python script crashes.
         action_socket
-            .set_rcvtimeo(5000)
+            .set_rcvtimeo(10000)
             .expect("Failed to set receive timeout");
         action_socket
             .connect(action_endpoint)
@@ -1730,6 +1730,8 @@ impl BitrateManager {
                 let ladder_mbps = (10..=100).step_by(10).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
 
+
+                print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
@@ -2123,10 +2125,10 @@ impl BitrateManager {
 
         let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
         let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6; 
-        let rtt_ms_avg_s = self.rtt_average.get_average().as_secs_f32(); 
-        let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average(); 
-        let bandwidth_mbps_std_s =      self.peak_throughput_average.get_std(); 
-        let frame_interarrival_avg_s = self.frame_interarrival_average.get_average(); 
+        let rtt_ms_avg_s = self.rtt_average.get_average().as_secs_f32() * 1000.0; 
+        let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average() * 1e-6; 
+        let bandwidth_mbps_std_s =      self.peak_throughput_average.get_std() * 1e-6; 
+        let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0; 
 
         let flr_avg_s = self.flr_shardloss_count.sum_flr() as f32 / 
                 (1.0 / self.frame_interval_average.get_average().as_secs_f32()); // percentage according to encoded frames window average, 
@@ -2141,7 +2143,7 @@ impl BitrateManager {
             rtt_ms_avg_s,
             bandwidth_mbps_avg_s,
             bandwidth_mbps_std_s,
-            frame_interarrival_avg_s, 
+            frame_interarrival_avg_ms, 
             flr_avg_s,
             buffer_level_avg_s, 
             rebuffer_event_sum, 
@@ -2420,6 +2422,43 @@ impl XRServer {
 
         // Stop streaming
         self.is_streaming = false;
+
+
+        match &self.bitrate_manager.bitrate_mode{
+            
+            BitrateMode::ReinforcementLearner { pending_obs, connector, last_action_idx, ..} => {
+
+                let mut con = connector.lock().unwrap(); 
+                let current_obs = self.bitrate_manager.build_rl_observation(now);
+
+                // Take the old history. If it's the first step, it will be None.
+                let mut obs_history_vec = pending_obs.lock().unwrap().take();
+
+                // If there was a previous state, send the transition
+                if let Some(ref mut history) = obs_history_vec {
+                    if let Some(prev_obs) = history.observations.last() {
+                        let prev_action = *last_action_idx.lock().unwrap();
+                        let reward = self.bitrate_manager.rl_reward_function(&current_obs);
+                        let done = true; 
+
+                        let transition = RLTransition {
+                            prev_obs: prev_obs.clone(),
+                            action: prev_action,
+                            reward,
+                            next_obs: current_obs.clone(),
+                            done,
+                        };
+                        con.post_transition(&transition);
+                        print_red!("[RL] POSTING FINAL TRANSITION: {:#?}", transition); 
+
+                    }
+                }
+            }
+            ,
+            _ => { // do nothing 
+                }
+        }
+
 
         // Drop or reset senders/receivers
         self.video_app_sender = None;
@@ -3605,6 +3644,9 @@ impl XRClient {
             
             let epsilon = Duration::from_nanos(1);
             let target = now + delay.max(epsilon);
+
+            
+
             context.scheduler.schedule_event(target, Self::session_reboot, ()).unwrap();
     }
 
@@ -4913,8 +4955,9 @@ impl XRClient {
                  self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
             } else { // Decoder queue was empty
-
+                print_red!("REBUFFER EVENT!!", ); 
                 self.rebuffer_event_counter.add_one(now); 
+
             } // End if let Some((id_f, video_frame))
 
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();

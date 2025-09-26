@@ -228,6 +228,21 @@ fn truncated_exponential_seconds<R: Rng>(rng: &mut R, mean: f64, a: f64, b: f64)
     x.clamp(a, b)
 }
 
+
+fn generate_session_timeline_basic(
+    // rng: &mut R,
+    sim_init_time: f64, 
+    stoptime: f64,
+) -> Vec<(f64, f64)> {
+
+    let mut sessions = Vec::new();
+
+    let start = sim_init_time;
+    let end = stoptime;
+    sessions.push((start, end));
+    sessions
+}
+
 fn generate_session_timeline<R: Rng>(
     rng: &mut R,
     sim_init_time: f64, 
@@ -568,7 +583,15 @@ fn main() {
 
     for (i, (addr_client, addr_server)) in xr_client_addresses.iter().zip(&xr_server_addresses).enumerate() {
         let init: f64 = SIM_START_TIME as f64; 
-        let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
+        let sessions = if test_distances_everest_bool 
+            {
+                generate_session_timeline(&mut rng, init, stoptime)
+            }
+            else{
+                generate_session_timeline_basic(init, stoptime)
+        }; 
+
+        // let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
         print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
         let mut sessions = sessions;

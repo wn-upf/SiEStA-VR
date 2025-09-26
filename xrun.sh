@@ -34,12 +34,10 @@ echo "***********************************"
 
 NUMBER_OF_JOBS=3
 SERIAL_EXECUTION=1
-
 # initial_bitrate_mbps=( 100.0 )
-
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=150.0
+simTime=20.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -67,7 +65,7 @@ IS_UL_BG=(0)
 intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
 GoP_sizes=(90)
 
-everest_tests=1
+everest_tests=0
 # Define the function to execute on Ctrl+C
 handle_interrupt() {
     echo "Simulation interrupted."
@@ -81,8 +79,30 @@ trap handle_interrupt SIGINT
 temp_file=$(mktemp)
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
+
+# Open a new terminal and run the Python training script
+gnome-terminal -- bash -c "
+    cd ~/Desktop/Rust_MG1/asynchronix/python_RL;
+    python gym_train_DQN.py;
+    exec bash"   # keeps terminal open afterwards
+
+    
 cargo build --release --example XR_sim
 sleep 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 for test in "${TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
         for nxr in "${N_XR[@]}"; do
