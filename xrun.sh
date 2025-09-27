@@ -32,7 +32,7 @@ echo "Current working directory: $(pwd)"
 
 echo "***********************************"
 
-NUMBER_OF_JOBS=3
+NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
@@ -99,20 +99,6 @@ cargo build --release --example XR_sim
 
 sleep 1
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 for test in "${TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
         for nxr in "${N_XR[@]}"; do
@@ -139,10 +125,10 @@ for test in "${TEST_TYPE[@]}"; do
                                                             if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder"
 
-                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
+                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
 
                                                             else                                    ## Serial execution
-                                                                 script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests" "out_log.ans"
+                                                                 script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
                                                                 sleep 5
                                                                 # rm out_log.ans
                                                                 rm -rf Video_Sink/*

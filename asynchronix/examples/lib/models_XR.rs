@@ -1264,6 +1264,7 @@ impl RLObservationVector{
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RLTransition {
+    pub sim_id: String, 
     pub prev_obs: RLObservation,
     pub action: usize,
     pub reward: f32,
@@ -1291,42 +1292,36 @@ pub trait RLConnector {
 pub struct ZmqConnector{
     action_socket: zmq::Socket, // REQ socket for blocking action selection
     step_socket: zmq::Socket,   // PUSH socket for sending (obs, reward, done) steps
+    sim_id: String, 
 }
-
-impl ZmqConnector{
-    // pub fn new(addr: &str, ctx: &zmq::Context) -> Self {
-    //     let socket = ctx.socket(zmq::REQ).unwrap(); 
-    //     socket.connect(addr).unwrap(); 
-    //     socket.set_rcvtimeo(1500).ok(); 
-    //     socket.set_sndtimeo(1500).ok(); 
-    //     Self{socket, last_obs: None, last_action_idx: 0, last_decision_time: TaiTime::EPOCH, } 
-    // }
-    pub fn new(action_endpoint: &str, reward_endpoint: &str, ctx: &zmq::Context) -> Self {
-        // --- Action Socket (REQ) ---
-        let action_socket = ctx.socket(zmq::REQ).expect("Failed to create REQ socket");
-        // Set a receive timeout (e.g., 5 seconds) to prevent infinite blocking
-        // if the Python script crashes.
+impl ZmqConnector {
+    pub fn new(action_endpoint: &str, reward_endpoint: &str, ctx: &zmq::Context, simu_id: &str) -> Self {
+        // --- Action Socket (DEALER) ---
+        let action_socket = ctx.socket(zmq::DEALER).expect("Failed to create DEALER socket");
         action_socket
-            .set_rcvtimeo(10000)
+            .set_identity(simu_id.as_bytes())
+            .expect("Failed to set DEALER identity");
+        action_socket
+            .set_rcvtimeo(10_000)
             .expect("Failed to set receive timeout");
         action_socket
             .connect(action_endpoint)
-            .expect("Failed to connect REQ socket");
-        println!("[ZmqConnector] Action socket connected to {}", action_endpoint);
+            .expect("Failed to connect DEALER socket");
+        println!("[ZmqConnector] Action DEALER connected to {} as {}", action_endpoint, simu_id);
 
         // --- Reward Socket (PUSH) ---
         let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
         reward_socket
             .connect(reward_endpoint)
             .expect("Failed to connect PUSH socket");
-        println!("[ZmqConnector] Reward socket connected to {}", reward_endpoint);
+        println!("[ZmqConnector] Reward PUSH connected to {}", reward_endpoint);
 
         Self {
             action_socket,
             step_socket: reward_socket,
+            sim_id: simu_id.to_string(),
         }
     }
-
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1334,62 +1329,51 @@ pub struct RLRequest{ pub obs: RLObservation}
 #[derive(Serialize, Deserialize)]
 pub struct RLResponse{pub action_idx: usize}
 
-
 impl RLConnector for ZmqConnector {
-
     fn select_action(&mut self, obs: &RLObservation) -> usize {
+        // Attach sim_id in the request for clarity
         let request = RLRequest { obs: obs.clone() };
-        let request_json = serde_json::to_string(&request).expect("Failed to serialize observation");
+        let request_json =
+            serde_json::to_string(&request).expect("Failed to serialize observation");
 
-        // 1. Send the observation to the Python agent
-        // println!("RUST: Sending action request...");
+        // DEALER: send message to ROUTER
         self.action_socket
-            .send(&request_json, 0)
+            .send(request_json.as_bytes(), 0)
             .expect("Failed to send observation");
 
-        // 2. Block and wait for the action, handling all possible outcomes
-        // println!("RUST: Waiting for action reply...");
+        // DEALER: wait for reply from ROUTER (Python)
         match self.action_socket.recv_bytes(0) {
             Ok(response_bytes) => {
-                // This is the success path. All success logic goes here.
-                // println!("RUST: Action reply received.");
-
-                // Deserialize the raw bytes into our RLResponse struct
-                let response: RLResponse =
-                    serde_json::from_slice(&response_bytes).expect("Failed to deserialize action response");
-
-                // Return the action index directly
+                let response: RLResponse = serde_json::from_slice(&response_bytes)
+                    .expect("Failed to deserialize action response");
                 response.action_idx
             }
             Err(zmq::Error::EAGAIN) => {
-                // This error means the timeout was reached
                 eprintln!("RUST ERROR: Timed out waiting for action from Python agent!");
-                // For now, we will panic, but you could also return a default action
-                // or attempt to resend the request.
                 panic!("ZMQ Timeout");
             }
             Err(e) => {
-                // Some other ZMQ error occurred
                 panic!("ZMQ Error: {}", e);
             }
         }
     }
 
-
-
     fn post_transition(&mut self, transition: &RLTransition) {
-        let transition_json = serde_json::to_string(transition)
-            .expect("Failed to serialize RLTransition");
+        // Must include sim_id in RLTransition struct when using PUSH/PULL
+        let transition_json =
+            serde_json::to_string(transition).expect("Failed to serialize RLTransition");
 
-        println!("Sending transition: action {}, reward {:.2}", transition.action, transition.reward);
+        println!(
+            "Sending transition: sim_id {}, action {}, reward {:.2}",
+            transition.sim_id, transition.action, transition.reward
+        );
 
         self.step_socket
-            .send(&transition_json, 0)
+            .send(transition_json.as_bytes(), 0)
             .expect("Failed to send transition");
-
-        // println!("RUST: Transition data sent."); 
     }
 }
+
 
 
 
@@ -1499,8 +1483,26 @@ impl TimedVecFLR{
         }
     }
 
-    pub fn sum_flr(&self) -> usize {
+    pub fn sum_flr(&mut self, time_f32: f32,) -> usize {
+        let cutoff = time_f32 - self.period;
+
+        while let Some(&(t, _)) = self.vec_flr.front() {
+            if t < cutoff {
+                self.vec_flr.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        while let Some(&(t, _)) = self.vec_shard_loss.front() {
+            if t < cutoff {
+                self.vec_shard_loss.pop_front();
+            } else {
+                break;
+            }
+        }
         self.vec_flr.iter().map(|&(_, v)| v).sum()
+
     }
 
     pub fn sum_shard_loss(&self) -> usize {
@@ -1590,63 +1592,14 @@ pub struct BitrateManager {
     jitbuf_avg_count: TimedVecBuffer,
     last_rebuffer_avg_sum: u8,   
     t_end_simulation: f64, 
+    sim_unique_string: String, 
 }
 
 
 
 impl BitrateManager {
-     pub fn reset(&mut self) {
-        // Reset timestamps and counters
-        self.last_frame_instant = TaiTime::EPOCH;
-        self.last_update_instant = TaiTime::EPOCH;
-        self.frame_index = 0;
-
-        // Clear sliding window averages
-        self.frame_interval_average.clear();
-        self.encoder_latency_average.clear();
-        self.network_latency_average.clear();
-        self.rtt_average.clear();
-        self.peak_throughput_average.clear();
-        self.frame_interarrival_average.clear();
-        self.bitrate_average_mbps.clear();
-
-        // Reset bitrate state
-        match &self.bitrate_mode {
-            BitrateMode::ConstantMbps(init_mbps) => {
-                self.last_target_bitrate_bps = *init_mbps * 1e6;
-            }
-            BitrateMode::EVeREst { bitrate_ladder_mbps } => {
-                // Pick the lowest rung as a safe restart point
-                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
-            }
-            BitrateMode::NestVr { min_bitrate_mbps, .. } => {
-                self.last_target_bitrate_bps = min_bitrate_mbps * 1e6;
-            }
-             BitrateMode::ReinforcementLearner { last_action_idx, last_decision_instant, pending_obs, bitrate_ladder_mbps,  .. } => {        
-                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;  // start at lowest
-                *last_action_idx.lock().unwrap() = 0;
-                *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
-                *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
-            }
-        }
-
-        // Reset Everest/Nest state
-        self.everest_last_capacity = 0.0;
-        self.everest_last_throughput = 0.0;
-        self.everest_last_dlong = 0.0;
-        self.everest_last_dshort = 0.0;
-        self.everest_capacity_ewma = 0.0;
-        self.everest_throughput_ewma = 0.0;
-        self.everest_time_last_capacity_update = TaiTime::EPOCH;
-        self.everest_time_last_throughput_update = TaiTime::EPOCH;
-        self.everest_last_order = EverestCommand::Continue;
-
-        crate::print_blue!(
-            "[BitrateManager] Reset complete -> bitrate = {:.2} Mbps",
-            self.last_target_bitrate_bps / 1e6
-        );
-    }     
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr) -> Self {
+   
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str) -> Self {
     
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -1735,7 +1688,7 @@ impl BitrateManager {
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new("tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556",  &ctx)))),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new("tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556",  &ctx, sim_unique_string)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
@@ -1787,9 +1740,62 @@ impl BitrateManager {
             jitbuf_avg_count: buflevel_vec, 
             last_rebuffer_avg_sum: 0, 
             t_end_simulation: t_end_simu, 
-
+            sim_unique_string: sim_unique_string.to_string(), 
         }
     }
+
+      pub fn reset(&mut self) {
+        // Reset timestamps and counters
+        self.last_frame_instant = TaiTime::EPOCH;
+        self.last_update_instant = TaiTime::EPOCH;
+        self.frame_index = 0;
+
+        // Clear sliding window averages
+        self.frame_interval_average.clear();
+        self.encoder_latency_average.clear();
+        self.network_latency_average.clear();
+        self.rtt_average.clear();
+        self.peak_throughput_average.clear();
+        self.frame_interarrival_average.clear();
+        self.bitrate_average_mbps.clear();
+
+        // Reset bitrate state
+        match &self.bitrate_mode {
+            BitrateMode::ConstantMbps(init_mbps) => {
+                self.last_target_bitrate_bps = *init_mbps * 1e6;
+            }
+            BitrateMode::EVeREst { bitrate_ladder_mbps } => {
+                // Pick the lowest rung as a safe restart point
+                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
+            }
+            BitrateMode::NestVr { min_bitrate_mbps, .. } => {
+                self.last_target_bitrate_bps = min_bitrate_mbps * 1e6;
+            }
+             BitrateMode::ReinforcementLearner { last_action_idx, last_decision_instant, pending_obs, bitrate_ladder_mbps,  .. } => {        
+                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;  // start at lowest
+                *last_action_idx.lock().unwrap() = 0;
+                *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
+                *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
+            }
+        }
+
+        // Reset Everest/Nest state
+        self.everest_last_capacity = 0.0;
+        self.everest_last_throughput = 0.0;
+        self.everest_last_dlong = 0.0;
+        self.everest_last_dshort = 0.0;
+        self.everest_capacity_ewma = 0.0;
+        self.everest_throughput_ewma = 0.0;
+        self.everest_time_last_capacity_update = TaiTime::EPOCH;
+        self.everest_time_last_throughput_update = TaiTime::EPOCH;
+        self.everest_last_order = EverestCommand::Continue;
+
+        crate::print_blue!(
+            "[BitrateManager] Reset complete -> bitrate = {:.2} Mbps",
+            self.last_target_bitrate_bps / 1e6
+        );
+    }     
+
     pub fn report_encoded_frame_server(&mut self, now: TaiTime<0>) {
         print_prettyy!(
             DebugColor::Purple,
@@ -1849,7 +1855,7 @@ impl BitrateManager {
         self.everest_last_dlong = network_stats.everest_dlong; 
         self.everest_last_order = network_stats.everest_command; 
         
-        if matches!(self.bitrate_mode , BitrateMode::EVeREst{ .. }) {
+        if matches!(self.bitrate_mode , BitrateMode::EVeREst{ .. }) && now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL) {
             print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  ); 
         }
     }   
@@ -1868,6 +1874,10 @@ impl BitrateManager {
             bitrate_bps 
         }
         else{
+
+            let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
+
+
             let bitrate_bps = match &self.bitrate_mode {
                 BitrateMode::ConstantMbps(bitrate_mbps) => {
                     self.last_target_bitrate_bps = *bitrate_mbps as f32 * 1E6;
@@ -1922,7 +1932,10 @@ impl BitrateManager {
                         else{
                             print_red!( "t: {:.6} -> no bitrate ladder? ", format_elapsed!(now)); 
                         }
-                        print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
+                        if now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL){
+                            print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
+
+                        }
                         self.last_target_bitrate_bps = bitrate_bps; 
                         
                         bitrate_bps
@@ -2064,8 +2077,7 @@ impl BitrateManager {
                             return self.last_target_bitrate_bps;
                         }
 
-                        let current_obs = self.build_rl_observation(now);
-
+                        let current_obs = obs.clone(); 
                         // Take the old history. If it's the first step, it will be None.
                         let mut obs_history_vec = pending_obs.lock().unwrap().take();
 
@@ -2077,6 +2089,7 @@ impl BitrateManager {
                                 let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
 
                                 let transition = RLTransition {
+                                    sim_id: self.sim_unique_string.clone(), 
                                     prev_obs: prev_obs.clone(),
                                     action: prev_action,
                                     reward,
@@ -2124,8 +2137,11 @@ impl BitrateManager {
     }
 
 
-    pub fn build_rl_observation (&self, now: TaiTime<0>) -> RLObservation{
-
+    pub fn build_rl_observation (&mut self, now: TaiTime<0>) -> RLObservation{
+        match self.bitrate_mode{
+            BitrateMode::ReinforcementLearner { .. } => {} //do nothing
+            _ => { return RLObservation::default();}       // return early. 
+        }; 
         let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
         let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6; 
         let rtt_ms_avg_s = self.rtt_average.get_average().as_secs_f32() * 1000.0; 
@@ -2133,7 +2149,7 @@ impl BitrateManager {
         let bandwidth_mbps_std_s =      self.peak_throughput_average.get_std() * 1e-6; 
         let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0; 
 
-        let flr_avg_s = self.flr_shardloss_count.sum_flr() as f32 / 
+        let flr_avg_s = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
                 (1.0 / self.frame_interval_average.get_average().as_secs_f32()); // percentage according to encoded frames window average, 
                                                                                 // (not in the same period though, watch out)
 
@@ -2161,8 +2177,25 @@ impl BitrateManager {
         let gamma = -0.02;       // rtt ~2 to 50 ms -> 0 to - 1
         let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
         let reward = alpha * obs.last_target_bitrate_mbps + beta * (1.0 - obs.flr_avg_s) + gamma * obs.rtt_ms_avg_s + omega * obs.rebuffer_event_sum as f32; 
-        // this expression could be negative if bitrate is very low and flr very high
 
+        let bitrate_term = alpha * obs.last_target_bitrate_mbps;
+        let flr_term = beta * (1.0 - obs.flr_avg_s);
+        let rtt_term = gamma * obs.rtt_ms_avg_s;
+        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;        
+        // this expression could be negative if bitrate is very low and flr very high
+        print_green!(
+            "Reward decomposition:
+            bitrate_term = {bitrate_term:.4},
+            flr_term     = {flr_term:.4},
+            rtt_term     = {rtt_term:.4},
+            rebuffer_term= {rebuffer_term:.4},
+            total_reward = {reward:.4}
+            (inputs: bitrate={:.2} Mbps, flr={:.2}, rtt={:.2} ms, rebuffer={})",
+            obs.last_target_bitrate_mbps,
+            obs.flr_avg_s,
+            obs.rtt_ms_avg_s,
+            obs.rebuffer_event_sum,
+        );
         reward
     }
 }
@@ -2319,6 +2352,7 @@ pub struct XRServer {
     pub last_tracking_rx_instant: TaiTime<0>, 
 
     pub csv_tracking: CsvTracking, 
+    pub sim_unique_string: String, 
 
 }
 #[allow(unused)]
@@ -2337,6 +2371,7 @@ impl XRServer {
         abr_enabled: usize, 
         nest_vr_profile: &NestVrProfile, 
         t_end_simu: f64, 
+        sim_unique_string: &str, 
 
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
@@ -2377,6 +2412,7 @@ impl XRServer {
                 nest_vr_profile, 
                 t_end_simu, 
                 ip_self, 
+                sim_unique_string, 
             ),
 
             video_app_sender: None,
@@ -2413,6 +2449,7 @@ impl XRServer {
             
             last_tracking_rx_instant: t0_sim, 
             csv_tracking: CsvTracking::new(name_folder, num).unwrap(), 
+            sim_unique_string: sim_unique_string.to_string(), 
         }
     }
 
@@ -2427,13 +2464,14 @@ impl XRServer {
         // Stop streaming
         self.is_streaming = false;
 
+        let obs = self.bitrate_manager.build_rl_observation(now); // only return something if RL mode activated
 
-        match &self.bitrate_manager.bitrate_mode{
+        match &self.bitrate_manager.bitrate_mode{  // This shouldn't be done here, but it's best way of enforcing end of an episode with 'done' flag. 
             
             BitrateMode::ReinforcementLearner { pending_obs, connector, last_action_idx, ..} => {
 
                 let mut con = connector.lock().unwrap(); 
-                let current_obs = self.bitrate_manager.build_rl_observation(now);
+                let current_obs = obs.clone();
 
                 // Take the old history. If it's the first step, it will be None.
                 let mut obs_history_vec = pending_obs.lock().unwrap().take();
@@ -2446,6 +2484,7 @@ impl XRServer {
                         let done = true; 
 
                         let transition = RLTransition {
+                            sim_id: self.sim_unique_string.clone(), 
                             prev_obs: prev_obs.clone(),
                             action: prev_action,
                             reward,
@@ -3523,6 +3562,8 @@ pub struct XRClient {
     everest_enabled: bool, 
 
     rebuffer_event_counter: TimedRebufferCounter, 
+    sim_unique_string: String, // for logging
+    bm_string: String, 
     // everest_capacity_vec: Vec<f32>, 
     // everest_throughput_vec: Vec<f32>, 
 }
@@ -3536,6 +3577,8 @@ impl XRClient {
         name_folder: &str,
         test: &str,
         everest_enabled: bool, 
+        simu_id: &str, // for logging
+        bm_str: &str,  // for logging 
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
@@ -3624,8 +3667,8 @@ impl XRClient {
             everest_enabled, 
 
             rebuffer_event_counter: TimedRebufferCounter::new( BITRATE_UPDATE_INTERVAL as f32), 
-            // everest_capacity_vec: Vec::new() ,
-            // everest_throughput_vec: Vec::new(), 
+            sim_unique_string: simu_id.to_string(), //for logging                
+            bm_string: bm_str.to_string(),          //for logging    
         }
     }
 
@@ -4899,7 +4942,9 @@ impl XRClient {
                                             self.last_bitrate_perfect_info_update_mbps,
                                             lost_frames_aux.clone(),
                                             &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
-                                            &self.test, 
+                                            &self.test,
+                                            &self.bm_string, 
+                                            &self.sim_unique_string, 
 
                                         );
                                     
@@ -5147,6 +5192,8 @@ pub fn display_single_frame_with_info(
     lost_frames: VecDeque<u32>,
     lost_frames_buffer: &mut LostFramesBuffer,
     test: &str,
+    bm: &str, 
+    string_id: &str, 
 ) -> bool {
     // 1) Convert raw RGB bytes → u32 pixel buffer
     let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
@@ -5176,7 +5223,16 @@ pub fn display_single_frame_with_info(
     // 5) Draw text overlays (frame index and bitrate)
     let margin = 10;
     let line_h = 20;
-    render_text(&mut buffer, &format!("FRAME #{}", frame_id), margin, margin, scaled_w, 0x00FF00, 2);
+    let line_hh = 40; 
+    
+    render_text(&mut buffer, 
+        &format!("FRAME #{}", 
+        frame_id), 
+        margin,
+        margin,
+        scaled_w,
+        0x00FF00,
+        2);
     render_text(
         &mut buffer,
         &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
@@ -5186,6 +5242,18 @@ pub fn display_single_frame_with_info(
         0x00FF00,
         2,
     );
+    render_text(
+        &mut buffer,
+        &format!("{}", bm ),
+        margin,
+        margin + line_hh,
+        scaled_w,
+        0x00FF00,
+        2,
+    );
+     
+
+
 
     // 6) Handle new lost-frames and add to buffer
     if !lost_frames.is_empty() {
@@ -5214,10 +5282,10 @@ pub fn display_single_frame_with_info(
             );
         }
     }
-
     // 8) Update title with timestamp and test identifier
     let title = format!(
-        "{} -- Frame #{} @ {:.2}s - Test: {}",
+        "{} | {} -- Frame #{} @ {:.2}s - Test: {}",
+        string_id, 
         server_ip,
         frame_id,
         now.duration_since(TaiTime::EPOCH).as_secs_f64(),

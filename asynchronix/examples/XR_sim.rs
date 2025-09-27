@@ -12,6 +12,8 @@ use lib::models_mm1k::NetworkPattern;
 use tai_time::TaiTime;
 use xkbcommon::xkb::Table;
 use crate::lib::models_XR::BitrateMode;
+
+use rand::seq::SliceRandom;
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
 
@@ -83,7 +85,7 @@ impl VRPair {
         pair_index: usize,
         t0: MonotonicTime,
         // mean_length_BG: f64,
-        initial_bitrate: f64,
+        initial_bitrate_orig: f64,
         distance: f64,
         name_folder: &str,
         test: &str,
@@ -97,9 +99,11 @@ impl VRPair {
         netem_values_tests: Option<(bool,bool,bool,bool)>,
         test_distances_everest_bool: bool, 
         t_end_simu: f64, 
+        simu_unique_str: &str, 
 
     ) -> Self {
 
+        let mut initial_bitrate= initial_bitrate_orig; 
 
         let abr_choice; 
     
@@ -112,11 +116,26 @@ impl VRPair {
             else{
                 let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
                 abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2
+
+                if abr_choice == 0 { // CBR (RANDOM)
+                    let values: Vec<u32> = (5..=100).step_by(5).collect();
+                    initial_bitrate = *values.choose(&mut rng).unwrap() as f64; 
+
+                }
             }
         }
         else{
             abr_choice = abr_enabled; 
         }
+
+        let bm_string = match abr_choice
+            {
+                0 => {"CBR"}
+                1 => {"Nest-VR"}, 
+                2 => {"EveRest"},
+                3 => {"RL agent"},
+                _ => {"???"}
+            }; 
 
         let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
         let client_id = PREFIX_ID_UPLINK + pair_index as i32;
@@ -147,11 +166,12 @@ impl VRPair {
             abr_choice, 
             nest_vr_profile, 
             t_end_simu, 
+            simu_unique_str, // for identifying each simulation on the RLConnector
         );
 
         let everest_enabled = if abr_choice == 2 { true } else {false}; 
 
-        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, everest_enabled);
+        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, everest_enabled, simu_unique_str, bm_string);
 
         let mut sta_server = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -294,9 +314,9 @@ fn main() {
     // println!("CUDA_VISIBLE_DEVICES={:?}", std::env::var("CUDA_VISIBLE_DEVICES"));
 
     let args: Vec<String> = env::args().collect();
-    if args.len() != 22 {
+    if args.len() != 23 {
         eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue>
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test>", args[0]);
+        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size>\n<Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id>", args[0]);
         return;
     }
 
@@ -305,7 +325,7 @@ fn main() {
     let mean_length_bg: f64     =       args[2].parse().unwrap();
     let k_queue: usize          =       args[3].parse().unwrap();
     let distance: f64           =       args[4].parse().expect("Invalid distance");
-    let initial_bitrate: f64    =       args[5].parse().expect("Invalid bitrate");
+    let initial_bitrate: f64    =       args[5].parse().expect("Invalid bitrate (Mbps)");
     let pl_prob: f64            =       args[6].parse().expect("Invalid PL");
     let n_xr: usize             =       args[7].parse().expect("Invalid N_xr");
     let n_bg: usize             =       args[8].parse().expect("Invalid N_bg"); // New parameter for background STAs
@@ -322,6 +342,9 @@ fn main() {
     let abr: usize              =       args[19].parse().expect("Invalid ABR: 0 -> CBR | 1 -> Nest-VR | 2 -> Everest | 3 -> ReinforcementLearner "); 
     let nest_vr_choice     =       args[20].parse().expect("Invalid NeSt profile"); 
     let test_distances_everest: usize = args[21].parse().expect("Invalid Coordinates option"); 
+    let sim_id :                usize = args[22].parse().expect("Invalid sim_id");
+
+    let sim_unique_string = format!("Simu_{}", sim_id);  
     
     let test_distances_everest_bool = test_distances_everest != 0; 
 
@@ -333,6 +356,9 @@ fn main() {
         "RANDOM" => (false,false, false, true), 
         _ => (false, false, false, false), // Default/STD case
     };
+
+
+
     // Use the test type from parameter as suffix directly
     let suffix = if ["BW", "JI", "PL", "STD", "RANDOM"].contains(&test_type.as_str()) {
         test_type.as_str()
@@ -437,6 +463,7 @@ fn main() {
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
             test_distances_everest_bool, 
             stoptime, 
+            &sim_unique_string, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -470,6 +497,7 @@ fn main() {
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
             test_distances_everest_bool, 
             stoptime, 
+            &sim_unique_string, 
 
         );
         // all_sta_ids.push(100 + i as i32);
