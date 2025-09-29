@@ -12,10 +12,17 @@
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
 
-source ~/.bashrc
+# source ~/.bashrc
+module purge
+
+conda deactivate 2>/dev/null || true
+unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE _CE_CONDA _CE_M mamba
+
+
 module load CUDA
 module load x265
 module load x264
+module load GCC/10.2.0
 
 export PATH=$HOME/.local/bin:$PATH
 
@@ -31,6 +38,14 @@ echo "Current working directory: $(pwd)"
 
 
 echo "***********************************"
+echo "=== Toolchain sanity ==="
+which gcc; gcc --version | head -1
+which g++; g++ --version | head -1
+which rustc; rustc -V
+which cargo
+echo "libstdc++ path: $(realpath $(g++ -print-file-name=libstdc++.so.6))"
+strings $(g++ -print-file-name=libstdc++.so.6) | grep GLIBCXX | tail -n 5
+echo "============================================"
 
 NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
@@ -71,17 +86,28 @@ temp_file=$(mktemp)
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
-# Open a new terminal and run the Python training script
-gnome-terminal --disable-factory -- bash -c "
+
+
+
+if [[ "${USER:-}" == "fmaura" ]]; then
+  IS_HPC=1
+  # Launch Python trainer INSIDE the allocation, in background, on the SAME node
+ srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
+  bash -lc '
+    source ~/miniconda3/etc/profile.d/conda.sh
+    conda activate vr_sim
+    python /home/fmaura/simulator_asynchronix/asynchronix/python_RL/gym_train_DQN.py' &
+    PY_PID=$!
+else
+  IS_HPC=0
+  gnome-terminal --disable-factory -- bash -c "
     cd ~/Desktop/Rust_MG1/asynchronix/python_RL;
     python gym_train_DQN.py;
     exec bash" &
-PY_TERM_PID=$!   # capture terminal PID
+  PY_PID=$!
+fi
 
 
-
-
-PY_TERM_PID=$!   # capture terminal PID
 # Define the function to execute on Ctrl+C
 handle_interrupt() {
     echo "Simulation interrupted."
@@ -92,12 +118,24 @@ handle_interrupt() {
 # Set up the trap for SIGINT (Ctrl+C)
 trap handle_interrupt SIGINT
 
+
+conda init vr_sim
+# conda activate 
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
+
 cargo build --release --example XR_sim
 
+# Verify what your binary will load
+echo "=== ldd XR_sim ==="
+ldd ./target/release/examples/XR_sim | grep -E 'stdc\+\+|x265|x264|zmq|cuda' || true
+echo "=== Required GLIBCXX versions seen in binary ==="
+strings ./target/release/examples/XR_sim | grep -o 'GLIBCXX_[0-9.]*' | sort -u
 
 
 
 sleep 1
+
 
 for test in "${TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do

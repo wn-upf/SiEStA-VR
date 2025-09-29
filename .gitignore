@@ -16,5 +16,5 @@ video_samples_vmaf/*
 *.zip
 *.rgb
 *.hevc
-
+*wandb*
 simu_decode_samples/*
