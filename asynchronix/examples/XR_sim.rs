@@ -118,7 +118,7 @@ impl VRPair {
                 abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2
 
                 if abr_choice == 0 { // CBR (RANDOM)
-                    let values: Vec<u32> = (5..=100).step_by(5).collect();
+                    let values: Vec<u32> = (5..=60).step_by(5).collect(); // bounding to max CBR 60 Mbps in RL scenario
                     initial_bitrate = *values.choose(&mut rng).unwrap() as f64; 
 
                 }
@@ -287,16 +287,16 @@ fn generate_session_timeline<R: Rng>(
     sim_init_time: f64, 
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
-    let start_time_pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
+    let start_time_pause = truncated_exponential_seconds(rng, 30.0, 10.0, 40.0);
     // let start_time_pause = sim_init_time; 
 
     let mut t = start_time_pause;
     let mut sessions = Vec::new();
     
     while t < stoptime {
-        let dur = rng.gen_range(90.0..=110.0);
+        let dur = rng.gen_range(20.0..=40.0);
 
-        let pause = truncated_exponential_seconds(rng, 30.0, 10.0, 60.0);
+        let pause = truncated_exponential_seconds(rng, 15.0, 10.0, 40.0);
 
         let start = t;
         let end = (t + dur).min(stoptime);

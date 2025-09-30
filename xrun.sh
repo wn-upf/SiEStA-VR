@@ -49,7 +49,7 @@ rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=( 3 ) 
+N_XR=( 1 2 3 4 ) 
 PL=0.1
 
 fps_list=( 90.0 )
@@ -62,7 +62,7 @@ nest_profiles=( 1 ) ## balanced and that's it                                  2
 RANDOM_SEEDS=( 1 2 3 4 5)
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
-video_samples=("snow")
+video_samples=("snow" "cut_video")
 N_BGs=(0)
 IS_UL_BG=(0)
 
@@ -80,6 +80,8 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 
 if [[ "${USER:-}" == "fmaura" ]]; then
     IS_HPC=1
+    export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
     # Launch Python trainer INSIDE the allocation, in background, on the SAME node
     PY_LOG_FILE="logs_hpc/python_trainer_${SLURM_JOB_ID}.log"
     echo "Python trainer log will be saved to: $PY_LOG_FILE"
@@ -106,7 +108,7 @@ fi
 handle_interrupt() {
     echo "Simulation interrupted."
     
-    kill -9 -$(ps -o pgid= $PY_TERM_PID | grep -o '[0-9]*') 2>/dev/null
+    # kill -9 -$(ps -o pgid= $PY_TERM_PID | grep -o '[0-9]*') 2>/dev/null
     exit 1
 }
 # Set up the trap for SIGINT (Ctrl+C)
@@ -115,7 +117,6 @@ trap handle_interrupt SIGINT
 
 # conda init vr_sim
 # conda activate 
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 
 cargo build --release --example XR_sim

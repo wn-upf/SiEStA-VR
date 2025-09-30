@@ -156,7 +156,7 @@ pub const DECODER_BUFFERING_FRAMES: usize = 3;
 pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
 
 #[allow(unused)]                                                                                    
-pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES / 2; // unused at the moment, 
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment, 
 
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
@@ -2172,25 +2172,29 @@ impl BitrateManager {
 
     pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
 
-        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
+        let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
         let beta = 1.0;   // flr 0 to 1
-        let gamma = -0.02;       // rtt ~2 to 50 ms -> 0 to - 1
+        let gamma = -0.04;       // rtt ~2 to 50 ms -> 0 to - 2
         let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
-        let reward = alpha * obs.last_target_bitrate_mbps + beta * (1.0 - obs.flr_avg_s) + gamma * obs.rtt_ms_avg_s + omega * obs.rebuffer_event_sum as f32; 
 
         let bitrate_term = alpha * obs.last_target_bitrate_mbps;
-        let flr_term = beta * (1.0 - obs.flr_avg_s);
+        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards. 
         let rtt_term = gamma * obs.rtt_ms_avg_s;
-        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;        
+        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
+
+        let reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
+
         // this expression could be negative if bitrate is very low and flr very high
         print_green!(
             "Reward decomposition:
             bitrate_term = {bitrate_term:.4},
-            flr_term     = {flr_term:.4},
-            rtt_term     = {rtt_term:.4},
+            flr_term     = {flr_term:.4} ( flr = {:.3}),
+            rtt_term     = {rtt_term:.4} ( rtt = {:.3}),
             rebuffer_term= {rebuffer_term:.4},
-            total_reward = {reward:.4}
+            ************ total_reward = {reward:.4} **************
             (inputs: bitrate={:.2} Mbps, flr={:.2}, rtt={:.2} ms, rebuffer={})",
+            obs.flr_avg_s, 
+            obs.rtt_ms_avg_s, 
             obs.last_target_bitrate_mbps,
             obs.flr_avg_s,
             obs.rtt_ms_avg_s,
@@ -3489,8 +3493,9 @@ pub struct XRClient {
     // pub ref_decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
     original_decoder: Option<Arc<Mutex<HevcDecoder>>>,
 
-    pub is_decoder_ready: bool,
-    pub is_ref_decoder_ready: bool,
+    pub is_decoder_ready: bool, // internal of FFMPEG
+    pub jitter_buffer_warmup_ready: bool, // of actual VR Client application
+    // pub is_ref_decoder_ready: bool,
     // Add these new fields:
     initialization_buffer: Vec<Vec<u8>>, // Buffer to hold initial frames
 
@@ -3609,8 +3614,8 @@ impl XRClient {
 
             // Add these new fields:
             initialization_buffer: Vec::new(), // Buffer to hold initial frames
-            is_decoder_ready: false, // Flag to track if decoder is ready
-            is_ref_decoder_ready: false,
+            is_decoder_ready: false, // Flag to track if FFMPEG decoder is ready
+            jitter_buffer_warmup_ready: false, // to buffer at least N frames before starting to show at first. 
             min_buffered_frames: 20, // Minimum frames to buffer before decoding
             dec_saw_keyframe: false,
             ref_saw_keyframe: false,
@@ -3683,6 +3688,7 @@ impl XRClient {
             self.output_app_tracking_sender = None;
             self.streamsocket_clone = None;
             self.decoder_queue.clear();
+            self.jitter_buffer_warmup_ready = false; 
 
             // Schedule reboot after pause_time
             let delay = Duration::from_secs_f64(pause_time);
@@ -3705,7 +3711,7 @@ impl XRClient {
         self.t_0 = now;
         self.last_tracking_time = now;
         self.is_decoder_ready = false;
-        self.is_ref_decoder_ready = false;
+        self.decoder_queue.clear();
 
         // Re-establish streams
         self.configure_streams(packet_size, context).await;
@@ -4737,252 +4743,262 @@ impl XRClient {
                 !processed || id.saturating_sub(current_last_processed) <= 100 // Avoid underflow
             });         
 
+            if !self.jitter_buffer_warmup_ready {
+                if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
+                    // do nothing
+                }
+                else {
+                    self.jitter_buffer_warmup_ready = true; 
+                }
+            }
+            else
+            {
             // Process the next frame if available from the regular stream queue
-            if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
+                if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
 
-                let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
-                self.last_seen_id = id_f;
+                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
+                    self.last_seen_id = id_f;
 
-                let timestamp = now.duration_since(self.t_0).as_secs_f64();           // TaiTime -> f64 seconds
+                    let timestamp = now.duration_since(self.t_0).as_secs_f64();           // TaiTime -> f64 seconds
 
-                
-                if !Path::new(&csv_path).exists() {
-                    // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                    println!("waiting until offline CSV created", ); 
-                }
-                else{
-
-                    // emu effects part here? 
-
-                   self.offline_csv_trace
-                        .write_record(&[
-                            "", // offset (preamble only)
-                            "", // source (preamble only)
-                            "", // IDR_freq (preamble only)
-                            &format!("{:.6}", timestamp),
-                            &id_f.to_string(),
-                            &lost.to_string(),
-                            &format!("{:.3}", self.last_throughput_avg),
-                        ])
-                        .await
-                        .expect("failed to append offline csv row");
-
-                    // Optional cheap periodic flush (avoid flushing every row)
-                    if id_f % BATCH_SIZE_CSV == 0 {
-                        let _ = self.offline_csv_trace.flush().await;
-                    }
-                }
-                let mut ip_client = self.server_ip; 
-                if let IpAddr::V4(ip4) = ip_client {
-                     let mut octets = ip4.octets();
-                     if octets[3] == 2 {
-                         octets[3] = 1; // Change last byte from 2 to 1
-                         ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
-                     }
-                 }
-               
-
-                if id_f % 10 == 0 {
-
-                    if USE_FFMPEG {
-                        if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client) {
-                            eprintln!("Error during hevc ref frame cleanup: {}", e);
-                        }
-                    }
-                }
-
-                if id_f > self.last_processed_frame_id + 1 {
-                    let missing_start = self.last_processed_frame_id + 1;
-                    let missing_end = id_f - 1; // Inclusive end
-
-                    print_pretty!(
-                        DebugColor::Red,
-                        "{} Detected missing regular frames between {} and {}",
-                        ip_client, missing_start, missing_end,
-                    );
-
-                    for missing_id in missing_start..=missing_end { // Iterate inclusive
-                        if !self.missing_frames_buffer.contains_key(&missing_id) {
-                            print_pretty!(
-                                DebugColor::DarkOrange,
-                                "{} Added missing frame {} to tracking system",
-                                ip_client, missing_id,
-                            );
-                            self.missing_frames_buffer.insert(missing_id, false); // Mark as not processed yet
-                        }
-
-                        // Check if already processed (e.g., by a previous recovery attempt)
-                            if *self.missing_frames_buffer.get(&missing_id).unwrap_or(&false) {
-                            print_pretty!(DebugColor::Purple, "Missing frame {} already processed, skipping", missing_id);
-                            continue;
-                            }
-                            // Mark as processed in the tracking buffer *after* attempting to process
-                            self.missing_frames_buffer.insert(missing_id, true);
-                    }
-                } // End of missing frame recovery
-
-
-                // Update last processed frame ID for the *regular* stream continuity check
-                self.last_processed_frame_id = id_f;
-
-                // Keyframe detection (keep as is)
-                if is_keyframe(&video_frame) {
-                    self.dec_saw_keyframe = true;
-                    print_pretty!(
-                        DebugColor::Magenta,
-                        "*** KEYFRAME DETECTED IN REGULAR STREAM *** Size: {} bytes",
-                        video_frame.len(),
-                    );
-                    self.dec_saw_keyframe_last_t = now;
-                }
-
-                if !self.is_decoder_ready && USE_FFMPEG { 
-
-                    if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
                     
-                     let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
-                     if is_keyframe(&video_frame) { self.dec_saw_keyframe = true; self.dec_saw_keyframe_last_t = now; }
-
-                     if has_enough_frames && self.dec_saw_keyframe {
-                        print_pretty!(DebugColor::Cyan, "Decoder initialization criteria met! Buffered {} frames", self.initialization_buffer.len());
-
-                        print_pretty!(DebugColor::Cyan, "Initialization processing complete.", );
-                        self.is_decoder_ready = true;
-                        // self.is_ref_decoder_ready = true; // Still needed?
-                        self.initialization_buffer.clear();
-
-                    } else { /* ... log buffering status ... */ }
-
-                } // End of initialization logic
-
-
-                if self.is_decoder_ready && USE_FFMPEG {
-                    if !video_frame.is_empty() {
-                         
-                         if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
-                            let miin: usize = usize::min(video_frame.len(), 50);
-                            // crate::print_magenta!(
-                            //     // DebugColor::Violet,
-                            //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
-                            //     format_elapsed!(now),
-                            //     ip_client,
-                            //     id_f,
-                            //     video_frame.len(),
-                            //     self.decoder_queue.len(),
-                            //     interarrival.as_secs_f32(),
-                            // );
-                        }
-
-                        if let Some(decoder_arc) = self.original_decoder.clone(){
-                            let mut decoder = decoder_arc.lock().unwrap();
-
-                            // Process the current frame pair using process_packets
-                            print_pretty!(DebugColor::Cyan, "Processing frame #{} ", id_f);
-                            decoder.process_packet(video_frame.clone());
-
-
-                            // Try to get a synchronized frame pair immediately after processing
-                            // This might yield 0, 1 or more pairs depending on internal buffering and state
-                             while let Some((frame, _)) = decoder.next_decoded_frame() {
-                                // print_pretty!(
-                                //     DebugColor::Green,
-                                //     "Retrieved frame #{}",
-                                //     decoder.decoded_frame_counter,
-                                // );
-
-                                // Display synchronized frame pair (keep display logic)
-                                thread_local! {
-                                    static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
-                                }
-
-                                DISPLAY_WINDOWS.with(|windows_cell| {
-                                    let mut windows = windows_cell.borrow_mut();
-                                     // Ensure window exists (keep window creation logic)
-                                     if !windows.contains_key(&self.server_ip) { 
-                                        
-                                            let window_title = format!("{} - Frame Display [{}]", format_elapsed!(now), self.server_ip);
-                                            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW ) as usize;
-                                            let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-                                            match Window::new(
-                                                &window_title,
-                                                window_width,
-                                                window_height,
-                                                WindowOptions::default()
-                                            ) {
-                                                Ok(window) => {
-                                                    // hide_by_title_with_wmctrl(&window_title);
-                                                    windows.insert(self.server_ip.clone(), window);
-                                                    print_pretty!(DebugColor::Green,
-                                                        "Created display window for {} ({} x {})", 
-                                                        self.server_ip, window_width, window_height,);
-                                                },
-                                                Err(e) => {
-                                                    print_pretty!(DebugColor::Red,
-                                                        "Failed to create display window: {}", 
-                                                        e,);
-                                                }
-                                            }   
-                                        }
-
-                                    if let Some(window) = windows.get_mut(&self.server_ip) {
-                                        // Calculate similarity (keep calculation)
-                                       
-                                        let bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap_or(0.0);
-
-                                        // Pass the current SyncState to the display function
-                                        self.lost_ids_reference_buffer = VecDeque::new(); 
-                                        
-                                        // let slice: &[u32] = lost_frames_aux.make_contiguous();
-                                        let display_result = display_single_frame_with_info(
-                                            &frame,
-                                            &self.server_ip,
-                                            decoder.decoded_frame_counter,
-                                            window,
-                                            now,
-                                            self.last_bitrate_perfect_info_update_mbps,
-                                            lost_frames_aux.clone(),
-                                            &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
-                                            &self.test,
-                                            &self.bm_string, 
-                                            &self.sim_unique_string, 
-
-                                        );
-                                    
-                                        lost_frames_aux = VecDeque::new(); 
-
-                                        if display_result {      
-                                            print_pretty!(DebugColor::Green,
-                                            "Successfully displayed frame #{}", 
-                                            decoder.decoded_frame_counter);                             
-                                        }
-                                        else {
-                                            print_pretty!(DebugColor::Red,
-                                            "Failed to display frame #{}", 
-                                            decoder.decoded_frame_counter,);
-                                    }                                            
-                                    } // End if let Some(window)
-                                }); // End DISPLAY_WINDOWS.with
-                            } // End while let Some(frame_pair)
-
-                        } else {
-                             print_pretty!(DebugColor::Red, "Synchronized decoder not initialized!", );
-                        }
-                    } else {
-                        // Log cases where frames might be empty if unexpected
-                        if video_frame.is_empty() { print_pretty!(DebugColor::Yellow, "Received empty regular frame #{}", id_f); }
+                    if !Path::new(&csv_path).exists() {
+                        // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
+                        println!("waiting until offline CSV created", ); 
                     }
-                } // End if self.is_decoder_ready
+                    else{
 
-                 // Update timestamp and send placeholder output (keep as is)
-                 self.last_decoded_frame_instant = now;
-                 self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
+                        // emu effects part here? 
 
-            } else { // Decoder queue was empty
-                print_red!("[{}] REBUFFER EVENT!!", self.server_ip ); 
-                self.rebuffer_event_counter.add_one(now); 
+                    self.offline_csv_trace
+                            .write_record(&[
+                                "", // offset (preamble only)
+                                "", // source (preamble only)
+                                "", // IDR_freq (preamble only)
+                                &format!("{:.6}", timestamp),
+                                &id_f.to_string(),
+                                &lost.to_string(),
+                                &format!("{:.3}", self.last_throughput_avg),
+                            ])
+                            .await
+                            .expect("failed to append offline csv row");
 
-            } // End if let Some((id_f, video_frame))
+                        // Optional cheap periodic flush (avoid flushing every row)
+                        if id_f % BATCH_SIZE_CSV == 0 {
+                            let _ = self.offline_csv_trace.flush().await;
+                        }
+                    }
+                    let mut ip_client = self.server_ip; 
+                    if let IpAddr::V4(ip4) = ip_client {
+                        let mut octets = ip4.octets();
+                        if octets[3] == 2 {
+                            octets[3] = 1; // Change last byte from 2 to 1
+                            ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
+                        }
+                    }
+                
 
+                    if id_f % 10 == 0 {
+
+                        if USE_FFMPEG {
+                            if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client) {
+                                eprintln!("Error during hevc ref frame cleanup: {}", e);
+                            }
+                        }
+                    }
+
+                    if id_f > self.last_processed_frame_id + 1 {
+                        let missing_start = self.last_processed_frame_id + 1;
+                        let missing_end = id_f - 1; // Inclusive end
+
+                        print_pretty!(
+                            DebugColor::Red,
+                            "{} Detected missing regular frames between {} and {}",
+                            ip_client, missing_start, missing_end,
+                        );
+
+                        for missing_id in missing_start..=missing_end { // Iterate inclusive
+                            if !self.missing_frames_buffer.contains_key(&missing_id) {
+                                print_pretty!(
+                                    DebugColor::DarkOrange,
+                                    "{} Added missing frame {} to tracking system",
+                                    ip_client, missing_id,
+                                );
+                                self.missing_frames_buffer.insert(missing_id, false); // Mark as not processed yet
+                            }
+
+                            // Check if already processed (e.g., by a previous recovery attempt)
+                                if *self.missing_frames_buffer.get(&missing_id).unwrap_or(&false) {
+                                print_pretty!(DebugColor::Purple, "Missing frame {} already processed, skipping", missing_id);
+                                continue;
+                                }
+                                // Mark as processed in the tracking buffer *after* attempting to process
+                                self.missing_frames_buffer.insert(missing_id, true);
+                        }
+                    } // End of missing frame recovery
+
+
+                    // Update last processed frame ID for the *regular* stream continuity check
+                    self.last_processed_frame_id = id_f;
+
+                    // Keyframe detection (keep as is)
+                    if is_keyframe(&video_frame) {
+                        self.dec_saw_keyframe = true;
+                        print_pretty!(
+                            DebugColor::Magenta,
+                            "*** KEYFRAME DETECTED IN REGULAR STREAM *** Size: {} bytes",
+                            video_frame.len(),
+                        );
+                        self.dec_saw_keyframe_last_t = now;
+                    }
+
+                    if !self.is_decoder_ready && USE_FFMPEG { 
+
+                        if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
+                        
+                        let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
+                        if is_keyframe(&video_frame) { self.dec_saw_keyframe = true; self.dec_saw_keyframe_last_t = now; }
+
+                        if has_enough_frames && self.dec_saw_keyframe {
+                            print_pretty!(DebugColor::Cyan, "Decoder initialization criteria met! Buffered {} frames", self.initialization_buffer.len());
+
+                            print_pretty!(DebugColor::Cyan, "Initialization processing complete.", );
+                            self.is_decoder_ready = true;
+                            // self.is_ref_decoder_ready = true; // Still needed?
+                            self.initialization_buffer.clear();
+
+                        } else { /* ... log buffering status ... */ }
+
+                    } // End of initialization logic
+
+
+                    if self.is_decoder_ready && USE_FFMPEG {
+                        if !video_frame.is_empty() {
+                            
+                            if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
+                                let miin: usize = usize::min(video_frame.len(), 50);
+                                // crate::print_magenta!(
+                                //     // DebugColor::Violet,
+                                //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                                //     format_elapsed!(now),
+                                //     ip_client,
+                                //     id_f,
+                                //     video_frame.len(),
+                                //     self.decoder_queue.len(),
+                                //     interarrival.as_secs_f32(),
+                                // );
+                            }
+
+                            if let Some(decoder_arc) = self.original_decoder.clone(){
+                                let mut decoder = decoder_arc.lock().unwrap();
+
+                                // Process the current frame pair using process_packets
+                                print_pretty!(DebugColor::Cyan, "Processing frame #{} ", id_f);
+                                decoder.process_packet(video_frame.clone());
+
+
+                                // Try to get a synchronized frame pair immediately after processing
+                                // This might yield 0, 1 or more pairs depending on internal buffering and state
+                                while let Some((frame, _)) = decoder.next_decoded_frame() {
+                                    // print_pretty!(
+                                    //     DebugColor::Green,
+                                    //     "Retrieved frame #{}",
+                                    //     decoder.decoded_frame_counter,
+                                    // );
+
+                                    // Display synchronized frame pair (keep display logic)
+                                    thread_local! {
+                                        static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
+                                    }
+
+                                    DISPLAY_WINDOWS.with(|windows_cell| {
+                                        let mut windows = windows_cell.borrow_mut();
+                                        // Ensure window exists (keep window creation logic)
+                                        if !windows.contains_key(&self.server_ip) { 
+                                            
+                                                let window_title = format!("{} - Frame Display [{}]", format_elapsed!(now), self.server_ip);
+                                                let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW ) as usize;
+                                                let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+                                                match Window::new(
+                                                    &window_title,
+                                                    window_width,
+                                                    window_height,
+                                                    WindowOptions::default()
+                                                ) {
+                                                    Ok(window) => {
+                                                        // hide_by_title_with_wmctrl(&window_title);
+                                                        windows.insert(self.server_ip.clone(), window);
+                                                        print_pretty!(DebugColor::Green,
+                                                            "Created display window for {} ({} x {})", 
+                                                            self.server_ip, window_width, window_height,);
+                                                    },
+                                                    Err(e) => {
+                                                        print_pretty!(DebugColor::Red,
+                                                            "Failed to create display window: {}", 
+                                                            e,);
+                                                    }
+                                                }   
+                                            }
+
+                                        if let Some(window) = windows.get_mut(&self.server_ip) {
+                                            // Calculate similarity (keep calculation)
+                                        
+                                            let bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap_or(0.0);
+
+                                            // Pass the current SyncState to the display function
+                                            self.lost_ids_reference_buffer = VecDeque::new(); 
+                                            
+                                            // let slice: &[u32] = lost_frames_aux.make_contiguous();
+                                            let display_result = display_single_frame_with_info(
+                                                &frame,
+                                                &self.server_ip,
+                                                decoder.decoded_frame_counter,
+                                                window,
+                                                now,
+                                                self.last_bitrate_perfect_info_update_mbps,
+                                                lost_frames_aux.clone(),
+                                                &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
+                                                &self.test,
+                                                &self.bm_string, 
+                                                &self.sim_unique_string, 
+
+                                            );
+                                        
+                                            lost_frames_aux = VecDeque::new(); 
+
+                                            if display_result {      
+                                                print_pretty!(DebugColor::Green,
+                                                "Successfully displayed frame #{}", 
+                                                decoder.decoded_frame_counter);                             
+                                            }
+                                            else {
+                                                print_pretty!(DebugColor::Red,
+                                                "Failed to display frame #{}", 
+                                                decoder.decoded_frame_counter,);
+                                        }                                            
+                                        } // End if let Some(window)
+                                    }); // End DISPLAY_WINDOWS.with
+                                } // End while let Some(frame_pair)
+
+                            } else {
+                                print_pretty!(DebugColor::Red, "Synchronized decoder not initialized!", );
+                            }
+                        } else {
+                            // Log cases where frames might be empty if unexpected
+                            if video_frame.is_empty() { print_pretty!(DebugColor::Yellow, "Received empty regular frame #{}", id_f); }
+                        }
+                    } // End if self.is_decoder_ready
+
+                    // Update timestamp and send placeholder output (keep as is)
+                    self.last_decoded_frame_instant = now;
+                    self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
+
+                } else { // Decoder queue was empty
+                    print_red!("[{}] REBUFFER EVENT!!", self.server_ip ); 
+                    self.rebuffer_event_counter.add_one(now); 
+
+                } // End if let Some((id_f, video_frame))
+            }
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
