@@ -1302,7 +1302,7 @@ impl ZmqConnector {
             .set_identity(simu_id.as_bytes())
             .expect("Failed to set DEALER identity");
         action_socket
-            .set_rcvtimeo(10_000)
+            .set_rcvtimeo(15_000)
             .expect("Failed to set receive timeout");
         action_socket
             .connect(action_endpoint)

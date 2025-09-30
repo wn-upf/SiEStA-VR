@@ -8,21 +8,20 @@
 #SBATCH --exclusive
 #SBATCH --mem=128G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
-# Optional: log files
+
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
 
-# source ~/.bashrc
-module purge
+source ~/.bashrc
+# module purge
 
-conda deactivate 2>/dev/null || true
-unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE _CE_CONDA _CE_M mamba
+# conda deactivate 2>/dev/null || true
+# unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE _CE_CONDA _CE_M mamba
 
 
 module load CUDA
 module load x265
 module load x264
-module load GCC/10.2.0
 
 export PATH=$HOME/.local/bin:$PATH
 
@@ -36,16 +35,6 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "***********************************"
 echo "Current working directory: $(pwd)"
 
-
-echo "***********************************"
-echo "=== Toolchain sanity ==="
-which gcc; gcc --version | head -1
-which g++; g++ --version | head -1
-which rustc; rustc -V
-which cargo
-echo "libstdc++ path: $(realpath $(g++ -print-file-name=libstdc++.so.6))"
-strings $(g++ -print-file-name=libstdc++.so.6) | grep GLIBCXX | tail -n 5
-echo "============================================"
 
 NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
@@ -90,13 +79,18 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
 if [[ "${USER:-}" == "fmaura" ]]; then
-  IS_HPC=1
-  # Launch Python trainer INSIDE the allocation, in background, on the SAME node
- srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
-  bash -lc '
-    source ~/miniconda3/etc/profile.d/conda.sh
-    conda activate vr_sim
-    python /home/fmaura/simulator_asynchronix/asynchronix/python_RL/gym_train_DQN.py' &
+    IS_HPC=1
+    # Launch Python trainer INSIDE the allocation, in background, on the SAME node
+    PY_LOG_FILE="logs_hpc/python_trainer_${SLURM_JOB_ID}.log"
+    echo "Python trainer log will be saved to: $PY_LOG_FILE"
+    
+    srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
+    /bin/bash -c '
+      export HOME="/home/fmaura"
+      source ~/miniconda3/etc/profile.d/conda.sh
+      conda activate vr_sim
+      python /home/fmaura/simulator_asynchronix/asynchronix/python_RL/gym_train_DQN.py
+    ' > "$PY_LOG_FILE" 2>&1 &
     PY_PID=$!
 else
   IS_HPC=0
@@ -119,7 +113,7 @@ handle_interrupt() {
 trap handle_interrupt SIGINT
 
 
-conda init vr_sim
+# conda init vr_sim
 # conda activate 
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
@@ -132,10 +126,7 @@ ldd ./target/release/examples/XR_sim | grep -E 'stdc\+\+|x265|x264|zmq|cuda' || 
 echo "=== Required GLIBCXX versions seen in binary ==="
 strings ./target/release/examples/XR_sim | grep -o 'GLIBCXX_[0-9.]*' | sort -u
 
-
-
 sleep 1
-
 
 for test in "${TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
