@@ -72,6 +72,8 @@ GoP_sizes=(90)
 everest_tests=1
 
 temp_file=$(mktemp)
+SHUFFLED_CMDS=$(mktemp)
+
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
@@ -121,11 +123,6 @@ trap handle_interrupt SIGINT
 
 cargo build --release --example XR_sim
 
-# Verify what your binary will load
-echo "=== ldd XR_sim ==="
-ldd ./target/release/examples/XR_sim | grep -E 'stdc\+\+|x265|x264|zmq|cuda' || true
-echo "=== Required GLIBCXX versions seen in binary ==="
-strings ./target/release/examples/XR_sim | grep -o 'GLIBCXX_[0-9.]*' | sort -u
 
 sleep 1
 
@@ -152,18 +149,17 @@ for test in "${TEST_TYPE[@]}"; do
                                                             (( SIM_COUNT++ ))  # ← increment
                                                             mkdir -p "Results/$name_folder"
 
-                                                            if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
+                                                            # if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder"
 
                                                                 echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
 
-                                                            else                                    ## Serial execution
-                                                                 script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
-                                                                sleep 5
+                                                                # else                                    ## Serial execution
+                                                                #     script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
+                                                                #     sleep 2
                                                                 # rm out_log.ans
-                                                                rm -rf Video_Sink/*
                                                             
-                                                            fi
+                                                            # fi
                                                         done
                                                     done 
                                                 done
@@ -204,7 +200,31 @@ echo " --- Number of simulations: $SIM_COUNT --- \n"
 # parallel -j "$NUMBER_OF_JOBS" < "$sorted_file"
 
 ##########################################################################################################
-shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
+# shuf "$temp_file" | parallel -j "$NUMBER_OF_JOBS" 
+
+
+
+# Shuffle the collected commands into a new temporary file
+shuf "$temp_file" > "$SHUFFLED_CMDS"
+rm "$temp_file" # Clean up the un-shuffled file
+
+if [ "$SERIAL_EXECUTION" -eq 1 ]; then
+    echo "Starting randomized SERIAL execution of $SIM_COUNT simulations..."
+    # Execute commands one by one, using a subshell for execution to ensure $cmd is treated correctly
+    while IFS= read -r cmd; do
+        echo "Executing: $cmd"
+        /bin/bash -c "$cmd"
+        sleep 5
+        # The cleanup step is critical for simulators sharing state/files
+        echo "Cleaning up Video_Sink/..."
+        rm -rf Video_Sink/*
+    done < "$SHUFFLED_CMDS"
+    
+elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
+    echo "Starting randomized PARALLEL execution of $SIM_COUNT simulations with $NUMBER_OF_JOBS threads..."
+    # Use GNU parallel on the shuffled list
+    parallel -j "$NUMBER_OF_JOBS" < "$SHUFFLED_CMDS"
+fi
 
 rm "$temp_file"
 rm "$sorted_file"
