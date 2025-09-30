@@ -5,7 +5,7 @@ Cargo.lock
 profile.json
 
 Results/*
-
+python_RL/tb/
 *.mkv
 *.mp4
 *.hevc

@@ -6,6 +6,8 @@ from gymnasium import spaces
 import pprint
 from stable_baselines3 import DQN
 
+from stable_baselines3 import PPO
+
 # --- NEW: W&B imports ---
 import os
 import time
@@ -25,7 +27,7 @@ class Colors:
     ENDC = '\033[0m'
 
 OBSERVATION_SHAPE = (9,)
-ACTION_DIM = 10
+ACTION_DIM = 20
 
 ACTION_ENDPOINT = "tcp://*:5555"  # Python BINDs a ROUTER here (was REP)
 STEP_ENDPOINT   = "tcp://*:5556"  # Python BINDs a PULL here

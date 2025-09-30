@@ -1682,7 +1682,7 @@ impl BitrateManager {
                     BitrateMode::EVeREst { bitrate_ladder_mbps }
                 }
             3 => {
-                let ladder_mbps = (10..=100).step_by(10).map(|x| x as f32).collect::<Vec<_>>();
+                let ladder_mbps = (10..=100).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
                 print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
                 BitrateMode::ReinforcementLearner {
