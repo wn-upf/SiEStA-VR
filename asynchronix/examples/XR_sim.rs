@@ -652,6 +652,9 @@ fn main() {
         let mut sessions = sessions;
         sessions.sort_by(|a,b| a.0.partial_cmp(&b.0).unwrap());
 
+
+        let mut has_scheduled_vsync: bool = false; 
+
         for (idx, (start, end)) in sessions.iter().copied().enumerate() {
             // ---- Schedule client start ----
             scheduler.schedule_event(
@@ -661,12 +664,18 @@ fn main() {
                 addr_client,
             ).unwrap();
 
-            scheduler.schedule_event(
-                Duration::from_secs_f64(start),
-                XRClient::vsync,
-                (),
-                addr_client,
-            ).unwrap();
+            // print_red!("Scheduling VSYNC at {}", start);
+
+            if !has_scheduled_vsync{
+                scheduler.schedule_event(  // ALREADY SCHEDULED BY session_reboot at start/end, do not schedule twice!! 
+                    Duration::from_secs_f64(start),
+                    XRClient::vsync,
+                    (),
+                    addr_client,
+                ).unwrap();
+                has_scheduled_vsync = true; // SCHEDULE VSYNC ONCE AND ONLY ONCE PER CLIENT.
+            }
+         
 
             // ---- Look ahead to compute the reboot pause AFTER this session ----
             let pause_after = if let Some((next_start, _next_end)) = sessions.get(idx + 1) {

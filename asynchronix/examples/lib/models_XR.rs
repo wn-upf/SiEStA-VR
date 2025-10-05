@@ -8,7 +8,7 @@ use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
 use rand::SeedableRng;
-use crate::{debug_debug, print_magenta, taitime_to_f64,
+use crate::{debug_debug, print_brown, print_magenta, taitime_to_f64
     //  print_brown
     };
 use image::{ImageBuffer, Rgb};
@@ -2947,8 +2947,8 @@ impl XRServer {
 
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
             
-            if self.video_app_sender.is_none(){
-                        println!("CATCH NO VIDEO APP SENDER"); 
+            if self.video_app_sender.is_none(){ // This happens when we end a session but the next frame was already scheduled. 
+                        // println!("CATCH NO VIDEO APP SENDER");  
                         return;
                     }
             
@@ -3754,8 +3754,6 @@ impl XRClient {
             let epsilon = Duration::from_nanos(1);
             let target = now + delay.max(epsilon);
 
-            
-
             context.scheduler.schedule_event(target, Self::session_reboot, ()).unwrap();
     }
 
@@ -3777,9 +3775,9 @@ impl XRClient {
             .schedule_event(Duration::from_millis(10), Self::video_receive_thread, ())
             .unwrap();
 
-        context.scheduler
-            .schedule_event(Duration::from_secs_f64(1.0 / self.framerate as f64), Self::vsync, () )
-            .unwrap();
+        // context.scheduler 
+        //     .schedule_event(Duration::from_secs_f64(1.0 / self.framerate as f64), Self::vsync, () )
+        //     .unwrap();
 
     }
 
@@ -4689,6 +4687,7 @@ impl XRClient {
                 }
                 else {
                     self.jitter_buffer_warmup_ready = true; 
+                    print_yellow!("Jitter buffer ready!!", ); 
                 }
             }
             else
@@ -4935,11 +4934,13 @@ impl XRClient {
                     self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
                 } else { // Decoder queue was empty
-                    print_red!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip ); 
+                    print_brown!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip ); 
                     self.rebuffer_event_counter.add_one(now); 
 
                 } // End if let Some((id_f, video_frame))
             }
+
+            // print_red!("{} - Scheduling VSYNC at {}", format_elapsed!(now), format_elapsed!(now + T_vsync));
             context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }  
