@@ -18,8 +18,8 @@ fn get_paths() -> (PathBuf, PathBuf) {
     match user.as_str() {
         // HPC user
         "fmaura" => (
-            PathBuf::from("/home/fmaura/simulator_asynchronix/video_samples_vmaf"),
-            PathBuf::from("/home/fmaura/simulator_asynchronix/csv_framesizes"),
+            PathBuf::from("/home/fmaura/simulator_asynchronix/asynchronix/video_samples_vmaf"),
+            PathBuf::from("/home/fmaura/simulator_asynchronix/asynchronix/csv_framesizes"),
         ),
         // Local user
         "boris" => (
