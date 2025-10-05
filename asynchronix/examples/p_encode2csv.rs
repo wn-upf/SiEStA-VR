@@ -9,15 +9,29 @@ mod lib;
 use lib::alvr_stream_socket::ChunkedHevcEncoder;
 use std::path::{PathBuf};
 use crate::lib::models_XR::{HEIGHT_ENCODER, WIDTH_ENCODER};
+use std::env; 
 
-const VIDEO_DIR: &str = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf";
-const CSV_DIR:   &str = "/home/boris/Desktop/Rust_MG1/asynchronix/csv_framesizes";
 
-#[derive(Debug)]
-enum Msg {
-    Data { col: usize, frame_idx: u64, bytes: u64 },
-    Done { col: usize, total_frames: u64 },
-    // (Optional) you could add an Error{col, reason} if you want
+// Instead of consts, we use a small helper
+fn get_paths() -> (PathBuf, PathBuf) {
+    let user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    match user.as_str() {
+        // HPC user
+        "fmaura" => (
+            PathBuf::from("/home/fmaura/simulator_asynchronix/video_samples_vmaf"),
+            PathBuf::from("/home/fmaura/simulator_asynchronix/csv_framesizes"),
+        ),
+        // Local user
+        "boris" => (
+            PathBuf::from("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf"),
+            PathBuf::from("/home/boris/Desktop/Rust_MG1/asynchronix/csv_framesizes"),
+        ),
+        // Fallback (optional)
+        _ => (
+            PathBuf::from("./video_samples_vmaf"),
+            PathBuf::from("./csv_framesizes"),
+        ),
+    }
 }
 
 
@@ -31,16 +45,28 @@ async fn main() -> anyhow::Result<()> {
     let gop_size: usize = 90;
     let intra_refresh = true;
 
+    let (video_dir, csv_dir) = get_paths();
+    println!(
+        "[INFO] Running as {} → VIDEO_DIR={}, CSV_DIR={}",
+        std::env::var("USER").unwrap_or_default(),
+        video_dir.display(),
+        csv_dir.display()
+    );
+
+
+
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
 
     for framerate in [60, 90, 120] {
         for &bitrate_mbps in &br_values {
+            let video_dir = video_dir.clone();
+            let csv_dir = csv_dir.clone();
             let permit = sem.clone().acquire_owned().await?;
             let task = tokio::spawn(async move {
                 let _permit = permit; // keep until task done
-                if let Err(e) = encode_one_video(width, height, gop_size, intra_refresh, framerate, bitrate_mbps).await {
+                if let Err(e) = encode_one_video(video_dir, csv_dir ,width, height, gop_size, intra_refresh, framerate, bitrate_mbps).await {
                     eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
                 }
             });
@@ -54,6 +80,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn encode_one_video(
+    video_dir: PathBuf,
+    csv_dir: PathBuf,
     width: usize,
     height: usize,
     gop_size: usize,
@@ -62,13 +90,14 @@ async fn encode_one_video(
     bitrate_mbps: f32,
 ) -> anyhow::Result<()> {
     let video_name = format!("snow_{}fps.mp4", framerate);
-    let video_path = Path::new(VIDEO_DIR).join(&video_name);
+    let video_path = video_dir.join(&video_name);
+
     if !video_path.exists() {
         eprintln!("WARN: video not found: {}", video_path.display());
         return Ok(());
     }
 
-    let csv_path = Path::new(CSV_DIR).join(format!(
+    let csv_path = csv_dir.join(format!(
         "{}_{}Mbps_framesizes.csv",
         video_path.file_stem().unwrap().to_str().unwrap(),
         bitrate_mbps
