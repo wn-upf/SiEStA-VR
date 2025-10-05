@@ -41,7 +41,7 @@ use std::net::IpAddr;
 
 use std::result::Result::Ok;
 use tai_time::TaiTime;
-use csv::Writer;
+use csv::{ReaderBuilder, Writer};
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
@@ -918,6 +918,7 @@ impl StreamSocket {
             // chunk_frames: VecDeque::new(),
             time_since_last_update: t0,
             csv_trace: OldCsvTrace::default(), 
+            frame_sizes: None, 
         }
     }
 
@@ -1814,6 +1815,8 @@ pub struct StreamSender<H> {
     pub time_since_last_update: TaiTime<0>,
 
     csv_trace: OldCsvTrace, 
+
+    frame_sizes: Option<FrameSizeTable>, 
 }
 
 
@@ -2121,7 +2124,21 @@ impl<H: Serialize> StreamSender<H> {
             };
         } else {
             // Fallback for non-FFMPEG mode
-            buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
+            let fps = framerate.round() as u32;
+            let table = get_table(final_file, fps)?; // global cached
+
+            // round to integer Mbps that must exist as a column
+            let want_mbps = current_bitrate_mbps.round() as u32;
+            let col = table.column_for_mbps(want_mbps)
+                .ok_or_else(|| anyhow::anyhow!("Bitrate {}Mbps not in fused CSV", want_mbps))?;
+
+            let bytes_this_frame = table.bytes(col, id_frame);
+            buffer = fibonacci_payload_exact(bytes_this_frame);
+
+            //////////// FAST CODE /////////////// 
+            // buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
+            // println!("TODO use CSV frame sizes per bitrate"); 
+
         }
 
         // Rest of your function remains the same
@@ -2296,6 +2313,105 @@ impl ReceiverDataStats {
     pub fn get_highest_rx_shard_index(&self) -> i32 {
         self.highest_rx_shard_index
     }
+}
+
+
+use once_cell::sync::OnceCell;
+
+
+//// NEW code for reading CSV of frame sizes, in order to emulate video transmission. 
+#[derive(Clone)]
+struct FrameSizeTable {
+    fps: u32,
+    // available Mbps columns, e.g. [5,10,15,...,100]
+    mbps_cols: Vec<u32>,
+    // framesizes[col_idx][frame_idx] -> bytes
+    framesizes: Vec<Vec<usize>>,
+}
+
+impl FrameSizeTable {
+    fn load(final_file: &str, fps: u32) -> anyhow::Result<Self> {
+        let path = get_prefix_path(&format!(
+            "csv_framesizes/{}_{}fps_fused_framesizes.csv",
+            final_file, fps
+        ));
+        if !std::path::Path::new(&path).exists() {
+            return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
+        }
+
+        let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+        let headers = rdr.headers()?.clone();
+
+        // Parse Mbps column names just once -> integers
+        // headers[0] is "frame_index"; the rest like "5Mbps", "10Mbps", ...
+        let mut mbps_cols = Vec::new();
+        for h in headers.iter().skip(1) {
+            // fast parse: strip "Mbps" suffix
+            let m = h.trim_end_matches("Mbps")
+                     .parse::<u32>()
+                     .map_err(|_| anyhow::anyhow!("Bad column name: {}", h))?;
+            mbps_cols.push(m);
+        }
+
+        // Preallocate vectors (one per column)
+        let ncols = mbps_cols.len();
+        let mut framesizes: Vec<Vec<usize>> = vec![Vec::new(); ncols];
+
+        // Read rows once; push ints (bytes) directly
+        for rec in rdr.records() {
+            let rec = rec?;
+            for (ci, _) in mbps_cols.iter().enumerate() {
+                let v = rec.get(ci + 1).unwrap_or("0"); // +1 to skip frame_index
+                let b = v.parse::<usize>().unwrap_or(0);
+                framesizes[ci].push(b);
+            }
+        }
+
+        Ok(Self { fps, mbps_cols, framesizes })
+    }
+
+    #[inline]
+    fn column_for_mbps(&self, mbps: u32) -> Option<usize> {
+        // linear scan is fine for ~20 cols; binary_search if you prefer:
+        self.mbps_cols.iter().position(|&x| x == mbps)
+    }
+
+    #[inline]
+    fn bytes(&self, col_idx: usize, frame_idx: usize) -> usize {
+        let vec = &self.framesizes[col_idx];
+        if vec.is_empty() { 0 } else { vec[frame_idx % vec.len()] }
+    }
+}
+
+// Global cache keyed by (final_file,fps)
+static TABLE_CACHE: OnceCell<HashMap<(String, u32), Arc<FrameSizeTable>>> = OnceCell::new();
+
+fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> {
+    let map = TABLE_CACHE.get_or_init(HashMap::new);
+    if let Some(t) = map.get(&(final_file.to_string(), fps)) {
+        return Ok(Arc::clone(t));
+    }
+    let table = Arc::new(FrameSizeTable::load(final_file, fps)?);
+    // insert (needs a mutable ref; rebuild a new map to keep OnceCell immutability simple)
+    let mut new_map = map.clone();
+    new_map.insert((final_file.to_string(), fps), Arc::clone(&table));
+    TABLE_CACHE.set(new_map).ok(); // ignore error if already set by a race
+    Ok(table)
+}
+
+
+
+#[inline]
+fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
+    let mut v = vec![0u8; size];
+    if size == 0 { return v; }
+    if size > 1 { v[1] = 1; }
+    // Tight loop; compilers auto-vectorize the addition pipeline well enough.
+    for i in 2..size {
+        // wrapping to stay in u8
+        v[i] = v[i - 1].wrapping_add(v[i - 2]);
+    }
+    v
 }
 
 pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {

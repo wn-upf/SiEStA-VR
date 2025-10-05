@@ -12,6 +12,8 @@ use show_image::glam::f64;
 use tai_time::TaiTime;
 use crate::{print_brown,  lib::DebugColor};
 
+use crate::lib::SlidingWindowAverage; 
+
 const DEBUG_GCC: bool = false; 
 macro_rules! gcc_debug {
     ($fmt:expr, $($arg:tt)*) => {
@@ -1164,5 +1166,500 @@ impl GccBandwidthEstimator{
         }else{
             return 0.0;
         }
+    }
+}
+
+
+
+/////////////////////////// NADA IMPLEMENTATION /////////////////////////////////
+use chrono::{Utc,Local};
+
+pub const NADA_PARAM_PRIO :f64 = 1.0;            //Weight of priority of the flow | 1.0
+/**
+ * Min and Max rate of application supported by media encoder | 150 Kbps & 1.5 Mbps
+ **/ 
+pub const RMCAT_CC_DEFAULT_RMIN : i64 = 2_000_000;    // 5Mbps
+pub const RMCAT_CC_DEFAULT_RMAX : i64 = 150_000_000;  //150Mbps
+pub const INITIAL_RATE : i64 = 15_000_000;  //15Mbps
+pub const NADA_PARAM_XREF : i64 = 20;     //Reference congestion level | 20ms
+pub const NADA_PARAM_KAPPA : f64 = 0.5;       //Scaling parameter for gradual rate update | 0.5
+pub const NADA_PARAM_ETA:f64 = 2.0;           //Scaling parameter for gradual rate update | 2.0
+pub const NADA_PARAM_TAU:i64 = 500;       //Upper bound of RTT in gradual rate update |  500ms
+pub const NADA_PARAM_DELTA: i64 = 100;    //Target feedback interval | 100ms 
+pub const NADA_PARAM_DELTA_US : i64 = 100_000; //in Nano second
+pub const NADA_PARAM_DFILT : i64 = 120;   //Bound on filtering delay | 120ms 
+pub const NADA_PARAM_DFILT_US : i64 = 120_000; //in Nano second
+pub const NADA_PARAM_LOGWIN : i64 = 500;  //Observation time window in for calculating packet summary statistics at receiver  | 500ms       |
+pub const NADA_PARAM_QEPS : i64 = 10;    //Threshold for determining queuing delay build up at receiver| 10ms
+pub const NADA_PARAM_QEPS_US : i64 = 10_000; //in Nano second
+
+pub const NADA_PARAM_QTH  : i64 = 50;    //Delay threshold for non-linear warping | 50ms 
+pub const NADA_PARAM_QMAX : i64 = 400;   //Delay upper bound for non-linear warping| 400ms
+pub const NADA_PARAM_DLOSS: i64 = 10; //1_000; //Delay penalty for loss  | 1.0s
+pub const NADA_PARAM_DMARK: i64 = 200;   //Delay penalty for ECN marking | 200ms 
+
+pub const NADA_PARAM_GAMMA_MAX : f64 = 0.5; //Upper bound on rate increase ratio for accelerated ramp-up | 50%
+pub const NADA_PARAM_QBOUND : i64 = 50;   //Upper bound on self-inflicted queuing delay during ramp up | 50ms
+
+pub const NADA_PARAM_FPS: f64 = 30.0; //Frame rate of incoming video | 30
+pub const NADA_PARAM_BETA_S: f64 = 0.1;   //Scaling parameter for modulating outgoing sending rate |  0.1
+pub const NADA_PARAM_BETA_V: f64 = 0.1;  //Scaling parameter for modulating video encoder target rate | 0.1 
+pub const NADA_PARAM_ALPHA: f64 = 0.1; // Smoothing factor of loss and marking ratios | 0.1 
+
+//Added by Ze
+pub const NADA_PARAM_LAMBDA :f64 = 0.5; 
+pub const NADA_PARAM_MULTILOSS : f64 = 7.0;
+pub const NADA_PARAM_PLRREF : f64 = 0.01;
+pub const NADA_PARAM_XMAX : f64 = 500.0;
+
+//History Size
+pub const NADA_RTT_HISTORY_SIZE : usize = 15;
+
+
+//RTCP NADA Feedback Report, from NADA Receiver
+pub struct NADAFeedbackReport{
+    pub rmode:i8, 
+    pub x_curr:f64, 
+    pub r_recv:i64,
+    
+    //Only For Debuging NADA Receiver
+    pub d_queue:i64,
+    pub d_tilde:f64,
+    pub p_loss: f64,
+}
+
+impl NADAFeedbackReport {
+pub fn new(
+    rmode:i8, x_curr:f64, r_recv:i64,  d_queue:i64, d_tilde:f64, p_loss: f64) -> Self {
+    Self {
+        rmode:rmode,
+        x_curr:x_curr,
+        r_recv:r_recv, 
+
+        //Only For Debuging NADA Receiver
+        d_queue:d_queue,
+        d_tilde: d_tilde,
+        p_loss: p_loss,
+    }
+}
+}
+#[derive(Debug, Clone, Copy)]
+pub enum RateUpdateMode {
+    AcceleratedRampUp = 0, // Corresponds to rmode = 0
+    GradualUpdate = 1,      // Corresponds to rmode = 1
+}
+
+
+pub struct NadaSender{
+    pub r_ref: i64, //Reference rate based on network congestion
+    pub rtt_history : SlidingWindowAverage<i64>, //Estimated round-trip-time  
+    pub r_recv : i64,   //Receiving rate
+    pub rmode : RateUpdateMode, //Rate update mode: (0 = accelerated ramp-up | 1 = gradual update)    
+    pub x_curr : f64,  //Aggregate congestion signal 
+    pub x_prev: f64,   //Prev value of aggregate congestion signal
+    pub r_vin : i64,   //target rate for the live video encoder
+    pub r_send : i64,  //actual sending rate for regulating traffic
+    pub prev_r_vin : i64, 
+    pub prev_r_send : i64,
+    pub t_last: i64,    //Last time receiving a feedback 
+    pub t_curr: i64,
+
+    //Only for Debugging the NADA Receiver
+    pub d_queue:i64, //Estimated queueing delay     
+    pub d_tilde:f64, //Equivalent delay after non-linear warping
+    pub p_loss: f64, //Estimated packet loss ratio
+}
+impl NadaSender {
+    pub fn new(now: TaiTime<0>)->Self{
+        Self { 
+            r_ref: INITIAL_RATE,
+            rtt_history: SlidingWindowAverage::new(
+                0,
+                NADA_RTT_HISTORY_SIZE,
+            ),
+            r_recv: INITIAL_RATE, //30Mbps
+            rmode: RateUpdateMode::GradualUpdate,
+            x_curr: 0.0,
+            x_prev: 0.0,
+            r_vin: INITIAL_RATE,  //30Mbps
+            r_send: INITIAL_RATE, //30Mbps
+            prev_r_vin: INITIAL_RATE, //30Mbps
+            prev_r_send: INITIAL_RATE, //30Mbps
+            t_last: now.duration_since(TaiTime::EPOCH).as_micros() as i64, 
+            t_curr: now.duration_since(TaiTime::EPOCH).as_micros() as i64, 
+
+            //Only for Debugging the NADA Receiver
+            d_queue: 0,
+            d_tilde: 0.0,
+            p_loss: 0.0,
+        }
+    }
+
+    // Function to save data to CSV
+    pub fn write_sender_values_to_csv(&self, filename: &str) -> Result<(), Box<dyn Error>> {
+        let eval_rmode = match self.rmode {
+            RateUpdateMode::AcceleratedRampUp => 0,
+            RateUpdateMode::GradualUpdate => 1,
+            _ => 2,
+        };
+        let linux_timestamp= Local::now().format("%Y%m%d%H%M%S").to_string();
+        let rtt_average = self.rtt_history.get_average() as f64/ 1000.0; // /1000 to convert us to ms
+
+        let nada_values = [
+            self.r_ref.to_string(),
+            rtt_average.to_string(),
+            self.r_recv.to_string(),
+            eval_rmode.to_string(),
+            self.x_curr.to_string(),
+            self.x_prev.to_string(),
+            self.r_vin.to_string(),
+            self.r_send.to_string(),
+            self.prev_r_vin.to_string(),
+            self.prev_r_send.to_string(),
+            self.t_curr.to_string(),
+            self.t_last.to_string(),
+            //Only to debug Receiver values
+            (self.d_queue as f64 /1000.0).to_string(),
+            self.d_tilde.to_string(),
+            self.p_loss.to_string(),
+            linux_timestamp,
+        ];
+
+        // let _= write_nada_variable_values_to_csv(filename, nada_values);
+        let file = OpenOptions::new().write(true).append(true).open(filename)?;
+        let mut writer = Writer::from_writer(file);
+        writer.write_record(&nada_values)?;
+
+        Ok(())
+    }
+
+    fn update_accelerated_rampup(&mut self) -> i64{
+        let rtt_average_ms = self.rtt_history.get_average() / 1000.0; // /1000 to convert us to ms
+        let res = (NADA_PARAM_QBOUND as f64 / (rtt_average_ms as f64 + NADA_PARAM_DELTA as f64 + NADA_PARAM_DFILT as f64)) ; // changes for casting to f64 ( to allow decimals )
+        //gamma: Rate increase multiplier in accelerated ramp-up mode 
+        let gamma = if res < NADA_PARAM_GAMMA_MAX {
+            res
+        } else {
+            NADA_PARAM_GAMMA_MAX
+        };
+        let updated_r_ref =  if self.r_ref as f64  > (1.0 + gamma) * self.r_recv as f64{
+            self.r_ref 
+        }else{
+            let result = (1.0 + gamma) * (self.r_recv as f64);
+            result.round() as i64 // Round the result and convert to i64
+        };
+
+        updated_r_ref
+    }
+
+    fn update_gradual(&mut self, delta_us: i64) -> i64{
+        let delta = delta_us as f64/1000.0; // nano sec (us) to ms
+        
+        let right_side = NADA_PARAM_PRIO * NADA_PARAM_XREF as f64 * RMCAT_CC_DEFAULT_RMAX  as f64 / self.r_ref  as f64;
+        let x_offset = self.x_curr - right_side;
+        let x_diff   = self.x_curr - self.x_prev;
+        let updated_r_ref = self.r_ref  as f64 - NADA_PARAM_KAPPA * (delta/ NADA_PARAM_TAU as f64) * (x_offset/ NADA_PARAM_TAU as f64) * self.r_ref  as f64
+        - NADA_PARAM_KAPPA * NADA_PARAM_ETA * (x_diff / NADA_PARAM_TAU as f64) * self.r_ref  as f64;
+
+        updated_r_ref.round() as i64
+    }
+
+    /** on receiving feedback report:
+       1. obtain current timestamp from system clock: t_curr  
+       2. obtain values of rmode, x_curr, and r_recv from feedback report
+       3. update estimation of rtt
+       4. measure feedback interval: delta = t_curr - t_last
+       if rmode == 0: update r_ref via accelerated ramp-up rules
+       else:          update r_ref via gradual update rules
+       6. clip rate r_ref within the range of [RMIN, RMAX]
+       x_prev = x_curr & t_last = t_curr
+     **/
+    pub fn update_on_receive_feedback(&mut self, send_timestamp:i64, 
+        feedback_report: NADAFeedbackReport, video_fps:f64){
+        self.t_curr = Utc::now().timestamp_micros();
+        self.rmode = match feedback_report.rmode{
+            0 => RateUpdateMode::AcceleratedRampUp,
+            1 => RateUpdateMode::GradualUpdate,
+            _ => RateUpdateMode::GradualUpdate,
+        };
+        self.x_curr = feedback_report.x_curr;
+        self.r_recv = feedback_report.r_recv;
+
+        //Only To Debug NADA Receiver
+        self.d_queue = feedback_report.d_queue;
+        self.d_tilde = feedback_report.d_tilde;
+
+        //update estimation of rtt
+        let rtt = self.t_curr - send_timestamp; 
+        self.rtt_history.submit_sample(rtt);
+        
+        //Measure feedback interval: delta = t_curr - t_last
+        let delta_us = self.t_curr - self.t_last;
+        let updated_r_ref;
+        match self.rmode{
+            RateUpdateMode::AcceleratedRampUp =>{
+                updated_r_ref = self.update_accelerated_rampup( );
+            }
+            _ => {
+                updated_r_ref = self.update_gradual(delta_us);
+            }
+        };
+        
+        self.r_ref  = updated_r_ref.clamp(RMCAT_CC_DEFAULT_RMIN, RMCAT_CC_DEFAULT_RMAX);
+        self.t_last = self.t_curr;
+        self.x_prev = self.x_curr;
+
+        //Update target (r_vin) & sending (r_send) bitrates
+        self.prev_r_vin = self.r_vin;
+        self.prev_r_send = self.r_send;
+
+        let use_shaping_buffer = false;
+        if use_shaping_buffer {
+            self.update_target_bitrate(0.0, video_fps);
+            self.update_sending_bitrate(0.0, video_fps);
+        } else{
+            self.r_vin  = self.r_ref;
+            self.r_send = self.r_ref;
+        }
+    }
+
+    fn update_target_bitrate(&mut self, buffer_len:f64, video_fps: f64){
+        self.prev_r_vin = self.r_vin;
+        let buffer_len_ = if buffer_len == 0.0{
+            RMCAT_CC_DEFAULT_RMAX as f64 /8.0 / 1500.0
+            // 1.0
+        }else{
+            buffer_len
+        };
+
+        // r_diff_v = min(0.05 * r_ref, BETA_V * 8 * buffer_len * FPS)
+        let r_diff_v = f64::min(self.r_ref as f64 * 0.05, NADA_PARAM_BETA_V * 8.0 * buffer_len_ * video_fps);
+        self.r_vin  = i64::max(RMCAT_CC_DEFAULT_RMIN, (self.r_ref as f64 - r_diff_v).round() as i64);
+    }
+
+    fn update_sending_bitrate(&mut self, buffer_len:f64, video_fps: f64){
+        let buffer_len_ = if buffer_len == 0.0{
+            RMCAT_CC_DEFAULT_RMAX as f64 /8.0 / 1500.0
+            // 1.0
+        }else{
+            buffer_len
+        };
+
+        // r_diff_s = min(0.05 * r_ref, BETA_S * 8 * buffer_len * FPS)
+        let r_diff_s = f64::min(self.r_ref as f64 * 0.05, NADA_PARAM_BETA_S * 8.0 * buffer_len_ * video_fps);
+        self.r_send =   i64::min(RMCAT_CC_DEFAULT_RMAX, (self.r_ref as f64 +  r_diff_s).round() as i64);
+    }
+
+    pub fn get_target_bitrate(&mut self) -> i64{
+        self.r_vin
+    }
+
+    pub fn get_sending_bitrate(&mut self) -> i64{
+        self.r_send
+    }
+}
+
+
+//////////// RECEIVER SIDE NADA /////////////
+
+pub struct NadaReceiver{
+    pub d_base : i64, //Estimated baseline delay 
+    pub d_tilde: f64, //Equivalent delay after non-linear warping 
+    pub d_queue: i64, //Estimated queueing delay  
+    pub p_loss : f64, //Estimated packet loss ratio 
+    pub p_mark: f64, //Estimated packet ECN marking ratio
+    pub r_recv : i64, //Receiving rate  (bps)
+    pub t_last : i64, //Last time receiving a feedback
+    pub d_queue_history : SlidingWindowAverage<i64>,
+    pub x_curr : f64, //Aggregate congestion signal 
+    pub rmode :  RateUpdateMode, //Rate update mode: (0 = accelerated ramp-up | 1 = gradual)      
+    
+    //last send & arrival times
+    pub last_t_send : i64, //last send timestamp
+    pub last_t_arrival : i64, //last arrival timestamp
+
+    //To compute r_recv, p_loss
+    pub total_received_bytes : usize,
+    total_num_packets: u32,
+    total_packets_lost: u32,
+    pub receive_rate_timer: Instant,
+}
+
+impl NadaReceiver{
+    pub fn new() -> Self {
+        Self { 
+            d_base: i64::MAX, 
+            d_tilde: 0.0,
+            d_queue: 0,
+            p_loss: 0.0, 
+            p_mark: 0.0,
+            r_recv: 0, 
+            t_last: Utc::now().timestamp_micros(), 
+            d_queue_history: SlidingWindowAverage::new(
+                0,
+                15,
+            ),
+            x_curr: 0.0,
+            rmode: RateUpdateMode::GradualUpdate,
+
+                //last send & arrival times
+            last_t_send: 0,
+            last_t_arrival: 0, 
+            
+            //receive timer
+            total_received_bytes: 0,
+            total_num_packets: 0,
+            total_packets_lost: 0,
+            receive_rate_timer: Instant::now(), 
+        }
+    }
+
+    /****
+        Obtain one-way delay measurement: d_fwd = t_curr - t_sent
+        update baseline delay: d_base = min(d_base, d_fwd)
+        update queuing delay:  d_queue = d_fwd - d_base
+     *****/
+    pub fn compute_oneway_delay(&mut self, frame_send_timestamp: i64, frame_arrival_timestamp: i64){
+        let d_fwd = frame_arrival_timestamp - frame_send_timestamp;
+        self.d_base = std::cmp::min(self.d_base, d_fwd);
+        self.d_queue = d_fwd -  self.d_base;
+        self.d_queue_history.submit_sample(self.d_queue);
+
+        //initialize last timestamps
+        self.last_t_send = frame_send_timestamp;
+        self.last_t_arrival = frame_arrival_timestamp;
+    }
+
+    /** When packet losses are observed, the estimated queuing delay follows
+        a non-linear warping inspired by the delay-adaptive congestion window
+        backoff policy in [Budzisz-TON11]: **/
+    fn compute_d_tilde(&mut self, had_packet_loss:bool){
+
+        if had_packet_loss{
+            if  self.d_queue <  NADA_PARAM_QTH{
+                self.d_tilde =  self.d_queue as f64;
+
+            } else if self.d_queue > NADA_PARAM_QTH &&  self.d_queue < NADA_PARAM_QMAX{
+                let numerator = (NADA_PARAM_QTH - self.d_queue).pow(4);
+                let denominator = (NADA_PARAM_QMAX - NADA_PARAM_QTH).pow(4);
+                self.d_tilde = NADA_PARAM_QTH  as f64 * (numerator/ denominator) as f64;
+            
+            } else{
+                self.d_tilde = 0.0;
+            }
+        }
+    } 
+    
+
+    /** On time to send a new feedback report (t_curr - t_last > DELTA)
+        calculate non-linear warping of delay d_tilde if packet loss exists
+        calculate current aggregate congestion signal x_curr
+        determine mode of rate adaptation for sender: rmode
+        send RTCP feedback report containing: rmode, x_curr, and r_recv
+        update t_last = t_curr  **/
+    pub fn time_to_report_feedback(&mut self, had_packet_loss: bool, had_packet_mark: bool)-> bool{
+        let t_curr = Utc::now().timestamp_micros();
+        let time_diff = (t_curr - self.t_last)/1000;
+
+        if time_diff > NADA_PARAM_DELTA{
+
+            self.d_tilde = self.d_queue_history.get_average() as f64/1000.0; // /1000 for us to ms
+            // Calculate non-linear warping of delay if packet loss exists
+             if had_packet_loss {
+                self.compute_d_tilde(had_packet_loss);
+            }
+            // Update packet marking ratio estimate
+            if had_packet_mark {
+                self.p_mark += 1.0; // Increment mark count (similarly, improve this logic as needed)
+            }
+            self.x_curr = self.d_tilde + self.p_mark * NADA_PARAM_DMARK as f64 + self.p_loss * NADA_PARAM_DLOSS as f64;
+            self.determine_rate_adaptation_mode(had_packet_loss);
+
+            true
+        }
+        else{
+            false
+        }
+    }
+
+    pub fn update_t_last(&mut self){
+        let t_curr = Utc::now().timestamp_micros();
+        self.t_last = t_curr;
+    }
+
+    /** Is there build-up of queuing delay?
+     Check if d_fwd-d_base < QEPS for all previous
+      delay samples within the observation window LOGWIN **/
+    fn exists_queuing_delay_buildup(&mut self) -> bool {
+        for value in self.d_queue_history.get_history_iter() {
+            if *value > NADA_PARAM_QEPS_US {
+                return true; 
+            }
+        }
+        false 
+    }
+
+    /**
+     Determine whether the network is underutilized 
+     and recommend the corresponding rate adaptation mode 
+    **/
+    fn determine_rate_adaptation_mode(&mut self, had_packet_loss: bool){
+
+        self.rmode = RateUpdateMode::AcceleratedRampUp;
+        /* To operate in accelerated ramp-up mode:
+        o  No recent packet losses within the observation window LOGWIN; and
+        o  No build-up of queuing delay: d_fwd-d_base < QEPS for all previous
+        delay samples within the observation window LOGWIN.*/
+        if had_packet_loss{
+            self.rmode = RateUpdateMode::GradualUpdate;
+        }
+        if self.exists_queuing_delay_buildup(){
+            self.rmode = RateUpdateMode::GradualUpdate;
+        }
+    }
+
+    pub fn update_receive_loss_rate(&mut self, received_bytes: usize){
+        let total_num_packets = (received_bytes as f32 / 1500.0).ceil() as u32;
+        let num_packets_lost = 0;
+        // received bytes in nal + size of header (VideoPacketHeader)
+        let size_of_timestamp = std::mem::size_of::<Duration>();
+        let size_of_send_timestamp = std::mem::size_of::<i64>();
+        self.total_received_bytes += received_bytes + size_of_timestamp + size_of_send_timestamp;
+        
+        // total & lost packets to compute p_inst
+        self.total_packets_lost += num_packets_lost;
+        self.total_num_packets += total_num_packets;
+
+        let elapsed = self.receive_rate_timer.elapsed();
+        if elapsed >= Duration::from_millis(NADA_PARAM_LOGWIN as u64){
+            /* 5.1.3.  Estimation of receiving rate (r_recv):
+             * NADA maintains a recent observation window with time span of LOGWIN,
+             * and simply divides the total size of packets arriving during that window */
+            let interval_in_sec = NADA_PARAM_LOGWIN as f64/1000.0 ;
+            let received_rate_bps=((self.total_received_bytes * 8) as f64) / interval_in_sec;
+            self.r_recv = received_rate_bps.round() as i64;
+
+
+            /* 5.1.2.  Estimation of packet loss/marking ratio:
+             * The instantaneous packet loss ratio p_inst is the ratio between 
+             * the number of missing packets over the number of total transmitted packets 
+             * within the recent observation window LOGWIN.  The packet loss ratio p_loss is
+             *obtained after exponential smoothing:
+                p_loss = ALPHA*p_inst + (1-ALPHA)*p_loss.   (10) */
+            let p_inst = if self.total_num_packets > 0 {
+                self.total_packets_lost as f64 / self.total_num_packets as f64
+            } else {
+                0.0 
+            };
+
+            self.p_loss = NADA_PARAM_ALPHA * p_inst + (1.0 - NADA_PARAM_ALPHA) * self.p_loss;
+            
+            //re-initialize
+            self.total_received_bytes = 0;
+            self.receive_rate_timer = Instant::now();
+            self.total_packets_lost = 0;
+            self.total_num_packets = 0;
+        }
+
     }
 }

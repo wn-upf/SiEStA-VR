@@ -90,7 +90,7 @@ use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::get_third_octet;
 // use async_process::Child;
 
-
+use crate::lib::gcc_nada_estimator::*;
 
 fn hide_by_title_with_wmctrl(title: &str) {
     let _ = std::process::Command::new("sh")
@@ -3628,6 +3628,9 @@ pub struct XRClient {
     rebuffer_event_counter: TimedRebufferCounter, 
     sim_unique_string: String, // for logging
     bm_string: String, 
+
+
+    nada_receiver: Arc<Mutex<NadaReceiver>>, 
     // everest_capacity_vec: Vec<f32>, 
     // everest_throughput_vec: Vec<f32>, 
 }
@@ -3732,7 +3735,9 @@ impl XRClient {
 
             rebuffer_event_counter: TimedRebufferCounter::new( BITRATE_UPDATE_INTERVAL as f32), 
             sim_unique_string: simu_id.to_string(), //for logging                
-            bm_string: bm_str.to_string(),          //for logging    
+            bm_string: bm_str.to_string(),          //for logging   
+
+            nada_receiver: Arc::new(Mutex::new(NadaReceiver::new())) 
         }
     }
 
@@ -4210,15 +4215,20 @@ impl XRClient {
                     };
 
                     let sized_vec = nal[..20.min(nal.len())].to_vec();                    
-                    /////////////////////////////////////////////
-                    
-                    // pub const EVEREST_ENABLED : bool = false; 
+
+                    ///////////////////////////////////////////////
+                    // pub const EVEREST_ENABLED : bool = false; // EVEREST STATS CLIENT
                     let mut everest_throughput: f32 = -1.0;     // initialize, if negative then on rx don't count 
                     let mut everest_capacity: f32 = -1.0;       // (only one measure per frame of either)
 
                     let mut command_abr_everest = EverestCommand::Continue; 
 
                     
+                    
+
+
+
+
                     if self.everest_enabled {
                         pub const EVEREST_CLASSIC : bool = false; 
                         if self.frame_size_exp_avg == 0.0 { 
@@ -4311,8 +4321,41 @@ impl XRClient {
 
                         }
                     }
-                    //////////////////////////////////////////////
                     
+                    
+                    
+                    //////////////////////////////////////////////  // NADA STATS (TODO)
+                    // {
+                    //     let mut nada_receiver = NADA_RECEIVER.lock();
+                    //     nada_receiver.compute_oneway_delay(frame_send_timestamp, arrival_ts);
+                    //     nada_receiver.update_receive_loss_rate(size);
+                    //     let is_feedback_on = nada_receiver.time_to_report_feedback(false, false);
+
+                    //     //if there is a feedback to report
+                    //     if is_feedback_on{
+                    //         //send RTCP feedback report containing values of: rmode, x_curr, and r_recv
+                    //         frame.client_stats.nada_feedback = true;
+                    //         frame.client_stats.nada_xcurr = nada_receiver.x_curr;
+                    //         frame.client_stats.nada_rmode = match nada_receiver.rmode {
+                    //             RateUpdateMode::AcceleratedRampUp => 0,
+                    //             RateUpdateMode::GradualUpdate => 1,
+                    //             _ => 1,
+                    //         };
+                    //         frame.client_stats.nada_recv = nada_receiver.r_recv;
+
+                    //         //To Debug NADA Receiver, report values of: t_last, d_fwd, d_tilde, d_queue, p_loss
+                    //         frame.client_stats.plr = nada_receiver.p_loss;
+                    //         frame.client_stats.d_tilde = nada_receiver.d_tilde;
+                    //         frame.client_stats.d_queue = nada_receiver.d_queue;
+
+                    //         //update t_last = t_curr
+                    //         nada_receiver.update_t_last();
+                    //     }else{
+                    //         frame.client_stats.nada_feedback = false;
+                    //     }
+                    // }
+
+                    ///////////////////////////////////////////////// NADA STATS END
                     let net = NetworkStatisticsPacket {
                         // Frame specific metrics
                         frame_index: frame_id as i32, // index of the current frame

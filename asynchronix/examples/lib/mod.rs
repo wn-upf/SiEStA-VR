@@ -68,7 +68,7 @@ pub mod gcc_nada_estimator;
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
-pub const USE_FFMPEG: bool = true;
+pub const USE_FFMPEG: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -1034,6 +1034,17 @@ impl<T> SlidingWindowAverage<T> {
 
     pub fn history_buffer_len(&self) -> usize {
         self.history_buffer.len()
+    }
+
+        // Method to return an iterator over the history_buffer
+    pub fn get_history_iter(&self) -> std::collections::vec_deque::Iter<'_, T> {
+        self.history_buffer.iter()
+    }
+    
+}
+impl SlidingWindowAverage<i64> {
+    pub fn get_average(&self) -> f32 { // obtain the average value of integers. 
+        self.history_buffer.iter().sum::<i64>() as f32 / self.history_buffer.len() as f32
     }
 }
 

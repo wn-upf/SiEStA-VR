@@ -53,8 +53,6 @@ async fn main() -> anyhow::Result<()> {
         csv_dir.display()
     );
 
-
-
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
