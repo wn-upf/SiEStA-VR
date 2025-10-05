@@ -1,13 +1,14 @@
 use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender
 };
+use crate::lib::gcc_nada_estimator::{self, GccBandwidthEstimator};
 use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_CSV};
 use async_std::future::pending;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
 use rand::SeedableRng;
-use crate::{debug_debug, print_magenta,
+use crate::{debug_debug, print_magenta, taitime_to_f64,
     //  print_brown
     };
 use image::{ImageBuffer, Rgb};
@@ -1217,6 +1218,9 @@ pub enum BitrateMode {
             last_action_idx: Arc<Mutex<usize>>,
             last_decision_instant: Arc<Mutex<TaiTime<0>>>,
             pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
+        }, 
+        GCCNadaPort{
+            gcc_estimator: GccBandwidthEstimator, 
         }
 }
 
@@ -1227,6 +1231,7 @@ impl BitrateMode{
             BitrateMode::EVeREst { .. } =>                "EVeREst".to_string(),
             BitrateMode::NestVr { .. } =>                 "NeSt-VR".to_string(), 
             BitrateMode::ReinforcementLearner { .. } =>   "ReinforcementLearner".to_string(),
+            BitrateMode::GCCNadaPort { .. } =>            "GCC Port".to_string(),   
         }
     }
 }
@@ -1621,7 +1626,7 @@ impl BitrateManager {
 
 
         let bitrate_mode = match abr_enabled{
-            1 =>  { 
+            1 =>  {  // NeSt-VR
                 
                     if max_bps != 0.0 && min_bps != 0.0 {
                         let mut vec_bitrates = Vec::new();
@@ -1681,7 +1686,7 @@ impl BitrateManager {
                     
                     BitrateMode::EVeREst { bitrate_ladder_mbps }
                 }
-            3 => {
+            3 => { // RL 
                 let ladder_mbps = (10..=100).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
                 print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
@@ -1694,6 +1699,14 @@ impl BitrateManager {
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
                 } 
             }
+
+            4 => { // GCC estimator. 
+
+                let gcc_estimator = GccBandwidthEstimator::new(); 
+
+                BitrateMode::GCCNadaPort { gcc_estimator }
+            }
+
             _ => BitrateMode::ConstantMbps(initial_bitrate_mbps)
         };          
 
@@ -1760,22 +1773,31 @@ impl BitrateManager {
         self.bitrate_average_mbps.clear();
 
         // Reset bitrate state
-        match &self.bitrate_mode {
+        match &mut self.bitrate_mode {
             BitrateMode::ConstantMbps(init_mbps) => {
                 self.last_target_bitrate_bps = *init_mbps * 1e6;
             }
             BitrateMode::EVeREst { bitrate_ladder_mbps } => {
-                // Pick the lowest rung as a safe restart point
                 self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
             }
             BitrateMode::NestVr { min_bitrate_mbps, .. } => {
-                self.last_target_bitrate_bps = min_bitrate_mbps * 1e6;
+                self.last_target_bitrate_bps = *min_bitrate_mbps * 1e6;
             }
-             BitrateMode::ReinforcementLearner { last_action_idx, last_decision_instant, pending_obs, bitrate_ladder_mbps,  .. } => {        
-                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;  // start at lowest
+            BitrateMode::ReinforcementLearner {
+                last_action_idx,
+                last_decision_instant,
+                pending_obs,
+                bitrate_ladder_mbps,
+                ..
+            } => {
+                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
                 *last_action_idx.lock().unwrap() = 0;
                 *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
                 *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
+            }
+            BitrateMode::GCCNadaPort { gcc_estimator } => {
+                self.last_target_bitrate_bps = 15.0 * 1e6;
+                *gcc_estimator = GccBandwidthEstimator::new();
             }
         }
 
@@ -1816,7 +1838,24 @@ impl BitrateManager {
         frame_interarrival_s: f32,
         network_stats: NetworkStatisticsPacket, 
         now: TaiTime<0>,
+        send_instant: TaiTime<0>, 
     ) {
+
+
+        match &mut self.bitrate_mode{
+            
+            BitrateMode::GCCNadaPort { gcc_estimator } => {
+
+                let current_frame_send_timestamp = taitime_to_f64!(send_instant); 
+                let current_frame_arrival_timestamp = taitime_to_f64!(now); 
+                let current_frame_size = network_stats.bytes_in_frame; 
+                let _target_bitrate_bps = gcc_estimator.Update(current_frame_send_timestamp, current_frame_arrival_timestamp, current_frame_size as i64, now); 
+                // target now unused, then retrieved during one_pass_abr()  
+            }
+            
+            _ => {}, 
+        }
+
         self.rtt_average.submit_sample(network_rtt);
 
         self.peak_throughput_average
@@ -1878,7 +1917,12 @@ impl BitrateManager {
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
 
-            let bitrate_bps = match &self.bitrate_mode {
+            if let BitrateMode::GCCNadaPort { ref mut gcc_estimator } = self.bitrate_mode {
+                let bitrate_bps = gcc_estimator.get_target_bitrate_bps();
+                self.last_target_bitrate_bps = bitrate_bps as f32;  // Done here because only in this case we need mut access to gcc_estimator. 
+            }
+
+            let bitrate_bps = match &self.bitrate_mode { // match all other cases. 
                 BitrateMode::ConstantMbps(bitrate_mbps) => {
                     self.last_target_bitrate_bps = *bitrate_mbps as f32 * 1E6;
                     // self.last_target_bitrate_mbps = *bitrate_mbps as f32;
@@ -2124,6 +2168,10 @@ impl BitrateManager {
                         
                         self.last_target_bitrate_bps
                                         
+                },
+
+                _ => {
+                    self.last_target_bitrate_bps
                 }
             };
             print_prettyy!(
@@ -2540,30 +2588,38 @@ impl XRServer {
                     // if let send_instant = map_clone.get(&frame_id).unwrap()
                     if let Some((_, send_instant)) = map_clone.remove(&frame_id) {
                         rtt = now.duration_since(send_instant);
+                        debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
+                        let (peak_network_throughput_bps, frame_interarrival_s) =
+                            self.STATISTICS_MANAGER.report_network_statistics(
+                                network_stats.clone(),
+                                rtt,
+                                now,
+                                self.bitrate_manager.last_target_bitrate_bps,
+                            );
+
+                        // BITRATE_MANAGER.lock().report_network_statistics
+                        self.bitrate_manager.report_network_statistics_abr(
+                            rtt,
+                            peak_network_throughput_bps,
+                            frame_interarrival_s,
+                            network_stats,
+                            now,  
+                            send_instant, 
+                        );
+
+
+
+
+
+
+
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
                         println!("frame {} RTT ZEROO!!!!!", network_stats.frame_index);
                         rtt = Duration::ZERO;
                     }
 
-                    debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
-
-                    let (peak_network_throughput_bps, frame_interarrival_s) =
-                        self.STATISTICS_MANAGER.report_network_statistics(
-                            network_stats.clone(),
-                            rtt,
-                            now,
-                            self.bitrate_manager.last_target_bitrate_bps,
-                        );
-
-                    // BITRATE_MANAGER.lock().report_network_statistics
-                    self.bitrate_manager.report_network_statistics_abr(
-                        rtt,
-                        peak_network_throughput_bps,
-                        frame_interarrival_s,
-                        network_stats,
-                        now,  
-                    );
+                    
                 }
                 ClientControlPacket::DeadlineShardLossStat(inner) => {
                     let frames_lost = inner.frame_indexes;
@@ -2914,7 +2970,7 @@ impl XRServer {
    
 
 
-                if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) {
+                if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCNadaPort{ .. }) {
                     if (now.duration_since(self.bitrate_manager.last_update_instant) >= duration_abr){
                        
                         let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
@@ -2930,7 +2986,7 @@ impl XRServer {
                         // print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
                     }
                 } 
-                else{ // EveRest classic is applied per-frame. 
+                else{ // EveRest classic and GCC are applied per-frame. 
 
                     let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
@@ -3914,7 +3970,6 @@ impl XRClient {
                             stop = true;
                             break;
                         } else {
-                            // TODO: CHECK WITH WIRESHARK ENCAPSULATION OF PACKET
                             // println!("{}", DebugColor::DarkGreen.to_color_fn()(String::from("Parsed from connection output:")));
                             if let Ok((
                                 packet_length,
@@ -3983,7 +4038,7 @@ impl XRClient {
                                     ))
                                 );
                                 stop = true;
-                                panic!("IS THIS HAPPENING"); 
+                                // panic!("IS THIS HAPPENING EVER?"); // Hasn't happened since ever, erasing for cleaning
                                 break;
                             }
                         }
@@ -4557,121 +4612,6 @@ impl XRClient {
     }
 
  
-
-    fn cleanup_hevc_rgb_files(&mut self, current_frame_id: usize, ip: IpAddr) -> Result<()> {
-        // Only clean up frames that are at least 100 frames behind
-        if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
-            return Ok(());
-        }
-
-        let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
-
-        let base_dir = get_prefix_path(&format!("Sink_for_video/{}",
-            &self.name_folder
-        )); 
-
-        // Define path to hevc_ref directory
-        let hevc_ref_dir = format!("{}/{}/hevc_ref", base_dir, ip);
-        let max_ref_dir = format!("{}/{}/hevc_max", base_dir, ip);
-
-        // Ensure the directory exists before trying to read it
-        if !std::path::Path::new(&hevc_ref_dir).exists() {
-            return Ok(()); // Nothing to clean if directory doesn't exist
-        }
-        if !std::path::Path::new(&max_ref_dir).exists() {
-            return Ok(()); // Nothing to clean if directory doesn't exist
-        }
-
-        // Process hevc_ref directory
-        if let Ok(entries) = std::fs::read_dir(&hevc_ref_dir) {
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-
-                // Process both .rgb and .hevc files
-                if let Some(extension) = path.extension() {
-                    if extension == "rgb" || extension == "hevc" {
-                        if let Some(filename) = path.file_stem() {
-                            if let Some(file_str) = filename.to_str() {
-                                // Parse frame number from filename
-                                if let Ok(frame_num) = file_str.parse::<usize>() {
-                                    if frame_num < oldest_frame_to_keep {
-                                        // Log before deletion attempt for debugging
-                                        // println!("Attempting to delete old file: {}", path.display());
-
-                                        if let Err(e) = std::fs::remove_file(&path) {
-                                            let file_type =
-                                                if extension == "rgb" { "RGB" } else { "HEVC" };
-                                            eprintln!(
-                                                "Failed to remove old {} file {}: {}",
-                                                file_type,
-                                                path.display(),
-                                                e
-                                            );
-                                        } else {
-                                            // Optional: Log successful deletion
-                                            let file_type =
-                                                if extension == "rgb" { "RGB" } else { "HEVC" };
-                                            // println!("Successfully deleted old {} file: {}", file_type, path.display());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Process hevc_max directory
-        if let Ok(entries) = std::fs::read_dir(&max_ref_dir) {
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-
-                // Process both .rgb and .hevc files
-                if let Some(extension) = path.extension() {
-                    if extension == "rgb" || extension == "hevc" {
-                        if let Some(filename) = path.file_stem() {
-                            if let Some(file_str) = filename.to_str() {
-                                // Parse frame number from filename
-                                if let Ok(frame_num) = file_str.parse::<usize>() {
-                                    if frame_num < oldest_frame_to_keep {
-                                        // Log before deletion attempt for debugging
-                                        // println!("Attempting to delete old MAX file: {}", path.display());
-
-                                        if let Err(e) = std::fs::remove_file(&path) {
-                                            let file_type =
-                                                if extension == "rgb" { "RGB" } else { "HEVC" };
-                                            eprintln!(
-                                                "Failed to remove old MAX {} file {}: {}",
-                                                file_type,
-                                                path.display(),
-                                                e
-                                            );
-                                        } else {
-                                            // Optional: Log successful deletion
-                                            let file_type =
-                                                if extension == "rgb" { "RGB" } else { "HEVC" };
-                                            // println!("Successfully deleted old MAX {} file: {}", file_type, path.display());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
-            println!(
-                "Cleaned up HEVC and RGB files older than frame {}",
-                oldest_frame_to_keep
-            );
-        }
-
-        Ok(())
-    }
-    
     pub async fn flush_vmaf_buffer(&mut self, now: TaiTime<0>) -> Result<()> {
         // If there are any frames left in the buffer, process them
         if !self.vmaf_frame_buffer.is_empty() {
@@ -4798,15 +4738,6 @@ impl XRClient {
                     }
                 
 
-                    if id_f % 10 == 0 {
-
-                        if USE_FFMPEG {
-                            if let Err(e) = self.cleanup_hevc_rgb_files(id_f, ip_client) {
-                                eprintln!("Error during hevc ref frame cleanup: {}", e);
-                            }
-                        }
-                    }
-
                     if id_f > self.last_processed_frame_id + 1 {
                         let missing_start = self.last_processed_frame_id + 1;
                         let missing_end = id_f - 1; // Inclusive end
@@ -4864,7 +4795,6 @@ impl XRClient {
 
                             print_pretty!(DebugColor::Cyan, "Initialization processing complete.", );
                             self.is_decoder_ready = true;
-                            // self.is_ref_decoder_ready = true; // Still needed?
                             self.initialization_buffer.clear();
 
                         } else { /* ... log buffering status ... */ }
