@@ -7,18 +7,31 @@ use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use csv::Writer;
+use show_image::glam::f64;
 // use chrono::{Utc, TimeZone};
 use tai_time::TaiTime;
+use crate::{print_brown,  lib::DebugColor};
 
+const DEBUG_GCC: bool = false; 
+macro_rules! gcc_debug {
+    ($fmt:expr, $($arg:tt)*) => {
+        if DEBUG_GCC
+        {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", DebugColor::Blue.to_background_fn()(msg));
+        }
+        
+    };
+}
 
 pub const GCC_WINDOW_SIZE: usize = 20;
 pub const GCC_MIN_CONFIGURED_BITRATE: f64 = 5.0*1000.*1000.;//5Mbps
-pub const GCC_MAX_CONFIGURED_BITRATE: f64 = 150.0*1000.*1000.;//150Mbps
+pub const GCC_MAX_CONFIGURED_BITRATE: f64 = 100.0*1000.*1000.;//100Mbps
 pub const GCC_INIT_CONFIGURED_BITRATE: f64 = 15.0*1000.*1000.;//15Mbps
 pub const GCC_INCREASE_COEF_ALPHA: f64 = 1.08;
 pub const GCC_DECREASE_COEF_BETA: f64 = 0.85;
 pub const GCC_DEFAULT_RTT: i64 = 200;//200ms
-pub const GCC_FRAME_INTERVAL: f64 = 1./72.;//72fps
+// pub const GCC_FRAME_INTERVAL: f64 = 1./72. // not const anymore, so it is adaptive to different framerates. 
 pub const GCC_BITRATE_ESTIMATOR_INIT_WINDOW_MS: i64 = 350;//350ms
 pub const GCC_BITRATE_ESTIMATOR_NONINIT_WINDOW_MS: i64 = 250;//250ms
 
@@ -210,7 +223,7 @@ impl InterArrival{
 
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum BandwidthUsage {
     kBwNormal = 0,
     kBwUnderusing = 1,
@@ -345,10 +358,14 @@ impl TrendlineEstimator{
         
 
         if modified_trend.abs() > self.threshold_ + 15.0 {
-        // Avoid adapting the threshold to big latency spikes, caused e.g.,
-        // by a sudden capacity drop.
-        self.last_update_ms_ = now_ms;
-        return;
+            // Avoid adapting the threshold to big latency spikes, caused e.g.,
+            // by a sudden capacity drop.
+             gcc_debug!(
+                "[Thresh] spike: |mod_trend|={:.2} >> thr+15 ({}). skip adapt",
+                modified_trend.abs(), self.threshold_
+            );
+            self.last_update_ms_ = now_ms;
+            return;
         }
         let k = if modified_trend.abs() < self.threshold_ {
             self.k_down_
@@ -358,6 +375,8 @@ impl TrendlineEstimator{
         
         let kMaxTimeDeltaMs = 100;
         let time_delta_ms = std::cmp::min(now_ms - self.last_update_ms_, kMaxTimeDeltaMs);
+        let prev = self.threshold_.clone(); 
+
         self.threshold_ += k * (modified_trend.abs() - self.threshold_) * time_delta_ms as f64;
         if self.threshold_>600.0 as f64{
             self.threshold_=600.0;
@@ -365,16 +384,23 @@ impl TrendlineEstimator{
             self.threshold_=6.0;
         }
         self.last_update_ms_ = now_ms;
+
+        gcc_debug!(
+            "[Thresh] dt={} ms, k={:.4}, old={:.2} → new={:.2}",
+            time_delta_ms as i64, k, prev, self.threshold_
+        );
     }
 
 
     pub fn Detect( &mut self,trend: f64,ts_delta: f64, now_ms: i64) {
         if self.num_of_deltas_ < 2 {  
+          gcc_debug!("[Detect] warmup: deltas={} → hyp=Normal", self.num_of_deltas_);
           self.hypothesis_ = BandwidthUsage::kBwNormal;
           return;
         }
         let modified_trend =
             std::cmp::min(self.num_of_deltas_, 60) as f64 * trend * self.threshold_gain_;
+        let prev = self.hypothesis_.clone(); 
         self.prev_modified_trend_ = modified_trend;
         
         if modified_trend > self.threshold_ {
@@ -404,6 +430,14 @@ impl TrendlineEstimator{
           self.overuse_counter_ = 0;
           self.hypothesis_ = BandwidthUsage::kBwNormal;
         }
+
+        gcc_debug!(
+            "[Detect] mod_trend={:.3} thr={:.2} overuse_t={:.3}s cnt={} hyp={:?} (prev={:?})",
+            modified_trend, self.threshold_, self.time_over_using_, self.overuse_counter_, self.hypothesis_, prev
+        );
+
+
+
         self.current_threshold_for_testing=self.threshold_;
         self.current_trend_for_testing=modified_trend;
         self.prev_trend_ = trend;
@@ -447,6 +481,13 @@ impl TrendlineEstimator{
                 trend = LinearFitSlope(&self.delay_hist_).unwrap_or(trend);
                 
                 }
+
+                gcc_debug!(
+                    "[Trend] Δms: recv={:.3}, send={:.3}, delta={:.3} | accum={:.3}, smooth={:.3}, trend={:.5}",
+                    recv_delta_ms, send_delta_ms, delta_ms,
+                    self.accumulated_delay_, self.smoothed_delay_, trend
+                );
+
                 self.Detect(trend, send_delta_ms, arrival_time_ms);
         }       
 }
@@ -553,7 +594,7 @@ impl Default for NetworkStateEstimate {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum RateControlState {
     kRcHold = 0,
     kRcIncrease = 1,
@@ -594,10 +635,11 @@ pub struct AimdRateControl{
     pub no_bitrate_increase_in_alr_:bool,
     pub last_decrease_:Option<f64>,
     pub esitmate_thr_testing:f64,
+    pub gcc_frame_interval: f64, 
 
 }
 impl AimdRateControl{
-    pub fn new(send_side:bool)->Self{
+    pub fn new(send_side:bool, framerate: f64)->Self{
         Self{
             min_configured_bitrate_: GCC_MIN_CONFIGURED_BITRATE,
             max_configured_bitrate_:GCC_MAX_CONFIGURED_BITRATE,
@@ -619,11 +661,11 @@ impl AimdRateControl{
                 ..Default::default()
             }),
             esitmate_thr_testing:0.0,
+            gcc_frame_interval: 1.0 / framerate, 
         }
 
     }
-    pub fn ChangeState(&mut self,input:& RateControlInput,
-        at_time:i64) {
+    pub fn ChangeState(&mut self,input:& RateControlInput, at_time:i64) {
             match input.bw_state {
                 BandwidthUsage::kBwNormal => {
                     if self.rate_control_state_ == RateControlState::kRcHold {
@@ -650,8 +692,8 @@ impl AimdRateControl{
     }
     pub fn GetNearMaxIncreaseRateBpsPerSecond(&mut self) -> f64 {
         //RTC_DCHECK(!current_bitrate_.IsZero());
-        let kFrameInterval = GCC_FRAME_INTERVAL;
-        let mut frame_size = self.current_bitrate_ * kFrameInterval;
+        let kFrameInterval = self.gcc_frame_interval;
+        let frame_size = self.current_bitrate_ * kFrameInterval;
         let kPacketSize = 1500*8;
         let packets_per_frame = frame_size as f64/ kPacketSize as f64;
         let  avg_packet_size = frame_size / packets_per_frame;
@@ -660,7 +702,7 @@ impl AimdRateControl{
         let mut response_time = (self.rtt_ + 100) as f64*0.001;
       
         response_time = response_time * 2.;
-        let mut increase_rate_bps_per_second =
+        let increase_rate_bps_per_second =
             avg_packet_size / response_time as f64;
         let kMinIncreaseRateBpsPerSecond = 4000.0;
         return f64::max(kMinIncreaseRateBpsPerSecond, increase_rate_bps_per_second);
@@ -672,18 +714,18 @@ impl AimdRateControl{
          current_bitrate:f64) ->f64 {
       let mut alpha = GCC_INCREASE_COEF_ALPHA;
       if last_time==i64::MIN {
-        let mut time_since_last_update = at_time - last_time;
+        let time_since_last_update = at_time - last_time;
         alpha = alpha.powf(((time_since_last_update as f64/1000.0).min(1.0))as f64);
       }
-      let mut multiplicative_increase =
+      let multiplicative_increase =
           f64::max(current_bitrate * (alpha - 1.0), 1000.0);
       return multiplicative_increase;
     }
     
     pub fn AdditiveRateIncrease(&mut self,at_time:i64,
                                                     last_time:i64) ->f64 {
-      let mut time_period_seconds = ((at_time - last_time)as f64)/1000.0;
-      let mut data_rate_increase_bps =
+      let time_period_seconds = ((at_time - last_time)as f64)/1000.0;
+      let data_rate_increase_bps =
           self.GetNearMaxIncreaseRateBpsPerSecond() * time_period_seconds;
       return data_rate_increase_bps;
     }
@@ -717,7 +759,7 @@ impl AimdRateControl{
         let mut new_bitrate_r=new_bitrate;
         if self.network_estimate_.is_some()&&
             self.network_estimate_.as_mut().unwrap().link_capacity_upper!=-std::f64::INFINITY {
-          let mut upper_bound = self.network_estimate_.as_mut().unwrap().link_capacity_upper;
+          let upper_bound = self.network_estimate_.as_mut().unwrap().link_capacity_upper;
           new_bitrate_r = f64::min(upper_bound, new_bitrate_r);
         }
         if self.network_estimate_.is_some()&& self.network_estimate_.as_mut().unwrap().link_capacity_lower!=-std::f64::INFINITY &&
@@ -752,8 +794,12 @@ impl AimdRateControl{
             self.ChangeState(input, at_time);
 
             match self.rate_control_state_{
-                RateControlState::kRcHold=>{},
+                RateControlState::kRcHold=>{
+                    print_brown!("GCC STATE -> HOLD", ); 
+                },
                 RateControlState::kRcIncrease => { 
+                    print_brown!("GCC STATE -> INCREASE", ); 
+
                     if estimated_throughput > self.link_capacity_.UpperBound()
                     { 
                         self.link_capacity_.Reset(); 
@@ -776,6 +822,8 @@ impl AimdRateControl{
                     self.time_last_bitrate_change_ = at_time;
                     },
                 RateControlState::kRcDecrease => {
+                    print_brown!("GCC STATE -> DECREASE",); 
+
                     let mut decreased_bitrate = std::f64::INFINITY;
 
                     decreased_bitrate = estimated_throughput * self.beta_;
@@ -841,11 +889,6 @@ impl AimdRateControl{
 
             self.current_bitrate_ = self.ClampBitrate(new_bitrate.unwrap_or(self.current_bitrate_));
         }
-
-
-        
-    
-
 }
 
 
@@ -1002,10 +1045,10 @@ pub struct GccBandwidthEstimator{
     pub last_frame_arrival_timestamp : f64,
 }
 impl GccBandwidthEstimator{
-    pub fn new()-> Self {
+    pub fn new(framerate: f64, )-> Self {
         Self { 
                 trendline_manager: TrendlineEstimator::new(),
-                aimd_manager: AimdRateControl::new(true),
+                aimd_manager: AimdRateControl::new(true, framerate),
                 rate_control_input_manager: RateControlInput::new(BandwidthUsage::kBwNormal, Some(GCC_INIT_CONFIGURED_BITRATE)),
                 bitrate_estimator_manager: BitrateEstimator::new(),
                 last_frame_send_timestamp: 0.,
@@ -1013,22 +1056,45 @@ impl GccBandwidthEstimator{
             }
     }
 
-    pub fn Update(&mut self, current_frame_send_timestamp: f64, current_frame_arrival_timestamp: f64, current_frame_size: i64, now: TaiTime<0>, )-> f64{
+    pub fn Update(&mut self, current_frame_send_timestamp_us: f64, current_frame_arrival_timestamp_us: f64, current_frame_size: i64, now: TaiTime<0>, )-> f64{  
+       
+        gcc_debug!(
+            "[GCC] Update: send_ts_us={:.0} arr_ts_us={:.0} size={}B",
+            current_frame_send_timestamp_us, current_frame_arrival_timestamp_us, current_frame_size
+        );
+
         let mut send_delta_ms= 0.0;
         let mut recv_delta_ms = 0.0;
         
         if self.last_frame_send_timestamp!=0.{
-            send_delta_ms = (current_frame_send_timestamp - self.last_frame_send_timestamp)*0.001;
-            recv_delta_ms = (current_frame_arrival_timestamp - self.last_frame_arrival_timestamp)*0.001;
+            send_delta_ms = (current_frame_send_timestamp_us - self.last_frame_send_timestamp)*0.001;  // * 0.001 converting to ms, meaning that input is expected to be microsecs. 
+            recv_delta_ms = (current_frame_arrival_timestamp_us - self.last_frame_arrival_timestamp)*0.001;
         }
-
-        self.last_frame_send_timestamp = current_frame_send_timestamp;
-        self.last_frame_arrival_timestamp = current_frame_arrival_timestamp;
-        let send_time_ms = (current_frame_send_timestamp*0.001) as i64;
-        let arrival_time_ms = (current_frame_arrival_timestamp*0.001) as i64;
+        gcc_debug!(
+            "[GCC] Δsend={:.3} ms, Δrecv={:.3} ms (since last frame)",
+            send_delta_ms, recv_delta_ms
+        );
+        self.last_frame_send_timestamp = current_frame_send_timestamp_us;
+        self.last_frame_arrival_timestamp = current_frame_arrival_timestamp_us;
+        let send_time_ms = (current_frame_send_timestamp_us*0.001) as i64;
+        let arrival_time_ms = (current_frame_arrival_timestamp_us*0.001) as i64;
         let packet_size = current_frame_size;
         
         self.trendline_manager.UpdateTrendline(recv_delta_ms, send_delta_ms, send_time_ms, arrival_time_ms, packet_size);
+
+
+        gcc_debug!(
+            "[Trend] smoothed={:.3} ms, accum={:.3} ms, win={}, trend={:.5}, mod_trend={:.3}, thr={:.2}, hyp={:?}",
+            self.trendline_manager.smoothed_delay_,
+            self.trendline_manager.accumulated_delay_,
+            self.trendline_manager.delay_hist_.len(),
+            self.trendline_manager.prev_trend_,
+            self.trendline_manager.current_trend_for_testing,
+            self.trendline_manager.current_threshold_for_testing,
+            self.trendline_manager.hypothesis_
+        );
+
+
 
         if self.trendline_manager.hypothesis_ == BandwidthUsage::kBwNormal{
             self.rate_control_input_manager.bw_state = BandwidthUsage::kBwNormal;
@@ -1040,16 +1106,48 @@ impl GccBandwidthEstimator{
 
         self.bitrate_estimator_manager.Update(arrival_time_ms, packet_size as usize, false);
 
-        if self.bitrate_estimator_manager.bitrate().is_some(){
-            self.rate_control_input_manager.estimated_throughput = Some(self.bitrate_estimator_manager.bitrate().unwrap());
+        if let Some( br ) = self.bitrate_estimator_manager.bitrate(){
+            self.rate_control_input_manager.estimated_throughput = Some(br);
+            gcc_debug!(
+                "[RateEst] sample={} kbps, peek={:?} kbps",
+                br / 1000.0,
+                self.bitrate_estimator_manager.PeekRate().map(|v| v / 1000.0)
+            );
+        }
+        else{
+            gcc_debug!("[RateEst] sample=∅ (insufficient window)",);
         }
         
 
         // let at_time = (Utc::now().timestamp_micros() as f64 * 0.001) as i64;
 
         let at_time = now.duration_since(tai_time::TaiTime::EPOCH).as_millis() as i64 ; //retrieve current timestamp as millis
+        
+        gcc_debug!(
+            "[AIMD] input: bw_state={:?}, est_thr={:?} kbps, cur={} kbps",
+            self.rate_control_input_manager.bw_state,
+            self.rate_control_input_manager
+                .estimated_throughput
+                .map(|v| v / 1000.0),
+            self.aimd_manager.current_bitrate_ / 1000.0
+        );
+
 
         let target_bitrate_bps = self.aimd_manager.Update(&self.rate_control_input_manager, at_time);
+        gcc_debug!(
+            "[AIMD] state={:?}, new={} kbps, bounds=[{:.0},{:.0}] kbps, last_dec={:?} kbps",
+            self.aimd_manager.rate_control_state_,
+            target_bitrate_bps / 1000.0,
+            self.aimd_manager
+                .network_estimate_
+                .as_ref().map(|n| n.link_capacity_lower / 1000.0).unwrap_or(0.0),
+            self.aimd_manager
+                .network_estimate_
+                .as_ref().map(|n| n.link_capacity_upper / 1000.0).unwrap_or(0.0),
+            self.aimd_manager.last_decrease_.map(|v| v / 1000.0)
+        );
+
+
 
         return target_bitrate_bps;
     }

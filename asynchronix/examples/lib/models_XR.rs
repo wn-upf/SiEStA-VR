@@ -1,7 +1,7 @@
 use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender
 };
-use crate::lib::gcc_nada_estimator::{self, GccBandwidthEstimator};
+use crate::lib::gcc_nada_estimator::{self, GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
 use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_CSV};
 use async_std::future::pending;
 use rand::distributions::Uniform;
@@ -1221,6 +1221,7 @@ pub enum BitrateMode {
         }, 
         GCCNadaPort{
             gcc_estimator: GccBandwidthEstimator, 
+            framerate: f64 // to reset without needing to store framerate in parent class. 
         }
 }
 
@@ -1702,9 +1703,9 @@ impl BitrateManager {
 
             4 => { // GCC estimator. 
 
-                let gcc_estimator = GccBandwidthEstimator::new(); 
+                let gcc_estimator = GccBandwidthEstimator::new(initial_framerate as f64); // make period be adaptive to framerate. 
 
-                BitrateMode::GCCNadaPort { gcc_estimator }
+                BitrateMode::GCCNadaPort { gcc_estimator, framerate: initial_framerate as f64}
             }
 
             _ => BitrateMode::ConstantMbps(initial_bitrate_mbps)
@@ -1795,9 +1796,9 @@ impl BitrateManager {
                 *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
                 *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
             }
-            BitrateMode::GCCNadaPort { gcc_estimator } => {
-                self.last_target_bitrate_bps = 15.0 * 1e6;
-                *gcc_estimator = GccBandwidthEstimator::new();
+            BitrateMode::GCCNadaPort { gcc_estimator , framerate} => {
+                self.last_target_bitrate_bps = GCC_INIT_CONFIGURED_BITRATE as f32 * 1e6;
+                *gcc_estimator = GccBandwidthEstimator::new(*framerate);
             }
         }
 
@@ -1844,12 +1845,12 @@ impl BitrateManager {
 
         match &mut self.bitrate_mode{
             
-            BitrateMode::GCCNadaPort { gcc_estimator } => {
+            BitrateMode::GCCNadaPort { gcc_estimator, ..} => {
 
-                let current_frame_send_timestamp = taitime_to_f64!(send_instant); 
-                let current_frame_arrival_timestamp = taitime_to_f64!(now); 
+                let current_frame_send_timestamp = taitime_to_f64!(send_instant) * 1e6; // input units: micros 
+                let current_frame_arrival_timestamp = taitime_to_f64!(now) * 1e6;       // input units: micros 
                 let current_frame_size = network_stats.bytes_in_frame; 
-                let _target_bitrate_bps = gcc_estimator.Update(current_frame_send_timestamp, current_frame_arrival_timestamp, current_frame_size as i64, now); 
+                let _target_bitrate_bps = gcc_estimator.Update(current_frame_send_timestamp , current_frame_arrival_timestamp, current_frame_size as i64, now); 
                 // target now unused, then retrieved during one_pass_abr()  
             }
             
@@ -1917,7 +1918,7 @@ impl BitrateManager {
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
 
-            if let BitrateMode::GCCNadaPort { ref mut gcc_estimator } = self.bitrate_mode {
+            if let BitrateMode::GCCNadaPort { ref mut gcc_estimator , ..} = self.bitrate_mode {
                 let bitrate_bps = gcc_estimator.get_target_bitrate_bps();
                 self.last_target_bitrate_bps = bitrate_bps as f32;  // Done here because only in this case we need mut access to gcc_estimator. 
             }
@@ -2967,10 +2968,12 @@ impl XRServer {
                 // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32()); 
 
                 let count = get_counter().fetch_add(1, Ordering::Relaxed);
-   
+                
 
 
-                if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCNadaPort{ .. }) {
+                if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || // One pass every BITRATE_UPDATE_INTERVAL
+                    !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCNadaPort{ .. }) 
+                {  
                     if (now.duration_since(self.bitrate_manager.last_update_instant) >= duration_abr){
                        
                         let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;

@@ -68,7 +68,7 @@ pub mod gcc_nada_estimator;
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
-pub const USE_FFMPEG: bool = false;
+pub const USE_FFMPEG: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
