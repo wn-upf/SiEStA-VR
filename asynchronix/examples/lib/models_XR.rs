@@ -2998,7 +2998,7 @@ impl XRServer {
                 
                 }
                 // if count % 30 == 0 {
-                //     print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
+                    print_green!("{} [{}]  Current bitrate: {} Mbps", format_elapsed!(now), self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
                 // }
 
                
@@ -4662,7 +4662,7 @@ impl XRClient {
 
 
             // --------------Initialize offline CSV tracker for frames ------------- 
-           if self.offline_csv_trace.writer.is_none() {
+           if self.offline_csv_trace.writer.is_none() && USE_FFMPEG {
                 if !Path::new(&csv_path).exists() {
                     // Encoder hasn’t created the file yet – keep your wait/log if you want
                     println!("waiting until offline CSV created");
@@ -4696,15 +4696,26 @@ impl XRClient {
             // Process the next frame if available from the regular stream queue
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
 
+
+                    crate::print_magenta!(
+                                    // DebugColor::Violet,
+                                    "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}", 
+                                    format_elapsed!(now),
+                                    self.server_ip,
+                                    id_f,
+                                    video_frame.len(),
+                                    self.decoder_queue.len(),
+                                    // interarrival.as_secs_f32(),
+                                );
+
                     let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
                     self.last_seen_id = id_f;
 
                     let timestamp = now.duration_since(self.t_0).as_secs_f64();           // TaiTime -> f64 seconds
 
                     
-                    if !Path::new(&csv_path).exists() {
+                    if !Path::new(&csv_path).exists()  {
                         // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                        println!("waiting until offline CSV created", ); 
                     }
                     else{
 
@@ -4924,7 +4935,7 @@ impl XRClient {
                     self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
                 } else { // Decoder queue was empty
-                    print_red!("[{}] REBUFFER EVENT!!", self.server_ip ); 
+                    print_red!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip ); 
                     self.rebuffer_event_counter.add_one(now); 
 
                 } // End if let Some((id_f, video_frame))

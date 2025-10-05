@@ -57,7 +57,7 @@ initial_bitrate_mbps=( 10.0 20.0 40.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach.
 
-ABR_ENABLED=( 3 )
+ABR_ENABLED=( 0 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
 RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 )
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
@@ -80,30 +80,30 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
 
-if [[ "${USER:-}" == "fmaura" ]]; then
-    IS_HPC=1
-    export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+# if [[ "${USER:-}" == "fmaura" ]]; then
+#     IS_HPC=1
+#     export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
-    # Launch Python trainer INSIDE the allocation, in background, on the SAME node
-    PY_LOG_FILE="logs_hpc/python_trainer_${SLURM_JOB_ID}.log"
-    echo "Python trainer log will be saved to: $PY_LOG_FILE"
+#     # Launch Python trainer INSIDE the allocation, in background, on the SAME node
+#     PY_LOG_FILE="logs_hpc/python_trainer_${SLURM_JOB_ID}.log"
+#     echo "Python trainer log will be saved to: $PY_LOG_FILE"
     
-    srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
-    /bin/bash -c '
-      export HOME="/home/fmaura"
-      source ~/miniconda3/etc/profile.d/conda.sh
-      conda activate vr_sim
-      python /home/fmaura/simulator_asynchronix/asynchronix/python_RL/gym_train_DQN.py
-    ' > "$PY_LOG_FILE" 2>&1 &
-    PY_PID=$!
-else
-  IS_HPC=0
-  gnome-terminal --disable-factory -- bash -c "
-    cd ~/Desktop/Rust_MG1/asynchronix/python_RL;
-    python gym_train_DQN.py;
-    exec bash" &
-  PY_PID=$!
-fi
+#     srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
+#     /bin/bash -c '
+#       export HOME="/home/fmaura"
+#       source ~/miniconda3/etc/profile.d/conda.sh
+#       conda activate vr_sim
+#       python /home/fmaura/simulator_asynchronix/asynchronix/python_RL/gym_train_DQN.py
+#     ' > "$PY_LOG_FILE" 2>&1 &
+#     PY_PID=$!
+# else
+#   IS_HPC=0
+#   gnome-terminal --disable-factory -- bash -c "
+#     cd ~/Desktop/Rust_MG1/asynchronix/python_RL;
+#     python gym_train_DQN.py;
+#     exec bash" &
+#   PY_PID=$!
+# fi
 
 
 # Define the function to execute on Ctrl+C
@@ -149,17 +149,17 @@ for test in "${TEST_TYPE[@]}"; do
                                                             (( SIM_COUNT++ ))  # ← increment
                                                             mkdir -p "Results/$name_folder"
 
-                                                            # if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
+                                                            if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                 echo "RUNNING SIM: $name_folder"
 
-                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
-
-                                                                # else                                    ## Serial execution
-                                                                #     script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
-                                                                #     sleep 2
-                                                                # rm out_log.ans
+                                                                # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
+                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
+                                                            else                                    ## Serial execution
+                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
+                                                                    sleep 5
+                                                                    rm out_log.ans
                                                             
-                                                            # fi
+                                                            fi
                                                         done
                                                     done 
                                                 done
@@ -215,9 +215,7 @@ if [ "$SERIAL_EXECUTION" -eq 1 ]; then
         echo "Executing: $cmd"
         /bin/bash -c "$cmd"
         sleep 5
-        # The cleanup step is critical for simulators sharing state/files
-        echo "Cleaning up Video_Sink/..."
-        rm -rf Video_Sink/*
+
     done < "$SHUFFLED_CMDS"
     
 elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
