@@ -7,7 +7,7 @@ use std::io::{Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use crate::lib::{get_third_octet, HevcParser, get_prefix_path};
-use crate::DebugColor;
+use crate::lib::DebugColor;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use std::io::BufReader;
 use crate::lib::OldCsvTrace;
@@ -107,7 +107,7 @@ impl ChunkedHevcEncoder {
         intra_refresh: bool, 
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
-        let (frame_tx, frame_rx) = bounded(300);
+        let (frame_tx, frame_rx) = bounded(1000);
 
         Self {
             input: input.to_string(),

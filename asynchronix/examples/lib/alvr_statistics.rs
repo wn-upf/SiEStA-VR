@@ -5,7 +5,7 @@ use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV};
 use crate::lib::{
     GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted,
 };
-use crate::DebugColor;
+use crate::lib::DebugColor;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::IpAddr;
