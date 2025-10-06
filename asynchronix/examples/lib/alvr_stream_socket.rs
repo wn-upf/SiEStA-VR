@@ -919,6 +919,8 @@ impl StreamSocket {
             time_since_last_update: t0,
             csv_trace: OldCsvTrace::default(), 
             frame_sizes: None, 
+            tmp_buf: Vec::new(), 
+            col_cache: HashMap::new(),
         }
     }
 
@@ -1817,6 +1819,8 @@ pub struct StreamSender<H> {
     csv_trace: OldCsvTrace, 
 
     frame_sizes: Option<FrameSizeTable>, 
+    tmp_buf: Vec<u8>,
+    col_cache: HashMap<u32, usize>, 
 }
 
 
@@ -2128,12 +2132,19 @@ impl<H: Serialize> StreamSender<H> {
             let table = get_table(final_file, fps)?; // global cached
 
             // round to integer Mbps that must exist as a column
+                        // Cache column index on bitrate (avoid per-frame map lookup):
             let want_mbps = current_bitrate_mbps.round() as u32;
-            let col = table.column_for_mbps(want_mbps)
-                .ok_or_else(|| anyhow::anyhow!("Bitrate {}Mbps not in fused CSV", want_mbps))?;
+            
+            let col = *self.col_cache.entry(want_mbps).or_insert_with(|| {
+                table.column_for_mbps(want_mbps)
+                    .unwrap_or_else(|| panic!("Bitrate {} Mbps not in CSV", want_mbps))
+            });
 
             let bytes_this_frame = table.bytes(col, id_frame);
-            buffer = fibonacci_payload_exact(bytes_this_frame);
+
+            // Reuse one buffer:
+            ensure_len_uninit(&mut self.tmp_buf, bytes_this_frame);
+            buffer = self.tmp_buf.clone(); // if you must hand ownership out
 
             //////////// FAST CODE /////////////// 
             // buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
@@ -2187,6 +2198,15 @@ impl<H: Serialize> StreamSender<H> {
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
 }
+
+#[inline]
+fn alloc_uninit(size: usize) -> Vec<u8> {
+    let mut v = Vec::<u8>::with_capacity(size);
+    unsafe { v.set_len(size); } // write every byte before any read!
+    v
+}
+
+
 
 impl<T> HandleTryAgain<T> for io::Result<T> {
     fn handle_try_again(self) -> ConResult<T> {
@@ -2320,13 +2340,94 @@ use once_cell::sync::OnceCell;
 
 
 //// NEW code for reading CSV of frame sizes, in order to emulate video transmission. 
+// #[derive(Clone)]
+// struct FrameSizeTable {
+//     fps: u32,
+//     // available Mbps columns, e.g. [5,10,15,...,100]
+//     mbps_cols: Vec<u32>,
+//     // framesizes[col_idx][frame_idx] -> bytes
+//     framesizes: Vec<Vec<usize>>,
+// }
+
+// impl FrameSizeTable {
+//     fn load(final_file: &str, fps: u32) -> anyhow::Result<Self> {
+//         let path = get_prefix_path(&format!(
+//             "csv_framesizes/{}_{}fps_fused_framesizes.csv",
+//             final_file, fps
+//         ));
+//         if !std::path::Path::new(&path).exists() {
+//             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
+//         }
+
+//         let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+//         let headers = rdr.headers()?.clone();
+
+//         // Parse Mbps column names just once -> integers
+//         // headers[0] is "frame_index"; the rest like "5Mbps", "10Mbps", ...
+//         let mut mbps_cols = Vec::new();
+//         for h in headers.iter().skip(1) {
+//             // fast parse: strip "Mbps" suffix
+//             let m = h.trim_end_matches("Mbps")
+//                      .parse::<u32>()
+//                      .map_err(|_| anyhow::anyhow!("Bad column name: {}", h))?;
+//             mbps_cols.push(m);
+//         }
+
+//         // Preallocate vectors (one per column)
+//         let ncols = mbps_cols.len();
+//         let mut framesizes: Vec<Vec<usize>> = vec![Vec::new(); ncols];
+
+//         // Read rows once; push ints (bytes) directly
+//         for rec in rdr.records() {
+//             let rec = rec?;
+//             for (ci, _) in mbps_cols.iter().enumerate() {
+//                 let v = rec.get(ci + 1).unwrap_or("0"); // +1 to skip frame_index
+//                 let b = v.parse::<usize>().unwrap_or(0);
+//                 framesizes[ci].push(b);
+//             }
+//         }
+
+//         Ok(Self { fps, mbps_cols, framesizes })
+//     }
+
+//     #[inline]
+//     fn column_for_mbps(&self, mbps: u32) -> Option<usize> {
+//         // linear scan is fine for ~20 cols; binary_search if you prefer:
+//         self.mbps_cols.iter().position(|&x| x == mbps)
+//     }
+
+//     #[inline]
+//     fn bytes(&self, col_idx: usize, frame_idx: usize) -> usize {
+//         let vec = &self.framesizes[col_idx];
+//         if vec.is_empty() { 0 } else { vec[frame_idx % vec.len()] }
+//     }
+// }
+
+// // Global cache keyed by (final_file,fps)
+// static TABLE_CACHE: OnceCell<HashMap<(String, u32), Arc<FrameSizeTable>>> = OnceCell::new();
+
+// fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> {
+//     let map = TABLE_CACHE.get_or_init(HashMap::new);
+//     if let Some(t) = map.get(&(final_file.to_string(), fps)) {
+//         return Ok(Arc::clone(t));
+//     }
+//     let table = Arc::new(FrameSizeTable::load(final_file, fps)?);
+//     // insert (needs a mutable ref; rebuild a new map to keep OnceCell immutability simple)
+//     let mut new_map = map.clone();
+//     new_map.insert((final_file.to_string(), fps), Arc::clone(&table));
+//     TABLE_CACHE.set(new_map).ok(); // ignore error if already set by a race
+//     Ok(table)
+// }
+
+
+
 #[derive(Clone)]
 struct FrameSizeTable {
     fps: u32,
-    // available Mbps columns, e.g. [5,10,15,...,100]
-    mbps_cols: Vec<u32>,
-    // framesizes[col_idx][frame_idx] -> bytes
-    framesizes: Vec<Vec<usize>>,
+    mbps_cols: Vec<u32>,                 // e.g. [5,10,15,...]
+    col_index: HashMap<u32, usize>,      // 5 -> 0, 10 -> 1, ...
+    // Column-major: framesizes[col_idx][frame_idx] -> bytes
+    framesizes: Vec<Vec<u32>>,           // use u32 to halve memory on 64-bit
 }
 
 impl FrameSizeTable {
@@ -2339,65 +2440,79 @@ impl FrameSizeTable {
             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
         }
 
-        let mut rdr = ReaderBuilder::new().has_headers(true).from_path(&path)?;
+        let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(&path)?;
         let headers = rdr.headers()?.clone();
 
-        // Parse Mbps column names just once -> integers
-        // headers[0] is "frame_index"; the rest like "5Mbps", "10Mbps", ...
-        let mut mbps_cols = Vec::new();
+        let mut mbps_cols = Vec::with_capacity(headers.len().saturating_sub(1));
         for h in headers.iter().skip(1) {
-            // fast parse: strip "Mbps" suffix
             let m = h.trim_end_matches("Mbps")
-                     .parse::<u32>()
-                     .map_err(|_| anyhow::anyhow!("Bad column name: {}", h))?;
+                .parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("Bad column name: {}", h))?;
             mbps_cols.push(m);
         }
-
-        // Preallocate vectors (one per column)
         let ncols = mbps_cols.len();
-        let mut framesizes: Vec<Vec<usize>> = vec![Vec::new(); ncols];
 
-        // Read rows once; push ints (bytes) directly
+        let mut framesizes: Vec<Vec<u32>> = (0..ncols).map(|_| Vec::new()).collect();
+
         for rec in rdr.records() {
             let rec = rec?;
             for (ci, _) in mbps_cols.iter().enumerate() {
-                let v = rec.get(ci + 1).unwrap_or("0"); // +1 to skip frame_index
-                let b = v.parse::<usize>().unwrap_or(0);
+                // +1 to skip frame_index
+                let v = rec.get(ci + 1).unwrap_or("0");
+                // if the csv is clean, you can use unwrap_unchecked-like fast paths,
+                // but keep it robust first:
+                let b = v.parse::<u32>().unwrap_or(0);
                 framesizes[ci].push(b);
             }
         }
 
-        Ok(Self { fps, mbps_cols, framesizes })
+        let col_index = mbps_cols
+            .iter()
+            .enumerate()
+            .map(|(i, &m)| (m, i))
+            .collect::<HashMap<_, _>>();
+
+        Ok(Self { fps, mbps_cols, col_index, framesizes })
     }
 
     #[inline]
     fn column_for_mbps(&self, mbps: u32) -> Option<usize> {
-        // linear scan is fine for ~20 cols; binary_search if you prefer:
-        self.mbps_cols.iter().position(|&x| x == mbps)
+        self.col_index.get(&mbps).copied()
     }
 
     #[inline]
     fn bytes(&self, col_idx: usize, frame_idx: usize) -> usize {
-        let vec = &self.framesizes[col_idx];
-        if vec.is_empty() { 0 } else { vec[frame_idx % vec.len()] }
+        let v = &self.framesizes[col_idx];
+        if v.is_empty() { 0 } else { v[frame_idx % v.len()] as usize }
     }
 }
 
-// Global cache keyed by (final_file,fps)
-static TABLE_CACHE: OnceCell<HashMap<(String, u32), Arc<FrameSizeTable>>> = OnceCell::new();
+#[inline]
+fn ensure_len_uninit(buf: &mut Vec<u8>, size: usize) {
+    if buf.capacity() < size {
+        // reserve_exact avoids overgrowth if sizes vary a lot
+        buf.reserve_exact(size - buf.capacity());
+    }
+    unsafe { buf.set_len(size); } // do NOT read before you write if anyone depends on bytes
+}
+
+
+use once_cell::sync::Lazy;
+use dashmap::DashMap;
+
+static TABLE_CACHE: Lazy<DashMap<(String, u32), Arc<FrameSizeTable>>> = Lazy::new(|| DashMap::new());
 
 fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> {
-    let map = TABLE_CACHE.get_or_init(HashMap::new);
-    if let Some(t) = map.get(&(final_file.to_string(), fps)) {
-        return Ok(Arc::clone(t));
+    if let Some(entry) = TABLE_CACHE.get(&(final_file.to_string(), fps)) {
+        return Ok(entry.clone());
     }
+    // Double-checked load
     let table = Arc::new(FrameSizeTable::load(final_file, fps)?);
-    // insert (needs a mutable ref; rebuild a new map to keep OnceCell immutability simple)
-    let mut new_map = map.clone();
-    new_map.insert((final_file.to_string(), fps), Arc::clone(&table));
-    TABLE_CACHE.set(new_map).ok(); // ignore error if already set by a race
-    Ok(table)
+    let key = (final_file.to_string(), fps);
+    let entry = TABLE_CACHE.entry(key).or_insert_with(|| table.clone());
+    Ok(entry.clone())
 }
+
 
 
 
