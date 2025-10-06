@@ -1,0 +1,51 @@
+# sweep.yaml
+program: ppo_a2c_dqn_sweep.py  # <-- IMPORTANT: Change this to your python script's filename
+method: bayes
+metric:
+  name: episode/return
+  goal: maximize
+parameters:
+  algorithm:
+    values: ['PPO', 'DQN', 'A2C']
+
+  # --- Core Hyperparameters (Shared across models) ---
+  learning_rate:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
+  gamma:
+    values: [0.95, 0.99, 0.995]
+  net_arch:
+    values: [[64, 64], [128, 128], [256, 256]]
+  
+  # --- PPO Specific Hyperparameters ---
+  n_steps:
+    values: [512, 1024, 2048]
+  batch_size_ppo: # Use a unique name to avoid conflicts
+    values: [64, 128, 256]
+  n_epochs:
+    values: [4, 10, 20]
+  gae_lambda:
+    values: [0.9, 0.95, 0.98]
+  clip_range:
+    values: [0.1, 0.2, 0.3]
+
+  # --- DQN Specific Hyperparameters ---
+  buffer_size:
+    values: [50000, 100000, 200000]
+  batch_size_dqn: # Use a unique name
+    values: [128, 256, 512]
+  exploration_fraction:
+    values: [0.1, 0.25, 0.5]
+  exploration_final_eps:
+    values: [0.01, 0.05, 0.1]
+  target_update_interval:
+    values: [1000, 5000, 10000]
+
+  # --- A2C Specific Hyperparameters ---
+  n_steps_a2c: # Use a unique name
+      values: [8, 16, 32, 64]
+  vf_coef:
+      values: [0.25, 0.5, 0.8]
+  ent_coef:
+      values: [0.0, 0.01, 0.05]

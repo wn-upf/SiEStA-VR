@@ -68,7 +68,7 @@ pub mod gcc_nada_estimator;
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 
-pub const USE_FFMPEG: bool = false;
+pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -1072,6 +1072,8 @@ impl SlidingWindowAverage<Duration> {
     pub fn get_average(&self) -> Duration {
         self.history_buffer.iter().sum::<Duration>() / self.history_buffer.len() as u32
     }
+    
+
 }
 
 #[macro_export]

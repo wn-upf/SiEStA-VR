@@ -8,7 +8,7 @@ use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
 use rand::SeedableRng;
-use crate::{debug_debug, print_brown, print_magenta, taitime_to_f64
+use crate::{debug_debug, print_blue, print_brown, print_dblue, print_magenta, taitime_to_f64
     //  print_brown
     };
 use image::{ImageBuffer, Rgb};
@@ -36,7 +36,7 @@ use std::{fs::File};
 use crate::lib::models_mm1k::NetworkPattern;
 
 use crate::{format_elapsed, print_green};
-use crate::lib::{HeaderALVRStream, USE_FFMPEG};
+use crate::lib::{HeaderALVRStream, USE_FFMPEG_DEMO};
 use crate::print_pretty;
 #[allow(unused)]
 use crate::{debug_bgprint, print_prettyy, print_red};
@@ -1241,13 +1241,19 @@ pub struct RLObservation {
     pub t_elapsed_s: f32, 
     pub last_target_bitrate_mbps: f32, 
     pub rtt_ms_avg_s: f32, 
+    pub rtt_ms_std_s: f32, 
+
     // pub frame_size_mb_avg_s: f32, 
     pub bandwidth_mbps_avg_s: f32,
     pub bandwidth_mbps_std_s: f32, 
     pub frame_interarrival_avg_ms: f32, 
+    pub frame_interarrival_std_ms: f32, 
+
     pub flr_avg_s: f32, 
     pub buffer_level_avg_s: f32, 
     pub rebuffer_event_sum: u8, 
+
+
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RLObservationVector{
@@ -1576,7 +1582,7 @@ pub struct BitrateManager {
 
     update_interval_s: Duration,
 
-    rtt_average: SlidingWindowAverage<Duration>,
+    rtt_average: SlidingWindowAverage<f32>,
     peak_throughput_average: SlidingWindowAverage<f32>,
     frame_interarrival_average: SlidingWindowAverage<f32>,
     everest_last_capacity: f32, 
@@ -1730,7 +1736,7 @@ impl BitrateManager {
             // last_target_bitrate_mbps: initial_bitrate_mbps,
             update_interval_s: UPDATE_BITRATE_INTERVAL,
 
-            rtt_average: SlidingWindowAverage::new(Duration::from_millis(5), max_history_size),
+            rtt_average: SlidingWindowAverage::new(Duration::from_millis(5).as_secs_f32(), max_history_size),
             peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
             frame_interarrival_average: SlidingWindowAverage::new(
                 1. / initial_framerate,
@@ -1857,7 +1863,7 @@ impl BitrateManager {
             _ => {}, 
         }
 
-        self.rtt_average.submit_sample(network_rtt);
+        self.rtt_average.submit_sample(network_rtt.as_secs_f32());
 
         self.peak_throughput_average
             .submit_sample(peak_throughput_bps);
@@ -1914,6 +1920,7 @@ impl BitrateManager {
             bitrate_bps 
         }
         else{
+            println!("One pass ABR"); 
 
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
@@ -2025,7 +2032,7 @@ impl BitrateManager {
                     };
 
                     let nfr_avg = fps_rx_avg / fps_tx_avg;
-                    let rtt_avg_ms = self.rtt_average.get_average().as_secs_f32() * 1000.0;
+                    let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
 
                     let estimated_capacity_bps = f32::max(self.peak_throughput_average.get_average(), 1e-9);
 
@@ -2121,6 +2128,7 @@ impl BitrateManager {
                         if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
                             return self.last_target_bitrate_bps;
                         }
+                        println!("reinforcement learner mode"); 
 
                         let current_obs = obs.clone(); 
                         // Take the old history. If it's the first step, it will be None.
@@ -2133,6 +2141,7 @@ impl BitrateManager {
                                 let reward = self.rl_reward_function(&current_obs);
                                 let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
 
+                                println!("r: {}, prev_a: {}", reward, prev_action);
                                 let transition = RLTransition {
                                     sim_id: self.sim_unique_string.clone(), 
                                     prev_obs: prev_obs.clone(),
@@ -2165,7 +2174,7 @@ impl BitrateManager {
                         // Apply action
                         let target_mbps = bitrate_ladder_mbps[next_action_idx];
                         self.last_target_bitrate_bps = target_mbps * 1e6;
-                        print_green!("[RL {}] New Action: {}, Target Bitrate: {:.2} Mbps", ip_server,  next_action_idx, target_mbps);
+                        print_blue!("[RL {}] New Action: {}, Target Bitrate: {:.2} Mbps", ip_server,  next_action_idx, target_mbps);
                         
                         self.last_target_bitrate_bps
                                         
@@ -2193,25 +2202,30 @@ impl BitrateManager {
         }; 
         let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
         let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6; 
-        let rtt_ms_avg_s = self.rtt_average.get_average().as_secs_f32() * 1000.0; 
+        let rtt_ms_avg_s = self.rtt_average.get_average() * 1000.0; 
+        let rtt_ms_std_s = self.rtt_average.get_std() * 1000.0; 
+
         let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average() * 1e-6; 
         let bandwidth_mbps_std_s =      self.peak_throughput_average.get_std() * 1e-6; 
         let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0; 
+        let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0; 
 
         let flr_avg_s = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
                 (1.0 / self.frame_interval_average.get_average().as_secs_f32()); // percentage according to encoded frames window average, 
                                                                                 // (not in the same period though, watch out)
 
         let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
-
         let rebuffer_event_sum = self.last_rebuffer_avg_sum; 
+
         RLObservation{
             t_elapsed_s,
             last_target_bitrate_mbps,
             rtt_ms_avg_s,
+            rtt_ms_std_s, 
             bandwidth_mbps_avg_s,
             bandwidth_mbps_std_s,
-            frame_interarrival_avg_ms, 
+            frame_interarrival_avg_ms,
+            frame_interarrival_std_ms,  
             flr_avg_s,
             buffer_level_avg_s, 
             rebuffer_event_sum, 
@@ -2234,7 +2248,7 @@ impl BitrateManager {
         let reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
 
         // this expression could be negative if bitrate is very low and flr very high
-        print_green!(
+        print_dblue!(
             "Reward decomposition:
             bitrate_term = {bitrate_term:.4},
             flr_term     = {flr_term:.4} ( flr = {:.3}),
@@ -3000,9 +3014,9 @@ impl XRServer {
                     // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;   
                 
                 }
-                // if count % 30 == 0 {
+                if count % 30 == 0 {
                     print_green!("{} [{}]  Current bitrate: {} Mbps", format_elapsed!(now), self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
-                // }
+                }
 
                
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_bps / 1e6;
@@ -4706,7 +4720,7 @@ impl XRClient {
 
 
             // --------------Initialize offline CSV tracker for frames ------------- 
-           if self.offline_csv_trace.writer.is_none() && USE_FFMPEG {
+           if self.offline_csv_trace.writer.is_none() && USE_FFMPEG_DEMO {
                 if !Path::new(&csv_path).exists() {
                     // Encoder hasn’t created the file yet – keep your wait/log if you want
                     println!("waiting until offline CSV created");
@@ -4742,16 +4756,16 @@ impl XRClient {
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
 
 
-                    crate::print_magenta!(
-                                    // DebugColor::Violet,
-                                    "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}", 
-                                    format_elapsed!(now),
-                                    self.server_ip,
-                                    id_f,
-                                    video_frame.len(),
-                                    self.decoder_queue.len(),
-                                    // interarrival.as_secs_f32(),
-                                );
+                    // crate::print_magenta!(
+                    //                 // DebugColor::Violet,
+                    //                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}", 
+                    //                 format_elapsed!(now),
+                    //                 self.server_ip,
+                    //                 id_f,
+                    //                 video_frame.len(),
+                    //                 self.decoder_queue.len(),
+                    //                 // interarrival.as_secs_f32(),
+                    //             );
 
                     let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
                     self.last_seen_id = id_f;
@@ -4839,7 +4853,7 @@ impl XRClient {
                         self.dec_saw_keyframe_last_t = now;
                     }
 
-                    if !self.is_decoder_ready && USE_FFMPEG { 
+                    if !self.is_decoder_ready && USE_FFMPEG_DEMO { 
 
                         if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
                         
@@ -4858,7 +4872,7 @@ impl XRClient {
                     } // End of initialization logic
 
 
-                    if self.is_decoder_ready && USE_FFMPEG {
+                    if self.is_decoder_ready && USE_FFMPEG_DEMO {
                         if !video_frame.is_empty() {
                             
                             if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {

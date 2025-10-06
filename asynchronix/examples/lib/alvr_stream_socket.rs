@@ -16,7 +16,7 @@ use crate::lib::models_mm1k::NetworkPattern;
 #[allow(unused)]
 use std::io::BufRead;
 use rand::Rng;
-use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG, print_pretty};
+use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 
 use crate::debug_bgprint;
 use std::cell::RefCell;
@@ -1950,7 +1950,7 @@ impl<H: Serialize> StreamSender<H> {
         //     _id_frame_files_ref
         // );
 
-        if USE_FFMPEG {
+        if USE_FFMPEG_DEMO {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
@@ -2144,7 +2144,7 @@ impl<H: Serialize> StreamSender<H> {
 
             // Reuse one buffer:
             ensure_len_uninit(&mut self.tmp_buf, bytes_this_frame);
-            buffer = self.tmp_buf.clone(); // if you must hand ownership out
+            buffer = self.tmp_buf.clone();      
 
             //////////// FAST CODE /////////////// 
             // buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
@@ -2493,7 +2493,7 @@ fn ensure_len_uninit(buf: &mut Vec<u8>, size: usize) {
         // reserve_exact avoids overgrowth if sizes vary a lot
         buf.reserve_exact(size - buf.capacity());
     }
-    unsafe { buf.set_len(size); } // do NOT read before you write if anyone depends on bytes
+    unsafe { buf.set_len(size); } // do NOT read before you write if anyone depends on bytes, while unsafe code it seems to work and helps make things fast
 }
 
 
