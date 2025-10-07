@@ -32,6 +32,43 @@ ACTION_DIM = 20
 ACTION_ENDPOINT = "tcp://*:5555"  # Python BINDs a ROUTER here (was REP)
 STEP_ENDPOINT   = "tcp://*:5556"  # Python BINDs a PULL here
 
+import os, socket, json, zmq, tempfile
+
+def bind_pair(ctx, base_dir=None, use_ipc=True):
+    if use_ipc and "SLURM_TMPDIR" in os.environ:
+        base_dir = os.environ["SLURM_TMPDIR"]
+        action_ep = f"ipc://{base_dir}/zmq_action_{os.getpid()}.sock"
+        step_ep   = f"ipc://{base_dir}/zmq_step_{os.getpid()}.sock"
+        router = ctx.socket(zmq.ROUTER); router.bind(action_ep)
+        pull   = ctx.socket(zmq.PULL);   pull.bind(step_ep)
+    else:
+        # tcp fallback (multi-node)
+        host = socket.gethostbyname(socket.gethostname())
+        router = ctx.socket(zmq.ROUTER)
+        action_port = router.bind_to_random_port(f"tcp://{host}")
+        pull   = ctx.socket(zmq.PULL)
+        step_port   = pull.bind_to_random_port(f"tcp://{host}")
+        action_ep = f"tcp://{host}:{action_port}"
+        step_ep   = f"tcp://{host}:{step_port}"
+
+    return router, pull, action_ep, step_ep
+
+def write_manifest(action_ep, step_ep, path=None):
+    if path is None:
+        # job-scoped temp area is best
+        base = os.environ.get("SLURM_TMPDIR", tempfile.gettempdir())
+        path = os.path.join(base, f"zmq_manifest_{os.getpid()}.json")
+    with open(path, "w") as f:
+        json.dump({"ACTION_ENDPOINT": action_ep, "STEP_ENDPOINT": step_ep}, f)
+    print(f"[ZMQ] Wrote manifest: {path}")
+    return path
+
+
+
+
+
+
+
 class ZmqEnvServer(gym.Env):
     metadata = {"render_modes": []}
 

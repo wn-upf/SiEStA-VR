@@ -41,7 +41,7 @@ SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=150.0
+simTime=90.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -76,30 +76,80 @@ SHUFFLED_CMDS=$(mktemp)
 
 SIM_COUNT=0                 # counter of simulations, not an input arg
 
+
+
+# ID for the W&B sweep you want the agent to join.
+SWEEP_ID="wn-upf/asynchronix-python_RL/58ga2yte"
+script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+PROJECT_DIR="$script_dir"
+
 if [[ "${USER:-}" == "fmaura" ]]; then
+    # --- HPC (SLURM) Mode ---
+    echo "🚀 Detected HPC environment (User: $USER). Using srun."
     IS_HPC=1
+    LOG_DIR="logs_hpc"
+    mkdir -p "$LOG_DIR" # Ensure log directory exists
+
+    # Set library path for Conda
     export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
-    # Launch Python trainer INSIDE the allocation, in background, on the SAME node
-    PY_LOG_FILE="logs_hpc/python_trainer_${SLURM_JOB_ID}.log"
-    echo "Python trainer log will be saved to: $PY_LOG_FILE"
-    
-    srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
-    /bin/bash -c '
-      export HOME="/home/fmaura"
+    # 1. Launch ZMQ Server in the background on the allocated node
+    ZMQ_LOG_FILE="${LOG_DIR}/zmq_server_${SLURM_JOB_ID}.log"
+    echo "🔹 Launching ZMQ Server... Log: $ZMQ_LOG_FILE"
+    srun --nodes=1 --ntasks=1 --exclusive \
+    /bin/bash -c "
       source ~/miniconda3/etc/profile.d/conda.sh
-      conda activate vr_sim
-      wandb agent wn-upf/asynchronix-python_RL/uc4ad6ok
-    ' > "$PY_LOG_FILE" 2>&1 &
-    PY_PID=$!
+      conda activate $CONDA_ENV_NAME
+      python $PROJECT_DIR/python_RL/zmq_server.py
+    " > "$ZMQ_LOG_FILE" 2>&1 &
+    ZMQ_SERVER_PID=$!
+    echo "  -> ZMQ Server started with PID: $ZMQ_SERVER_PID"
+
+    # Give the server a moment to start up
+    sleep 5
+
+    # 2. Launch Python trainer (W&B Agent) in the background on the same node
+    AGENT_LOG_FILE="${LOG_DIR}/wandb_agent_${SLURM_JOB_ID}.log"
+    echo "🔹 Launching W&B Agent... Log: $AGENT_LOG_FILE"
+    srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
+        /bin/bash -c "
+        source ~/miniconda3/etc/profile.d/conda.sh
+        conda activate $CONDA_ENV_NAME
+        cd $PROJECT_DIR/python_RL  # <-- Add this line
+        wandb agent $SWEEP_ID
+        " > "$AGENT_LOG_FILE" 2>&1 &
+    WANDB_AGENT_PID=$!
+    echo "  -> W&B Agent started with PID: $WANDB_AGENT_PID"
+
 else
-  IS_HPC=0
-  gnome-terminal --disable-factory -- bash -c "
-    cd ~/Desktop/Rust_MG1/asynchronix/python_RL;
-    wandb agent wn-upf/asynchronix-python_RL/uc4ad6ok
-    exec bash" &
-  PY_PID=$!
+    # --- Non-HPC (Local Desktop) Mode ---
+    echo "🖥️  Detected non-HPC environment. Using gnome-terminal."
+    IS_HPC=0
+
+    # 1. Launch ZMQ Server in a new terminal
+    echo "🔹 Launching ZMQ Server in a new terminal..."
+    gnome-terminal --disable-factory -- bash -c "
+      echo '--- ZMQ Server Terminal ---'
+      cd '$PROJECT_DIR/python_RL/'
+      python zmq_server.py
+      exec bash" &
+    ZMQ_SERVER_PID=$!
+    echo "  -> ZMQ Server terminal process started with PID: $ZMQ_SERVER_PID"
+
+    # Give the server a moment to start up
+    sleep 2
+
+    # 2. Launch W&B Agent in another new terminal
+    echo "🔹 Launching W&B Agent in a new terminal..."
+    gnome-terminal --disable-factory -- bash -c "
+      echo '--- W&B Agent Terminal ---'
+      cd '$PROJECT_DIR/python_RL/'
+      wandb agent '$SWEEP_ID'
+      exec bash" &
+    WANDB_AGENT_PID=$!
+    echo "  -> W&B Agent terminal process started with PID: $WANDB_AGENT_PID"
 fi
+
 
 
 # Define the function to execute on Ctrl+C
@@ -148,17 +198,17 @@ for ((i=0; i<20; i++)); do
                                                                 (( SIM_COUNT++ ))  # ← increment
                                                                 mkdir -p "Results/$name_folder"
 
-                                                                if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
-                                                                    echo "RUNNING SIM: $name_folder"
+                                                                # if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
+                                                                    # echo "RUNNING SIM: $name_folder"
 
                                                                     # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
                                                                     echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
-                                                                else                                    ## Serial execution
-                                                                        script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
-                                                                        sleep 5
-                                                                        rm out_log.ans
+                                                                # else                                    ## Serial execution
+                                                                #         script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
+                                                                #         sleep 5
+                                                                #         rm out_log.ans
                                                                 
-                                                                fi
+                                                                # fi
                                                             done
                                                         done 
                                                     done
@@ -213,7 +263,7 @@ if [ "$SERIAL_EXECUTION" -eq 1 ]; then
     while IFS= read -r cmd; do
         echo "Executing: $cmd"
         /bin/bash -c "$cmd"
-        sleep 5
+        # sleep 5
 
     done < "$SHUFFLED_CMDS"
     

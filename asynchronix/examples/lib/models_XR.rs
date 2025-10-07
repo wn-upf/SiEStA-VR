@@ -1314,7 +1314,7 @@ impl ZmqConnector {
             .set_identity(simu_id.as_bytes())
             .expect("Failed to set DEALER identity");
         action_socket
-            .set_rcvtimeo(15_000)
+            .set_rcvtimeo(60_000)
             .expect("Failed to set receive timeout");
         action_socket
             .connect(action_endpoint)
@@ -1574,9 +1574,9 @@ pub struct BitrateManager {
     pub bitrate_mode: BitrateMode,
     frame_index: usize,
 
-    frame_interval_average: SlidingWindowAverage<Duration>,
-    encoder_latency_average: SlidingWindowAverage<Duration>,
-    network_latency_average: SlidingWindowAverage<Duration>,
+    frame_interval_average: SlidingWindowAverage<f32>,
+    encoder_latency_average: SlidingWindowAverage<f32>,
+    network_latency_average: SlidingWindowAverage<f32>,
 
     bitrate_average_mbps: SlidingWindowAverage<f32>,
 
@@ -1727,10 +1727,9 @@ impl BitrateManager {
             last_update_instant: TaiTime::EPOCH,
 
             frame_index: 0,
-
-            frame_interval_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
-            encoder_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
-            network_latency_average: SlidingWindowAverage::new(Duration::ZERO, max_history_size),
+            frame_interval_average: SlidingWindowAverage::new(0.0, max_history_size),
+            encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
+            network_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
 
             bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
             // last_target_bitrate_mbps: initial_bitrate_mbps,
@@ -1829,10 +1828,10 @@ impl BitrateManager {
         print_prettyy!(
             DebugColor::Purple,
             "[bitrateManager] submitted encoded frame. avg_fps = {}",
-            1.0 / self.frame_interval_average.get_average().as_secs_f32()
+            1.0 / self.frame_interval_average.get_average()
         );
         if self.last_frame_instant != TaiTime::EPOCH {
-            let dur = now.duration_since(self.last_frame_instant);
+            let dur = now.duration_since(self.last_frame_instant).as_secs_f32();
             self.frame_interval_average.submit_sample(dur);
         }
         self.last_frame_instant = now;
@@ -2017,7 +2016,7 @@ impl BitrateManager {
                     let r_rtt = rng.sample(uniform_dist);
                     let r_inc = rng.sample(uniform_dist);
 
-                    let frame_interval_s = f32::max(self.frame_interval_average.get_average().as_secs_f32(), 1e-9);
+                    let frame_interval_s = f32::max(self.frame_interval_average.get_average(), 1e-9);
 
                     let fps_tx_avg = if frame_interval_s != 0.0 {
                         1.0 / frame_interval_s
@@ -2211,7 +2210,7 @@ impl BitrateManager {
         let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0; 
 
         let flr_avg_s = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
-                (1.0 / self.frame_interval_average.get_average().as_secs_f32()); // percentage according to encoded frames window average, 
+                (1.0 / self.frame_interval_average.get_average()); // percentage according to encoded frames window average, 
                                                                                 // (not in the same period though, watch out)
 
         let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 

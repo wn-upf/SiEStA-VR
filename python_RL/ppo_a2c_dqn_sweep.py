@@ -30,139 +30,60 @@ OBSERVATION_SHAPE = (11,)
 ACTION_DIM = 20
 ACTION_ENDPOINT = "tcp://*:5555"
 STEP_ENDPOINT = "tcp://*:5556"
-class ZmqEnvServer(gym.Env):
+
+# Endpoint for Python training clients
+TRAINER_ENDPOINT = "tcp://*:5557"
+
+TRAINER_ENDPOINT = "tcp://localhost:5557"
+
+
+# -------------------------------------------------------------------
+# NEW: Gym-compatible ZMQ Client
+# This replaces the old ZmqEnvServer class.
+# -------------------------------------------------------------------
+class ZmqEnvClient(gym.Env):
+    """A gymnasium.Env that acts as a client to the standalone ZmqServer.
+    It connects to the server and handles the request-reply communication."""
     metadata = {"render_modes": []}
 
-    def __init__(self, log_to_wandb: bool = True):
+    def __init__(self):
         super().__init__()
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=OBSERVATION_SHAPE, dtype=np.float32)
         self.action_space = spaces.Discrete(ACTION_DIM)
 
-        self.ctx = zmq.Context.instance()
-        self.router = self.ctx.socket(zmq.ROUTER); self.router.bind(ACTION_ENDPOINT)
-        self.pull_socket = self.ctx.socket(zmq.PULL); self.pull_socket.bind(STEP_ENDPOINT)
-
-        self.active_sim_id = None
-        self.global_step = 0
-        self.ep_return = 0.0
-        self.ep_len = 0
-        self.run_return_cumsum = 0.0
-        self.log_to_wandb = log_to_wandb and (wandb.run is not None)
-
-        print("✅ Python ZMQ Server (ROUTER/PULL) is ready. Start the Rust simulation(s).")
-
-    def _obs_from_json(self, obs_json):
-        return np.array([obs_json[k] for k in sorted(obs_json)], dtype=np.float32)
+        # This is a REQ socket that connects, not binds
+        self.ctx = zmq.Context()
+        self.socket = self.ctx.socket(zmq.REQ)
+        self.socket.connect(TRAINER_ENDPOINT)
+        print("✅ Python ZMQ Client connected to server.")
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        print(f"\n{Colors.YELLOW}--- Episode boundary ---{Colors.ENDC}")
-        print("PY: Waiting for FIRST action request from Rust...")
-
-        self.ep_return = 0.0
-        self.ep_len = 0
-
-        t0 = time.time()
-        parts = self.router.recv_multipart()
-        recv_latency_ms = (time.time() - t0) * 1000.0
-
-        sim_id, payload = parts[0], parts[-1]
-        req = json.loads(payload.decode("utf-8"))
-        initial_obs_arr = self._obs_from_json(req["obs"])
-
-        self.active_sim_id = sim_id
-        self.router.send_multipart([self.active_sim_id, json.dumps({"action_idx": 0}).encode("utf-8")])
-
-        print(f"{Colors.BLUE}PY: Initial observation received from {sim_id!r}{Colors.ENDC}")
-        print(f"{Colors.GREEN}PY: Sent dummy action 0 to unblock Rust.{Colors.ENDC}")
-
-        if self.log_to_wandb:
-            wandb.log({
-                "env/reset_recv_latency_ms": recv_latency_ms,
-                "env/episode": wandb.run.summary.get("episodes", 0) + 1
-            })
-
-        return initial_obs_arr, {}
+        # Send reset command and wait for the initial observation
+        self.socket.send_json({"command": "reset"})
+        response = self.socket.recv_json()
+        initial_obs = np.array(response["obs"], dtype=np.float32)
+        return initial_obs, {}
 
     def step(self, action):
-        print("PY: Waiting for transition from Rust...")
-        t0 = time.time()
-        transition = self.pull_socket.recv_json()
-        pull_latency_ms = (time.time() - t0) * 1000.0
-
-        sim_id_field = transition.get("sim_id")
-        if sim_id_field is not None and self.active_sim_id is not None:
-            active = self.active_sim_id.decode("utf-8", errors="ignore")
-            while sim_id_field != active:
-                transition = self.pull_socket.recv_json()
-                sim_id_field = transition.get("sim_id")
-
-        reward = float(transition["reward"])
-        done = bool(transition["done"])
-        next_obs_dict = transition["next_obs"]
-        next_obs_arr = self._obs_from_json(next_obs_dict)
-        truncated = False
+        # Send step command with action and wait for the result
+        self.socket.send_json({"command": "step", "action": int(action)})
+        response = self.socket.recv_json()
+        
+        next_obs = np.array(response["next_obs"], dtype=np.float32)
+        reward = response["reward"]
+        done = response["done"]
+        truncated = False # Assuming no truncation for now
         info = {}
-
-        print(f"{Colors.BLUE}PY: Received Step Data:{Colors.ENDC}")
-        print(f"{Colors.BLUE}{pprint.pformat({'sim_id': sim_id_field, 'reward': reward, 'done': done})}{Colors.ENDC}")
-
-        self.ep_return += reward
-        self.ep_len += 1
-        self.global_step += 1
-        self.run_return_cumsum += reward
-
-        router_roundtrip_ms = None
-        if not done:
-            t1 = time.time()
-            parts = self.router.recv_multipart()
-            sim_id, payload = parts[0], parts[-1]
-            while self.active_sim_id is not None and sim_id != self.active_sim_id:
-                self.router.send_multipart([sim_id, json.dumps({"action_idx": 0}).encode("utf-8")])
-                parts = self.router.recv_multipart()
-                sim_id, payload = parts[0], parts[-1]
-            self.router.send_multipart([sim_id, json.dumps({"action_idx": int(action)}).encode("utf-8")])
-            router_roundtrip_ms = (time.time() - t1) * 1000.0
-        else:
-            print(f"{Colors.YELLOW}PY: Episode finished (done=True).{Colors.ENDC}")
-
-        if self.log_to_wandb:
-            log_dict = {
-                "train/reward": reward,
-                "train/return_cumsum": self.run_return_cumsum,
-                "train/done": int(done),
-                "train/action": int(action),
-                "timing/pull_latency_ms": pull_latency_ms,
-            }
-            if sim_id_field is not None:
-                log_dict["sim/id"] = sim_id_field
-            for k, v in transition.items():
-                if k in ("reward", "done", "next_obs", "sim_id"):
-                    continue
-                if isinstance(v, (int, float)):
-                    log_dict[f"sim/{k}"] = v
-            try:
-                for i, (k, v) in enumerate(sorted(next_obs_dict.items())):
-                    # if i >= 3: break  # un-comment to reduce verbosity
-                    log_dict[f"obs_preview/{k}"] = float(v)
-            except Exception:
-                pass
-            # optionally include router RTT:
-            # if router_roundtrip_ms is not None:
-            #     log_dict["timing/router_roundtrip_ms"] = router_roundtrip_ms
-
-            wandb.log(log_dict)
-
-        if done and self.log_to_wandb:
-            wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
-            wandb.run.summary["episodes"] = wandb.run.summary.get("episodes", 0) + 1
-
-        return next_obs_arr, reward, done, truncated, info
+        
+        return next_obs, reward, done, truncated, info
 
     def close(self):
-        self.router.close(0)
-        self.pull_socket.close(0)
+        self.socket.close()
         self.ctx.term()
+
+
+
 
 # --- Main Training Function for W&B Sweep ---
 def train_sweep():
@@ -174,8 +95,7 @@ def train_sweep():
     )
 
     # 2) Build env
-    env = ZmqEnvServer(log_to_wandb=True)
-    
+    env = ZmqEnvClient()    
     # 3) Select and configure the model based on wandb.config
     model = None
     algo = wandb.config.algorithm
