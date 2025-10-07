@@ -3013,7 +3013,7 @@ impl XRServer {
                     // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;   
                 
                 }
-                if count % 30 == 0 {
+                if count % 80 == 0 {
                     print_green!("{} [{}]  Current bitrate: {} Mbps", format_elapsed!(now), self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
                 }
 
@@ -4338,8 +4338,10 @@ impl XRClient {
                     
                     
                     //////////////////////////////////////////////  // NADA STATS (TODO)
+                    /// 
+                    
                     // {
-                    //     let mut nada_receiver = NADA_RECEIVER.lock();
+                    //     let mut nada_receiver = self.nada_receiver.lock().unwrap();
                     //     nada_receiver.compute_oneway_delay(frame_send_timestamp, arrival_ts);
                     //     nada_receiver.update_receive_loss_rate(size);
                     //     let is_feedback_on = nada_receiver.time_to_report_feedback(false, false);

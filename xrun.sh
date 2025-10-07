@@ -79,7 +79,9 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
 # ID for the W&B sweep you want the agent to join.
-SWEEP_ID="wn-upf/asynchronix-python_RL/58ga2yte"
+SWEEP_ID="wn-upf/asynchronix-python_RL/nt0vvahl"
+
+
 script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_DIR="$script_dir"
 

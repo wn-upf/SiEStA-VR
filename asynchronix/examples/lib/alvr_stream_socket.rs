@@ -571,6 +571,7 @@ impl Default for KalmanFilter {
             p_prev: 0.0,
             k_gain: 0.0,
             measured_delay: 0.0,
+
         }
     }
 }
@@ -779,8 +780,7 @@ impl<H> ReceiverData<H> {
         } else {
             vec![2 as u8, 2]
         }
-    }
-
+    }  
     pub fn had_packet_loss(&self) -> bool {
         self.had_packet_loss
     }
@@ -1106,6 +1106,7 @@ impl StreamSocket {
                 overwritten_data_backup: None,
                 should_discard: false,
                 frame_first_shard_deadline: None,
+                // tx_r_instant, 
             })
         };
 
@@ -1304,6 +1305,10 @@ impl StreamSocket {
                         if let Some(prev_frame_tx_r_instant) = self.prev_frame_tx_r_instant {
                             self.kalman.ow_delay = frame_interarrival
                                 - (first_shard_stats.tx_r_instant - prev_frame_tx_r_instant);
+
+
+                            // self.kalman.last_tx_time = first_shard_stats.tx_r_instant; 
+                            // self.kalman.last_rx_time = prev_frame_tx_r_instant;    
                         }
                         self.prev_frame_tx_r_instant = Some(first_shard_stats.tx_r_instant);
 
@@ -1347,6 +1352,9 @@ impl StreamSocket {
 
                 interarrival_jitter: self.interarrival_jitter,
                 ow_delay: self.kalman.ow_delay,
+
+                // tx_instant_packet: self.kalman.last_tx_time, // used for NADA ABR in XRClient connection loop
+                // rx_instant_packet: self.kalman.last_rx_time, // used for NADA ABR in XRClient connection loop
                 filtered_ow_delay: self.kalman.m_current,
 
                 rx_bytes: self.rx_bytes,
@@ -1761,6 +1769,9 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
 
             highest_rx_frame_index: packet.highest_rx_frame_index,
             highest_rx_shard_index: packet.highest_rx_shard_index,
+
+            // tx_instant_packet: packet.tx_instant_packet,
+            // rx_instant_packet: packet.rx_instant_packet, 
         })
     }
 }

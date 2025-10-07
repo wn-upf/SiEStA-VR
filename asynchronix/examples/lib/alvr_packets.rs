@@ -216,12 +216,12 @@ pub struct NetworkStatisticsPacket {
     pub buffer_level_decoder: u8, 
     pub rebuffering_events_last_s: u8, 
 
-    /// NADA FIELDS 
+    /// NADA FIELDS   // after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed 
     // pub frame_send_timestamp:i64,
     // pub shard_loss_rate:f64,
     // pub plr: f64,
     // pub is_idr:bool,
-    ///// RTCP Feedback Report: NADA Receiver--> Sender
+    // /// RTCP Feedback Report: NADA Receiver--> Sender
     // pub nada_feedback:bool,
     // pub nada_xcurr:f64,
     // pub nada_rmode:i8,

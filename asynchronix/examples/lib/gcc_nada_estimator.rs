@@ -1627,7 +1627,7 @@ impl NadaReceiver{
         self.total_received_bytes += received_bytes + size_of_timestamp + size_of_send_timestamp;
         
         // total & lost packets to compute p_inst
-        self.total_packets_lost += num_packets_lost;
+        self.total_packets_lost += num_packets_lost;   // Comment when replicating: THIS IS ALWAYS ZERO? So packets lost is useless. 
         self.total_num_packets += total_num_packets;
 
         let elapsed = self.receive_rate_timer.elapsed();

@@ -55,6 +55,7 @@ class ZmqEnvClient(gym.Env):
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.REQ)
         self.socket.connect(TRAINER_ENDPOINT)
+        self.step_count = 0 
         print("✅ Python ZMQ Client connected to server.")
 
     def reset(self, *, seed=None, options=None):
@@ -75,6 +76,14 @@ class ZmqEnvClient(gym.Env):
         done = response["done"]
         truncated = False # Assuming no truncation for now
         info = {}
+        self.step_count += 1
+        if self.step_count % 30 == 0:
+            wandb.log({
+                "transition/action": action,
+                "transition/reward": reward,
+                "transition/done": done,
+                **{f"obs_{i}": next_obs[i] for i in range(len(next_obs))},
+            })
         
         return next_obs, reward, done, truncated, info
 
