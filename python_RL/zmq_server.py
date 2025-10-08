@@ -40,8 +40,16 @@ class ZmqServer:
         print(f"🤖 Listening for Python trainer on {TRAINER_ENDPOINT}")
 
     def _obs_from_json(self, obs_json):
-        # Helper to convert JSON observation to a sorted list
+        # --- FIX ---
+        # The observation from Rust is now a pre-ordered list (Vec<f32>).
+        # We no longer need to sort it by key. We just return it as is.
+        # This resolves the TypeError.
+        if isinstance(obs_json, list):
+            return obs_json
+        # Fallback for old dictionary-based observations
+        print(f"{Colors.YELLOW}Warning: Received a dictionary-based observation. Consider updating all clients.{Colors.ENDC}")
         return [obs_json[k] for k in sorted(obs_json)]
+
 
     def run_forever(self):
         """Main server loop."""

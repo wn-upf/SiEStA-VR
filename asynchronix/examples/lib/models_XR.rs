@@ -1254,6 +1254,31 @@ pub struct RLObservation {
     pub rebuffer_event_sum: u8, 
 
 }
+
+
+impl RLObservation {
+    /// Converts the struct into a vector of f32s in a defined order.
+    /// This is the key to preserving order across the language boundary.
+    pub fn to_vec(&self) -> Vec<f32> {
+        vec![
+            self.t_elapsed_s,
+            self.last_target_bitrate_mbps,
+            self.rtt_ms_avg_s,
+            self.rtt_ms_std_s,
+            self.bandwidth_mbps_avg_s,
+            self.bandwidth_mbps_std_s,
+            self.frame_interarrival_avg_ms,
+            self.frame_interarrival_std_ms,
+            self.flr_avg_s,
+            self.buffer_level_avg_s,
+            self.rebuffer_event_sum as f32, // Cast u8 to f32
+        ]
+    }
+}
+
+
+
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RLObservationVector{
     observations: Vec<RLObservation>, 
@@ -1276,10 +1301,10 @@ impl RLObservationVector{
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RLTransition {
     pub sim_id: String, 
-    pub prev_obs: RLObservation,
+    pub prev_obs:  Vec<f32>,
     pub action: usize,
     pub reward: f32,
-    pub next_obs: RLObservation,
+    pub next_obs:  Vec<f32>,
     pub done: bool,
 }
 
@@ -1336,14 +1361,14 @@ impl ZmqConnector {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct RLRequest{ pub obs: RLObservation}
+pub struct RLRequest{ pub obs: Vec<f32>}
 #[derive(Serialize, Deserialize)]
 pub struct RLResponse{pub action_idx: usize}
 
 impl RLConnector for ZmqConnector {
     fn select_action(&mut self, obs: &RLObservation) -> usize {
         // Attach sim_id in the request for clarity
-        let request = RLRequest { obs: obs.clone() };
+        let request = RLRequest { obs: obs.to_vec() };
         let request_json =
             serde_json::to_string(&request).expect("Failed to serialize observation");
 
@@ -2142,10 +2167,10 @@ impl BitrateManager {
                                 println!("r: {}, prev_a: {}", reward, prev_action);
                                 let transition = RLTransition {
                                     sim_id: self.sim_unique_string.clone(), 
-                                    prev_obs: prev_obs.clone(),
+                                    prev_obs: prev_obs.to_vec(),
                                     action: prev_action,
                                     reward,
-                                    next_obs: current_obs.clone(),
+                                    next_obs: current_obs.to_vec(),
                                     done,
                                 };
                                 connector.lock().unwrap().post_transition(&transition);
@@ -2550,10 +2575,10 @@ impl XRServer {
 
                         let transition = RLTransition {
                             sim_id: self.sim_unique_string.clone(), 
-                            prev_obs: prev_obs.clone(),
+                            prev_obs: prev_obs.to_vec(),
                             action: prev_action,
                             reward,
-                            next_obs: current_obs.clone(),
+                            next_obs: current_obs.to_vec(),
                             done,
                         };
                         con.post_transition(&transition);

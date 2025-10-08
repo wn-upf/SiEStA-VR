@@ -26,7 +26,7 @@ pub const BATCH_SIZE_CSV : usize = 256*2;
 
 const CHANNEL_WIDTH: usize = 80; //MHz
 
-const LEGACY_PHY_DURATION: f64 = 20E-6; // seconds
+const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;
 const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
@@ -2030,7 +2030,7 @@ pub fn airtime_ampdu(
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
 
-    let L: f64 = total_bits_transmitted / n_mpdus as f64;
+    let L: f64 = total_bits_transmitted / n_mpdus as f64; // TODO: Check if it's correct to have a size as f32 (in reality not, but as avg model? )
 
     let SF = 16.0;
     let TB = 18.0;
