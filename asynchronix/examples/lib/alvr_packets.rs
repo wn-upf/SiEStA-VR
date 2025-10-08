@@ -179,7 +179,7 @@ pub struct ClientStatistics {
 pub struct DeadlineShardlossStatPacket {
     pub frame_indexes: Vec<u32>,
     pub shards_lost: Vec<usize>,
-    pub edca_ac: EdcaAc, 
+    // pub edca_ac: EdcaAc, 
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -216,7 +216,7 @@ pub struct NetworkStatisticsPacket {
     pub buffer_level_decoder: u8, 
     pub rebuffering_events_last_s: u8, 
 
-    /// NADA FIELDS   // after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed 
+    // NADA FIELDS after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed 
     // pub frame_send_timestamp:i64,
     // pub shard_loss_rate:f64,
     // pub plr: f64,
@@ -227,12 +227,7 @@ pub struct NetworkStatisticsPacket {
     // pub nada_rmode:i8,
     // pub nada_recv:i64,
 
-
-
-
-
-
-    pub edca_ac: EdcaAc, 
+    // pub edca_ac: EdcaAc, 
     // pub tx_instant: f64,
 }
 

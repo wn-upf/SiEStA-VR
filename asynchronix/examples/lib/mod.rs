@@ -26,7 +26,7 @@ pub const BATCH_SIZE_CSV : usize = 256*2;
 
 const CHANNEL_WIDTH: usize = 80; //MHz
 
-const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+const LEGACY_PHY_DURATION: f64 = 20E-6; // seconds
 const PHY_DURATION: f64 = 100E-6;
 const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;

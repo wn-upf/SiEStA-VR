@@ -36,6 +36,20 @@ TRAINER_ENDPOINT = "tcp://*:5557"
 
 TRAINER_ENDPOINT = "tcp://localhost:5557"
 
+OBSERVATION_KEYS = [
+    "t_elapsed_s",
+    "last_target_bitrate_mbps",
+    "rtt_ms_avg_s",
+    "rtt_ms_std_s",
+    "bandwidth_mbps_avg_s",
+    "bandwidth_mbps_std_s",
+    "frame_interarrival_avg_ms",
+    "frame_interarrival_std_ms",
+    "flr_avg_s",
+    "buffer_level_avg_s",
+    "rebuffer_event_sum", 
+]
+
 
 # -------------------------------------------------------------------
 # NEW: Gym-compatible ZMQ Client
@@ -56,35 +70,94 @@ class ZmqEnvClient(gym.Env):
         self.socket = self.ctx.socket(zmq.REQ)
         self.socket.connect(TRAINER_ENDPOINT)
         self.step_count = 0 
+        self.global_step = 0
+        self.ep_return = 0.0
+        self.ep_len = 0
+        self.run_return_cumsum = 0.0
+
+
         print("✅ Python ZMQ Client connected to server.")
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        # Send reset command and wait for the initial observation
+        print(f"\n{Colors.YELLOW}--- Episode boundary ---{Colors.ENDC}")
+        self.ep_return = 0.0
+        self.ep_len = 0
         self.socket.send_json({"command": "reset"})
+        t0 = time.time()
         response = self.socket.recv_json()
+        recv_latency_ms = (time.time() - t0) * 1000.0
         initial_obs = np.array(response["obs"], dtype=np.float32)
+
+        # Log reset latency like in DQN-only
+        if wandb.run is not None:
+            wandb.log({
+                "env/reset_recv_latency_ms": recv_latency_ms,
+                "env/episode": wandb.run.summary.get("episodes", 0) + 1
+            })
+
+        # ✅ return MUST be here, at the end, not inside any 'if'
         return initial_obs, {}
 
+    
     def step(self, action):
-        # Send step command with action and wait for the result
+        # --- 1) Send step command and receive response ---
+        t0 = time.time()
         self.socket.send_json({"command": "step", "action": int(action)})
         response = self.socket.recv_json()
-        
+        pull_latency_ms = (time.time() - t0) * 1000.0
+
+        # --- 2) Parse response ---
         next_obs = np.array(response["next_obs"], dtype=np.float32)
-        reward = response["reward"]
-        done = response["done"]
-        truncated = False # Assuming no truncation for now
+        reward = float(response["reward"])
+        done = bool(response["done"])
+        truncated = False
         info = {}
+
+        # --- 3) Update local stats ---
+        self.ep_return += reward
+        self.ep_len += 1
+        self.global_step += 1
+        self.run_return_cumsum += reward
         self.step_count += 1
-        if self.step_count % 30 == 0:
+
+        # --- 4) Build log dictionary ---
+        log_dict = {
+            "train/reward": reward,
+            "train/return_cumsum": self.run_return_cumsum,
+            "train/action": int(action),
+            "train/done": int(done),
+            "timing/pull_latency_ms": pull_latency_ms,
+        }
+
+        # Add named observation metrics
+        for i, v in enumerate(next_obs):
+            key = OBSERVATION_KEYS[i] if i < len(OBSERVATION_KEYS) else f"extra_{i}"
+            log_dict[f"obs/{key}"] = float(v)
+
+        # Add any other scalar fields the simulator might send
+        for k, v in response.items():
+            if k in ("reward", "done", "next_obs"):
+                continue
+            if isinstance(v, (int, float)):
+                log_dict[f"sim/{k}"] = v
+
+        # --- 5) Log every step or every N steps ---
+        if wandb.run is not None:
+            wandb.log(log_dict)
+
+        # --- 6) Episode summary if done ---
+        if done:
             wandb.log({
-                "transition/action": action,
-                "transition/reward": reward,
-                "transition/done": done,
-                **{f"obs_{i}": next_obs[i] for i in range(len(next_obs))},
+                "episode/return": self.ep_return,
+                "episode/len": self.ep_len,
             })
-        
+            wandb.run.summary["episodes"] = wandb.run.summary.get("episodes", 0) + 1
+
+            # Reset episode counters
+            self.ep_return = 0.0
+            self.ep_len = 0
+
         return next_obs, reward, done, truncated, info
 
     def close(self):

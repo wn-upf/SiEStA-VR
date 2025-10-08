@@ -108,7 +108,7 @@ if [[ "${USER:-}" == "fmaura" ]]; then
     echo "  -> ZMQ Server started with PID: $ZMQ_SERVER_PID"
 
     # Give the server a moment to start up
-    sleep 5
+    sleep 3
 
     # 2. Launch Python trainer (W&B Agent) in the background on the same node
     AGENT_LOG_FILE="${LOG_DIR}/wandb_agent_${SLURM_JOB_ID}.log"
@@ -173,7 +173,7 @@ cargo build --release --example XR_sim
 
 
 sleep 1
-for ((i=0; i<20; i++)); do
+# for ((i=0; i<5; i++)); do
     echo "SSSSIM i = $i"
 
 
@@ -226,7 +226,7 @@ for ((i=0; i<20; i++)); do
             done
         done
     done
-done
+# done
 
 # After writing to temp file
 echo "Contents of temp file:"

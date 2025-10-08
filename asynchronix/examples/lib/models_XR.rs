@@ -1253,7 +1253,6 @@ pub struct RLObservation {
     pub buffer_level_avg_s: f32, 
     pub rebuffer_event_sum: u8, 
 
-
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RLObservationVector{
@@ -2620,12 +2619,6 @@ impl XRServer {
                             now,  
                             send_instant, 
                         );
-
-
-
-
-
-
 
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
@@ -4045,7 +4038,6 @@ impl XRClient {
                                     // );
                                 }
                                 if stream_id == TRACKING {
-
                                     packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering. 
                                     self.outport_tracking_network.send(packet).await;
                                 }
@@ -4076,17 +4068,14 @@ impl XRClient {
         }
     }
 
-    pub async fn framed_send<S: Serialize>(
+    pub async fn framed_send(
         &mut self,
-        packet: &S,
+        packet: &ClientControlPacket,
         context: &Context<Self>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // println!("FRAMEDSEND!");
 
-        // match category{
-
-
-        // }
+        
 
         let mut buffer = vec![0; MAX_PACKET_SIZE_RECV];
 
@@ -4109,6 +4098,13 @@ impl XRClient {
         packetz.data_inner = buffer[0..packet_size].to_vec();
         packetz.header_alvr.stream_id = CONTROL_STREAM;
         packetz.header_alvr.next_packet_index = 2;
+
+        if matches!(packet, ClientControlPacket::NetworkStatistics(..)){
+            packetz.edca_ac = EdcaAc::Video; 
+        }
+        else if matches!(packet, ClientControlPacket::DeadlineShardLossStat(..)) {
+            packetz.edca_ac = EdcaAc::BestEffort; 
+        }
 
         context
             .scheduler
@@ -4163,7 +4159,7 @@ impl XRClient {
         let net = DeadlineShardlossStatPacket {
             frame_indexes: frames.clone(),
             shards_lost: shards_lost,
-            edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking. 
+            // edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking. 
         };
 
         for frame in frames{
@@ -4396,7 +4392,7 @@ impl XRClient {
                         everest_command: command_abr_everest,
                         buffer_level_decoder: self.decoder_queue.len() as u8,  
                         rebuffering_events_last_s: self.rebuffer_event_counter.sum_in_period() as u8, // should be impossible to overflow unless FPS > 256 (not planned, makes no sense) 
-                        edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
+                        // edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
                         
                     };
 
