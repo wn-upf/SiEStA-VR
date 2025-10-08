@@ -983,34 +983,55 @@ impl StreamSocket {
         }
     }
 
+
     pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
-        let mut total_lost_deadline = 0;
-        // Collect keys into a vector before modifying the map
-        let keys: Vec<_> = self.lost_shards_deadline_map.keys().cloned().collect();
+        let cap = self.lost_shards_deadline_map.len();
+        let mut vec_keys = Vec::with_capacity(cap);
+        let mut vec_lost = Vec::with_capacity(cap);
 
-        let mut vec_keys = vec![];
-        let mut vec_lost = vec![];
-
-        // Now you can iterate over the keys and remove them from the map
-        for frame_deadlined in keys {
-            vec_keys.push(frame_deadlined);
-
-            let lost_in_frame = self
-                .lost_shards_deadline_map
-                .remove(&frame_deadlined)
-                .unwrap();
-            // println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
+        // Drain empties the map while yielding (key, value) pairs.
+        for (frame_deadlined, lost_in_frame) in self.lost_shards_deadline_map.drain() {
             debug_bgprint!(
                 DebugColor::Red,
                 "[Flush deadline] Packets lost in frame {}: {:?}",
                 frame_deadlined,
                 lost_in_frame
             );
+            vec_keys.push(frame_deadlined);
             vec_lost.push(lost_in_frame);
-            total_lost_deadline += lost_in_frame;
         }
+
         (vec_keys, vec_lost)
     }
+
+    // pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
+    //     let mut total_lost_deadline = 0;
+    //     // Collect keys into a vector before modifying the map
+    //     let keys: Vec<_> = self.lost_shards_deadline_map.keys().cloned().collect();
+
+    //     let mut vec_keys = vec![];
+    //     let mut vec_lost = vec![];
+
+    //     // Now you can iterate over the keys and remove them from the map
+    //     for frame_deadlined in keys {
+    //         vec_keys.push(frame_deadlined);
+
+    //         let lost_in_frame = self
+    //             .lost_shards_deadline_map
+    //             .remove(&frame_deadlined)
+    //             .unwrap();
+    //         // println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
+    //         debug_bgprint!(
+    //             DebugColor::Red,
+    //             "[Flush deadline] Packets lost in frame {}: {:?}",
+    //             frame_deadlined,
+    //             lost_in_frame
+    //         );
+    //         vec_lost.push(lost_in_frame);
+    //         total_lost_deadline += lost_in_frame;
+    //     }
+    //     (vec_keys, vec_lost)
+    // }
 
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
@@ -1906,7 +1927,7 @@ impl<H> StreamSender<H> {
 }
 
 impl<H: Serialize> StreamSender<H> {
-
+    #[inline]
     pub async fn get_buffer_emu(
         &mut self,
         header: &H,

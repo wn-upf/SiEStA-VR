@@ -6,13 +6,13 @@ metric:
   goal: maximize
 parameters:
   algorithm:
-    values: ['PPO', 'DQN', 'A2C']
+    values: ['PPO', 'DQN', 'A2C', 'RNN_PPO']
 
   # --- Core Hyperparameters (Shared across models) ---
   learning_rate:
     distribution: log_uniform_values
-    min: 0.00001
-    max: 0.001
+    min: 0.0001
+    max: 0.02
   gamma:
     values: [0.95, 0.99, 0.995]
   net_arch:
@@ -30,6 +30,13 @@ parameters:
   clip_range:
     values: [0.1, 0.2, 0.3]
 
+  # ----------------- RNN_PPO-only -----------------
+  lstm_hidden_size:
+    values: [64, 128, 256]
+  n_lstm_layers:
+    values: [1, 2]
+
+    
   # --- DQN Specific Hyperparameters ---
   buffer_size:
     values: [50000, 100000, 200000]

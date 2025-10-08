@@ -1635,6 +1635,8 @@ pub struct MpduPacket {
 
     pub original_index: usize, 
     pub edca_ac: EdcaAc,          
+
+    pub mac_key_cached: Option<(i32, EdcaAc)>,
     // pub is_alvr_control_packet: bool,
 }
 #[repr(u8)]
@@ -1668,6 +1670,7 @@ impl MpduPacket {
             emulated_added_delay_deadline: None,
             original_index: 0, 
             edca_ac: EdcaAc::BestEffort , 
+            mac_key_cached: None, 
             // is_alvr_control_packet: false,
         }
     }
@@ -1822,7 +1825,7 @@ pub struct ResultsFrameTXDelay {
 //         }
 //     }
 // }
-
+#[inline]
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
     let dx = x_ - x;
     let dy = y_ - y;
@@ -1830,12 +1833,12 @@ pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> 
 
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
-
+#[inline]
 pub fn path_loss(d: f64) -> f64 {
     let gamma = 2.06067_f64;
     54.12 + 10.0 * gamma * (d).log10() + 5.25 * 0.1467 * d
 }
-
+#[inline]
 pub fn collision_delay() -> f32 {
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
@@ -1960,7 +1963,7 @@ pub fn collision_delay() -> f32 {
 //         data_service_delay: T_DATA,
 //     }
 // }
-
+#[inline]
 pub fn airtime_ampdu(
     total_bits_transmitted: f64,
     n_mpdus: i32,
@@ -2050,7 +2053,7 @@ pub fn airtime_ampdu(
     phy_time
 }
 
-
+#[inline]
 #[allow(unused)] // as it's shared with other sims than XR.
 pub fn write_all_sta_csvs(
     sta_stats_vec: &HashMap<usize, perStaLockStats>,

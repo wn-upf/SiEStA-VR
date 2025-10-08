@@ -1936,14 +1936,14 @@ impl BitrateManager {
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
 
-        const TIME_WARMUP_ABR: u64 = 11; 
+        const TIME_WARMUP_ABR: u64 = 6; 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
             println!("No ABR (warmup) {} -> {}", format_elapsed!(now), TIME_WARMUP_ABR); 
             let bitrate_bps = self.last_target_bitrate_bps; 
             bitrate_bps 
         }
         else{
-            println!("One pass ABR"); 
+            // println!("One pass ABR"); 
 
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
@@ -2268,24 +2268,26 @@ impl BitrateManager {
         let rtt_term = gamma * obs.rtt_ms_avg_s;
         let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
 
-        let reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
+        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
+
+        reward = f32::max(reward, 0.0); // clip rewards to 0 
 
         // this expression could be negative if bitrate is very low and flr very high
-        print_dblue!(
-            "Reward decomposition:
-            bitrate_term = {bitrate_term:.4},
-            flr_term     = {flr_term:.4} ( flr = {:.3}),
-            rtt_term     = {rtt_term:.4} ( rtt = {:.3}),
-            rebuffer_term= {rebuffer_term:.4},
-            ************ total_reward = {reward:.4} **************
-            (inputs: bitrate={:.2} Mbps, flr={:.2}, rtt={:.2} ms, rebuffer={})",
-            obs.flr_avg_s, 
-            obs.rtt_ms_avg_s, 
-            obs.last_target_bitrate_mbps,
-            obs.flr_avg_s,
-            obs.rtt_ms_avg_s,
-            obs.rebuffer_event_sum,
-        );
+        // print_dblue!(
+        //     "Reward decomposition:
+        //     bitrate_term = {bitrate_term:.4},
+        //     flr_term     = {flr_term:.4} ( flr = {:.3}),
+        //     rtt_term     = {rtt_term:.4} ( rtt = {:.3}),
+        //     rebuffer_term= {rebuffer_term:.4},
+        //     ************ total_reward = {reward:.4} **************
+        //     (inputs: bitrate={:.2} Mbps, flr={:.2}, rtt={:.2} ms, rebuffer={})",
+        //     obs.flr_avg_s, 
+        //     obs.rtt_ms_avg_s, 
+        //     obs.last_target_bitrate_mbps,
+        //     obs.flr_avg_s,
+        //     obs.rtt_ms_avg_s,
+        //     obs.rebuffer_event_sum,
+        // );
         reward
     }
 }
@@ -2321,7 +2323,7 @@ pub struct CsvTracking {
 impl CsvTracking {
     pub fn new(folder_name: &str, num_id: u8) -> std::io::Result<Self> {
         let dir = format!("Results/{}", folder_name);
-        std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
 
         let file_path = format!("{}/TRACKING_stats{}.csv", dir, num_id);
 
@@ -4222,13 +4224,13 @@ impl XRClient {
                             StreamSocket::flush_shards_lost_deadline(&mut ssocket);
 
                         if !frames_lost.is_empty() {
-                            println!(
-                                "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
-                                format_elapsed!(now), 
-                                self.server_ip, 
-                                &frames_lost[..],
-                                &shards_lost[..]
-                            );
+                            // println!(
+                            //     "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
+                            //     format_elapsed!(now), 
+                            //     self.server_ip, 
+                            //     &frames_lost[..],
+                            //     &shards_lost[..]
+                            // );
                             self.report_frame_lost(frames_lost, shards_lost, context);
                         }
                     }
@@ -5016,7 +5018,7 @@ impl XRClient {
                     self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
 
                 } else { // Decoder queue was empty
-                    print_brown!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip ); 
+                    // print_brown!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip ); 
                     self.rebuffer_event_counter.add_one(now); 
 
                 } // End if let Some((id_f, video_frame))

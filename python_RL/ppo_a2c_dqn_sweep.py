@@ -7,8 +7,13 @@ import gymnasium as gym
 from gymnasium import spaces
 import zmq
 
+N_STEPS_RL=1_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
+from sb3_contrib import RecurrentPPO
+policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
+
 # --- Stable Baselines 3 Imports ---
 from stable_baselines3 import PPO, DQN, A2C
+import argparse
 
 # --- W&B Imports ---
 import wandb
@@ -51,6 +56,15 @@ OBSERVATION_KEYS = [
 ]
 
 
+def coerce_batch_size(n_steps: int, batch_size: int, n_envs: int = 1) -> int:
+    total = n_steps * n_envs
+    if total % batch_size == 0:
+        return batch_size
+    # pick the largest divisor of total that is <= batch_size
+    for b in range(min(batch_size, total), 0, -1):
+        if total % b == 0:
+            return b
+    return total  # fallback
 # -------------------------------------------------------------------
 # NEW: Gym-compatible ZMQ Client
 # This replaces the old ZmqEnvServer class.
@@ -187,7 +201,7 @@ def train_sweep():
 
     if algo == "PPO":
         model = PPO(
-            "MlpPolicy", env,
+            policy_ppo_a2c, env,
             learning_rate=wandb.config.learning_rate,
             n_steps=wandb.config.n_steps,
             batch_size=wandb.config.batch_size_ppo,
@@ -215,7 +229,7 @@ def train_sweep():
         )
     elif algo == "A2C":
         model = A2C(
-            "MlpPolicy", env,
+            policy_ppo_a2c, env,
             learning_rate=wandb.config.learning_rate,
             n_steps=wandb.config.n_steps_a2c,
             gamma=wandb.config.gamma,
@@ -224,7 +238,25 @@ def train_sweep():
             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
             verbose=1,
         )
-
+    elif algo == "RNN_PPO":  # or reuse "PPO" and gate via a config flag
+        model = RecurrentPPO(
+            "MlpLstmPolicy",
+            env,
+            learning_rate=wandb.config.learning_rate,
+            n_steps=wandb.config.n_steps,          # rollout length per env
+            batch_size=wandb.config.batch_size_ppo,# must divide n_steps * n_envs
+            n_epochs=wandb.config.n_epochs,
+            gamma=wandb.config.gamma,
+            gae_lambda=wandb.config.gae_lambda,
+            clip_range=wandb.config.clip_range,
+            policy_kwargs=dict(
+                net_arch=list(wandb.config.net_arch),  # shared MLP before LSTM
+                lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
+                n_lstm_layers=wandb.config.get("n_lstm_layers", 1),
+                # Optional: ortho_init=False can help with LSTM stability sometimes
+            ),
+            verbose=1,
+        )
     # 4) Set up callback and start learning
     callback = WandbCallback(
         model_save_path=f"models/{run.id}",
@@ -233,7 +265,7 @@ def train_sweep():
         log="all", 
     )
 
-    total_steps = 1_500_000 # Keep this fixed for fair comparison across runs
+    total_steps = N_STEPS_RL # Keep this fixed for fair comparison across runs
     model.learn(total_timesteps=total_steps, callback=callback)
 
     # --- NEW: Save and log the final model artifact ---

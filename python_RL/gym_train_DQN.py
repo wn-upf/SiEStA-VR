@@ -302,7 +302,7 @@ def main():
         log="all",
     )
 
-    total_steps = 500_000
+    total_steps = 7_500_000
 
     model.learn(total_timesteps=total_steps, callback=callback)
     model.save("dqn_bitrate_agent")

@@ -47,7 +47,7 @@ use std::time::Duration;
 use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer, BITRATE_UPDATE_INTERVAL};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
-pub const SIM_START_TIME: u64 = 10;
+pub const SIM_START_TIME: u64 = 1;
 
 
 

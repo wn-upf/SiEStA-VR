@@ -810,35 +810,57 @@ impl EmulatedLink {
 
     /// Scheduled event: attempt to emit all ready packets from the internal queue
     pub fn flush_queue<'a>(
-        &'a mut self,
-        _: (),
-        context: &'a Context<Self>,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            // Process all delayed packets that have reached their deadline
-            let ready = self.queue_mechanism.process_emu_queued_packets(context);
-            for pkt in ready {
-                self.output.send(pkt).await;
-            }
-
-            if !self.queue_mechanism.queue.is_empty() {
-                if let Some(next_deadline) = self.queue_mechanism
-                                      .queue
-                                      .iter()
-                                      .filter_map(|p| p.emulated_added_delay_deadline)
-                                      .min()
-                {   
-                    let now   = context.scheduler.time();
-                    let delay = next_deadline.duration_since(now)
-                                            .max(Duration::from_nanos(1));
-                    context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
-                }
-            }
-
-
-
+    &'a mut self,
+    _: (),
+    context: &'a Context<Self>,
+) -> impl Future<Output = ()> + Send + 'a {
+    async move {
+        let ready = self.queue_mechanism.process_emu_queued_packets(context);
+        for pkt in ready {
+            self.output.send(pkt).await;
+        }
+        if let Some(next_deadline) = self.queue_mechanism.queue
+            .iter()
+            .filter_map(|p| p.emulated_added_delay_deadline)
+            .min()
+        {
+            let now   = context.scheduler.time();
+            let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
+            context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
         }
     }
+}
+  
+    // pub fn flush_queue<'a>(
+    //     &'a mut self,
+    //     _: (),
+    //     context: &'a Context<Self>,
+    // ) -> impl Future<Output = ()> + Send + 'a {
+    //     async move {
+    //         // Process all delayed packets that have reached their deadline
+    //         let ready = self.queue_mechanism.process_emu_queued_packets(context);
+    //         for pkt in ready {
+    //             self.output.send(pkt).await;
+    //         }
+
+    //         if !self.queue_mechanism.queue.is_empty() {
+    //             if let Some(next_deadline) = self.queue_mechanism
+    //                                   .queue
+    //                                   .iter()
+    //                                   .filter_map(|p| p.emulated_added_delay_deadline)
+    //                                   .min()
+    //             {   
+    //                 let now   = context.scheduler.time();
+    //                 let delay = next_deadline.duration_since(now)
+    //                                         .max(Duration::from_nanos(1));
+    //                 context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
+    //             }
+    //         }
+
+
+
+    //     }
+    // }
 }
 
 impl Model for EmulatedLink {}
@@ -1112,71 +1134,102 @@ impl QueueMechanism {
         context: &Context<EmulatedLink>,
     ) -> Vec<MpduPacket> {
         let now = context.scheduler.time();
-        let mut transmitted_packets: Vec<MpduPacket> = Vec::new();
-        let mut index = 0;
-        // print_red!("****PROCESSING ENQUED PACKETS*****\n Len of self queue: {}", self.queue.len()); 
+
+        // Take the queue out to rebuild it in one pass.
+        let mut old = std::mem::take(&mut self.queue);
+        let mut keep: VecDeque<MpduPacket> = VecDeque::with_capacity(old.len());
+        let mut ready: Vec<MpduPacket> = Vec::new();
+
+        while let Some(mut p) = old.pop_front() {
+            match p.emulated_added_delay_deadline {
+                Some(deadline) => {
+                    // Trigger when now >= deadline (exact float equality is brittle).
+                    if now >= deadline {
+                        ready.push(p); // transmit now
+                    } else {
+                        keep.push_back(p);
+                    }
+                }
+                None => {
+                    // treat as dropped
+                    // (optional) log here if you want
+                }
+            }
+            }
+
+            self.queue = keep;
+            ready
+    }
+    // pub fn process_emu_queued_packets(
+    //     &mut self,
+    //     context: &Context<EmulatedLink>,
+    // ) -> Vec<MpduPacket> {
+    //     let now = context.scheduler.time();
+    //     let mut transmitted_packets: Vec<MpduPacket> = Vec::new();
+    //     let mut index = 0;
+    //     // print_red!("****PROCESSING ENQUED PACKETS*****\n Len of self queue: {}", self.queue.len()); 
 
 
         
-        let mut indexes_to_remove = vec![];
-        while index < self.queue.len() {
-            if let Some(packet) = self.queue.get_mut(index) {
-                match packet.emulated_added_delay_deadline {
-                    Some(delay) if delay == TaiTime::EPOCH => {
-                        // Remove and process the packet
-                        debug_bgprint!(DebugColor::DarkGreen, "[DBG EMU QUEUE PROCESS] Delay ZERO Packet ALVR: {}. Now = {} | (F_index: {} , {} / {} )", 
-                        format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count );
-                        // let packet = self.queue.remove(index).unwrap();
-                        indexes_to_remove.push(index);
-                        transmitted_packets.push(packet.clone());
-                        // Don't increment index as we've removed the current element
-                    }
-                    Some(delay) => {
-                        const EPSILON: f32 = 1e-9;
+    //     let mut indexes_to_remove = vec![];
+    //     while index < self.queue.len() {
+    //         if let Some(packet) = self.queue.get_mut(index) {
+    //             match packet.emulated_added_delay_deadline {
+    //                 Some(delay) if delay == TaiTime::EPOCH => {
+    //                     // Remove and process the packet
+    //                     debug_bgprint!(DebugColor::DarkGreen, "[DBG EMU QUEUE PROCESS] Delay ZERO Packet ALVR: {}. Now = {} | (F_index: {} , {} / {} )", 
+    //                     format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count );
+    //                     // let packet = self.queue.remove(index).unwrap();
+    //                     indexes_to_remove.push(index);
+    //                     transmitted_packets.push(packet.clone());
+    //                     // Don't increment index as we've removed the current element
+    //                 }
+    //                 Some(delay) => {
+    //                     const EPSILON: f32 = 1e-9;
 
-                        // Compare with a small tolerance
-                        if (now.duration_since(TaiTime::EPOCH).as_secs_f32()
-                            - delay.duration_since(TaiTime::EPOCH).as_secs_f32())
-                        .abs()
-                            < EPSILON
-                        {
-                            transmitted_packets.push(packet.clone());
+    //                     // Compare with a small tolerance
+    //                     if (now.duration_since(TaiTime::EPOCH).as_secs_f32()
+    //                         - delay.duration_since(TaiTime::EPOCH).as_secs_f32())
+    //                     .abs()
+    //                         < EPSILON
+    //                     {
+    //                         transmitted_packets.push(packet.clone());
 
-                            self.queue.remove(index);
+    //                         self.queue.remove(index);
 
-                            // continue; // skip incrementing index
-                        } else {
-                            // debug_bgprint!(DebugColor::Mint, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {:.9}, deadline = {:.9} | (F_index: {} , {}/{} )",
-                            // format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count );
-                            index += 1;
-                        }
+    //                         // continue; // skip incrementing index
+    //                     } else {
+    //                         // debug_bgprint!(DebugColor::Mint, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {:.9}, deadline = {:.9} | (F_index: {} , {}/{} )",
+    //                         // format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count );
+    //                         index += 1;
+    //                     }
 
-                        // Packet still needs to wait
-                    }
-                    None => {
-                        // Packet dropped
-                        self.queue.remove(index);
-                        print_pretty!(
-                            DebugColor::Red,
-                            "[EMU QUEUE DROP] Dropped packet ID {}",
-                            index
-                        );
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-        indexes_to_remove.sort_unstable();
-        indexes_to_remove.reverse();
+    //                     // Packet still needs to wait
+    //                 }
+    //                 None => {
+    //                     // Packet dropped
+    //                     self.queue.remove(index);
+    //                     print_pretty!(
+    //                         DebugColor::Red,
+    //                         "[EMU QUEUE DROP] Dropped packet ID {}",
+    //                         index
+    //                     );
+    //                 }
+    //             }
+    //         } else {
+    //             break;
+    //         }
+    //     }
+    //     indexes_to_remove.sort_unstable();
+    //     indexes_to_remove.reverse();
 
-        for &index in &indexes_to_remove {
-            print!("actually Removed: ");
-            let packet = self.queue.remove(index).unwrap();
-            packet.print(DebugColor::LightBlue);
-        }
-        transmitted_packets
-    }
+    //     for &index in &indexes_to_remove {
+    //         print!("actually Removed: ");
+    //         let packet = self.queue.remove(index).unwrap();
+    //         packet.print(DebugColor::LightBlue);
+    //     }
+    //     transmitted_packets
+    // }
 }
 
 
@@ -1679,13 +1732,17 @@ fn log_edca(key: &MacKey, msg: &str) {
     print_blue!("\t\t-----contenders: {} | {}", fmt_key(key), msg);
 }
 
-
-
+#[inline]
 fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
-    // AP (downlink) contends with id = -1; UL STA contends with its own id
-    let mac_id = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
-    (mac_id, p.edca_ac) == (*id, *ac)
+    matches!(p.mac_key_cached, Some((pid, pac)) if pid == *id && pac == *ac)
 }
+
+
+// fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
+//     // AP (downlink) contends with id = -1; UL STA contends with its own id
+//     let mac_id = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
+//     (mac_id, p.edca_ac) == (*id, *ac)
+// }
 
 
 fn ac_needs_tick(
@@ -1798,12 +1855,7 @@ pub struct QueueModule {
 
 #[allow(unused)]
 impl QueueModule {
-    pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
-        self.cumulative_stats_queue.clone()
-    }
-    pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
-        self.array_stas_stats.clone()
-    }
+  
     pub fn new(
         num_stas: usize,
         queue_size: usize,
@@ -1845,7 +1897,7 @@ impl QueueModule {
         }
 
         Self {
-            queue: VecDeque::new(),
+            queue: VecDeque::with_capacity(queue_size),
             queue_maxsize: queue_size,
             output_port_sta1: Default::default(),
             output_port_sta2: Default::default(),
@@ -1882,67 +1934,86 @@ impl QueueModule {
         }
     }
 
-
+    pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
+        self.cumulative_stats_queue.clone()
+    }
+    pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
+        self.array_stas_stats.clone()
+    }
 
    fn tick_backoff(&mut self, now: TaiTime<0>) -> Vec<MacKey> {
-        
         self.shared_medium.clear_if_idle(now);
-        
+
+        // --- Precompute which MacKeys actually have packets in the queue (single O(n) pass) ---
+        use std::collections::HashSet;
+        let mut present_keys: HashSet<MacKey> = HashSet::new();
+        for p in self.queue.iter() {
+            // Same mapping logic as maps_to(), but done once per packet
+            let is_ul = p.sta_src_id > p.sta_dest_id;
+            let key: MacKey = if is_ul { (p.sta_src_id, p.edca_ac) } else { (-1, p.edca_ac) };
+            present_keys.insert(key);
+        }
+
         let mut ready = Vec::new();
         let idle_slot = self.shared_medium.is_idle(now);
 
-        // crate::print_pink!("states array dcf: ",); 
-        // for state in self.array_dcf_values.lock().unwrap().keys(){
-        //     crate::print_pink!("{:?}", state); 
-        // }
-
+        // --- Hold the lock once while we walk EDCA states ---
+        let mut map = self.array_dcf_values.lock().unwrap();
 
         debug_edca!(
             "{} | [EDCA] medium_idle={} |  q_size={} | ac_states={}",
             format_elapsed!(now),
             idle_slot,
             self.queue.len(),
-            self.array_dcf_values.lock().unwrap().len()
+            map.len()
         );
-        for (key, st) in self.array_dcf_values.lock().unwrap().iter_mut() {
-            if !self.queue.iter().any(|p| maps_to(key, p)) { 
+
+        for (key, st) in map.iter_mut() {
+            // Skip ACs that have no packets waiting (avoids O(m*n) scans)
+            if !present_keys.contains(key) {
                 // log_edca(now, key, "no_pkts_for_AC -> skip");
-                continue; 
+                continue;
             }
 
             // AIFS gating
-            if idle_slot && st.medium_free_since + aifs(st.param) <= now {
+            let aifs_until = st.medium_free_since + aifs(st.param);
+            if idle_slot && aifs_until <= now {
                 debug_edca!("\t[{} AIFS satisfied] -> unfreeze", key.0);
                 st.backoff_frozen = false;
+            } else {
+                debug_edca!(
+                    "\t[{} WAIT AIFS] {} < {}",
+                    key.0,
+                    format_elapsed!(now),
+                    format_elapsed!(aifs_until)
+                );
             }
-            else{
-                debug_edca!("\t[{} WAIT AIFS] {} < {}",key.0, format_elapsed!(now)  , format_elapsed!(now + aifs(st.param))); 
-            }
-            // else if !idle_slot {
-                // st.medium_free_since = now;
-                // st.backoff_frozen = true;
-            // }
 
             // Backoff countdown (one slot per call of deque_schedule_service)
             if idle_slot && !st.backoff_frozen && st.backoff_counter > 0 {
-
                 let prev = st.backoff_counter;
                 st.backoff_counter -= 1;
                 if DEBUG_EDCA {
-                    log_edca(
-                        key,
-                        &format!(" countdown {} -> {}", prev, st.backoff_counter)
-                );
+                    log_edca(key, &format!(" countdown {} -> {}", prev, st.backoff_counter));
                 }
             }
 
             if st.backoff_counter == 0 && !st.backoff_frozen {
-                if DEBUG_EDCA{print_green!("{} [ {} -> AC {:?}] READY (backoff==0 & unfrozen)", format_elapsed!(now), key.0, key.1);}
+                if DEBUG_EDCA {
+                    print_green!(
+                        "{} [ {} -> AC {:?}] READY (backoff==0 & unfrozen)",
+                        format_elapsed!(now),
+                        key.0,
+                        key.1
+                    );
+                }
                 ready.push(*key);
             }
         }
+
         ready
     }
+
 
     fn txop_cap_secs(&self, key: &MacKey) -> f64 {
         let p = self.array_dcf_values.lock().unwrap()[key].param;
@@ -2004,7 +2075,10 @@ impl QueueModule {
         pkt.queue_in_instant = now;
         self.arrived_packet_counter += 1;
 
-
+        let is_ul = pkt.sta_src_id > pkt.sta_dest_id;
+        pkt.mac_key_cached = Some(if is_ul { (pkt.sta_src_id, pkt.edca_ac) } else { (-1, pkt.edca_ac) });
+        
+        
         if self.queue.len() < self.queue_maxsize {
             self.queue.push_back(pkt);
             if !self.packet_being_served && self.shared_medium.is_idle(now) {
@@ -2021,6 +2095,10 @@ impl QueueModule {
         self.queue_length_counter += self.queue.len();
 
         let now = context.scheduler.time();
+        let is_ul = packet.sta_src_id > packet.sta_dest_id;
+        packet.mac_key_cached = Some(if is_ul { (packet.sta_src_id, packet.edca_ac) } else { (-1, packet.edca_ac) });
+        
+        
         if self.queue.len() < self.queue_maxsize {
             packet.queue_in_instant = now;
             self.queue.push_back(packet.clone());
@@ -2081,42 +2159,60 @@ impl QueueModule {
         }
         if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&mac_key) { st.on_success(st.param.cw_min); }
 
-        if let Some(stats_rx) = self.stats_rx.as_mut() {
-            // print!("OK1,");
-            if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
-                // print!("OK2,");
-
-                if let Ok(_array_STAs_stats) = self.array_stas_stats.lock() {
-                    // print!("OK3,");
-
-                    while let Ok(stats_update) = stats_rx.try_recv() {
-                        // println!("OK CUM");
-                        queue_stats.update_cumstats(
-                            stats_update.T_s,
-                            stats_update.T_q,
-                            stats_update.blocked_packet_counter,
-                            stats_update.arrived_packet_counter,
-                            stats_update.queue_length_when_out,
-                        );
-
-                        // println!("OK STATS");
-                        self.csv_metrics.update_stats(
-                            stats_update.now,
-                            stats_update.packet_id as usize,
-                            stats_update.queue_length_when_out,
-                            stats_update.T_s,
-                            stats_update.T_q,
-                            stats_update.length_packet,
-                            stats_update.sta_src_id,
-                            stats_update.sta_dest_id,
-                            stats_update.ampdu_id, 
-                            stats_update.is_collision, 
-                            stats_update.collision_backoff, 
-                        );
-                    }
+        let mut drained = smallvec::SmallVec::<[StatsUpdate; 64]>::new();
+        if let Some(rx) = self.stats_rx.as_mut() {
+            while let Ok(up) = rx.try_recv() { drained.push(up); }
+        }
+        if !drained.is_empty() {
+            if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
+                for u in &drained {
+                    qstats.update_cumstats(u.T_s, u.T_q, u.blocked_packet_counter, u.arrived_packet_counter, u.queue_length_when_out);
                 }
             }
+            for u in drained { // CSV write outside the lock
+                self.csv_metrics.update_stats(
+                    u.now, u.packet_id as usize, u.queue_length_when_out, u.T_s, u.T_q,
+                    u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision, u.collision_backoff
+                );
+            }
         }
+
+        // if let Some(stats_rx) = self.stats_rx.as_mut() {
+        //     // print!("OK1,");
+        //     if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
+        //         // print!("OK2,");
+
+        //         if let Ok(_array_STAs_stats) = self.array_stas_stats.lock() {
+        //             // print!("OK3,");
+
+        //             while let Ok(stats_update) = stats_rx.try_recv() {
+        //                 // println!("OK CUM");
+        //                 queue_stats.update_cumstats(
+        //                     stats_update.T_s,
+        //                     stats_update.T_q,
+        //                     stats_update.blocked_packet_counter,
+        //                     stats_update.arrived_packet_counter,
+        //                     stats_update.queue_length_when_out,
+        //                 );
+
+        //                 // println!("OK STATS");
+        //                 self.csv_metrics.update_stats(
+        //                     stats_update.now,
+        //                     stats_update.packet_id as usize,
+        //                     stats_update.queue_length_when_out,
+        //                     stats_update.T_s,
+        //                     stats_update.T_q,
+        //                     stats_update.length_packet,
+        //                     stats_update.sta_src_id,
+        //                     stats_update.sta_dest_id,
+        //                     stats_update.ampdu_id, 
+        //                     stats_update.is_collision, 
+        //                     stats_update.collision_backoff, 
+        //                 );
+        //             }
+        //         }
+        //     }
+        // }
     }
 
     fn select_next_sta(&self) -> HashMap<(i32, i32), StaRateInfo> {
