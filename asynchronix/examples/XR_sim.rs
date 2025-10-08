@@ -118,10 +118,9 @@ impl VRPair {
                 abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2
 
                 if abr_choice == 0 { // CBR (RANDOM)
-                    let values: Vec<u32> = (5..=60).step_by(5).collect(); // bounding to max CBR 60 Mbps in RL scenario
+                    let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario
                     initial_bitrate = *values.choose(&mut rng).unwrap() as f64; 
-
-                }
+                }                
             }
         }
         else{

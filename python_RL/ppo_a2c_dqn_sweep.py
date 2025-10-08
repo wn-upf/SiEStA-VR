@@ -239,21 +239,26 @@ def train_sweep():
             verbose=1,
         )
     elif algo == "RNN_PPO":  # or reuse "PPO" and gate via a config flag
+        
+        final_batch_size = coerce_batch_size(
+            n_steps=wandb.config.n_steps,
+            batch_size=wandb.config.batch_size_ppo
+        )
+        
         model = RecurrentPPO(
             "MlpLstmPolicy",
             env,
             learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps,          # rollout length per env
-            batch_size=wandb.config.batch_size_ppo,# must divide n_steps * n_envs
+            n_steps=wandb.config.n_steps,
+            batch_size=final_batch_size, # Use the corrected batch size here
             n_epochs=wandb.config.n_epochs,
             gamma=wandb.config.gamma,
             gae_lambda=wandb.config.gae_lambda,
             clip_range=wandb.config.clip_range,
             policy_kwargs=dict(
-                net_arch=list(wandb.config.net_arch),  # shared MLP before LSTM
+                net_arch=list(wandb.config.net_arch),
                 lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
                 n_lstm_layers=wandb.config.get("n_lstm_layers", 1),
-                # Optional: ortho_init=False can help with LSTM stability sometimes
             ),
             verbose=1,
         )

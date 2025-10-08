@@ -1,7 +1,7 @@
 #!/bin/bash
 
 RESULTS_DIR="/path/to/Results"
-INTERVAL_MINUTES=10  # how often to clean (every 30 minutes)
+INTERVAL_MINUTES=4  # how often to clean (every 30 minutes)
 
 while true; do
     echo "[$(date)] Cleaning up $RESULTS_DIR ..."
