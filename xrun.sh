@@ -5,7 +5,7 @@
 #SBATCH --nodes=1                # number of nodes
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=nvenc
-#SBATCH --exclusive
+###### #SBATCH --exclusive
 #SBATCH --mem=128G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
 
@@ -70,11 +70,10 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 
 # ID for the W&B sweep you want the agent to join.
 SWEEP_ID="wn-upf/asynchronix-python_RL/i9igunmc"
-
+CONDA_ENVV="vr_sim"
 
 script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-PROJECT_DIR="$script_dir"
-
+PROJECT_DIR="$SLURM_SUBMIT_DIR"
 if [[ "${USER:-}" == "fmaura" ]]; then
     # --- HPC (SLURM) Mode ---
     echo "🚀 Detected HPC environment (User: $USER). Using srun."
@@ -88,10 +87,10 @@ if [[ "${USER:-}" == "fmaura" ]]; then
     # 1. Launch ZMQ Server in the background on the allocated node
     ZMQ_LOG_FILE="${LOG_DIR}/zmq_server_${SLURM_JOB_ID}.log"
     echo "🔹 Launching ZMQ Server... Log: $ZMQ_LOG_FILE"
-    srun --nodes=1 --ntasks=1 --exclusive \
+    srun --nodes=1 --ntasks=1  \
     /bin/bash -c "
       source ~/miniconda3/etc/profile.d/conda.sh
-      conda activate $CONDA_ENV_NAME
+      conda activate $CONDA_ENVV
       python $PROJECT_DIR/python_RL/zmq_server.py
     " > "$ZMQ_LOG_FILE" 2>&1 &
     ZMQ_SERVER_PID=$!
@@ -106,7 +105,7 @@ if [[ "${USER:-}" == "fmaura" ]]; then
     srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
         /bin/bash -c "
         source ~/miniconda3/etc/profile.d/conda.sh
-        conda activate $CONDA_ENV_NAME
+        conda activate $CONDA_ENVV
         cd $PROJECT_DIR/python_RL  # <-- Add this line
         wandb agent $SWEEP_ID
         " > "$AGENT_LOG_FILE" 2>&1 &
