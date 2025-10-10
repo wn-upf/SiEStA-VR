@@ -4722,7 +4722,7 @@ impl XRClient {
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
             let mut lost_frames_aux =self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
-            if self.original_decoder.is_none(){
+            if self.original_decoder.is_none() && USE_FFMPEG_DEMO{
                 self.original_decoder = Some(
                     Arc::new( Mutex::new( HevcDecoder::new(
                         self.framerate as u32,
