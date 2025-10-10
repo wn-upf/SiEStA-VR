@@ -23,6 +23,14 @@ from wandb.integration.sb3 import WandbCallback
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 from absl import logging as absl_logging
+import os
+
+
+ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
+STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
+TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
+
+
 absl_logging.set_verbosity(absl_logging.ERROR)
 
 class Colors:
@@ -33,13 +41,11 @@ class Colors:
 
 OBSERVATION_SHAPE = (11,)
 ACTION_DIM = 20
-ACTION_ENDPOINT = "tcp://*:5555"
-STEP_ENDPOINT = "tcp://*:5556"
+# ACTION_ENDPOINT = "tcp://*:5555"
+# STEP_ENDPOINT = "tcp://*:5556"
+# TRAINER_ENDPOINT = "tcp://*:5557"
+# TRAINER_ENDPOINT = "tcp://localhost:5557"
 
-# Endpoint for Python training clients
-TRAINER_ENDPOINT = "tcp://*:5557"
-
-TRAINER_ENDPOINT = "tcp://localhost:5557"
 
 OBSERVATION_KEYS = [
     "t_elapsed_s",

@@ -7,10 +7,13 @@ import time
 
 # --- Constants ---
 # Endpoints for Rust simulations to connect to
-ACTION_ENDPOINT = "tcp://*:5555"
-STEP_ENDPOINT = "tcp://*:5556"
+# ACTION_ENDPOINT = "tcp://*:5555"
+# STEP_ENDPOINT = "tcp://*:5556"
 # Endpoint for Python training clients to connect to
-TRAINER_ENDPOINT = "tcp://*:5557"
+# TRAINER_ENDPOINT = "tcp://*:5557"
+ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
+STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
+TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
 
 class Colors:
     BLUE = '\033[94m'

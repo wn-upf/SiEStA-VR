@@ -1331,24 +1331,30 @@ pub struct ZmqConnector{
     sim_id: String, 
 }
 impl ZmqConnector {
-    pub fn new(action_endpoint: &str, reward_endpoint: &str, ctx: &zmq::Context, simu_id: &str) -> Self {
+    pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str) -> Self {
         // --- Action Socket (DEALER) ---
-        let action_socket = ctx.socket(zmq::DEALER).expect("Failed to create DEALER socket");
-        action_socket
-            .set_identity(simu_id.as_bytes())
-            .expect("Failed to set DEALER identity");
+        // let action_socket = ctx.socket(zmq::DEALER).expect("Failed to create DEALER socket");
+        // action_socket
+        //     .set_identity(simu_id.as_bytes())
+        //     .expect("Failed to set DEALER identity");
+
+
+        let action_socket = ctx.socket(zmq::DEALER).unwrap();
+        action_socket.set_identity(simu_id.as_bytes()).unwrap();
+
+
         action_socket
             .set_rcvtimeo(60_000)
             .expect("Failed to set receive timeout");
-        action_socket
-            .connect(action_endpoint)
-            .expect("Failed to connect DEALER socket");
+       
+        action_socket.connect(&action_ep).unwrap();
+    
         println!("[ZmqConnector] Action DEALER connected to {} as {}", action_endpoint, simu_id);
 
         // --- Reward Socket (PUSH) ---
         let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
         reward_socket
-            .connect(reward_endpoint)
+            .connect(reward_ep)
             .expect("Failed to connect PUSH socket");
         println!("[ZmqConnector] Reward PUSH connected to {}", reward_endpoint);
 
@@ -1721,10 +1727,15 @@ impl BitrateManager {
                 let ladder_mbps = (10..=100).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
                 print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
+
+                let action_ep  = std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
+                let reward_ep  = std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
+
+
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new("tcp://127.0.0.1:5555", "tcp://127.0.0.1:5556",  &ctx, sim_unique_string)))),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(action_ep, reward_ep,  &ctx, sim_unique_string)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),

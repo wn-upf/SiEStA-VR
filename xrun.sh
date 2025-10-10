@@ -13,11 +13,6 @@
 #SBATCH -e logs_hpc/%x_%j.err
 
 source ~/.bashrc
-# module purge
-
-# conda deactivate 2>/dev/null || true
-# unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE _CE_CONDA _CE_M mamba
-
 
 module load CUDA
 module load x265
@@ -29,6 +24,7 @@ export PATH=$HOME/.local/bin:$PATH
 NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
+
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
 simTime=90.0
@@ -71,9 +67,16 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 # ID for the W&B sweep you want the agent to join.
 SWEEP_ID="wn-upf/asynchronix-python_RL/i9igunmc"
 CONDA_ENVV="vr_sim"
-
 script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_DIR="$SLURM_SUBMIT_DIR"
+
+RUN_ID="${SLURM_JOB_ID:-$$}_$RANDOM"   # or add your SIM_COUNT etc.
+
+
+export ZMQ_ACTION_EP="ipc:///tmp/xr_${RUN_ID}_action"
+export ZMQ_STEP_EP="ipc:///tmp/xr_${RUN_ID}_step"
+export ZMQ_TRAINER_EP="ipc:///tmp/xr_${RUN_ID}_trainer"
+
 if [[ "${USER:-}" == "fmaura" ]]; then
     # --- HPC (SLURM) Mode ---
     echo "🚀 Detected HPC environment (User: $USER). Using srun."
@@ -102,7 +105,7 @@ if [[ "${USER:-}" == "fmaura" ]]; then
     # 2. Launch Python trainer (W&B Agent) in the background on the same node
     AGENT_LOG_FILE="${LOG_DIR}/wandb_agent_${SLURM_JOB_ID}.log"
     echo "🔹 Launching W&B Agent... Log: $AGENT_LOG_FILE"
-    srun --nodes=1 --ntasks=1 --gres=gpu:1 --exclusive \
+    srun --nodes=1 --ntasks=1  \
         /bin/bash -c "
         source ~/miniconda3/etc/profile.d/conda.sh
         conda activate $CONDA_ENVV
