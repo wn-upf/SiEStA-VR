@@ -119,7 +119,7 @@ else
     # --- Non-HPC (Local Desktop) Mode ---
     echo "🖥️  Detected non-HPC environment. Using gnome-terminal."
     IS_HPC=0
-
+    PROJECT_DIR="/home/boris/Desktop/Rust_MG1/asynchronix"
     # 1. Launch ZMQ Server in a new terminal
     echo "🔹 Launching ZMQ Server in a new terminal..."
     gnome-terminal --disable-factory -- bash -c "

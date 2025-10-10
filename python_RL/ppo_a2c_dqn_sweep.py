@@ -264,7 +264,7 @@ def train_sweep():
             policy_kwargs=dict(
                 net_arch=list(wandb.config.net_arch),
                 lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
-                n_lstm_layers=wandb.config.get("n_lstm_layers", 1),
+                n_lstm_layers=wandb.config.get("n_lstm_layers", 2),
             ),
             verbose=1,
         )
