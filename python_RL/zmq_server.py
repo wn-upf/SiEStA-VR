@@ -4,7 +4,7 @@ import zmq
 import json
 import numpy as np
 import time
-
+import os
 # --- Constants ---
 # Endpoints for Rust simulations to connect to
 # ACTION_ENDPOINT = "tcp://*:5555"

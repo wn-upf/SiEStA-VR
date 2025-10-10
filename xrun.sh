@@ -3,12 +3,12 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
-#SBATCH --gres=gpu:1
+####### SBATCH --gres=gpu:1
 #SBATCH --constraint=nvenc
 ###### #SBATCH --exclusive
 #SBATCH --mem=128G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
-
+#SBATCH --cpus-per-task=64        # example
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
 
@@ -90,7 +90,7 @@ if [[ "${USER:-}" == "fmaura" ]]; then
     # 1. Launch ZMQ Server in the background on the allocated node
     ZMQ_LOG_FILE="${LOG_DIR}/zmq_server_${SLURM_JOB_ID}.log"
     echo "🔹 Launching ZMQ Server... Log: $ZMQ_LOG_FILE"
-    srun --nodes=1 --ntasks=1  \
+    srun --ntasks=1 --cpus-per-task=8 --exclusive --cpu-bind=cores \
     /bin/bash -c "
       source ~/miniconda3/etc/profile.d/conda.sh
       conda activate $CONDA_ENVV
@@ -105,7 +105,7 @@ if [[ "${USER:-}" == "fmaura" ]]; then
     # 2. Launch Python trainer (W&B Agent) in the background on the same node
     AGENT_LOG_FILE="${LOG_DIR}/wandb_agent_${SLURM_JOB_ID}.log"
     echo "🔹 Launching W&B Agent... Log: $AGENT_LOG_FILE"
-    srun --nodes=1 --ntasks=1  \
+    srun --ntasks=1 ---cpus-per-task=8 -exclusive --cpu-bind=cores  \
         /bin/bash -c "
         source ~/miniconda3/etc/profile.d/conda.sh
         conda activate $CONDA_ENVV

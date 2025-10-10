@@ -1349,14 +1349,14 @@ impl ZmqConnector {
        
         action_socket.connect(&action_ep).unwrap();
     
-        println!("[ZmqConnector] Action DEALER connected to {} as {}", action_endpoint, simu_id);
+        println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
 
         // --- Reward Socket (PUSH) ---
         let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
         reward_socket
             .connect(reward_ep)
             .expect("Failed to connect PUSH socket");
-        println!("[ZmqConnector] Reward PUSH connected to {}", reward_endpoint);
+        println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
 
         Self {
             action_socket,
@@ -1735,7 +1735,7 @@ impl BitrateManager {
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(action_ep, reward_ep,  &ctx, sim_unique_string)))),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(&action_ep, &reward_ep,  &ctx, sim_unique_string)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
