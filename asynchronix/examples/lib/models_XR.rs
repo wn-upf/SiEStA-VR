@@ -1653,6 +1653,8 @@ pub struct BitrateManager {
     pub last_nada_target_bitrate_mbps: Option<f64>, //updated on receive of NADA feedback data.  
 
     aimd_manager: Option<Arc<Mutex<FOAimdRateControl>>>, 
+
+    framerate: f32, 
 }
 
 
@@ -1660,7 +1662,7 @@ pub struct BitrateManager {
 impl BitrateManager {
     
 
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str) -> Self {
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, fps: f32, ) -> Self {
         
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -1823,6 +1825,7 @@ impl BitrateManager {
 
             last_nada_target_bitrate_mbps: None, 
             aimd_manager: None, 
+            framerate: fps, 
         }
     }
 
@@ -2313,7 +2316,7 @@ impl BitrateManager {
         let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0; 
 
         let flr_avg_s = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
-                (1.0 / self.frame_interval_average.get_average()); // percentage according to encoded frames window average, 
+                (1.0 / self.framerate ); // percentage according to encoded frames window average, 
                                                                                 // (not in the same period though, watch out)
         // let flr_sum = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()); 
         
@@ -2625,6 +2628,7 @@ impl XRServer {
                 t_end_simu, 
                 ip_self, 
                 sim_unique_string, 
+                frame_rate, 
             ),
 
             video_app_sender: None,

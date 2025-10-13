@@ -798,10 +798,10 @@ impl AimdRateControl{
 
             match self.rate_control_state_{
                 RateControlState::kRcHold=>{
-                    print_brown!("GCC STATE -> HOLD", ); 
+                    // print_brown!("GCC STATE -> HOLD", ); 
                 },
                 RateControlState::kRcIncrease => { 
-                    print_brown!("GCC STATE -> INCREASE", ); 
+                    // print_brown!("GCC STATE -> INCREASE", ); 
 
                     if estimated_throughput > self.link_capacity_.UpperBound()
                     { 
@@ -825,7 +825,7 @@ impl AimdRateControl{
                     self.time_last_bitrate_change_ = at_time;
                     },
                 RateControlState::kRcDecrease => {
-                    print_brown!("GCC STATE -> DECREASE",); 
+                    // print_brown!("GCC STATE -> DECREASE",); 
 
                     let mut decreased_bitrate = std::f64::INFINITY;
 
