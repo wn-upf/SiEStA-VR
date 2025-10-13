@@ -115,8 +115,11 @@ impl VRPair {
                 // do nothing, it's correct
             }
             else{
-                let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
-                abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2
+                // abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2 (or 4 for GCC)
+                let choices = [0, 1, 2, 4];
+                let mut rng = thread_rng();
+                abr_choice = *choices.choose(&mut rng).unwrap();
+
 
                 if abr_choice == 0 { // CBR (RANDOM)
                     let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario

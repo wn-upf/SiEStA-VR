@@ -18,6 +18,10 @@ module load CUDA
 module load x265
 module load x264
 
+
+SWEEP_ID="wn-upf/asynchronix-python_RL/0uk46bio"
+
+
 export PATH=$HOME/.local/bin:$PATH
 
 
@@ -27,7 +31,7 @@ SERIAL_EXECUTION=1
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=90.0
+simTime=40.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -65,7 +69,6 @@ SIM_COUNT=0                 # counter of simulations, not an input arg
 
 
 # ID for the W&B sweep you want the agent to join.
-SWEEP_ID="wn-upf/asynchronix-python_RL/i9igunmc"
 CONDA_ENVV="vr_sim"
 script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_DIR="$SLURM_SUBMIT_DIR"
@@ -155,14 +158,7 @@ handle_interrupt() {
 }
 # Set up the trap for SIGINT (Ctrl+C)
 trap handle_interrupt SIGINT
-
-
-# conda init vr_sim
-# conda activate 
-
-
 cargo build --release --example XR_sim
-
 
 # sleep 1
 # for ((i=0; i<5; i++)); do
@@ -196,9 +192,9 @@ cargo build --release --example XR_sim
                                                                     # echo "RUNNING SIM: $name_folder"
 
                                                                     # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
-                                                                    echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
+                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
                                                                 # else                                    ## Serial execution
-                                                                #         script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
+                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
                                                                 #         sleep 5
                                                                 #         rm out_log.ans
                                                                 
@@ -251,11 +247,7 @@ echo " --- Number of simulations: $SIM_COUNT --- \n"
 shuf "$temp_file" > "$SHUFFLED_CMDS"
 rm "$temp_file" # Clean up the un-shuffled file
 
-
-
-## I have 6000 scenarios here with many seeds, I want to repeat this process 15 times for RL: 
-
-RL_STEPS=20 ## should be enough for training 10 agents 
+RL_STEPS=20 ## should be enough for training 1M steps  
 for RL_ITERATION in $(seq 1 $RL_REPETITIONS); do
     if [ "$SERIAL_EXECUTION" -eq 1 ]; then
         echo "Starting randomized SERIAL execution of $SIM_COUNT simulations..."

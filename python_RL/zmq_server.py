@@ -15,6 +15,15 @@ ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_actio
 STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
 TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
 
+def _obs_from_payload_dict(d):
+    if "obs_flat" in d:
+        return d["obs_flat"]
+    if "obs" in d:
+        return d["obs"]
+    raise KeyError("Neither 'obs_flat' nor 'obs' in payload")
+
+
+
 class Colors:
     BLUE = '\033[94m'
     GREEN = '\033[92m'
@@ -68,7 +77,7 @@ class ZmqServer:
                 print("SERVER: Waiting for initial observation from a Rust simulation...")
                 sim_id, payload = self.router.recv_multipart()
                 req_obs = json.loads(payload.decode("utf-8"))
-                initial_obs = self._obs_from_json(req_obs["obs"])
+                initial_obs = _obs_from_payload_dict(req_obs)
                 
                 self.active_sim_id = sim_id
                 # 2. Send a dummy action to unblock the Rust sim
@@ -91,7 +100,18 @@ class ZmqServer:
 
                 reward = float(transition["reward"])
                 done = bool(transition["done"])
-                next_obs = self._obs_from_json(transition["next_obs"])
+                # next_obs = self._obs_from_json(transition["next_obs"])
+                # next_obs = _obs_from_payload_dict(transition)
+                next_obs_field = transition.get("next_obs")
+                if next_obs_field is None:
+                    raise KeyError(f"Transition missing 'next_obs'; got keys: {list(transition.keys())}")
+
+                # If Rust sends a plain list -> use it directly.
+                # If Rust sends a dict like {"obs_flat": [...], "seq_len": ..., ...} -> normalize it.
+                if isinstance(next_obs_field, dict):
+                    next_obs = _obs_from_payload_dict(next_obs_field)
+                else:
+                    next_obs = next_obs_field
                 
                 # 2. If not done, sync with Rust and send the new action
                 if not done:

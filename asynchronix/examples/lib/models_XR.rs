@@ -1298,7 +1298,9 @@ pub struct RLObservationVector{
 }
 
 impl RLObservationVector{
-    pub fn new(max_len: u8) -> Self { Self{ observations: Vec::new(), max_len}}
+    pub fn new(max_len: u8) -> Self { 
+        debug_assert_eq!(FEAT_DIM, RLObservation::default().to_vec().len());
+        Self{ observations: Vec::new(), max_len}}
 
     pub fn push(&mut self, o: RLObservation){
         self.observations.push(o); 
@@ -1306,6 +1308,27 @@ impl RLObservationVector{
             self.observations.remove(0); 
         }
     } 
+
+    pub fn seq_len(&self) -> usize {
+        self.observations.len()
+    }
+
+    /// Return a flat Vec<f32> of length (max_len * FEAT_DIM), left-padded with zeros.
+    /// Layout: [o_{t-k+1}, ..., o_t] row-major, zeros for missing prefix.
+    pub fn as_flat_padded(&self) -> Vec<f32> {
+        let cap = self.max_len as usize;
+        let mut out = vec![0.0f32; cap * FEAT_DIM];
+
+        // copy rows to the tail to keep left padding at the front
+        let len = self.observations.len();
+        let start_row = cap.saturating_sub(len);
+        for (i, o) in self.observations.iter().enumerate() {
+            let row = o.to_vec();                    // len == FEAT_DIM
+            let dst = (start_row + i) * FEAT_DIM;
+            out[dst..dst + FEAT_DIM].copy_from_slice(&row[..FEAT_DIM]);
+        }
+        out
+    }
 }
 
 
@@ -1330,10 +1353,61 @@ pub trait RLConnector {
     fn select_action(&mut self, obs: &RLObservation) -> usize; // returns the chosen action, or continuous bitrate choice. 
 
     fn post_transition(&mut self, transition: &RLTransition);
+    
+    fn reset_window(&mut self); 
 
 }
+const RL_WINDOW_OBSERVATION_SIZE: usize = 5; 
+const FEAT_DIM: usize  = 11; // keep in sync with RLObservation::to_vec().len()
 
+#[derive(Debug, Clone)]
+pub struct ObsWindow {
+    buf: VecDeque<Vec<f32>>,
+    cap: usize,
+}
 
+impl ObsWindow {
+    pub fn new(cap: usize) -> Self {
+        Self { buf: VecDeque::with_capacity(cap), cap }
+    }
+
+    pub fn clear(&mut self) { self.buf.clear(); }
+
+    pub fn push_obs(&mut self, obs: &RLObservation) {
+        if self.buf.len() == self.cap {
+            self.buf.pop_front();
+        }
+        self.buf.push_back(obs.to_vec());
+    }
+
+    /// Current logical sequence length (<= cap)
+    pub fn seq_len(&self) -> usize { self.buf.len() }
+
+    /// Return a flattened window of size (cap * FEAT_DIM), left-padded with zeros.
+    /// Layout: [o_{t-k+1}, ..., o_{t}] row-major.
+    pub fn as_flat_padded(&self) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.cap * FEAT_DIM];
+        // copy the existing rows to the tail of out to keep left padding zeros
+        let start_row = self.cap - self.buf.len();
+        for (i, row) in self.buf.iter().enumerate() {
+            let dst = (start_row + i) * FEAT_DIM;
+            out[dst..dst + FEAT_DIM].copy_from_slice(&row[..FEAT_DIM]);
+        }
+        out
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RLRequestRNN {
+    pub sim_id: String,
+    pub obs_flat: Vec<f32>, // length = window_len * FEAT_DIM
+    pub seq_len: u8,        // how many real steps (<= window_len)
+    pub feat_dim: u8,       // = FEAT_DIM
+    pub window_len: u8,     // fixed capacity N
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RLResponse { pub action_idx: usize }
 
 
 
@@ -1341,91 +1415,109 @@ pub struct ZmqConnector{
     action_socket: zmq::Socket, // REQ socket for blocking action selection
     step_socket: zmq::Socket,   // PUSH socket for sending (obs, reward, done) steps
     sim_id: String, 
+    window: ObsWindow, 
 }
 impl ZmqConnector {
-    pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str) -> Self {
-        // --- Action Socket (DEALER) ---
-        // let action_socket = ctx.socket(zmq::DEALER).expect("Failed to create DEALER socket");
-        // action_socket
-        //     .set_identity(simu_id.as_bytes())
-        //     .expect("Failed to set DEALER identity");
+    // pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str) -> Self {
+    //     // --- Action Socket (DEALER) ---
+    //     // let action_socket = ctx.socket(zmq::DEALER).expect("Failed to create DEALER socket");
+    //     // action_socket
+    //     //     .set_identity(simu_id.as_bytes())
+    //     //     .expect("Failed to set DEALER identity");
 
 
-        let action_socket = ctx.socket(zmq::DEALER).unwrap();
-        action_socket.set_identity(simu_id.as_bytes()).unwrap();
+    //     let action_socket = ctx.socket(zmq::DEALER).unwrap();
+    //     action_socket.set_identity(simu_id.as_bytes()).unwrap();
 
 
-        action_socket
-            .set_rcvtimeo(60_000)
-            .expect("Failed to set receive timeout");
+    //     action_socket
+    //         .set_rcvtimeo(60_000)
+    //         .expect("Failed to set receive timeout");
        
-        action_socket.connect(&action_ep).unwrap();
+    //     action_socket.connect(&action_ep).unwrap();
     
-        println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
+    //     println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
 
-        // --- Reward Socket (PUSH) ---
-        let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
-        reward_socket
-            .connect(reward_ep)
-            .expect("Failed to connect PUSH socket");
-        println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
+    //     // --- Reward Socket (PUSH) ---
+    //     let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
+    //     reward_socket
+    //         .connect(reward_ep)
+    //         .expect("Failed to connect PUSH socket");
+    //     println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
 
-        Self {
-            action_socket,
-            step_socket: reward_socket,
-            sim_id: simu_id.to_string(),
+    //     Self {
+    //         action_socket,
+    //         step_socket: reward_socket,
+    //         sim_id: simu_id.to_string(),
+    //         window: ObsWindow::new(window_len),
+    //     }
+    // }
+    pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str, window_len: usize) -> Self {
+            let action_socket = ctx.socket(zmq::DEALER).unwrap();
+            action_socket.set_identity(simu_id.as_bytes()).unwrap();
+            action_socket.set_rcvtimeo(60_000).unwrap();
+            action_socket.connect(action_ep).unwrap();
+            println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
+
+            let reward_socket = ctx.socket(zmq::PUSH).unwrap();
+            reward_socket.connect(reward_ep).unwrap();
+            println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
+
+            Self {
+                action_socket,
+                step_socket: reward_socket,
+                sim_id: simu_id.to_string(),
+                window: ObsWindow::new(window_len),
+            }
         }
-    }
+
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct RLRequest{ pub obs: Vec<f32>}
-#[derive(Serialize, Deserialize)]
-pub struct RLResponse{pub action_idx: usize}
+// #[derive(Serialize, Deserialize)]
+// pub struct RLResponse{pub action_idx: usize}
 
 impl RLConnector for ZmqConnector {
     fn select_action(&mut self, obs: &RLObservation) -> usize {
-        // Attach sim_id in the request for clarity
-        let request = RLRequest { obs: obs.to_vec() };
-        let request_json =
-            serde_json::to_string(&request).expect("Failed to serialize observation");
+        // 1) Build prev window FLAT (no push yet!)
+        let prev_flat = self.window.as_flat_padded();
+        let req = RLRequestRNN {
+            sim_id: self.sim_id.clone(),
+            obs_flat: prev_flat,
+            seq_len: self.window.seq_len() as u8,
+            feat_dim: FEAT_DIM as u8,
+            window_len: self.window.cap as u8,
+        };
+        let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
+        self.action_socket.send(request_json.as_bytes(), 0).expect("send obs window");
 
-        // DEALER: send message to ROUTER
-        self.action_socket
-            .send(request_json.as_bytes(), 0)
-            .expect("Failed to send observation");
-
-        // DEALER: wait for reply from ROUTER (Python)
-        match self.action_socket.recv_bytes(0) {
-            Ok(response_bytes) => {
-                let response: RLResponse = serde_json::from_slice(&response_bytes)
-                    .expect("Failed to deserialize action response");
-                response.action_idx
-            }
-            Err(zmq::Error::EAGAIN) => {
+        // 2) recv action
+        let response_bytes = self.action_socket.recv_bytes(0).unwrap_or_else(|e| {
+            if let zmq::Error::EAGAIN = e {
                 eprintln!("RUST ERROR: Timed out waiting for action from Python agent!");
                 panic!("ZMQ Timeout");
             }
-            Err(e) => {
-                panic!("ZMQ Error: {}", e);
-            }
-        }
+            panic!("ZMQ Error: {}", e);
+        });
+        let response: RLResponse = serde_json::from_slice(&response_bytes).expect("deserialize RLResponse");
+
+        // 3) push CURRENT obs into window now (the env state we just acted on)
+        self.window.push_obs(obs);
+
+        response.action_idx
     }
 
     fn post_transition(&mut self, transition: &RLTransition) {
-        // Must include sim_id in RLTransition struct when using PUSH/PULL
-        let transition_json =
-            serde_json::to_string(transition).expect("Failed to serialize RLTransition");
-
-        println!(
-            "Sending transition: sim_id {}, action {}, reward {:.2}",
-            transition.sim_id, transition.action, transition.reward
-        );
-
-        self.step_socket
-            .send(transition_json.as_bytes(), 0)
-            .expect("Failed to send transition");
+        let transition_json = serde_json::to_string(transition).expect("Failed to serialize RLTransition");
+        // println!(
+        //     "Sending transition: sim_id {}, action {}, reward {:.2}",
+        //     transition.sim_id, transition.action, transition.reward
+        // );
+        self.step_socket.send(transition_json.as_bytes(), 0).expect("Failed to send transition");
     }
+    fn reset_window(&mut self) { self.window.clear(); }
+
 }
 
 
@@ -1537,9 +1629,10 @@ impl TimedVecFLR{
         }
     }
 
-    pub fn sum_flr(&mut self, time_f32: f32,) -> usize {
+    pub fn sum_flr(&mut self, time_f32: f32) -> usize {
         let cutoff = time_f32 - self.period;
 
+        // Remove outdated entries
         while let Some(&(t, _)) = self.vec_flr.front() {
             if t < cutoff {
                 self.vec_flr.pop_front();
@@ -1555,8 +1648,10 @@ impl TimedVecFLR{
                 break;
             }
         }
-        self.vec_flr.iter().map(|&(_, v)| v).sum()
 
+        // Sum *and remove* all currently stored FLR values (only once)
+        let sum: usize = self.vec_flr.drain(..).map(|(_, v)| v).sum();
+        sum
     }
 
     pub fn sum_shard_loss(&self) -> usize {
@@ -1756,7 +1851,7 @@ impl BitrateManager {
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(&action_ep, &reward_ep,  &ctx, sim_unique_string)))),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(&action_ep, &reward_ep,  &ctx, sim_unique_string , RL_WINDOW_OBSERVATION_SIZE)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
@@ -1985,13 +2080,15 @@ impl BitrateManager {
     }   
 
     pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
-     
+        
+
+        println!("{}%%%%%%%% -> Pushing F: [{}], SL: {}  ", timestep_f32 , fl, sl); 
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
+        const TIME_WARMUP_ABR: u64 = 5; 
 
-        const TIME_WARMUP_ABR: u64 = 6; 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
             println!("No ABR (warmup) {} -> {}", format_elapsed!(now), TIME_WARMUP_ABR); 
             let bitrate_bps = self.last_target_bitrate_bps; 
@@ -2205,45 +2302,50 @@ impl BitrateManager {
                         if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
                             return self.last_target_bitrate_bps;
                         }
-                        println!("reinforcement learner mode"); 
+                        // println!("reinforcement learner mode"); 
 
-                        let current_obs = obs.clone(); 
-                        // Take the old history. If it's the first step, it will be None.
-                        let mut obs_history_vec = pending_obs.lock().unwrap().take();
+                       let current_obs = obs.clone();
+                        // Take (move) history out; None means we're at the first step
+                        let mut history_opt = pending_obs.lock().unwrap().take();
 
-                        // If there was a previous state, send the transition
-                        if let Some(ref mut history) = obs_history_vec {
-                            if let Some(prev_obs) = history.observations.last() {
-                                let prev_action = *last_action_idx.lock().unwrap();
-                                let reward = self.rl_reward_function(&current_obs);
-                                let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
+                        // Ensure history exists
+                        let mut history = history_opt.unwrap_or_else(|| RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
 
-                                println!("r: {}, prev_a: {}", reward, prev_action);
-                                let transition = RLTransition {
-                                    sim_id: self.sim_unique_string.clone(), 
-                                    prev_obs: prev_obs.to_vec(),
-                                    action: prev_action,
-                                    reward,
-                                    next_obs: current_obs.to_vec(),
-                                    done,
-                                };
-                                connector.lock().unwrap().post_transition(&transition);
-                            }
-                        }
+                        // ---- prev window (BEFORE pushing current_obs) ----
+                        let prev_win_flat = history.as_flat_padded();
 
-                        // Get the next action from the agent
-                        // println!("before selecting action");
+                        // Get the next action from the agent (you still send only current_obs here;
+                        // later you can switch select_action to accept the window too)
                         let next_action_idx = connector
                             .lock()
                             .unwrap()
                             .select_action(&current_obs)
                             .min(bitrate_ladder_mbps.len().saturating_sub(1));
 
-                        // Update the history vector (or create it if it was the first step)
-                        let mut history = obs_history_vec.unwrap_or_else(|| RLObservationVector::new(8));
-                        history.push(current_obs);
+                        // Compute reward/done for transition (your logic)
+                        let reward = self.rl_reward_function(&current_obs);
+                        let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
+                        let prev_action = *last_action_idx.lock().unwrap();
 
-                        // CRITICAL: Put the updated history back for the next step
+                        // ---- push current_obs and build next window ----
+                        history.push(current_obs);
+                        let next_win_flat = history.as_flat_padded();
+
+                        // Send transition with WINDOWED vectors
+                        let transition = RLTransition {
+                            sim_id: self.sim_unique_string.clone(),
+                            prev_obs: prev_win_flat,   // length = window_len * FEAT_DIM
+                            action: prev_action,
+                            reward,
+                            next_obs: next_win_flat,   // length = window_len * FEAT_DIM
+                            done,
+                        };
+                        connector.lock().unwrap().post_transition(&transition);
+                        if done {
+                            *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+                        }   
+
+                        // Put updated history back for the next step
                         *pending_obs.lock().unwrap() = Some(history);
                         *last_action_idx.lock().unwrap() = next_action_idx;
                         *last_decision_instant.lock().unwrap() = now;
@@ -2251,8 +2353,11 @@ impl BitrateManager {
                         // Apply action
                         let target_mbps = bitrate_ladder_mbps[next_action_idx];
                         self.last_target_bitrate_bps = target_mbps * 1e6;
-                        print_blue!("[RL {}] New Action: {}, Target Bitrate: {:.2} Mbps", ip_server,  next_action_idx, target_mbps);
-                        
+                        print_blue!(
+                            "[RL {}] New Action: {}, Target Bitrate: {:.2} Mbps",
+                            ip_server, next_action_idx, target_mbps
+                        );
+
                         self.last_target_bitrate_bps
                                         
                 }
@@ -2315,11 +2420,10 @@ impl BitrateManager {
         let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0; 
         let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0; 
 
-        let flr_avg_s = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
-                (1.0 / self.framerate ); // percentage according to encoded frames window average, 
-                                                                                // (not in the same period though, watch out)
+        let flr_avg_s = (self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
+                (1.0 / self.framerate )) ; // percentage according to encoded frames window average, 
+                                                                                // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
         // let flr_sum = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()); 
-        
         
         let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
         let rebuffer_event_sum = self.last_rebuffer_avg_sum; 
@@ -2341,7 +2445,12 @@ impl BitrateManager {
 
     }
 
-    pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
+    pub fn vmaf_manual_function( &self, bitrate: f32 ) -> f32{ // Empircal values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
+                             // Snow sample, intra-refresh against 100 Mbps (median fit)
+        100.0 - 89.40 * (-0.0615 * bitrate).exp()
+    }
+
+    pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 {
 
         let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
         let beta = 1.0;   // flr 0 to 1
@@ -2354,25 +2463,22 @@ impl BitrateManager {
         let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
 
         let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
-
         reward = f32::max(reward, 0.0); // clip rewards to 0 
+        reward
+    }
+    pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
+        let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
 
-        // this expression could be negative if bitrate is very low and flr very high
-        // print_dblue!(
-        //     "Reward decomposition:
-        //     bitrate_term = {bitrate_term:.4},
-        //     flr_term     = {flr_term:.4} ( flr = {:.3}),
-        //     rtt_term     = {rtt_term:.4} ( rtt = {:.3}),
-        //     rebuffer_term= {rebuffer_term:.4},
-        //     ************ total_reward = {reward:.4} **************
-        //     (inputs: bitrate={:.2} Mbps, flr={:.2}, rtt={:.2} ms, rebuffer={})",
-        //     obs.flr_avg_s, 
-        //     obs.rtt_ms_avg_s, 
-        //     obs.last_target_bitrate_mbps,
-        //     obs.flr_avg_s,
-        //     obs.rtt_ms_avg_s,
-        //     obs.rebuffer_event_sum,
-        // );
+        println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.flr_avg_s, obs.rtt_ms_avg_s); 
+
+        let reward = if obs.flr_avg_s <= 0.05 {
+            if obs.rtt_ms_avg_s <= 40.0 { // let's use this manual MTP threshold
+                self.vmaf_manual_function(obs.last_target_bitrate_mbps) * alpha
+            }
+            else{
+                0.0}
+        }
+        else{0.0}; 
         reward
     }
 }
@@ -2687,40 +2793,49 @@ impl XRServer {
 
         let obs = self.bitrate_manager.build_rl_observation(now); // only return something if RL mode activated
 
-        match &self.bitrate_manager.bitrate_mode{  // This shouldn't be done here, but it's best way of enforcing end of an episode with 'done' flag. 
-            
-            BitrateMode::ReinforcementLearner { pending_obs, connector, last_action_idx, ..} => {
+        match &self.bitrate_manager.bitrate_mode {
+            BitrateMode::ReinforcementLearner { pending_obs, connector, last_action_idx, .. } => {
+                println!("SESSION ENDDD!");
+                let mut con = connector.lock().unwrap();  // lock ONCE
 
-                let mut con = connector.lock().unwrap(); 
                 let current_obs = obs.clone();
 
-                // Take the old history. If it's the first step, it will be None.
-                let mut obs_history_vec = pending_obs.lock().unwrap().take();
+                // history
+                let mut history_opt = pending_obs.lock().unwrap().take();
+                let mut history = history_opt
+                    .unwrap_or_else(|| RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
 
-                // If there was a previous state, send the transition
-                if let Some(ref mut history) = obs_history_vec {
-                    if let Some(prev_obs) = history.observations.last() {
-                        let prev_action = *last_action_idx.lock().unwrap();
-                        let reward = self.bitrate_manager.rl_reward_function(&current_obs);
-                        let done = true; 
+                // prev window BEFORE pushing current_obs
+                let prev_win_flat = history.as_flat_padded();
 
-                        let transition = RLTransition {
-                            sim_id: self.sim_unique_string.clone(), 
-                            prev_obs: prev_obs.to_vec(),
-                            action: prev_action,
-                            reward,
-                            next_obs: current_obs.to_vec(),
-                            done,
-                        };
-                        con.post_transition(&transition);
-                        print_red!("[RL] POSTING FINAL TRANSITION: {:#?}", transition); 
+                let reward = self.bitrate_manager.rl_reward_function(&current_obs);
+                let prev_action = *last_action_idx.lock().unwrap();
 
-                    }
-                }
+                // push and build next window
+                history.push(current_obs);
+                let next_win_flat = history.as_flat_padded();
+                println!("SESSION ENDDD2!");
+
+                // FINAL transition (windowed)
+                let transition = RLTransition {
+                    sim_id: self.sim_unique_string.clone(),
+                    prev_obs: prev_win_flat,
+                    action: prev_action,
+                    reward,
+                    next_obs: next_win_flat,
+                    done: true,
+                };
+                con.post_transition(&transition);     // <--- use `con`, don't re-lock
+                print_red!("[RL] POSTING FINAL TRANSITION: {:#?}", transition);
+
+                con.reset_window();                   // <--- use `con`, don't re-lock
+
+                // Reset history window for next episode
+                *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+                println!("SESSION ENDDD3!");
+                drop(con); // releases the lock
             }
-            ,
-            _ => { // do nothing 
-                }
+            _ => {}
         }
 
 
@@ -4658,13 +4773,13 @@ impl XRClient {
                             StreamSocket::flush_shards_lost_deadline(&mut ssocket);
 
                         if !frames_lost.is_empty() {
-                            // println!(
-                            //     "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
-                            //     format_elapsed!(now), 
-                            //     self.server_ip, 
-                            //     &frames_lost[..],
-                            //     &shards_lost[..]
-                            // );
+                            println!(
+                                "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
+                                format_elapsed!(now), 
+                                self.server_ip, 
+                                &frames_lost[..],
+                                &shards_lost[..]
+                            );
                             self.report_frame_lost(frames_lost, shards_lost, context);
                         }
                     }

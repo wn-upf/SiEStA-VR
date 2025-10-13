@@ -6,8 +6,6 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import zmq
-
-N_STEPS_RL=1_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
 from sb3_contrib import RecurrentPPO
 policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
@@ -24,12 +22,30 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 from absl import logging as absl_logging
 import os
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import torch as th
+from gymnasium import spaces
+
+import torch.nn as nn
+#CONSTS
+##############################
+
+N_STEPS_RL=1_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
+FEAT_DIM = 11
+WINDOW_LEN = 5
+OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
+
+ACTION_DIM = 20
+
 
 
 ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
 STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
 TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
 
+
+
+###############################3
 
 absl_logging.set_verbosity(absl_logging.ERROR)
 
@@ -39,8 +55,7 @@ class Colors:
     YELLOW = '\033[93m'
     ENDC = '\033[0m'
 
-OBSERVATION_SHAPE = (11,)
-ACTION_DIM = 20
+# OBSERVATION_SHAPE = (11,)
 # ACTION_ENDPOINT = "tcp://*:5555"
 # STEP_ENDPOINT = "tcp://*:5556"
 # TRAINER_ENDPOINT = "tcp://*:5557"
@@ -71,119 +86,313 @@ def coerce_batch_size(n_steps: int, batch_size: int, n_envs: int = 1) -> int:
         if total % b == 0:
             return b
     return total  # fallback
-# -------------------------------------------------------------------
-# NEW: Gym-compatible ZMQ Client
-# This replaces the old ZmqEnvServer class.
-# -------------------------------------------------------------------
-class ZmqEnvClient(gym.Env):
-    """A gymnasium.Env that acts as a client to the standalone ZmqServer.
-    It connects to the server and handles the request-reply communication."""
+
+
+
+
+class ZmqEnvClientVEC(gym.Env):
+    """Gym env that talks to your trainer server via ZMQ (REQ/REP)."""
     metadata = {"render_modes": []}
 
     def __init__(self):
         super().__init__()
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=OBSERVATION_SHAPE, dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=OBSERVATION_SHAPE, dtype=np.float32
+        )
         self.action_space = spaces.Discrete(ACTION_DIM)
 
-        # This is a REQ socket that connects, not binds
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.REQ)
         self.socket.connect(TRAINER_ENDPOINT)
-        self.step_count = 0 
+
+        self.step_count = 0
         self.global_step = 0
         self.ep_return = 0.0
         self.ep_len = 0
         self.run_return_cumsum = 0.0
 
-
         print("✅ Python ZMQ Client connected to server.")
 
+    # ---------- helpers ----------
+    @staticmethod
+    def _parse_obs_payload(payload):
+        """
+        Accept:
+        - dict with {"obs_flat": [...]} or {"obs": [...]}
+        - raw list/ndarray [...], which can be either a full flat window
+            or a single-row (FEAT_DIM,) vector -> we left-pad to window.
+        Return: (flat_obs: np.ndarray shape (WINDOW_LEN*FEAT_DIM,), meta: dict)
+        """
+        # --- raw list/ndarray ---
+        if isinstance(payload, (list, np.ndarray)):
+            raw = np.asarray(payload, dtype=np.float32).ravel()
+            feat_dim = FEAT_DIM
+            window_len = WINDOW_LEN
+            if raw.size == feat_dim:
+                # Single row -> left-pad into window
+                flat = np.zeros((window_len * feat_dim,), dtype=np.float32)
+                flat[-feat_dim:] = raw
+                seq_len = 1
+            else:
+                # Already flat window (or larger): trim/pad to window size
+                expect = window_len * feat_dim
+                if raw.size < expect:
+                    flat = np.pad(raw, (expect - raw.size, 0))
+                else:
+                    flat = raw[-expect:]
+                # heuristic seq_len
+                seq_len = min(window_len, max(1, flat.size // feat_dim))
+            mask = np.zeros(window_len, dtype=bool)
+            mask[-seq_len:] = True
+            meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
+            return flat.astype(np.float32, copy=False), meta
+
+        # --- dict with keys ---
+        if "obs_flat" in payload:
+            flat = np.asarray(payload["obs_flat"], dtype=np.float32).ravel()
+            seq_len = int(payload.get("seq_len", WINDOW_LEN))
+            feat_dim = int(payload.get("feat_dim", FEAT_DIM))
+            window_len = int(payload.get("window_len", WINDOW_LEN))
+        elif "obs" in payload:
+            raw = np.asarray(payload["obs"], dtype=np.float32).ravel()
+            feat_dim = FEAT_DIM
+            window_len = WINDOW_LEN
+            if raw.size == feat_dim:
+                flat = np.zeros((window_len * feat_dim,), dtype=np.float32)
+                flat[-feat_dim:] = raw
+                seq_len = 1
+            else:
+                expect = window_len * feat_dim
+                flat = raw[-expect:] if raw.size >= expect else np.pad(raw, (expect - raw.size, 0))
+                seq_len = min(window_len, max(1, flat.size // feat_dim))
+        else:
+            raise KeyError("Neither 'obs_flat' nor 'obs' in payload and payload is not a list/ndarray")
+
+        expect = window_len * feat_dim
+        if flat.size != expect:
+            flat = flat[-expect:] if flat.size > expect else np.pad(flat, (expect - flat.size, 0))
+        mask = np.zeros(window_len, dtype=bool)
+        mask[-seq_len:] = True
+        meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
+        return flat.astype(np.float32, copy=False), meta
+
+
+    @staticmethod
+    def _log_last_row(log_dict, flat_obs):
+        """Log only the most recent row for readability."""
+        feat_dim = FEAT_DIM
+        last_row = flat_obs[-feat_dim:]
+        for i, v in enumerate(last_row):
+            key = OBSERVATION_KEYS[i] if i < len(OBSERVATION_KEYS) else f"feat_{i}"
+            log_dict[f"obs_last/{key}"] = float(v)
+
+    # ---------- gym API ----------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        print(f"\n{Colors.YELLOW}--- Episode boundary ---{Colors.ENDC}")
+        print(f"\n--- Episode boundary ---")
         self.ep_return = 0.0
         self.ep_len = 0
+
         self.socket.send_json({"command": "reset"})
         t0 = time.time()
         response = self.socket.recv_json()
         recv_latency_ms = (time.time() - t0) * 1000.0
-        initial_obs = np.array(response["obs"], dtype=np.float32)
 
-        # Log reset latency like in DQN-only
+        obs_payload = response.get("obs", response.get("obs_flat", response))
+        flat_obs, meta = self._parse_obs_payload(obs_payload)
+
+        # flat_obs, meta = self._parse_obs_payload(response)
+
+        # Optional logging
         if wandb.run is not None:
             wandb.log({
                 "env/reset_recv_latency_ms": recv_latency_ms,
-                "env/episode": wandb.run.summary.get("episodes", 0) + 1
+                "env/episode": wandb.run.summary.get("episodes", 0) + 1,
+                "obs/seq_len": meta["seq_len"],
             })
 
-        # ✅ return MUST be here, at the end, not inside any 'if'
-        return initial_obs, {}
+        info = {"obs_meta": meta}  # expose mask & dims downstream if needed
+        return flat_obs, info
 
-    
     def step(self, action):
-        # --- 1) Send step command and receive response ---
         t0 = time.time()
         self.socket.send_json({"command": "step", "action": int(action)})
         response = self.socket.recv_json()
         pull_latency_ms = (time.time() - t0) * 1000.0
+        obs_payload = response.get("next_obs")
+        if obs_payload is None:
+            raise KeyError(f"Server step response missing 'next_obs'. Keys: {list(response.keys())}")
+        flat_obs, meta = self._parse_obs_payload(obs_payload)
 
-        # --- 2) Parse response ---
-        next_obs = np.array(response["next_obs"], dtype=np.float32)
+        
         reward = float(response["reward"])
         done = bool(response["done"])
         truncated = False
-        info = {}
 
-        # --- 3) Update local stats ---
+        # Stats
         self.ep_return += reward
         self.ep_len += 1
         self.global_step += 1
         self.run_return_cumsum += reward
         self.step_count += 1
 
-        # --- 4) Build log dictionary ---
+        # Logging
         log_dict = {
             "train/reward": reward,
             "train/return_cumsum": self.run_return_cumsum,
             "train/action": int(action),
             "train/done": int(done),
             "timing/pull_latency_ms": pull_latency_ms,
+            "obs/seq_len": meta["seq_len"],
         }
+        # Log the last row only (most recent observation)
+        self._log_last_row(log_dict, flat_obs)
 
-        # Add named observation metrics
-        for i, v in enumerate(next_obs):
-            key = OBSERVATION_KEYS[i] if i < len(OBSERVATION_KEYS) else f"extra_{i}"
-            log_dict[f"obs/{key}"] = float(v)
-
-        # Add any other scalar fields the simulator might send
+        # Any extra scalar fields from sim
         for k, v in response.items():
-            if k in ("reward", "done", "next_obs"):
+            if k in ("reward", "done", "obs", "obs_flat", "seq_len", "feat_dim", "window_len"):
                 continue
             if isinstance(v, (int, float)):
                 log_dict[f"sim/{k}"] = v
 
-        # --- 5) Log every step or every N steps ---
         if wandb.run is not None:
             wandb.log(log_dict)
 
-        # --- 6) Episode summary if done ---
         if done:
-            wandb.log({
-                "episode/return": self.ep_return,
-                "episode/len": self.ep_len,
-            })
+            wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
             wandb.run.summary["episodes"] = wandb.run.summary.get("episodes", 0) + 1
-
-            # Reset episode counters
             self.ep_return = 0.0
             self.ep_len = 0
 
-        return next_obs, reward, done, truncated, info
+        info = {"obs_meta": meta}
+        return flat_obs, reward, done, truncated, info
 
     def close(self):
         self.socket.close()
         self.ctx.term()
 
+
+class LastRowExtractor(BaseFeaturesExtractor):
+    def __init__(self, observation_space: spaces.Box, feat_dim: int = FEAT_DIM):
+        super().__init__(observation_space, features_dim=feat_dim)
+        self.feat_dim = feat_dim
+
+    def forward(self, obs: th.Tensor) -> th.Tensor:
+        # obs: [B, WINDOW_LEN*FEAT_DIM] → return last row: [B, FEAT_DIM]
+        return obs[:, -self.feat_dim:]
+
+
+# --- Main Training Function for W&B Sweep (VEC/windowed obs) ---
+def train_sweep_vec():
+    # 1) Initialize W&B run
+    run = wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "xr-abr"),
+        entity=os.environ.get("WANDB_ENTITY"),
+        save_code=True,
+    )
+
+    # 2) Build env (windowed obs)
+    env = ZmqEnvClientVEC()
+
+    # 3) Select and configure the model based on wandb.config
+    model = None
+    algo = wandb.config.algorithm
+
+    print(f"{Colors.GREEN}--- Starting run for algorithm: {algo} ---{Colors.ENDC}")
+    print(f"{Colors.BLUE}{pprint.pformat(dict(wandb.config))}{Colors.ENDC}")
+
+    if algo == "PPO":
+        model = PPO(
+            policy_ppo_a2c, env,
+            learning_rate=wandb.config.learning_rate,
+            n_steps=wandb.config.n_steps,
+            batch_size=wandb.config.batch_size_ppo,
+            n_epochs=wandb.config.n_epochs,
+            gamma=wandb.config.gamma,
+            gae_lambda=wandb.config.gae_lambda,
+            clip_range=wandb.config.clip_range,
+            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+            verbose=1,
+        )
+
+    elif algo == "DQN":
+        model = DQN(
+            "MlpPolicy", env,
+            learning_rate=wandb.config.learning_rate,
+            buffer_size=wandb.config.buffer_size,
+            learning_starts=1000,
+            batch_size=wandb.config.batch_size_dqn,
+            gamma=wandb.config.gamma,
+            train_freq=(1, "step"),
+            target_update_interval=wandb.config.target_update_interval,
+            exploration_fraction=wandb.config.exploration_fraction,
+            exploration_final_eps=wandb.config.exploration_final_eps,
+            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+            verbose=1,
+        )
+
+    elif algo == "A2C":
+        model = A2C(
+            policy_ppo_a2c, env,
+            learning_rate=wandb.config.learning_rate,
+            n_steps=wandb.config.n_steps_a2c,
+            gamma=wandb.config.gamma,
+            vf_coef=wandb.config.vf_coef,
+            ent_coef=wandb.config.ent_coef,
+            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+            verbose=1,
+        )
+
+    elif algo == "RNN_PPO":
+        final_batch_size = coerce_batch_size(
+            n_steps=wandb.config.n_steps,
+            batch_size=wandb.config.batch_size_ppo
+        )
+        model = RecurrentPPO(
+            "MlpLstmPolicy",
+            env,
+            learning_rate=wandb.config.learning_rate,
+            n_steps=wandb.config.n_steps,
+            batch_size=final_batch_size,
+            n_epochs=wandb.config.n_epochs,
+            gamma=wandb.config.gamma,
+            gae_lambda=wandb.config.gae_lambda,
+            clip_range=wandb.config.clip_range,
+            policy_kwargs=dict(
+                net_arch=list(wandb.config.net_arch),
+                lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
+                n_lstm_layers=wandb.config.get("n_lstm_layers", 2),
+            ),
+            verbose=1,
+        )
+    else:
+        raise ValueError(f"Unknown algorithm: {algo}")
+
+    # 4) Callback and learning
+    callback = WandbCallback(
+        model_save_path=f"models/{run.id}",
+        model_save_freq=50_000,
+        verbose=2,
+        log="all",
+    )
+
+    total_steps = N_STEPS_RL
+    model.learn(total_timesteps=total_steps, callback=callback)
+
+    # 5) Save final model as artifact
+    print(f"{Colors.GREEN}--- Training complete. Saving final model. ---{Colors.ENDC}")
+    final_model_path = f"models/{run.id}/final_model.zip"
+    model.save(final_model_path)
+
+    final_artifact = wandb.Artifact(
+        name=f"{algo}-{run.id}-final",
+        type="model",
+        description=f"Final model for a {algo} run after {total_steps} steps."
+    )
+    final_artifact.add_file(final_model_path)
+    run.log_artifact(final_artifact)
+
+    wandb.finish()
 
 
 
@@ -296,4 +505,5 @@ def train_sweep():
     wandb.finish()
 
 if __name__ == "__main__":
-    train_sweep()
+    # train_sweep() 
+    train_sweep_vec()
