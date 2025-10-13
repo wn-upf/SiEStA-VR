@@ -19,7 +19,7 @@ use rand::Rng;
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 
 use crate::debug_bgprint;
-use std::cell::RefCell;
+use std::cell::{RefCell, Cell};
 use std::fmt::{self, Debug};
 use std::{
     cmp::Ordering,
@@ -41,12 +41,12 @@ use std::net::IpAddr;
 
 use std::result::Result::Ok;
 use tai_time::TaiTime;
-use csv::{ReaderBuilder, Writer};
+use csv::{ Writer};
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 // use super::alvr_packets::NetworkStatisticsPacket;
-use std::env;
+// use std::env;
 
 
 
@@ -72,8 +72,17 @@ pub const HAPTICS: u16 = 1;
 pub const AUDIO: u16 = 2;
 pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
-
 pub const CONTROL_STREAM: u16 = 5;
+
+
+pub const FOVOPTIX_BW_PROBE: u16 = 9; 
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct BwProbeHeader {
+    seq: u32,
+    tx_instant_ns: i128, // original send instant (TaiTime since EPOCH in ns)
+    payload_len: u32,    // bytes
+}
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 pub struct ChunkedHevcEncoder {
@@ -556,6 +565,12 @@ pub struct KalmanFilter {
     p_prev: f32,
     k_gain: f32,
     measured_delay: f32,
+
+    pub last_tx_time: f32,  
+    // TaiTime<0>, 
+    pub last_rx_time: f32,  
+    // TaiTime<0>, 
+
 }
 
 impl Default for KalmanFilter {
@@ -571,6 +586,8 @@ impl Default for KalmanFilter {
             p_prev: 0.0,
             k_gain: 0.0,
             measured_delay: 0.0,
+            last_tx_time: 0.0,
+            last_rx_time: 0.0, 
 
         }
     }
@@ -627,6 +644,9 @@ struct ReconstructedPacket {
 
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
+
+    tx_instant_packet: f32,   // used for NADA ABR in XRClient connection loop
+    rx_instant_packet: f32,  
 }
 
 impl fmt::Debug for ReconstructedPacket {
@@ -771,6 +791,9 @@ pub struct ReceiverData<H> {
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
     // tx_instant_first_shard: TaiTime<0>,
+
+    tx_instant_packet: f32,
+    rx_instant_packet: f32, 
 }
 #[allow(unused)]
 impl<H> ReceiverData<H> {
@@ -781,6 +804,13 @@ impl<H> ReceiverData<H> {
             vec![2 as u8, 2]
         }
     }  
+
+    pub fn get_tx_time_first(&self) -> f32 {
+        self.tx_instant_packet
+    }
+    pub fn get_rx_time_last(&self) -> f32 {
+        self.rx_instant_packet
+    }
     pub fn had_packet_loss(&self) -> bool {
         self.had_packet_loss
     }
@@ -920,7 +950,10 @@ impl StreamSocket {
             csv_trace: OldCsvTrace::default(), 
             frame_sizes: None, 
             tmp_buf: Vec::new(), 
-            col_cache: HashMap::new(),
+
+            last_lo : Cell::new(0), 
+            last_hi: Cell::new(1), 
+            // col_cache: HashMap::new(),
         }
     }
 
@@ -1328,8 +1361,8 @@ impl StreamSocket {
                                 - (first_shard_stats.tx_r_instant - prev_frame_tx_r_instant);
 
 
-                            // self.kalman.last_tx_time = first_shard_stats.tx_r_instant; 
-                            // self.kalman.last_rx_time = prev_frame_tx_r_instant;    
+                            self.kalman.last_tx_time = first_shard_stats.tx_r_instant; 
+                            self.kalman.last_rx_time = prev_frame_tx_r_instant;    
                         }
                         self.prev_frame_tx_r_instant = Some(first_shard_stats.tx_r_instant);
 
@@ -1374,10 +1407,9 @@ impl StreamSocket {
                 interarrival_jitter: self.interarrival_jitter,
                 ow_delay: self.kalman.ow_delay,
 
-                // tx_instant_packet: self.kalman.last_tx_time, // used for NADA ABR in XRClient connection loop
-                // rx_instant_packet: self.kalman.last_rx_time, // used for NADA ABR in XRClient connection loop
+                tx_instant_packet: self.kalman.last_tx_time, // used for NADA ABR in XRClient connection loop
+                rx_instant_packet: self.kalman.last_rx_time, // used for NADA ABR in XRClient connection loop
                 filtered_ow_delay: self.kalman.m_current,
-
                 rx_bytes: self.rx_bytes,
                 bytes_in_frame: all_bytes_in_frame,
                 bytes_in_frame_app: all_bytes_in_frame_app,
@@ -1791,8 +1823,9 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             highest_rx_frame_index: packet.highest_rx_frame_index,
             highest_rx_shard_index: packet.highest_rx_shard_index,
 
-            // tx_instant_packet: packet.tx_instant_packet,
-            // rx_instant_packet: packet.rx_instant_packet, 
+            
+            tx_instant_packet: packet.tx_instant_packet,
+            rx_instant_packet: packet.rx_instant_packet, 
         })
     }
 }
@@ -1852,7 +1885,9 @@ pub struct StreamSender<H> {
 
     frame_sizes: Option<FrameSizeTable>, 
     tmp_buf: Vec<u8>,
-    col_cache: HashMap<u32, usize>, 
+    // col_cache: HashMap<u32, usize>, 
+    last_lo: Cell<usize>,
+    last_hi: Cell<usize>,
 }
 
 
@@ -2167,12 +2202,15 @@ impl<H: Serialize> StreamSender<H> {
                         // Cache column index on bitrate (avoid per-frame map lookup):
             let want_mbps = current_bitrate_mbps.round() as u32;
             
-            let col = *self.col_cache.entry(want_mbps).or_insert_with(|| {
-                table.column_for_mbps(want_mbps)
-                    .unwrap_or_else(|| panic!("Bitrate {} Mbps not in CSV", want_mbps))
-            });
+            // let col = *self.col_cache.entry(want_mbps).or_insert_with(|| {
+            //     table.column_for_mbps(want_mbps)
+            //         .unwrap_or_else(|| panic!("Bitrate {} Mbps not in CSV", want_mbps))
+            // });
 
-            let bytes_this_frame = table.bytes(col, id_frame);
+            // let bytes_this_frame = table.bytes(col, id_frame);
+
+            let bytes_this_frame = table.bytes_interp_cached(current_bitrate_mbps as f32, id_frame, &self.last_lo, &self.last_hi); 
+            // bytes interpolation, when current_bitrate is not in {5,10,15..max_bitrate} for fastness
 
             // Reuse one buffer:
             ensure_len_uninit(&mut self.tmp_buf, bytes_this_frame);
@@ -2368,7 +2406,7 @@ impl ReceiverDataStats {
 }
 
 
-use once_cell::sync::OnceCell;
+// use once_cell::sync::OnceCell;
 
 
 //// NEW code for reading CSV of frame sizes, in order to emulate video transmission. 
@@ -2463,6 +2501,107 @@ struct FrameSizeTable {
 }
 
 impl FrameSizeTable {
+
+    // Return interpolated frame size (bytes) for arbitrary Mbps
+    #[inline(always)]
+    fn bytes_interp_cached(&self, want_mbps: f32, frame_idx: usize,
+                           last_lo: &Cell<usize>, last_hi: &Cell<usize>) -> usize
+    {
+        // --- Fast path: exact integer Mbps match
+        if let Some(&col_idx) = self.col_index.get(&(want_mbps.round() as u32)) {
+            let v = &self.framesizes[col_idx];
+            return v[frame_idx % v.len()] as usize;
+        }
+
+        let mbps_cols = &self.mbps_cols;
+        let n = mbps_cols.len();
+        if n == 0 {
+            return 0;
+        }
+
+        // --- Clamp to bounds
+        if want_mbps <= mbps_cols[0] as f32 {
+            return self.framesizes[0][frame_idx % self.framesizes[0].len()] as usize;
+        }
+        if want_mbps >= mbps_cols[n - 1] as f32 {
+            return self.framesizes[n - 1][frame_idx % self.framesizes[n - 1].len()] as usize;
+        }
+
+        // --- Try cached indices
+        let mut lo = last_lo.get();
+        let mut hi = last_hi.get();
+
+        // Reuse cache if still valid
+        if lo < n && hi < n {
+            let m0 = mbps_cols[lo] as f32;
+            let m1 = mbps_cols[hi] as f32;
+            if want_mbps >= m0 && want_mbps <= m1 {
+                let f = (want_mbps - m0) / (m1 - m0);
+                let v0 = self.framesizes[lo][frame_idx % self.framesizes[lo].len()] as f32;
+                let v1 = self.framesizes[hi][frame_idx % self.framesizes[hi].len()] as f32;
+                return ((v0 + f * (v1 - v0)).round() as u32) as usize;
+            }
+        }
+
+        // --- Binary search fallback if outside cached bracket
+        hi = match mbps_cols.binary_search_by(|&v| v.cmp(&(want_mbps as u32))) {
+            Ok(i) => i,
+            Err(i) => i,
+        };
+        lo = hi.saturating_sub(1);
+        last_lo.set(lo);
+        last_hi.set(hi);
+
+        let m0 = mbps_cols[lo] as f32;
+        let m1 = mbps_cols[hi] as f32;
+        let f = (want_mbps - m0) / (m1 - m0);
+
+        let v0 = self.framesizes[lo][frame_idx % self.framesizes[lo].len()] as f32;
+        let v1 = self.framesizes[hi][frame_idx % self.framesizes[hi].len()] as f32;
+        ((v0 + f * (v1 - v0)).round() as u32) as usize
+    }
+
+
+    #[inline(always)]
+    fn bytes_interp(&self, want_mbps: f32, frame_idx: usize) -> usize {
+        // Fast path: exact match
+        if let Some(&col_idx) = self.col_index.get(&(want_mbps.round() as u32)) {
+            let v = &self.framesizes[col_idx];
+            return v[frame_idx % v.len()] as usize;
+        }
+
+        // Find bracketing columns
+        let mbps_cols = &self.mbps_cols;
+        let n = mbps_cols.len();
+        if n == 0 {
+            return 0;
+        }
+        if want_mbps <= mbps_cols[0] as f32 {
+            return self.framesizes[0][frame_idx % self.framesizes[0].len()] as usize;
+        }
+        if want_mbps >= mbps_cols[n - 1] as f32 {
+            return self.framesizes[n - 1][frame_idx % self.framesizes[n - 1].len()] as usize;
+        }
+
+        // Binary search avoids O(n)
+        let hi = match mbps_cols.binary_search_by(|&v| v.cmp(&(want_mbps as u32))) {
+            Ok(i) => i,
+            Err(i) => i,
+        };
+        let lo = hi.saturating_sub(1);
+
+        let m0 = mbps_cols[lo] as f32;
+        let m1 = mbps_cols[hi] as f32;
+        let f = (want_mbps - m0) / (m1 - m0); // interpolation factor in [0,1]
+
+        let v0 = self.framesizes[lo][frame_idx % self.framesizes[lo].len()] as f32;
+        let v1 = self.framesizes[hi][frame_idx % self.framesizes[hi].len()] as f32;
+
+        ((v0 + f * (v1 - v0)).round() as u32) as usize
+    }
+
+
+
     fn load(final_file: &str, fps: u32) -> anyhow::Result<Self> {
         let path = get_prefix_path(&format!(
             "csv_framesizes/{}_{}fps_fused_framesizes.csv",

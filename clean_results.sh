@@ -1,7 +1,7 @@
 #!/bin/bash
 
 RESULTS_DIR="/home/boris/Desktop/Rust_MG1/asynchronix/Results"
-INTERVAL_MINUTES=4  # how often to clean (every 30 minutes)
+INTERVAL_MINUTES=1  # how often to clean (every 30 minutes)
 
 while true; do
     echo "[$(date)] Cleaning up $RESULTS_DIR ..."

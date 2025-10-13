@@ -10,8 +10,8 @@ use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 use lib::models_mm1k::NetworkPattern;
 use tai_time::TaiTime;
-use xkbcommon::xkb::Table;
-use crate::lib::models_XR::BitrateMode;
+// use xkbcommon::xkb::Table;
+// use crate::lib::models_XR::BitrateMode;
 
 use rand::seq::SliceRandom;
 // use futures_util::Stream;
@@ -105,12 +105,13 @@ impl VRPair {
 
         let mut initial_bitrate= initial_bitrate_orig; 
 
-        let abr_choice; 
+        let mut abr_choice; 
     
-        if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
+        // UNCOMMENT (when not evaluating RL in same scenario) . 
+        // if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
 
-            if pair_index == 0{
-                abr_choice = 3; 
+            if pair_index == 0{ 
+                abr_choice = abr_enabled; 
                 // do nothing, it's correct
             }
             else{
@@ -122,10 +123,10 @@ impl VRPair {
                     initial_bitrate = *values.choose(&mut rng).unwrap() as f64; 
                 }                
             }
-        }
-        else{
-            abr_choice = abr_enabled; 
-        }
+        // }
+        // else{
+            // abr_choice = abr_enabled; //makes all sessions have same ABR choice
+        // }
 
         let bm_string = match abr_choice
             {
@@ -169,9 +170,7 @@ impl VRPair {
             simu_unique_str, // for identifying each simulation on the RLConnector
         );
 
-        let everest_enabled = if abr_choice == 2 { true } else {false}; 
-
-        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, everest_enabled, simu_unique_str, bm_string);
+        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, abr_choice, simu_unique_str, bm_string);
 
         let mut sta_server = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -642,7 +641,8 @@ fn main() {
                 generate_session_timeline_basic(init, stoptime)
         }; 
 
-        if i == 0 && abr == 3 {
+        // if i == 0 && abr == 3 {
+        if i == 0 { // Make STA0 always be active, since it is used as the one for plots for a fair comparison.  
             sessions = generate_session_timeline_basic(init, stoptime); // Force the ReinforcementLearner to be active all across the simulation. 
         }
         // let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
@@ -650,7 +650,6 @@ fn main() {
         print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
         let mut sessions = sessions;
         sessions.sort_by(|a,b| a.0.partial_cmp(&b.0).unwrap());
-
 
         let mut has_scheduled_vsync: bool = false; 
 

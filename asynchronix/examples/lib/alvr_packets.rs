@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::lib::EdcaAc;
+// use crate::lib::EdcaAc;
 /// A 2-dimensional vector.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 // #[cfg_attr(feature = "cuda", repr(align(8)))]
@@ -181,6 +181,24 @@ pub struct DeadlineShardlossStatPacket {
     pub shards_lost: Vec<usize>,
     // pub edca_ac: EdcaAc, 
 }
+#[derive(Default, Serialize, Deserialize, Clone, Debug )]
+pub struct NadaStats{
+    pub frame_send_timestamp:i64,
+    pub shard_loss_rate:f64,
+    pub plr: f64,
+    pub is_idr:bool,
+
+    //RTCP Feedback Report: NADA Receiver--> Sender
+    pub nada_feedback:bool,
+    pub nada_xcurr:f64,
+    pub nada_rmode:i8,
+    pub nada_recv:i64,
+
+    //Only to debug NADA Receiver
+    pub t_last: i64,
+    pub d_queue:i64,
+    pub d_tilde:f64,
+} 
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkStatisticsPacket {
@@ -215,6 +233,8 @@ pub struct NetworkStatisticsPacket {
     pub everest_command: EverestCommand, 
     pub buffer_level_decoder: u8, 
     pub rebuffering_events_last_s: u8, 
+
+    pub nada_stats: NadaStats, 
 
     // NADA FIELDS after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed 
     // pub frame_send_timestamp:i64,

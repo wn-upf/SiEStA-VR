@@ -60,6 +60,7 @@ pub mod alvr_control_socket;
 pub mod taitime_serde;
 
 pub mod gcc_nada_estimator;
+pub mod fovoptix;
 
 // pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {

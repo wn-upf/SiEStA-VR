@@ -27,7 +27,7 @@ SERIAL_EXECUTION=1
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=150.0
+simTime=90.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=20E6;   ## BG traffic arrival rate
@@ -45,7 +45,7 @@ initial_bitrate_mbps=( 10.0 20.0 40.0 )
 
 ABR_ENABLED=( 3 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
-RANDOM_SEEDS=({1..10})
+RANDOM_SEEDS=({1..500})
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")

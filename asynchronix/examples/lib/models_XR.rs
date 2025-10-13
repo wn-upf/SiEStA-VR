@@ -22,7 +22,7 @@ use regex::Regex;
 use std::cell::RefCell;
 use std::fs::{OpenOptions};
 use std::io::{BufReader, Read, Write, BufWriter};
-use std::net::Ipv4Addr;
+use std::net::{self, Ipv4Addr};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,8 +33,9 @@ use std::path::Path;
 use minifb::{Window, WindowOptions};
 use std::{fs::File};
 
-use crate::lib::models_mm1k::NetworkPattern;
-
+use crate::lib::{models_mm1k::NetworkPattern,
+    fovoptix::{FOAimdRateControl, FovOptixStruct, * }};
+// }; 
 use crate::{format_elapsed, print_green};
 use crate::lib::{HeaderALVRStream, USE_FFMPEG_DEMO};
 use crate::print_pretty;
@@ -56,13 +57,13 @@ use std::time::{Duration, Instant};
 use std::{mem, vec};
 
 use crate::lib::alvr_control_socket::ProtoControlSocket;
-use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket, EverestCommand,};
+use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket, EverestCommand, NadaStats, };
 use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
     SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader, CHUNK_DURATION_F64_S,
 };
 use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
+    AUDIO, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO, FOVOPTIX_BW_PROBE, 
 };
 use crate::lib::DEBUG_PRINT_ENABLED;
 use dashmap::DashMap;
@@ -91,6 +92,7 @@ use super::get_third_octet;
 // use async_process::Child;
 
 use crate::lib::gcc_nada_estimator::*;
+
 
 fn hide_by_title_with_wmctrl(title: &str) {
     let _ = std::process::Command::new("sh")
@@ -1219,20 +1221,30 @@ pub enum BitrateMode {
             last_decision_instant: Arc<Mutex<TaiTime<0>>>,
             pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
         }, 
-        GCCNadaPort{
+        GCCPort{
             gcc_estimator: GccBandwidthEstimator, 
             framerate: f64 // to reset without needing to store framerate in parent class. 
-        }
+        },
+
+        NADACiscoPort{
+            // last_bitrate_mbps: f64, 
+        }, 
+
+        FovOptixPort{
+            last_bitrate_mbps: f32,   // FovOptix requires additional network probing, TODO. 
+        },
 }
 
 impl BitrateMode{
     fn variant_name(&self) -> String {
         match self {
             BitrateMode::ConstantMbps(val) =>       format!("CBR {} Mbps", val),      
-            BitrateMode::EVeREst { .. } =>                "EVeREst".to_string(),
+            BitrateMode::EVeREst { .. } =>                "EVeREst-Intra".to_string(),
             BitrateMode::NestVr { .. } =>                 "NeSt-VR".to_string(), 
             BitrateMode::ReinforcementLearner { .. } =>   "ReinforcementLearner".to_string(),
-            BitrateMode::GCCNadaPort { .. } =>            "GCC Port".to_string(),   
+            BitrateMode::GCCPort { .. } =>                 "GCC Port".to_string(),   
+            BitrateMode::NADACiscoPort {  } =>             "NADA Port".to_string(), 
+            BitrateMode::FovOptixPort { .. }        =>    "FovOptix Port".to_string(), 
         }
     }
 }
@@ -1628,6 +1640,7 @@ pub struct BitrateManager {
 
     last_target_bitrate_bps: f32,
 
+
     bitrate_ladder_bps: Option<Vec<f32>>, 
     bitrate_step_size_bps_nest: f32, 
     flr_shardloss_count: TimedVecFLR,  
@@ -1635,14 +1648,20 @@ pub struct BitrateManager {
     last_rebuffer_avg_sum: u8,   
     t_end_simulation: f64, 
     sim_unique_string: String, 
+    
+    
+    pub last_nada_target_bitrate_mbps: Option<f64>, //updated on receive of NADA feedback data.  
+
+    aimd_manager: Option<Arc<Mutex<FOAimdRateControl>>>, 
 }
 
 
 
 impl BitrateManager {
-   
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str) -> Self {
     
+
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str) -> Self {
+        
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
             NestVrProfile::Balanced => {1},
@@ -1653,7 +1672,7 @@ impl BitrateManager {
         let mut bitrate_ladder_std_bps = Vec::new(); 
         let bitrate_step_count = 9; 
 
-        let max_mbps = 100.0; 
+        let max_mbps = MAX_MBPS_LADDER; 
         let min_mbps = 10.0; 
 
         let (min_bps, max_bps) = ( min_mbps * 1e6, max_mbps * 1e6); 
@@ -1714,7 +1733,7 @@ impl BitrateManager {
                     }
                 }
             2 => {  
-                    let values_original = [10.0, 20.0, 40.0, 60.0, 80.0, 120.0]; 
+                    let values_original = [10.0, 20.0, 40.0, 60.0, 80.0, MAX_MBPS_LADDER]; 
                     let mut bitrate_ladder_mbps = Vec::new(); 
                     for value in values_original.iter(){
                         bitrate_ladder_mbps.push(*value as f32); 
@@ -1724,7 +1743,7 @@ impl BitrateManager {
                     BitrateMode::EVeREst { bitrate_ladder_mbps }
                 }
             3 => { // RL 
-                let ladder_mbps = (10..=100).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
+                let ladder_mbps = (10..=MAX_MBPS_LADDER as usize).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
                 print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
 
@@ -1745,9 +1764,15 @@ impl BitrateManager {
             4 => { // GCC estimator. 
 
                 let gcc_estimator = GccBandwidthEstimator::new(initial_framerate as f64); // make period be adaptive to framerate. 
-
-                BitrateMode::GCCNadaPort { gcc_estimator, framerate: initial_framerate as f64}
+                BitrateMode::GCCPort { gcc_estimator, framerate: initial_framerate as f64}
             }
+            5 => {
+                BitrateMode::NADACiscoPort{ }
+            }
+            6 => {
+                BitrateMode::FovOptixPort { last_bitrate_mbps : initial_bitrate_mbps }
+            }
+
 
             _ => BitrateMode::ConstantMbps(initial_bitrate_mbps)
         };          
@@ -1795,6 +1820,9 @@ impl BitrateManager {
             last_rebuffer_avg_sum: 0, 
             t_end_simulation: t_end_simu, 
             sim_unique_string: sim_unique_string.to_string(), 
+
+            last_nada_target_bitrate_mbps: None, 
+            aimd_manager: None, 
         }
     }
 
@@ -1836,9 +1864,22 @@ impl BitrateManager {
                 *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
                 *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
             }
-            BitrateMode::GCCNadaPort { gcc_estimator , framerate} => {
+            BitrateMode::GCCPort { gcc_estimator , framerate} => {
                 self.last_target_bitrate_bps = GCC_INIT_CONFIGURED_BITRATE as f32 * 1e6;
                 *gcc_estimator = GccBandwidthEstimator::new(*framerate);
+            }
+
+            BitrateMode::NADACiscoPort { ..  } => {
+
+                self.last_target_bitrate_bps = NADA_INITIAL_RATE as f32; // in bps
+                // last_order_bitrate_mbps = 
+                // }
+            }
+            
+            BitrateMode::FovOptixPort { .. } => {
+                if self.aimd_manager.is_none(){
+                    self.aimd_manager = Some(Arc::new(Mutex::new(FOAimdRateControl::new(true)))); 
+                }
             }
         }
 
@@ -1885,7 +1926,7 @@ impl BitrateManager {
 
         match &mut self.bitrate_mode{
             
-            BitrateMode::GCCNadaPort { gcc_estimator, ..} => {
+            BitrateMode::GCCPort { gcc_estimator, ..} => {
 
                 let current_frame_send_timestamp = taitime_to_f64!(send_instant) * 1e6; // input units: micros 
                 let current_frame_arrival_timestamp = taitime_to_f64!(now) * 1e6;       // input units: micros 
@@ -1958,8 +1999,7 @@ impl BitrateManager {
 
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
-
-            if let BitrateMode::GCCNadaPort { ref mut gcc_estimator , ..} = self.bitrate_mode {
+            if let BitrateMode::GCCPort { ref mut gcc_estimator , ..} = self.bitrate_mode {
                 let bitrate_bps = gcc_estimator.get_target_bitrate_bps();
                 self.last_target_bitrate_bps = bitrate_bps as f32;  // Done here because only in this case we need mut access to gcc_estimator. 
             }
@@ -2212,8 +2252,36 @@ impl BitrateManager {
                         
                         self.last_target_bitrate_bps
                                         
-                },
+                }
 
+                BitrateMode::NADACiscoPort {} => {
+                    if let Some(last_order_bitrate_mbps ) = self.last_nada_target_bitrate_mbps{
+                        let bitrate_bps = last_order_bitrate_mbps * 1e6; 
+                        self.last_target_bitrate_bps = bitrate_bps as f32; 
+
+                        self.last_target_bitrate_bps
+                    }
+                    else{
+                        panic!("WHATS HAPPPPPPPPPPENING CATCH!"); 
+                        self.last_target_bitrate_bps 
+                    }
+                }, 
+
+                BitrateMode::FovOptixPort { .. } => {
+
+                    println!("Value is configured BEFORE one pass ABR: {:.2} Mbps", self.last_target_bitrate_bps / 1e6); 
+                    self.last_target_bitrate_bps
+                }
+
+                // BitrateMode::FovOptixPort { last_bitrate_mbps }{
+
+                //     if let Some(guard) = self.aimd_manager.unwrap().lock().unwrap(); 
+                //     {
+                //         bitrate_bps=guard.flag_for_qp;
+                //         let nol=guard.normalize_delta;
+                //         let tps=guard.current_bitrate_/72./8.;
+                //     }
+                // }
                 _ => {
                     self.last_target_bitrate_bps
                 }
@@ -2247,7 +2315,9 @@ impl BitrateManager {
         let flr_avg_s = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
                 (1.0 / self.frame_interval_average.get_average()); // percentage according to encoded frames window average, 
                                                                                 // (not in the same period though, watch out)
-
+        // let flr_sum = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()); 
+        
+        
         let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
         let rebuffer_event_sum = self.last_rebuffer_avg_sum; 
 
@@ -2261,6 +2331,7 @@ impl BitrateManager {
             frame_interarrival_avg_ms,
             frame_interarrival_std_ms,  
             flr_avg_s,
+            // flr_sum,
             buffer_level_avg_s, 
             rebuffer_event_sum, 
         }
@@ -2425,6 +2496,7 @@ struct TrackingLog {
     orientation: Quat,
     linear_velocity: Vec3,
 }
+
 #[allow(unused)]
 pub struct XRServer {
     pub ip_self: IpAddr,
@@ -2432,7 +2504,9 @@ pub struct XRServer {
     pub t_0: TaiTime<0>,
     pub bitrate_manager: BitrateManager,
     pub video_app_sender: Option<StreamSender<VideoPacketHeader>>,
-    pub audio_app_sender: Option<StreamSender<()>>,  
+    pub audio_app_sender: Option<StreamSender<()>>,
+    pub bw_probe_sender: Option<StreamSender<()>>,                  // Optional, only used by FovOptix to estimate current BW via active probing. 
+
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
     pub control_socket_sender: Option<ControlSocketSender<ClientControlPacket>>,
@@ -2457,6 +2531,10 @@ pub struct XRServer {
     pub csv_tracking: CsvTracking, 
     pub sim_unique_string: String, 
 
+    pub nada_sender: Option<Arc<Mutex<NadaSender>>>, 
+
+    pub fov_optix_manager : Option<Arc<Mutex<FovOptixStruct>>> , 
+
 }
 #[allow(unused)]
 impl XRServer {
@@ -2465,7 +2543,7 @@ impl XRServer {
         ip_client: IpAddr,
         t0_sim: TaiTime<0>,
         frame_rate: f32,
-        initial_bitrate: f32,
+        initial_bitrate_mbps: f32,
         name_folder: &str,
         effects: &[NetworkPattern], 
         file_name_video: &str,
@@ -2502,6 +2580,35 @@ impl XRServer {
         let num = crate::lib::get_4_octet(ip_self);
         let history_interval = BITRATE_UPDATE_INTERVAL;
 
+        let nada_sender = if abr_enabled == 5{
+            Some(Arc::new(Mutex::new(NadaSender::new(t0_sim))))
+        }
+        else{
+            None
+        }; 
+
+        let fovoptix_struct: Option<Arc<Mutex<FovOptixStruct>>> = if abr_enabled == 6 {
+            // let interarrival_man = FOInterArrival::new(60, 0.001);  // completely unused... 
+            let trendline_man = FOTrendlineEstimator::new(); 
+            let aimd_man =    FOAimdRateControl::new(true); 
+
+            let bitrate_est_man = FOBitrateEstimator::new(); 
+            let ratecontrol_man= FORateControlInput::new(FOBandwidthUsage::kBwNormal, Some((30. * 1024. * 1024.))); 
+
+
+            Some(Arc::new(Mutex::new( FovOptixStruct::new(
+                trendline_man, 
+                aimd_man, 
+                bitrate_est_man, 
+                ratecontrol_man, 
+                initial_bitrate_mbps as f64 )
+            )))
+        }
+        else{
+            None
+        }; 
+
+
         Self {
             ip_self,
             ip_client,
@@ -2510,7 +2617,7 @@ impl XRServer {
             bitrate_manager: BitrateManager::new(
                 MAX_HISTORY_SIZE,
                 frame_rate,
-                initial_bitrate,
+                initial_bitrate_mbps,
                 abr_enabled, 
                 nest_vr_profile, 
                 t_end_simu, 
@@ -2520,6 +2627,8 @@ impl XRServer {
 
             video_app_sender: None,
             audio_app_sender: None, 
+            bw_probe_sender: None,  // Optional, only used by FovOptix to estimate current BW via active probing. 
+
 
             tracking_app_receiver: None,
             statistics_app_receiver: None,
@@ -2553,6 +2662,9 @@ impl XRServer {
             last_tracking_rx_instant: t0_sim, 
             csv_tracking: CsvTracking::new(name_folder, num).unwrap(), 
             sim_unique_string: sim_unique_string.to_string(), 
+            nada_sender, 
+            fov_optix_manager: fovoptix_struct, 
+            
         }
     }
 
@@ -2640,6 +2752,10 @@ impl XRServer {
                     if let Some((_, send_instant)) = map_clone.remove(&frame_id) {
                         rtt = now.duration_since(send_instant);
                         debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
+
+
+                        let netstats= network_stats.clone(); 
+
                         let (peak_network_throughput_bps, frame_interarrival_s) =
                             self.STATISTICS_MANAGER.report_network_statistics(
                                 network_stats.clone(),
@@ -2657,6 +2773,20 @@ impl XRServer {
                             now,  
                             send_instant, 
                         );
+
+                        if netstats.nada_stats.nada_feedback{                                              // Should be equivalent to matching bitrate_mode to NADAPort
+                            let client_stats = netstats.nada_stats.clone(); 
+                            let feedback_report  =  NADAFeedbackReport::new(client_stats.nada_rmode, client_stats.nada_xcurr, client_stats.nada_recv, client_stats.d_queue, client_stats.d_tilde, client_stats.plr);
+                            if let Some(nada_sender_arc) = self.nada_sender.as_mut(){
+                                let mut guard = nada_sender_arc.lock().unwrap(); 
+                                guard.update_on_receive_feedback(send_instant.duration_since(TaiTime::EPOCH).as_micros() as i64, feedback_report, self.fps as f64);
+                                self.bitrate_manager.last_nada_target_bitrate_mbps = Some(guard.get_target_bitrate() as f64 / 1024.0 / 1024.0) ;
+                            }
+                        }
+                        if let Some(foman ) = self.fov_optix_manager.as_mut(){ // Should be equivalent to matching bitrate_mode to FovOptixPort
+                            let mut guard = foman.lock().unwrap(); 
+                            guard.report_fovoptix_stats_server(netstats, send_instant, now); 
+                        }
 
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
@@ -2980,6 +3110,73 @@ impl XRServer {
     }
 
 
+    pub fn generate_FO_bandwidth_probe<'a>(
+        &'a mut self, _: (), context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let now = context.scheduler.time();
+
+            // build a small payload (100 bytes like original)
+            let payload_len: usize = 100;
+
+            if let Some(fov_man) = self.fov_optix_manager.as_mut(){
+
+
+                let mut pkt: MpduPacket = MpduPacket::new();
+                {                                                   // ( scoped so mutex guard is dropped before await, future not Send, etc. )
+                    let mut guard = fov_man.lock().unwrap(); 
+                    let mut header = guard.header; 
+                        // Put our little header inside the payload so the echo can carry it back:
+                    let header = BwProbeHeader {
+                        seq: header.seq,
+                        tx_instant_ns: now.duration_since(TaiTime::EPOCH).as_nanos() as i128,
+                        payload_len: payload_len as u32,
+                    };
+                    let header_bytes = bincode::serialize(&header).unwrap();
+
+                    // NOTE: ALVR framing expects SHARD_PREFIX + serialized stream header for real streams.
+                    // For this synthetic probe we don't need a full VideoPacketHeader; we just carry our
+                    // BwProbeHeader as payload after the SHARD_PREFIX, keeping your `parse_shard_data` happy.
+
+                    let mut raw = vec![0u8; SHARD_PREFIX_SIZE + header_bytes.len() + payload_len];
+                    raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + header_bytes.len()]
+                        .copy_from_slice(&header_bytes);
+
+                    pkt.header_alvr = HeaderALVRStream {
+                        packet_length: raw.len() as u32,
+                        stream_id: FOVOPTIX_BW_PROBE,
+                        next_packet_index: header.seq,
+                        shards_count: 1,
+                        shard_index: 0,
+                        tx_instant: now.duration_since(TaiTime::EPOCH).as_secs_f32(), // your TaiTime<0>
+                    };
+                    pkt.data_inner = raw;
+
+                    // Use BE or Background AC so it doesn't fight with video/audio priorities:
+                    pkt.edca_ac = EdcaAc::Background;
+                    
+                    // book-keeping so we can compute RTT/goodput on echo
+                    guard.bw_sent_map.insert(guard.bw_seq, now);
+                    guard.bw_seq = guard.bw_seq.wrapping_add(1);
+                }  
+                // guard.drop(); 
+                // send into the simulated network
+                self.outport_videoapp_network.send(pkt).await;   
+
+                // probe cadence: 20ms is a nice compromise; tune to your needs
+                context.scheduler
+                    .schedule_event(Duration::from_millis(20), Self::generate_FO_bandwidth_probe, ())
+                    .unwrap();
+                }
+                else{
+                    panic!("NEVER SHOULD BE CALLED IF FOVOPTIX NOT ON!"); 
+                }
+        }
+    }
+
+
+
+
 
     pub fn generate_video_frame<'a>(
         &'a mut self,
@@ -3012,11 +3209,11 @@ impl XRServer {
                 // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32()); 
 
                 let count = get_counter().fetch_add(1, Ordering::Relaxed);
+
+
                 
-
-
                 if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || // One pass every BITRATE_UPDATE_INTERVAL
-                    !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCNadaPort{ .. }) 
+                    !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCPort{ .. }) 
                 {  
                     if (now.duration_since(self.bitrate_manager.last_update_instant) >= duration_abr){
                        
@@ -3032,18 +3229,38 @@ impl XRServer {
 
                         // print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
                     }
-                } 
-                else{ // EveRest classic and GCC are applied per-frame. 
+                }                
+                else{ // EveRest classic, GCC, FovOptix are applied per-frame. 
+
+                    if matches!(self.bitrate_manager.bitrate_mode , BitrateMode::FovOptixPort { ..}){
+                        if let Some(man) = self.fov_optix_manager.as_mut(){
+
+                            let mut guard = man.lock().unwrap(); 
+
+                            let bitrate_bps = guard.aimd.flag_for_qp; 
+                            let nol = guard.aimd.normalize_delta; 
+                            let tps =      guard.aimd.current_bitrate_ / 72.0 / 8.0 ; // Is this only valid for 72 FPS? :/      
+
+                            println!("[FOVOPTIX] Bitrate Mbps : {:.2} Mbps", bitrate_bps as f32 / 1e6 ); 
+
+
+                            panic!("CHECK FovOptix paper and VideoEncoderNVENC: Actual usage of nol and tps"); 
+                            self.bitrate_manager.last_target_bitrate_bps = bitrate_bps as f32; 
+                        }
+                    }
 
                     let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
                     
                     let perfect_info_message = PerfectInfoBitrateMessage{bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),  bitrate_mbps: last_bitrate_mbps }; 
                     self.output_perfect_information_bitrate.send(perfect_info_message).await;  // Client knows the bitrate ladder, needed for thresholds computing in HMD. 
-                    
+
                     // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;   
-                
                 }
+
+
+
+
                 if count % 80 == 0 {
                     print_green!("{} [{}]  Current bitrate: {} Mbps", format_elapsed!(now), self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
                 }
@@ -3162,6 +3379,8 @@ impl XRServer {
                 Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO, self.t_0));
             
             self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0)); 
+
+            self.bw_probe_sender = Some(stream_socket.request_stream(P, t0))
             
             
             self.tracking_app_receiver =
@@ -3187,7 +3406,11 @@ impl XRServer {
 
             XRServer::generate_video_frame(self, (), context).await;
             XRServer::generate_audio_frame(self, (), context).await; 
-            // STEP 2: DO SAME FOR REST OF PACKETS (VIDEO; HAPTICS) and loop using context.scheduler!
+
+            if matches!(self.bitrate_manager.bitrate_mode, BitrateMode::FovOptixPort { .. }) {
+                XRServer::generate_FO_bandwidth_probe(self, (), context).await; 
+            }
+            // STEP 2: DO SAME FOR HAPTICS using context.scheduler!
             // TODO!
         }
     }
@@ -3674,7 +3897,9 @@ pub struct XRClient {
     bm_string: String, 
 
 
-    nada_receiver: Arc<Mutex<NadaReceiver>>, 
+    nada_receiver: Option<Arc<Mutex<NadaReceiver>>>,
+
+    abr_mode: usize, 
     // everest_capacity_vec: Vec<f32>, 
     // everest_throughput_vec: Vec<f32>, 
 }
@@ -3687,13 +3912,24 @@ impl XRClient {
         now: TaiTime<0>,
         name_folder: &str,
         test: &str,
-        everest_enabled: bool, 
+        // everest_enabled: bool,  // todo, match on abr_mode == 2 instead
+        abr_mode: usize, 
         simu_id: &str, // for logging
         bm_str: &str,  // for logging 
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
         let synchronized_throttle = Arc::new(Semaphore::new(0));
+        
+        let nada_receiver = if abr_mode == 5 { // ONLY for NADA (nest>1, everest>2, RL>3, Gcc>4,NADA>5 )
+            Some(Arc::new(Mutex::new(NadaReceiver::new())) )
+        }
+        else{
+            None
+        }; 
+
+        let everest_enabled = abr_mode == 2; 
+        
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
             outport_tracking_network: Output::default(),
@@ -3781,7 +4017,8 @@ impl XRClient {
             sim_unique_string: simu_id.to_string(), //for logging                
             bm_string: bm_str.to_string(),          //for logging   
 
-            nada_receiver: Arc::new(Mutex::new(NadaReceiver::new())) 
+            nada_receiver,  
+            abr_mode, 
         }
     }
 
@@ -4270,11 +4507,6 @@ impl XRClient {
 
                     let mut command_abr_everest = EverestCommand::Continue; 
 
-                    
-                    
-
-
-
 
                     if self.everest_enabled {
                         pub const EVEREST_CLASSIC : bool = false; 
@@ -4371,38 +4603,47 @@ impl XRClient {
                     
                     
                     
-                    //////////////////////////////////////////////  // NADA STATS (TODO)
-                    /// 
-                    
-                    // {
-                    //     let mut nada_receiver = self.nada_receiver.lock().unwrap();
-                    //     nada_receiver.compute_oneway_delay(frame_send_timestamp, arrival_ts);
-                    //     nada_receiver.update_receive_loss_rate(size);
-                    //     let is_feedback_on = nada_receiver.time_to_report_feedback(false, false);
+                    //////////////////////////////////////////////  // NADA rcv loop upon succesfully receiving a full frame. 
+                    let mut nada_stats: NadaStats = NadaStats::default(); 
 
-                    //     //if there is a feedback to report
-                    //     if is_feedback_on{
-                    //         //send RTCP feedback report containing values of: rmode, x_curr, and r_recv
-                    //         frame.client_stats.nada_feedback = true;
-                    //         frame.client_stats.nada_xcurr = nada_receiver.x_curr;
-                    //         frame.client_stats.nada_rmode = match nada_receiver.rmode {
-                    //             RateUpdateMode::AcceleratedRampUp => 0,
-                    //             RateUpdateMode::GradualUpdate => 1,
-                    //             _ => 1,
-                    //         };
-                    //         frame.client_stats.nada_recv = nada_receiver.r_recv;
+                    if let Some( nada_receiver_in) = self.nada_receiver.as_mut(){
+                            
+                        let mut nada_receiver = nada_receiver_in.lock().unwrap(); 
 
-                    //         //To Debug NADA Receiver, report values of: t_last, d_fwd, d_tilde, d_queue, p_loss
-                    //         frame.client_stats.plr = nada_receiver.p_loss;
-                    //         frame.client_stats.d_tilde = nada_receiver.d_tilde;
-                    //         frame.client_stats.d_queue = nada_receiver.d_queue;
+                        let frame_send_timestamp =     data.get_tx_time_first();  // as secs; 
+                        let frame_recv_timestamp =     data.get_rx_time_last();  //as secs; 
+                        let size = data.get_bytes_in_frame() as usize; 
 
-                    //         //update t_last = t_curr
-                    //         nada_receiver.update_t_last();
-                    //     }else{
-                    //         frame.client_stats.nada_feedback = false;
-                    //     }
-                    // }
+                        let micros_send_ts = (frame_send_timestamp * 1_000_000.0).round() as i64;
+                        let micros_rcv_ts =  (frame_recv_timestamp * 1_000_000.0).round() as i64; 
+                        
+                        nada_receiver.compute_oneway_delay(micros_send_ts, micros_rcv_ts); //inputs as micros
+                        nada_receiver.update_receive_loss_rate(size);
+                        let is_feedback_on = nada_receiver.time_to_report_feedback(now, false, false);
+
+                        //if there is a feedback to report
+                        if is_feedback_on{
+                            //send RTCP feedback report containing values of: rmode, x_curr, and r_recv
+                            nada_stats.nada_feedback = true;
+                            nada_stats.nada_xcurr = nada_receiver.x_curr;
+                            nada_stats.nada_rmode = match nada_receiver.rmode {
+                                RateUpdateMode::AcceleratedRampUp => 0,
+                                RateUpdateMode::GradualUpdate => 1,
+                                _ => 1,
+                            };
+                            nada_stats.nada_recv = nada_receiver.r_recv;
+
+                            //To Debug NADA Receiver, report values of: t_last, d_fwd, d_tilde, d_queue, p_loss
+                            nada_stats.plr = nada_receiver.p_loss;
+                            nada_stats.d_tilde = nada_receiver.d_tilde;
+                            nada_stats.d_queue = nada_receiver.d_queue;
+
+                            //update t_last = t_curr
+                            nada_receiver.update_t_last(now);
+                        }else{
+                            nada_stats.nada_feedback = false;
+                        }
+                    }
 
                     ///////////////////////////////////////////////// NADA STATS END
                     let net = NetworkStatisticsPacket {
@@ -4431,7 +4672,7 @@ impl XRClient {
                         buffer_level_decoder: self.decoder_queue.len() as u8,  
                         rebuffering_events_last_s: self.rebuffer_event_counter.sum_in_period() as u8, // should be impossible to overflow unless FPS > 256 (not planned, makes no sense) 
                         // edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
-                        
+                        nada_stats, 
                     };
 
                     if self.last_throughput_avg == 0.0 {

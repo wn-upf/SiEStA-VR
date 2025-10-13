@@ -7,7 +7,7 @@ use crate::lib::{
 };
 use crate::lib::DebugColor;
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+// use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::Path;
 // use ::{warn, SlidingWindowAverage};
@@ -109,8 +109,6 @@ pub struct StatisticsManager {
     // optional: only log every N frames
     // stats_stride: usize,
     frame_counter: usize,
-
-
 }
 
 use std::{fs::{ create_dir_all}, io::{BufWriter}, thread,};
@@ -297,6 +295,9 @@ impl StatisticsManager {
             id_XR: ip_self,
             csv_sink,
             frame_counter: 0,
+
+            // flr_shardloss_count: TimedVecFLR::new(), 
+
         }
     }
 

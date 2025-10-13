@@ -21,8 +21,8 @@ module load x264
 export PATH=$HOME/.local/bin:$PATH
 
 
-NUMBER_OF_JOBS=2
-SERIAL_EXECUTION=1
+NUMBER_OF_JOBS=3
+SERIAL_EXECUTION=0
 # initial_bitrate_mbps=( 100.0 )
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
@@ -39,11 +39,11 @@ N_XR=( 1 2 3 4 )
 PL=0.1
 
 fps_list=( 90.0 )
-initial_bitrate_mbps=( 10.0 20.0 40.0 ) 
+initial_bitrate_mbps=( 40.0 ) 
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach, 4=> GCC, 5 => NADA (TODO)
 
-ABR_ENABLED=( 3 )
+ABR_ENABLED=( 1 2 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
 RANDOM_SEEDS=({1..10})
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
@@ -54,8 +54,7 @@ IS_UL_BG=(0)
 
 intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
 GoP_sizes=(90)
-
-everest_tests=1
+everest_tests=1  ## Random locations moving at 5m/s in 1m circle, sessions start/end for each STA
 
 temp_file=$(mktemp)
 SHUFFLED_CMDS=$(mktemp)
@@ -110,7 +109,7 @@ if [[ "${USER:-}" == "fmaura" ]]; then
         source ~/miniconda3/etc/profile.d/conda.sh
         conda activate $CONDA_ENVV
         cd $PROJECT_DIR/python_RL  # <-- Add this line
-        wandb agent $SWEEP_ID
+        python model_eval.py
         " > "$AGENT_LOG_FILE" 2>&1 &
     WANDB_AGENT_PID=$!
     echo "  -> W&B Agent started with PID: $WANDB_AGENT_PID"
@@ -137,8 +136,8 @@ else
     echo "🔹 Launching W&B Agent in a new terminal..."
     gnome-terminal --disable-factory -- bash -c "
       echo '--- W&B Agent Terminal ---'
-      cd '$PROJECT_DIR/python_RL/'
-      wandb agent '$SWEEP_ID'
+      cd '$PROJECT_DIR/python_RL/'      
+      python model_eval.py
       exec bash" &
     WANDB_AGENT_PID=$!
     echo "  -> W&B Agent terminal process started with PID: $WANDB_AGENT_PID"
@@ -254,25 +253,24 @@ rm "$temp_file" # Clean up the un-shuffled file
 
 
 ## I have 6000 scenarios here with many seeds, I want to repeat this process 15 times for RL: 
+# RL_REPETITIONS=1
+# for RL_ITERATION in $(seq 1 $RL_REPETITIONS); do
+if [ "$SERIAL_EXECUTION" -eq 1 ]; then
+    echo "Starting randomized SERIAL execution of $SIM_COUNT simulations..."
+    # Execute commands one by one, using a subshell for execution to ensure $cmd is treated correctly
+    while IFS= read -r cmd; do
+        echo "Executing: $cmd"
+        /bin/bash -c "$cmd"
+        # sleep 5
 
-RL_STEPS=20 ## should be enough for training 10 agents 
-for RL_ITERATION in $(seq 1 $RL_REPETITIONS); do
-    if [ "$SERIAL_EXECUTION" -eq 1 ]; then
-        echo "Starting randomized SERIAL execution of $SIM_COUNT simulations..."
-        # Execute commands one by one, using a subshell for execution to ensure $cmd is treated correctly
-        while IFS= read -r cmd; do
-            echo "Executing: $cmd"
-            /bin/bash -c "$cmd"
-            # sleep 5
-
-        done < "$SHUFFLED_CMDS"
-        
-    elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
-        echo "Starting randomized PARALLEL execution of $SIM_COUNT simulations with $NUMBER_OF_JOBS threads..."
-        # Use GNU parallel on the shuffled list
-        parallel -j "$NUMBER_OF_JOBS" < "$SHUFFLED_CMDS"
-    fi
-done 
+    done < "$SHUFFLED_CMDS"
+    
+elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
+    echo "Starting randomized PARALLEL execution of $SIM_COUNT simulations with $NUMBER_OF_JOBS threads..."
+    # Use GNU parallel on the shuffled list
+    parallel -j "$NUMBER_OF_JOBS" < "$SHUFFLED_CMDS"
+fi
+# done 
 
 
 rm "$temp_file"
@@ -283,3 +281,4 @@ echo "ALL JOBS FINISHED!!!"
 # cargo run --release --example two_bitrates_tests
 
 echo "XRUN FINALLY FINISHED!!!"
+exit 1
