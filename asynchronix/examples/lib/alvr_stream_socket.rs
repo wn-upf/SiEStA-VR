@@ -77,12 +77,6 @@ pub const CONTROL_STREAM: u16 = 5;
 
 pub const FOVOPTIX_BW_PROBE: u16 = 9; 
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct BwProbeHeader {
-    seq: u32,
-    tx_instant_ns: i128, // original send instant (TaiTime since EPOCH in ns)
-    payload_len: u32,    // bytes
-}
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 pub struct ChunkedHevcEncoder {

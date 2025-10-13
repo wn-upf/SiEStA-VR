@@ -443,7 +443,7 @@ fn main() {
 
     for i in 0..n_close{ // to set up variable distance scenarios across users
 
-        let first_vr_pair_distance= VRPair::new(
+        let first_vr_pair_distance: VRPair= VRPair::new(
             
             i,
             t0,

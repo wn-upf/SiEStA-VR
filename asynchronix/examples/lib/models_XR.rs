@@ -2507,6 +2507,8 @@ pub struct XRServer {
     pub audio_app_sender: Option<StreamSender<()>>,
     pub bw_probe_sender: Option<StreamSender<()>>,                  // Optional, only used by FovOptix to estimate current BW via active probing. 
 
+    pub bw_probe_receiver: Option<StreamReceiver<()>>, 
+
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
     pub control_socket_sender: Option<ControlSocketSender<ClientControlPacket>>,
@@ -2628,7 +2630,7 @@ impl XRServer {
             video_app_sender: None,
             audio_app_sender: None, 
             bw_probe_sender: None,  // Optional, only used by FovOptix to estimate current BW via active probing. 
-
+            bw_probe_receiver: None, 
 
             tracking_app_receiver: None,
             statistics_app_receiver: None,
@@ -3109,70 +3111,137 @@ impl XRServer {
         }
     }
 
-
     pub fn generate_FO_bandwidth_probe<'a>(
-        &'a mut self, _: (), context: &'a Context<Self>,
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time();
 
-            // build a small payload (100 bytes like original)
-            let payload_len: usize = 100;
-
-            if let Some(fov_man) = self.fov_optix_manager.as_mut(){
-
-
-                let mut pkt: MpduPacket = MpduPacket::new();
-                {                                                   // ( scoped so mutex guard is dropped before await, future not Send, etc. )
-                    let mut guard = fov_man.lock().unwrap(); 
-                    let mut header = guard.header; 
-                        // Put our little header inside the payload so the echo can carry it back:
-                    let header = BwProbeHeader {
-                        seq: header.seq,
-                        tx_instant_ns: now.duration_since(TaiTime::EPOCH).as_nanos() as i128,
-                        payload_len: payload_len as u32,
-                    };
-                    let header_bytes = bincode::serialize(&header).unwrap();
-
-                    // NOTE: ALVR framing expects SHARD_PREFIX + serialized stream header for real streams.
-                    // For this synthetic probe we don't need a full VideoPacketHeader; we just carry our
-                    // BwProbeHeader as payload after the SHARD_PREFIX, keeping your `parse_shard_data` happy.
-
-                    let mut raw = vec![0u8; SHARD_PREFIX_SIZE + header_bytes.len() + payload_len];
-                    raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + header_bytes.len()]
-                        .copy_from_slice(&header_bytes);
-
-                    pkt.header_alvr = HeaderALVRStream {
-                        packet_length: raw.len() as u32,
-                        stream_id: FOVOPTIX_BW_PROBE,
-                        next_packet_index: header.seq,
-                        shards_count: 1,
-                        shard_index: 0,
-                        tx_instant: now.duration_since(TaiTime::EPOCH).as_secs_f32(), // your TaiTime<0>
-                    };
-                    pkt.data_inner = raw;
-
-                    // Use BE or Background AC so it doesn't fight with video/audio priorities:
-                    pkt.edca_ac = EdcaAc::Background;
-                    
-                    // book-keeping so we can compute RTT/goodput on echo
-                    guard.bw_sent_map.insert(guard.bw_seq, now);
+            // Run only if we have the FovOptix managers AND a probe sender
+            if let (Some(fov_man), Some(mut sender)) = (self.fov_optix_manager.as_ref(), self.bw_probe_sender.clone()) {
+                // ---- take what we need without holding the lock across await ----
+                let (seq, bw_sent_map_arc) = {
+                    let mut guard = fov_man.lock().unwrap();
+                    let seq = guard.bw_seq;
+                    let map_arc = guard.bw_sent_map.clone(); // Arc<DashMap<...>>
                     guard.bw_seq = guard.bw_seq.wrapping_add(1);
-                }  
-                // guard.drop(); 
-                // send into the simulated network
-                self.outport_videoapp_network.send(pkt).await;   
+                    (seq, map_arc)
+                }; // drop(guard) here before any await
 
-                // probe cadence: 20ms is a nice compromise; tune to your needs
-                context.scheduler
-                    .schedule_event(Duration::from_millis(20), Self::generate_FO_bandwidth_probe, ())
-                    .unwrap();
-                }
-                else{
-                    panic!("NEVER SHOULD BE CALLED IF FOVOPTIX NOT ON!"); 
-                }
+                // 1) tiny payload (~100 bytes)
+                let payload_len: usize = 100;
+
+                // 2) build the probe header
+                let hdr = BwProbeHeader {
+                    seq,
+                    tx_instant_ns: now.duration_since(TaiTime::EPOCH).as_nanos() as i128,
+                    payload_len: payload_len as u32,
+                };
+
+                // 3) compute hidden prefix size (SHARD_PREFIX + serialized header)
+                let hsize = bincode::serialized_size(&hdr).unwrap() as usize;
+                let hidden_offset = SHARD_PREFIX_SIZE + hsize;
+
+                // 4) allocate buffer = hidden area + payload
+                let mut raw = vec![0u8; hidden_offset + payload_len];
+
+                // 5) encode BwProbeHeader into hidden area
+                let hdr_bytes = bincode::serialize(&hdr).unwrap();
+                raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + hsize].copy_from_slice(&hdr_bytes);
+
+                // 6) wrap it as Buffer<()> to match StreamSender<()> 
+                let buf = crate::lib::alvr_stream_socket::Buffer {
+                    inner: raw,
+                    hidden_offset,
+                    length: payload_len,
+                    _phantom: std::marker::PhantomData::<()> // IMPORTANT
+                };
+
+                // 7) remember send time for RTT/goodput on echo
+                bw_sent_map_arc.insert(seq, now);
+
+                // 8) send + forward the app→network side
+                let _ = sender.send(buf, now);
+                let arc_reader = sender.app_network_interface.clone();
+                let rx_buf: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+                XRServer::read_app_send_network_interface(self, (), now, rx_buf, arc_reader).await;
+            }
+
+            // 9) schedule next probe (tune period as needed)
+            context.scheduler
+                .schedule_event(std::time::Duration::from_millis(20), Self::generate_FO_bandwidth_probe, ())
+                .unwrap();
         }
     }
+
+
+    // pub fn generate_FO_bandwidth_probe<'a>(
+    //     &'a mut self, _: (), context: &'a Context<Self>,
+    // ) -> impl Future<Output = ()> + Send + 'a {
+    //     async move {
+    //         let now = context.scheduler.time();
+
+    //         // build a small payload (100 bytes like original)
+    //         let payload_len: usize = 100;
+
+    //         if let Some(fov_man) = self.fov_optix_manager.as_mut(){
+
+
+    //             let mut pkt: MpduPacket = MpduPacket::new();
+
+    //             if let Some(sender) = &self.bw_probe_sender
+    //             {                                                   // ( scoped so mutex guard is dropped before await, future not Send, etc. )
+    //                 let mut guard = fov_man.lock().unwrap(); 
+    //                 let mut header = guard.header; 
+    //                     // Put our little header inside the payload so the echo can carry it back:
+    //                 let header = BwProbeHeader {
+    //                     seq: header.seq,
+    //                     tx_instant_ns: now.duration_since(TaiTime::EPOCH).as_nanos() as i128,
+    //                     payload_len: payload_len as u32,
+    //                 };
+    //                 let header_bytes = bincode::serialize(&header).unwrap();
+
+    //                 // NOTE: ALVR framing expects SHARD_PREFIX + serialized stream header for real streams.
+    //                 // For this synthetic probe we don't need a full VideoPacketHeader; we just carry our
+    //                 // BwProbeHeader as payload after the SHARD_PREFIX, keeping your `parse_shard_data` happy.
+
+    //                 let mut raw = vec![0u8; SHARD_PREFIX_SIZE + header_bytes.len() + payload_len];
+    //                 raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + header_bytes.len()]
+    //                     .copy_from_slice(&header_bytes);
+
+    //                 pkt.header_alvr = HeaderALVRStream {
+    //                     packet_length: raw.len() as u32,
+    //                     stream_id: FOVOPTIX_BW_PROBE,
+    //                     next_packet_index: header.seq,
+    //                     shards_count: 1,
+    //                     shard_index: 0,
+    //                     tx_instant: now.duration_since(TaiTime::EPOCH).as_secs_f32(), // your TaiTime<0>
+    //                 };
+    //                 pkt.data_inner = raw;
+
+    //                 // Use BE or Background AC so it doesn't fight with video/audio priorities:
+    //                 pkt.edca_ac = EdcaAc::Background;
+                    
+    //                 // book-keeping so we can compute RTT/goodput on echo
+    //                 guard.bw_sent_map.insert(guard.bw_seq, now);
+    //                 guard.bw_seq = guard.bw_seq.wrapping_add(1);
+    //             }  
+    //             // guard.drop(); 
+    //             // send into the simulated network
+    //             self.outport_videoapp_network.send(pkt).await;   
+
+    //             // probe cadence: 20ms is a nice compromise; tune to your needs
+    //             context.scheduler
+    //                 .schedule_event(Duration::from_millis(20), Self::generate_FO_bandwidth_probe, ())
+    //                 .unwrap();
+    //             }
+    //             else{
+    //                 panic!("NEVER SHOULD BE CALLED IF FOVOPTIX NOT ON!"); 
+    //             }
+    //     }
+    // }
 
 
 
@@ -3380,7 +3449,7 @@ impl XRServer {
             
             self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0)); 
 
-            self.bw_probe_sender = Some(stream_socket.request_stream(P, t0))
+            self.bw_probe_sender = Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0)); 
             
             
             self.tracking_app_receiver =
@@ -3389,6 +3458,7 @@ impl XRServer {
                 stream_socket
                     .subscribe_to_stream::<ClientStatistics>(STATISTICS, MAX_UNREAD_PACKETS),
             );
+
 
             // self.control_receiver = Some(
             //     stream_socket.subscribe_to_stream::<()>(CONTROL_STREAM,  MAX_UNREAD_PACKETS),
@@ -3790,7 +3860,11 @@ pub struct XRClient {
     pub input_app_audio: Option<StreamReceiver<()>>,
     pub input_app_haptics: Option<StreamReceiver<Haptics>>,
 
+    pub input_app_bw_probe: Option<StreamReceiver<()>>, 
+
     pub output_app_tracking_sender: Option<StreamSender<Tracking>>,
+
+    pub output_app_bw_probe_back: Option<StreamSender<()>>, 
 
     pub out_video_decoded: Output<Vec<u8>>,
 
@@ -3936,6 +4010,8 @@ impl XRClient {
             input_app_video: None,
             input_app_audio: None,
             input_app_haptics: None,
+            input_app_bw_probe: None, 
+            output_app_bw_probe_back: None, 
 
             output_app_tracking_sender: None,
             out_video_decoded: Output::default(),
@@ -4099,6 +4175,15 @@ impl XRClient {
                 Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
             self.streamsocket_clone = Some(stream_socket.clone());
 
+            if self.abr_mode == 6 { // FovOptix only
+
+                self.input_app_bw_probe = 
+                    Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS)); 
+
+                self.output_app_bw_probe_back = 
+                    Some(stream_socket.request_stream( FOVOPTIX_BW_PROBE, self.t_0)); // way back for bw probing packets. 
+            }
+
             self.output_app_tracking_sender =
                 Some(stream_socket.request_stream(TRACKING, self.t_0));
 
@@ -4200,23 +4285,23 @@ impl XRClient {
         vecc
     }
 
-    pub async fn send_tracking(&mut self, tracking: Tracking, now: TaiTime<0>) {
-        if let Some(mut sender) = self.output_app_tracking_sender.clone() {
-            let arc_inner_app_receiver = sender.app_network_interface.clone();
+    // pub async fn send_tracking(&mut self, tracking: Tracking, now: TaiTime<0>) {
+    //     if let Some(mut sender) = self.output_app_tracking_sender.clone() {
+    //         let arc_inner_app_receiver = sender.app_network_interface.clone();
 
-            let send_result = sender.send_header_tracking(&tracking, now);
-            let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+    //         let send_result = sender.send_header_tracking(&tracking, now);
+    //         let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 
-            XRClient::read_app_send_network_interface(
-                self,
-                (),
-                now,
-                buffer,
-                arc_inner_app_receiver,
-            )
-            .await; // FUNCTION TO HANDLE NETWORK PACKETS!
-        }
-    }
+    //         XRClient::read_app_send_network_interface(
+    //             self,
+    //             (),
+    //             now,
+    //             buffer,
+    //             arc_inner_app_receiver,
+    //         )
+    //         .await; // FUNCTION TO HANDLE NETWORK PACKETS!
+    //     }
+    // }
 
 
     fn read_app_send_network_interface<'a>(
@@ -4350,8 +4435,6 @@ impl XRClient {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // println!("FRAMEDSEND!");
 
-        
-
         let mut buffer = vec![0; MAX_PACKET_SIZE_RECV];
 
         let serialized_size = bincode::serialized_size(&packet)? as usize;
@@ -4454,6 +4537,102 @@ impl XRClient {
         
     }
     
+
+    pub fn bw_probe_receive_thread<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let now = context.scheduler.time();
+
+            // Only proceed if both ends exist
+            if let (Some(mut receiver), Some(mut sender)) =
+                (self.input_app_bw_probe.clone(), self.output_app_bw_probe_back.clone())
+            {
+                // Try receiving a probe
+                let data: ReceiverData<()> = match receiver.recv(STREAMING_RECV_TIMEOUT) {
+                    Ok(d) => d,
+                    Err(ConnectionError::TryAgain(_)) => return,
+                    Err(ConnectionError::Other(_)) => return,
+                };
+
+                // Extract the raw bytes and meta information
+                let (raw_bytes, hidden_offset, length) = data.get_raw(); 
+                // ^ You might not have `get_raw()` — if not, use `data.bytes()` or manually reserialize 
+                //   depending on how ReceiverData stores the payload. 
+                //   (The idea is to get Vec<u8> + offsets so we can rebuild a Buffer.)
+
+                // Re-wrap into a Buffer<()> for sending back
+                let buf = crate::lib::alvr_stream_socket::Buffer {
+                    inner: raw_bytes,
+                    hidden_offset,
+                    length,
+                    _phantom: std::marker::PhantomData::<()>,
+                };
+
+                // Send back (echo)
+                let _ = sender.send(buf, now);
+
+                // Forward app→network to actually put the echo on the simulated link
+                let arc_inner_app_receiver = sender.app_network_interface.clone();
+                let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+                XRClient::read_app_send_network_interface(
+                    self,
+                    (),
+                    now,
+                    buffer,
+                    arc_inner_app_receiver,
+                )
+                .await;
+
+                debug_debug!(
+                    DebugColor::Cyan,
+                    "[BW_ECHO] Client {} echoed probe back at {:.6}s",
+                    self.server_ip,
+                    format_elapsed!(now)
+                );
+            }
+        }
+    }
+
+    // pub fn bw_probe_receive_thread<'a>(&'a mut self,
+    //     _: (),
+    //     context: &'a Context<Self>,
+    // ) -> impl Future<Output = ()> + Send + 'a {
+    //     async move {
+            
+
+    //         let now = context.scheduler.time(); 
+    //         println!("{} - [Client {} ] Receiving BW probe!", format_elapsed!(now), self.server_ip);
+    //         if let Some(mut receiver) = self.input_app_bw_probe.clone() {
+    //             let data: ReceiverData<()> =
+    //                 match receiver.recv(STREAMING_RECV_TIMEOUT) {
+    //                     Ok(data) => data,
+    //                     Err(ConnectionError::TryAgain(_)) => return,
+    //                     Err(ConnectionError::Other(_)) => return,
+    //                 };
+                
+
+    //         if let Some(mut sender) = self.output_app_bw_probe_back.clone() {
+    //                 let arc_inner_app_receiver = sender.app_network_interface.clone();
+    //                 let send_result = sender.send(&data, now);
+    //                 let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
+
+    //                 XRClient::read_app_send_network_interface(
+    //                     self,
+    //                     (),
+    //                     now,
+    //                     buffer,
+    //                     arc_inner_app_receiver,
+    //                 )
+    //                 .await; // FUNCTION TO HANDLE NETWORK PACKETS!
+    //             }
+    //         }
+    //     }
+    // }
+    
+
     pub fn video_receive_thread<'a>(
         &'a mut self,
         _: (),
@@ -5346,6 +5525,27 @@ impl XRClient {
                         }
                     } else {
                         print!(".");
+                    }
+                }
+
+                FOVOPTIX_BW_PROBE => {
+                    if let Some(sock) = self.input_app_bw_probe.clone() {
+                        let _sender = sock.network_app_interface.lock().unwrap().send(&buffer); 
+
+                        if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
+
+                            let _resulllt = StreamSocket::recv(
+                                &mut ssocket,
+                                self.server_ip,
+                                sock.inner,
+                                context); 
+                        
+                            println!("Received FOVOPTIX PROBE"); 
+                            context
+                                .scheduler
+                                .schedule_event(Duration::ZERO, Self::bw_probe_receive_thread, ())
+                                .unwrap();                        
+                        }
                     }
                 }
                 _ => {
