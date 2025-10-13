@@ -2083,6 +2083,7 @@ impl BitrateManager {
         
 
         println!("{}%%%%%%%% -> Pushing F: [{}], SL: {}  ", timestep_f32 , fl, sl); 
+        
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
@@ -2327,6 +2328,7 @@ impl BitrateManager {
                         let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
                         let prev_action = *last_action_idx.lock().unwrap();
 
+                        print_green!("Obs: \n{:#?}\nREWARD: {} ", current_obs, reward); 
                         // ---- push current_obs and build next window ----
                         history.push(current_obs);
                         let next_win_flat = history.as_flat_padded();
@@ -2420,9 +2422,17 @@ impl BitrateManager {
         let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0; 
         let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0; 
 
-        let flr_avg_s = (self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
-                (1.0 / self.framerate )) ; // percentage according to encoded frames window average, 
-                                                                                // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
+        // let flr_avg_s = (self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
+        //         (1.0 / self.framerate )) ; // percentage according to encoded frames window average, 
+        //  
+        let window_s = self.flr_shardloss_count.period; // the window period (e.g., 1 s)
+        let frames_sent = self.framerate * window_s;
+        let frames_lost = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()) as f32;
+
+        // normalize to a ratio [0.0, 1.5]
+        let flr_avg_s = (frames_lost / frames_sent).min(1.5);
+
+                                                                       // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
         // let flr_sum = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()); 
         
         let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
@@ -2469,7 +2479,7 @@ impl BitrateManager {
     pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
         let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
 
-        println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.flr_avg_s, obs.rtt_ms_avg_s); 
+        println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.rtt_ms_avg_s, obs.flr_avg_s); 
 
         let reward = if obs.flr_avg_s <= 0.05 {
             if obs.rtt_ms_avg_s <= 40.0 { // let's use this manual MTP threshold
@@ -2931,7 +2941,7 @@ impl XRServer {
                         );
                         let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
 
-                        self.bitrate_manager.report_shard_and_frame_loss(*frame as usize, *shard, time_elapsed); 
+                        self.bitrate_manager.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); 
                     }
                 }
 

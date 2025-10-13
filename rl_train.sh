@@ -39,7 +39,7 @@ rate_bps_src_BG=20E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=( 1 2 3 4 ) 
+N_XR=(  3) 
 PL=0.1
 
 fps_list=( 90.0 )
@@ -191,11 +191,11 @@ cargo build --release --example XR_sim
                                                                 # if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                     # echo "RUNNING SIM: $name_folder"
 
-                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
-                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
+                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > sim.log 2>&1" >> "$temp_file"
+                                                                    echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/sim.log" >> "$temp_file"
                                                                 # else                                    ## Serial execution
-                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
-                                                                #         sleep 5
+                                                                # script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT" "out_log.ans"
+                                                                # sleep 5
                                                                 #         rm out_log.ans
                                                                 
                                                                 # fi
@@ -255,7 +255,7 @@ for RL_ITERATION in $(seq 1 $RL_REPETITIONS); do
         while IFS= read -r cmd; do
             echo "Executing: $cmd"
             /bin/bash -c "$cmd"
-            # sleep 5
+            sleep 5
 
         done < "$SHUFFLED_CMDS"
         
