@@ -134,7 +134,9 @@ impl VRPair {
                 1 => {"Nest-VR"}, 
                 2 => {"EveRest"},
                 3 => {"RL agent"},
-                4 => {"GCC port"}, 
+                4 => {"GCC Port"}, 
+                5 => {"NADA Port"}, 
+                6 => {"FovOptix Port"}
                 _ => {"???"}
             }; 
 

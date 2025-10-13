@@ -4558,17 +4558,20 @@ impl XRClient {
                 };
 
                 // Extract the raw bytes and meta information
-                let (raw_bytes, hidden_offset, length) = data.get_raw(); 
+                // let (raw_bytes, hidden_offset, length) = data.get_buffer(); 
+
+                let raw = data.get_buffer(); // Vec<u8>
+                let total_len = raw.len();
                 // ^ You might not have `get_raw()` — if not, use `data.bytes()` or manually reserialize 
                 //   depending on how ReceiverData stores the payload. 
                 //   (The idea is to get Vec<u8> + offsets so we can rebuild a Buffer.)
 
                 // Re-wrap into a Buffer<()> for sending back
                 let buf = crate::lib::alvr_stream_socket::Buffer {
-                    inner: raw_bytes,
-                    hidden_offset,
-                    length,
-                    _phantom: std::marker::PhantomData::<()>,
+                    inner: raw,
+                    hidden_offset: SHARD_PREFIX_SIZE,        // standard offset
+                    length: total_len - SHARD_PREFIX_SIZE,   // actual payload length
+                    _phantom: std::marker::PhantomData::<()>, // match StreamSender<()> generic
                 };
 
                 // Send back (echo)
