@@ -1876,7 +1876,7 @@ impl BitrateManager {
 
         print_green!("Server {} has BitrateMode => {:?}", ip_server, bitrate_mode.variant_name());
 
-        let flr_vec: TimedVecFLR = TimedVecFLR::new( BITRATE_UPDATE_INTERVAL as f32); 
+        let flr_vec: TimedVecFLR = TimedVecFLR::new( 1.0 as f32); // let's take FLR 1 sec sliding window. TODO: input arg 
         let buflevel_vec =  TimedVecBuffer::new( BITRATE_UPDATE_INTERVAL as f32); 
 
         Self {
@@ -2074,15 +2074,15 @@ impl BitrateManager {
         self.everest_last_dlong = network_stats.everest_dlong; 
         self.everest_last_order = network_stats.everest_command; 
         
-        if matches!(self.bitrate_mode , BitrateMode::EVeREst{ .. }) && now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL) {
-            print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  ); 
-        }
+        // if matches!(self.bitrate_mode , BitrateMode::EVeREst{ .. }) && now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL) {
+        //     print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  ); 
+        // }
     }   
 
     pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
         
 
-        println!("{}%%%%%%%% -> Pushing F: [{}], SL: {}  ", timestep_f32 , fl, sl); 
+        // println!("{}%%%%%%%% -> Pushing F: [{}], SL: {}  ", timestep_f32 , fl, sl); 
         
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
@@ -2159,10 +2159,10 @@ impl BitrateManager {
                         else{
                             print_red!( "t: {:.6} -> no bitrate ladder? ", format_elapsed!(now)); 
                         }
-                        if now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL){
-                            print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
+                        // if now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL){
+                        //     print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
 
-                        }
+                        // }
                         self.last_target_bitrate_bps = bitrate_bps; 
                         
                         bitrate_bps
@@ -2240,7 +2240,7 @@ impl BitrateManager {
                             }
                         }
                     }
-                    print_pink!("bitrate after Nest: {} Mbps", f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps )); 
+                    // print_pink!("bitrate after Nest: {} Mbps", f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps )); 
                     // Ensure bitrate is below the estimated network capacity
                     let capacity_upper_limit =
                         profile_config.capacity_scaling_factor * estimated_capacity_bps;
@@ -2281,12 +2281,12 @@ impl BitrateManager {
                         estimated_capacity_mbps: estimated_capacity_bps / 1e6, 
                     };
 
-                    print_pink!(
-                        // DebugColor::Purple,
-                        "[{}]NeSt-VR STATS-------: {:#?}",
-                        ip_server, 
-                        heur_stats
-                    );
+                    // print_pink!(
+                    //     // DebugColor::Purple,
+                    //     "[{}]NeSt-VR STATS-------: {:#?}",
+                    //     ip_server, 
+                    //     heur_stats
+                    // );
                     self.last_target_bitrate_bps = bitrate_bps;
                     // self.last_target_bitrate_mbps = bitrate_bps / 1E6; 
                     bitrate_bps
@@ -2328,7 +2328,7 @@ impl BitrateManager {
                         let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
                         let prev_action = *last_action_idx.lock().unwrap();
 
-                        print_green!("Obs: \n{:#?}\nREWARD: {} ", current_obs, reward); 
+                        // print_green!("Obs:\n{:#?}\nREWARD: {} ", current_obs, reward); 
                         // ---- push current_obs and build next window ----
                         history.push(current_obs);
                         let next_win_flat = history.as_flat_padded();
@@ -2836,7 +2836,7 @@ impl XRServer {
                     done: true,
                 };
                 con.post_transition(&transition);     // <--- use `con`, don't re-lock
-                print_red!("[RL] POSTING FINAL TRANSITION: {:#?}", transition);
+                // print_red!("[RL] POSTING FINAL TRANSITION);
 
                 con.reset_window();                   // <--- use `con`, don't re-lock
 
@@ -2941,7 +2941,7 @@ impl XRServer {
                         );
                         let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
 
-                        self.bitrate_manager.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); 
+                        self.bitrate_manager.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // report one frame lost, and nº of video shards lost
                     }
                 }
 
@@ -4783,13 +4783,13 @@ impl XRClient {
                             StreamSocket::flush_shards_lost_deadline(&mut ssocket);
 
                         if !frames_lost.is_empty() {
-                            println!(
-                                "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
-                                format_elapsed!(now), 
-                                self.server_ip, 
-                                &frames_lost[..],
-                                &shards_lost[..]
-                            );
+                            // println!(
+                            //     "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
+                            //     format_elapsed!(now), 
+                            //     self.server_ip, 
+                            //     &frames_lost[..],
+                            //     &shards_lost[..]
+                            // );
                             self.report_frame_lost(frames_lost, shards_lost, context);
                         }
                     }
