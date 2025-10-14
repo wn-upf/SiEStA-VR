@@ -1,16 +1,14 @@
 #!/bin/bash
-#SBATCH --export=ALL
-#SBATCH -J xr_sims               # job name
-#SBATCH --partition=high         # partition
-#SBATCH --nodes=1                # number of nodes
-####### SBATCH --gres=gpu:1
-#SBATCH --constraint=nvenc
-###### #SBATCH --exclusive
-#SBATCH --mem=128G               # memory
-#SBATCH --time=48:00:00          # max walltime (adjust!)
-#SBATCH --cpus-per-task=64        # example
+#SBATCH --job-name=rl_xr              # Job name
+#SBATCH -p high                    # short, medium, high, high-cpu
+#SBATCH --nodes=1                      # Request 1 node
+#SBATCH --ntasks=1                     # Single task
+#SBATCH --cpus-per-task=5             # CPUs per task        ----default 10 cores
+#SBATCH --mem=16G                       # Memory allocation   ----default 16G
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
+
+
 
 source ~/.bashrc
 
@@ -21,10 +19,7 @@ module load x264
 
 SWEEP_ID="wn-upf/asynchronix-python_RL/0uk46bio"
 
-
 export PATH=$HOME/.local/bin:$PATH
-
-
 NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
@@ -42,7 +37,7 @@ num_close_users=( 0 )     ## number of users with alternate distance
 N_XR=( 1 2 3 4) 
 PL=0.1
 
-fps_list=( 90.0 )
+fps_list=( 60.0 90.0 120.0 )
 initial_bitrate_mbps=( 10.0 20.0 40.0 ) 
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach, 4=> GCC, 5 => NADA (TODO)
@@ -60,14 +55,9 @@ intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
 GoP_sizes=(90)
 
 everest_tests=1
-
 temp_file=$(mktemp)
 SHUFFLED_CMDS=$(mktemp)
-
 SIM_COUNT=0                 # counter of simulations, not an input arg
-# N_STEPS_RL=7_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
-
-
 # ID for the W&B sweep you want the agent to join.
 CONDA_ENVV="vr_sim"
 script_dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -80,43 +70,50 @@ export ZMQ_ACTION_EP="ipc:///tmp/xr_${RUN_ID}_action"
 export ZMQ_STEP_EP="ipc:///tmp/xr_${RUN_ID}_step"
 export ZMQ_TRAINER_EP="ipc:///tmp/xr_${RUN_ID}_trainer"
 
+
+# --- Cleanup Function and Trap ---
+# This function will be called when the script exits or is cancelled.
+cleanup() {
+    echo "🧹 Cleaning up background processes..."
+    # Check if PIDs exist before trying to kill
+    if ps -p "${ZMQ_SERVER_PID}" > /dev/null; then
+       kill "${ZMQ_SERVER_PID}"
+       echo "   -> ZMQ Server (PID: ${ZMQ_SERVER_PID}) terminated."
+    fi
+    if ps -p "${WANDB_AGENT_PID}" > /dev/null; then
+       kill "${WANDB_AGENT_PID}"
+       echo "   -> W&B Agent (PID: ${WANDB_AGENT_PID}) terminated."
+    fi
+    # Clean up temporary files
+    rm -f "$SHUFFLED_CMDS"
+}
+trap cleanup EXIT SIGINT SIGTERM
+
+
 if [[ "${USER:-}" == "fmaura" ]]; then
     # --- HPC (SLURM) Mode ---
     echo "🚀 Detected HPC environment (User: $USER). Using srun."
     IS_HPC=1
+    # --- 1. Start Background Services ---
     LOG_DIR="logs_hpc"
-    mkdir -p "$LOG_DIR" # Ensure log directory exists
+    mkdir -p "$LOG_DIR"
 
-    # Set library path for Conda
-    export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-
-    # 1. Launch ZMQ Server in the background on the allocated node
-    ZMQ_LOG_FILE="${LOG_DIR}/zmq_server_${SLURM_JOB_ID}.log"
-    echo "🔹 Launching ZMQ Server... Log: $ZMQ_LOG_FILE"
-    srun --ntasks=1 --cpus-per-task=8 --exclusive --cpu-bind=cores \
-    /bin/bash -c "
-      source ~/miniconda3/etc/profile.d/conda.sh
-      conda activate $CONDA_ENVV
-      python $PROJECT_DIR/python_RL/zmq_server.py
-    " > "$ZMQ_LOG_FILE" 2>&1 &
+    echo "🔹 Launching ZMQ Server in the background..."
+    python "$PROJECT_DIR/python_RL/zmq_server.py" > "${LOG_DIR}/zmq_server_${SLURM_JOB_ID}.log" 2>&1 &
     ZMQ_SERVER_PID=$!
-    echo "  -> ZMQ Server started with PID: $ZMQ_SERVER_PID"
+    echo "   -> ZMQ Server started with PID: $ZMQ_SERVER_PID"
 
-    # Give the server a moment to start up
-    sleep 3
-
-    # 2. Launch Python trainer (W&B Agent) in the background on the same node
-    AGENT_LOG_FILE="${LOG_DIR}/wandb_agent_${SLURM_JOB_ID}.log"
-    echo "🔹 Launching W&B Agent... Log: $AGENT_LOG_FILE"
-    srun --ntasks=1 ---cpus-per-task=8 -exclusive --cpu-bind=cores  \
-        /bin/bash -c "
-        source ~/miniconda3/etc/profile.d/conda.sh
-        conda activate $CONDA_ENVV
-        cd $PROJECT_DIR/python_RL  # <-- Add this line
-        wandb agent $SWEEP_ID
-        " > "$AGENT_LOG_FILE" 2>&1 &
+    echo "🔹 Launching W&B Agent in the background..."
+    # Note: It's good practice to cd into the directory if the script expects it
+    (cd "$PROJECT_DIR/python_RL" && wandb agent "$SWEEP_ID") > "${LOG_DIR}/wandb_agent_${SLURM_JOB_ID}.log" 2>&1 &
     WANDB_AGENT_PID=$!
-    echo "  -> W&B Agent started with PID: $WANDB_AGENT_PID"
+    echo "   -> W&B Agent started with PID: $WANDB_AGENT_PID"
+
+    echo "⏳ Waiting for services to initialize..."
+    sleep 2 # Give servers time to start up
+
+    # --- 2. Build Executable and Prepare Simulation Commands 
+
 
 else
     # --- Non-HPC (Local Desktop) Mode ---
