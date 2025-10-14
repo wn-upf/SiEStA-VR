@@ -312,6 +312,7 @@ def train_sweep_vec():
             gae_lambda=wandb.config.gae_lambda,
             clip_range=wandb.config.clip_range,
             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+            ent_coef=wandb.config.get("ent_coef", 0.0),
             verbose=1,
         )
 

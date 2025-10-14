@@ -61,7 +61,7 @@ pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 80.0;
-pub const CHUNK_DURATION_F64_S: f64 = 0.30;
+pub const CHUNK_DURATION_F64_S: f64 = 0.03; // aprox 3 frames
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;

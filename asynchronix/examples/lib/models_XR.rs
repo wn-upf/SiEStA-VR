@@ -147,7 +147,7 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<u32>() // shards index
     + mem::size_of::<f32>(); // tx relative timestamp
 
-pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+// pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
 
@@ -1811,7 +1811,7 @@ impl BitrateManager {
                         min_bitrate_mbps: min_mbps,
                         initial_bitrate_mbps,
                         nest_vr_profile: ProfileConfig {
-                                            update_interval_nestvr_s: UPDATE_BITRATE_INTERVAL.as_secs_f32(), 
+                                            update_interval_nestvr_s: BITRATE_UPDATE_INTERVAL as f32, 
                                             max_bitrate_mbps: max_mbps,
                                             min_bitrate_mbps: min_mbps,
                                             initial_bitrate_mbps: initial_bitrate_mbps,
@@ -1890,7 +1890,7 @@ impl BitrateManager {
 
             bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
             // last_target_bitrate_mbps: initial_bitrate_mbps,
-            update_interval_s: UPDATE_BITRATE_INTERVAL,
+            update_interval_s: Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL),
 
             rtt_average: SlidingWindowAverage::new(Duration::from_millis(5).as_secs_f32(), max_history_size),
             peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
