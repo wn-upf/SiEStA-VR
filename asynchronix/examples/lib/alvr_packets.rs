@@ -237,18 +237,6 @@ pub struct NetworkStatisticsPacket {
     pub nada_stats: NadaStats, 
 
     // NADA FIELDS after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed 
-    // pub frame_send_timestamp:i64,
-    // pub shard_loss_rate:f64,
-    // pub plr: f64,
-    // pub is_idr:bool,
-    // /// RTCP Feedback Report: NADA Receiver--> Sender
-    // pub nada_feedback:bool,
-    // pub nada_xcurr:f64,
-    // pub nada_rmode:i8,
-    // pub nada_recv:i64,
-
-    // pub edca_ac: EdcaAc, 
-    // pub tx_instant: f64,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug,)]

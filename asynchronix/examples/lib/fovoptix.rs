@@ -591,7 +591,8 @@ impl dataPoint{
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, Default)]
 pub struct BwProbeHeader {
     pub seq: u32,
-    pub tx_instant_ns: i128, // original send instant (TaiTime since EPOCH in ns)
+    pub tx_instant_us: i128, // original send instant (TaiTime since EPOCH in micros)
+    pub rx_instant_s_video_frame: f32, 
     pub payload_len: u32,    // bytes
 }
 
@@ -603,14 +604,16 @@ pub struct FovOptixStruct{
     pub rc:    FORateControlInput, 
 
 
-    pub last_frame_tx_timestamp: f32, 
-    pub last_frame_rx_timestamp: f32, 
+    pub last_frame_tx_timestamp_s: f32,  
+    pub last_frame_rx_timestamp_s: f32, 
 
+    pub last_reported_frame_rx_client_timestamp: f32, 
 
     packet_loss_partial_sum: i32,
     video_bytes_sended_for_webrtc:usize,
     time_instant_for_webrtc:Instant,
     prev_target_bitrate_inrtc:f64,
+
     last_frame_send_timestamp:i64,
     last_frame_arrival_timestamp:i64,
     pub data_hist:VecDeque<dataPoint>,
@@ -628,10 +631,9 @@ pub struct FovOptixStruct{
     pub bw_seq: u32,
     pub bw_sent_map: Arc<DashMap<u32, TaiTime<0>>>, // seq -> tx time
     pub last_bw_bps: f64,
-    pub ewma_bw_bps: f64,
-    pub ewma_alpha: f64,
+    // pub ewma_bw_bps: f64,
+    // pub ewma_alpha: f64,
 }
-
 
 impl FovOptixStruct{
 
@@ -643,9 +645,9 @@ impl FovOptixStruct{
             aimd,
             bit,
             rc,
-            last_frame_rx_timestamp: 0.0,
-            last_frame_tx_timestamp: 0.0, 
-
+            last_frame_rx_timestamp_s : 0.,
+            last_frame_tx_timestamp_s : 0., 
+            last_reported_frame_rx_client_timestamp: 0.0, 
 
             packet_loss_partial_sum:0,
             video_bytes_sended_for_webrtc:0,
@@ -664,8 +666,6 @@ impl FovOptixStruct{
             bw_seq: 0,
             bw_sent_map: Arc::new(DashMap::new()),  
             last_bw_bps: 0.0,   
-            ewma_bw_bps: 0.0,   
-            ewma_alpha: 0.2,   // tune as you like  
             }
     }
 
@@ -700,18 +700,18 @@ impl FovOptixStruct{
     }
 
 
-    pub fn report_fovoptix_stats_server(&mut self, client_stats: NetworkStatisticsPacket, tx_time_s_taitime: TaiTime<0>, rx_time_s_taitime: TaiTime<0>, ) {
+    pub fn report_fovoptix_stats_server(&mut self, client_stats: NetworkStatisticsPacket, tx_time_s: f32, rx_time_s: f32, ) {
         let mut send_delta_ms=0.0;
         let mut recv_delta_ms=0.0;
 
-        let tx_time_s = tx_time_s_taitime.duration_since(TaiTime::EPOCH).as_secs_f32(); 
-        let rx_time_s = rx_time_s_taitime.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        // let tx_time_s = tx_time_s.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        // let rx_time_s = rx_time_s_taitime.duration_since(TaiTime::EPOCH).as_secs_f32(); 
         // if self.last_frame_send_timestamp!=0{
-        send_delta_ms = ( tx_time_s - self.last_frame_tx_timestamp) as f64 * 0.001;
-        recv_delta_ms = (rx_time_s - self.last_frame_rx_timestamp) as f64 * 0.001;
+        send_delta_ms = ( tx_time_s - self.last_frame_tx_timestamp_s) as f64 * 0.001;
+        recv_delta_ms = (rx_time_s -  self.last_frame_rx_timestamp_s ) as f64 * 0.001;
         // } 
-        self.last_frame_tx_timestamp = tx_time_s;
-        self.last_frame_rx_timestamp = rx_time_s;
+        self.last_frame_tx_timestamp_s = tx_time_s;
+        self.last_frame_rx_timestamp_s = rx_time_s;
         
         let mut timestamp_delta=send_delta_ms.to_string();//i64::default();
         let mut arrival_time_delta_ms=recv_delta_ms.to_string();//i64::default();
