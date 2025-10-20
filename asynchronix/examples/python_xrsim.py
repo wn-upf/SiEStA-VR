@@ -212,8 +212,8 @@ def main():
         raise FileNotFoundError(f"Example not found at {exe}")
 
     # ==== Define your parameter lists (ported from your bash) ====
-    TEST_TYPE = ["STD"]                     # "BW", "JI", "PL", "RANDOM", "STD"
-    simTime = 40.0
+    TEST_TYPE = ["STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+    simTime = 60.0
     k_queue = 10000
     mean_length_BG = 12000.0               # BG packet length (your meaning)
     rate_bps_src_BG = 20e6                 # BG arrival rate (bps)

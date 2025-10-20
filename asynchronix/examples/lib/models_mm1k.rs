@@ -99,18 +99,18 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
 
 
-pub const STEP1_TBEGIN: f64 = 25.0;
-pub const STEP1_TEND: f64 =   35.0;
+pub const STEP1_TBEGIN: f64 = 15.0;
+pub const STEP1_TEND: f64 =   25.0;
 
-pub const STEP2_TBEGIN: f64 = 45.0;
-pub const STEP2_TEND: f64 =   55.0;
+pub const STEP2_TBEGIN: f64 = 35.0;
+pub const STEP2_TEND: f64 =   45.0;
 
 pub const STEP3_TBEGIN: f64 = 65.0;
 pub const STEP3_TEND: f64 =   75.0;
 
 pub const BANDWIDTH_LIMIT_S1: f64 = 90E6;
-pub const BANDWIDTH_LIMIT_S2: f64 = 70E6;
-pub const BANDWIDTH_LIMIT_S3: f64 = 50E6;
+pub const BANDWIDTH_LIMIT_S2: f64 = 50E6;
+pub const BANDWIDTH_LIMIT_S3: f64 = 30E6;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -800,10 +800,10 @@ impl EmulatedLink {
             }
             EnqueueResult::Dropped => {
                 // Packet dropped by network pattern or overflow. Logging can go here.
-                print_red!(
-                    // crate::lib::DebugColor::Red,
-                    "[EMULATED LINK] Packet dropped by network emulator", 
-                );
+                // print_red!(
+                //     // crate::lib::DebugColor::Red,
+                //     "[EMULATED LINK] Packet dropped by network emulator", 
+                // );
             }
         }
     }
@@ -915,40 +915,40 @@ impl QueueMechanism {
 
         // print_red!("EMU EFFECTS APPLIED! {:?}", tests); 
         if test_random {
-            network_emulator.add_random_events(
-                NUMBER_OF_RANDOM_EVENTS,                                  // count: add 5 events
-                RandomEventKind::Jitter,            // type of event
-                overall_start,                      // overall start time for events
-                overall_end,                        // overall end time for events
-                Duration::from_millis(50),         // min duration for each event
-                Duration::from_millis(500),         // max duration for each event
-                JitterDistributionType::Uniform,    // distribution for the event duration (and jitter)
-                8.0,                                // mean delay in ms
-                6.0,                                // half-width (for Uniform jitter) or std dev (if Gaussian)
-            );
+            // network_emulator.add_random_events(
+            //     NUMBER_OF_RANDOM_EVENTS,                                  // count: add 5 events
+            //     RandomEventKind::Jitter,            // type of event
+            //     overall_start,                      // overall start time for events
+            //     overall_end,                        // overall end time for events
+            //     Duration::from_millis(50),         // min duration for each event
+            //     Duration::from_millis(500),         // max duration for each event
+            //     JitterDistributionType::Uniform,    // distribution for the event duration (and jitter)
+            //     8.0,                                // mean delay in ms
+            //     6.0,                                // half-width (for Uniform jitter) or std dev (if Gaussian)
+            // );
     
-            network_emulator.add_random_events(
-                NUMBER_OF_RANDOM_EVENTS,                                  // Number of events
-                RandomEventKind::PacketLoss,        // Event type: Packet Loss
-                overall_start,                      // Overall window start time
-                overall_end,                        // Overall window end time
-                Duration::from_millis(50),          // Minimum duration per event
-                Duration::from_millis(500),         // Maximum duration per event
-                JitterDistributionType::Uniform,    // Distribution for event duration
-                0.01,                                // Drop probability (mean_value)
-                0.01,                                // Variance (not used for packet loss events)
-            );
+            // network_emulator.add_random_events(
+            //     NUMBER_OF_RANDOM_EVENTS,                                  // Number of events
+            //     RandomEventKind::PacketLoss,        // Event type: Packet Loss
+            //     overall_start,                      // Overall window start time
+            //     overall_end,                        // Overall window end time
+            //     Duration::from_millis(50),          // Minimum duration per event
+            //     Duration::from_millis(500),         // Maximum duration per event
+            //     JitterDistributionType::Uniform,    // Distribution for event duration
+            //     0.01,                                // Drop probability (mean_value)
+            //     0.01,                                // Variance (not used for packet loss events)
+            // );
     
             network_emulator.add_random_events(
                 NUMBER_OF_RANDOM_EVENTS,                                  // Number of events
                 RandomEventKind::Bandwidth,         // Event type: Bandwidth limit
                 overall_start,                      // Overall window start time
                 overall_end,                        // Overall window end time
-                Duration::from_millis(50),         // Minimum duration per event
-                Duration::from_millis(500),        // Maximum duration per event
+                Duration::from_millis(200),         // Minimum duration per event
+                Duration::from_millis(2000),        // Maximum duration per event
                 JitterDistributionType::Uniform,    // Distribution for event duration
                 50e6,                                // Maximum bps (1Mbps) as mean_value
-                0.0,                                // Variance (not used for bandwidth events)
+                40e6,                                // Variance 
             );
         }
 
@@ -1315,7 +1315,14 @@ impl NetworkPatternEmulator {
                 event_type, event_start, event_duration, mean_value
             ); 
 
-            let std_dev = variance.sqrt();
+            let std_dev = variance;
+
+            println!(">>>std dev: {}", std_dev); 
+            println!(
+                "DEBUG: mean_value={} std_dev={} ratio={}",
+                mean_value, std_dev, std_dev / mean_value
+            );
+
             let normal = Normal::new(mean_value, std_dev).expect("Invalid distribution parameters");
             let mut drop_probability = normal.sample(&mut rng);
             drop_probability = drop_probability.clamp(0.0, 1.0);
@@ -1348,9 +1355,25 @@ impl NetworkPatternEmulator {
             }, 
             RandomEventKind::Bandwidth => {
                 // For bandwidth events, mean_value represents the max_bps limit.
+                let std_dev = variance.sqrt();
+
+                            // Define a normal distribution centered at mean_value (bps)
+                let normal_bw = Normal::new(mean_value, std_dev)
+                        .unwrap_or_else(|_| Normal::new(mean_value, 0.1 * mean_value).unwrap());
+                // Sample the effective bandwidth for this event
+                // let sampled_bw = normal_bw.sample(&mut rng).max(0.0); // avoid negatives
+
+                let z: f64 = normal.sample(&mut rand::thread_rng()).max(5e6); // minimum 5 Mbps
+                crate::print_dblue!(
+                    // DebugColor::Cyan,
+                    "📶 Bandwidth event: {:.2} Mbps ± {:.2} variance → sampled {:.2} Mbps",
+                    mean_value / 1e6,
+                    variance / 1e6,
+                    z / 1e6
+                );
                 NetworkPattern::new_bandwidth(
-                    mean_value, // max_bps for the event
-                    mean_value, // here we use the same value for the token refill rate
+                    z, // max_bps for the event
+                    z, // here we use the same value for the token refill rate
                     event_start,
                     event_end,
                 )
@@ -1423,10 +1446,10 @@ impl NetworkPatternEmulator {
         let (_has_active, just_ended) = self.check_active_patterns(current_time);
         // / If a pattern just ended, signal to purge the queue
         if just_ended {
-            print_green!(
-                "{} [PATTERN TRANSITION] Bandwidth pattern just ended, need to purge queue",
-                format_elapsed!(current_time)
-            );
+            // print_green!(
+            //     "{} [PATTERN TRANSITION] Bandwidth pattern just ended, need to purge queue",
+            //     format_elapsed!(current_time)
+            // );
 
             return None; // Signal to drop the packet (and potentially purge queue)
         }
@@ -1876,7 +1899,7 @@ impl QueueModule {
             // We need to lock the mutex to modify the sta_id
             if let Ok(mut stats) = sta_stats.data.clone().lock() {
                 stats.sta_id = vec_ids[i] as i32;
-                println!("iter: {}, stats id : {:?}", i, stats.sta_id);
+                // println!("iter: {}, stats id : {:?}", i, stats.sta_id);
                 stats_vec.insert(stats.sta_id.clone() as usize, sta_stats.clone());
         
             }    

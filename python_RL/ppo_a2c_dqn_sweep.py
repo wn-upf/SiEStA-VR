@@ -7,7 +7,6 @@ import gymnasium as gym
 from gymnasium import spaces
 import zmq
 from sb3_contrib import RecurrentPPO
-policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 
 from pathlib import Path
@@ -45,6 +44,7 @@ WINDOW_LEN = 5
 OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
 
 ACTION_DIM = 20
+policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 
 
@@ -144,7 +144,7 @@ class ZmqServer:
         """Main server loop."""
         while True:
             # Wait for a command from the training agent ('reset' or 'step')
-            print(f"\n{Colors.YELLOW}SERVER: Waiting for command from trainer...{Colors.ENDC}")
+            # print(f"\n{Colors.YELLOW}SERVER: Waiting for command from trainer...{Colors.ENDC}")
             req = self.rep_socket.recv_json()
             command = req.get("command")
             
@@ -234,6 +234,7 @@ def start_zmq_server_thread(env_vars):
     t.start()
 
     return server, t
+
 
 class ZmqEnvClientVEC(gym.Env):
     """Gym env that talks to your trainer server via ZMQ (REQ/REP)."""
@@ -419,6 +420,33 @@ class ZmqEnvClientVEC(gym.Env):
         self.ctx.term()
 
 
+
+class ZmqEnvClient(ZmqEnvClientVEC):
+    """Simpler env version that only uses the last observation (no history window)."""
+    def __init__(self, trainer_ep):
+        super().__init__(trainer_ep)
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(FEAT_DIM,), dtype=np.float32
+        )
+
+    @staticmethod
+    def _parse_obs_payload(payload):
+        """Strip history, keep only the last row."""
+        if isinstance(payload, (list, np.ndarray)):
+            raw = np.asarray(payload, dtype=np.float32).ravel()
+            if raw.size > FEAT_DIM:
+                raw = raw[-FEAT_DIM:]
+            return raw.astype(np.float32, copy=False), dict(seq_len=1)
+        elif isinstance(payload, dict) and "obs_flat" in payload:
+            raw = np.asarray(payload["obs_flat"], dtype=np.float32)
+            return raw[-FEAT_DIM:].astype(np.float32, copy=False), dict(seq_len=1)
+        else:
+            raise KeyError("Cannot parse obs payload")
+
+
+
+
+
 class LastRowExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: spaces.Box, feat_dim: int = FEAT_DIM):
         super().__init__(observation_space, features_dim=feat_dim)
@@ -439,8 +467,16 @@ def train_sweep_vec(trainer_ep: str ):
     )
     # os.environ.update(env_vars)
     # 2) Build env (windowed obs)
-    env = ZmqEnvClientVEC(trainer_ep)
-
+    # env = ZmqEnvClientVEC(trainer_ep)
+    if wandb.config.get("use_vectorized_obs", True):
+        print(f"{Colors.BLUE}Using vectorized (windowed) observations.{Colors.ENDC}")
+        env = ZmqEnvClientVEC(trainer_ep)
+        policy = policy_ppo_a2c
+    else:
+        print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
+        env = ZmqEnvClient(trainer_ep)
+        # Use feature extractor that trims window, if any
+        policy = "MlpPolicy"
     # 3) Select and configure the model based on wandb.config
     model = None
     algo = wandb.config.algorithm
@@ -542,277 +578,70 @@ def train_sweep_vec(trainer_ep: str ):
 
     wandb.finish()
 
+def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
+    """
+    Run multiple shuffled passes over all simulation combos.
+    """
+    # ---- Fixed endpoints for the entire run ----
+    base_id = os.environ.get("SLURM_JOB_ID") or os.getpid()
+    RUN_ID = f"{base_id}_train"
+
+    action_ep  = f"ipc:///tmp/xr_{RUN_ID}_action"
+    step_ep    = f"ipc:///tmp/xr_{RUN_ID}_step"
+    trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
+
+    # ---- Start the shared ZMQ server ----
+    env_server = {
+        "ZMQ_ACTION_EP":  action_ep,
+        "ZMQ_STEP_EP":    step_ep,
+        "ZMQ_TRAINER_EP": trainer_ep,
+    }
+    server, thread = start_zmq_server_thread(env_server)
+    time.sleep(0.5)
+
+    # ---- Start RL thread (same endpoints for all episodes) ----
+    pool = ThreadPoolExecutor(max_workers=2)
+    fut_rl = pool.submit(train_sweep_vec, trainer_ep)
+    print(f"RL loop started on {trainer_ep}")
+
+    # ---- Outer training loop over multiple passes ----
+    for pass_idx in range(1, num_passes + 1):
+        random.shuffle(combos)
+        print(f"\n🔁 Starting pass {pass_idx}/{num_passes} — {len(combos)} combos.")
+
+        for sim_count, combo in enumerate(combos, 1):
+            (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
+             close_users, close_distance, seed, distance, gop,
+             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
+
+            argv = [
+                f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
+                f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
+                f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
+                f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
+                "1", f"{sim_count}"
+            ]
+
+            env_sim = os.environ.copy()
+            env_sim["ZMQ_ACTION_EP"]  = action_ep
+            env_sim["ZMQ_STEP_EP"]    = step_ep
+            env_sim["ZMQ_TRAINER_EP"] = trainer_ep
+            env_sim["WANDB_RUN_GROUP"] = f"pass_{pass_idx}_episode_{sim_count}"
+
+            log_path = Path("Results") / f"pass_{pass_idx}_combo_{sim_count}" / "sim.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+
+            print(f"\n🚀 Pass {pass_idx}: launching combo {sim_count}/{len(combos)}")
+            ret = run_sim(exe, argv, env_sim, log_path)
+            print(f"✅ Pass {pass_idx}, combo {sim_count}: simulator exited with {ret}")
+
+        print(f"🎯 Finished pass {pass_idx}/{num_passes}")
+
+    print("🧹 All passes done — waiting for RL to finish or reach its timestep limit.")
+    server.close()
+    pool.shutdown(wait=False)
 
 
-# --- Main Training Function for W&B Sweep ---
-def train_sweep():
-    # 1) Initialize W&B run. The agent will automatically fill config.
-    run = wandb.init(
-        project=os.environ.get("WANDB_PROJECT", "xr-abr"),
-        entity=os.environ.get("WANDB_ENTITY"),
-        save_code=True,
-    )
-
-    # 2) Build env
-    env = ZmqEnvClient()    
-    # 3) Select and configure the model based on wandb.config
-    model = None
-    algo = wandb.config.algorithm
-
-    print(f"{Colors.GREEN}--- Starting run for algorithm: {algo} ---{Colors.ENDC}")
-    print(f"{Colors.BLUE}{pprint.pformat(dict(wandb.config))}{Colors.ENDC}")
-
-    if algo == "PPO":
-        model = PPO(
-            policy_ppo_a2c, env,
-            learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps,
-            batch_size=wandb.config.batch_size_ppo,
-            n_epochs=wandb.config.n_epochs,
-            gamma=wandb.config.gamma,
-            gae_lambda=wandb.config.gae_lambda,
-            clip_range=wandb.config.clip_range,
-            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-            verbose=1,
-        )
-    elif algo == "DQN":
-        model = DQN(
-            "MlpPolicy", env,
-            learning_rate=wandb.config.learning_rate,
-            buffer_size=wandb.config.buffer_size,
-            learning_starts=1000,
-            batch_size=wandb.config.batch_size_dqn,
-            gamma=wandb.config.gamma,
-            train_freq=(1, "step"),
-            target_update_interval=wandb.config.target_update_interval,
-            exploration_fraction=wandb.config.exploration_fraction,
-            exploration_final_eps=wandb.config.exploration_final_eps,
-            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-            verbose=1,
-        )
-    elif algo == "A2C":
-        model = A2C(
-            policy_ppo_a2c, env,
-            learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps_a2c,
-            gamma=wandb.config.gamma,
-            vf_coef=wandb.config.vf_coef,
-            ent_coef=wandb.config.ent_coef,
-            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-            verbose=1,
-        )
-    elif algo == "RNN_PPO":  # or reuse "PPO" and gate via a config flag
-        
-        final_batch_size = coerce_batch_size(
-            n_steps=wandb.config.n_steps,
-            batch_size=wandb.config.batch_size_ppo
-        )
-        
-        model = RecurrentPPO(
-            "MlpLstmPolicy",
-            env,
-            learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps,
-            batch_size=final_batch_size, # Use the corrected batch size here
-            n_epochs=wandb.config.n_epochs,
-            gamma=wandb.config.gamma,
-            gae_lambda=wandb.config.gae_lambda,
-            clip_range=wandb.config.clip_range,
-            policy_kwargs=dict(
-                net_arch=list(wandb.config.net_arch),
-                lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
-                n_lstm_layers=wandb.config.get("n_lstm_layers", 2),
-            ),
-            verbose=1,
-        )
-    # 4) Set up callback and start learning
-    callback = WandbCallback(
-        model_save_path=f"models/{run.id}",
-        model_save_freq=50_000, # Saving less frequently during a sweep is fine
-        verbose=2,
-        log="all", 
-    )
-
-    total_steps = N_STEPS_RL # Keep this fixed for fair comparison across runs
-    model.learn(total_timesteps=total_steps, callback=callback)
-
-    # --- NEW: Save and log the final model artifact ---
-    print(f"{Colors.GREEN}--- Training complete. Saving final model. ---{Colors.ENDC}")
-    final_model_path = f"models/{run.id}/final_model.zip"
-    model.save(final_model_path)
-    
-    final_artifact = wandb.Artifact(
-        name=f"{algo}-{run.id}-final", 
-        type="model",
-        description=f"Final model for a {algo} run after {total_steps} steps."
-    )
-    final_artifact.add_file(final_model_path)
-    run.log_artifact(final_artifact)
-    # --- End of new section ---
-
-    wandb.finish()
-
-
-
-# def train_over_all_combos(exe: Path, combos):
-#     """Train one single PPO agent over all parameter combinations sequentially."""
-#     # 1️⃣ Start the ZMQ server once
-#     server, thread = start_zmq_server_thread(os.environ)
-#     time.sleep(1.0)
-
-#     # 2️⃣ Build the ZMQ gym environment
-#     env = ZmqEnvClientVEC()
-
-#     # 3️⃣ Initialize W&B and the RL model (once!)
-#     run = wandb.init(
-#         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
-#         entity=os.environ.get("WANDB_ENTITY"),
-#         save_code=True,
-#     )
-
-#     algo = wandb.config.algorithm
-#     print(f"{Colors.GREEN}--- Continuous training over all combos with {algo} ---{Colors.ENDC}")
-
-#     if algo == "PPO":
-#         model = PPO(
-#             policy_ppo_a2c, env,
-#             learning_rate=wandb.config.learning_rate,
-#             n_steps=wandb.config.n_steps,
-#             batch_size=wandb.config.batch_size_ppo,
-#             n_epochs=wandb.config.n_epochs,
-#             gamma=wandb.config.gamma,
-#             gae_lambda=wandb.config.gae_lambda,
-#             clip_range=wandb.config.clip_range,
-#             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-#             ent_coef=wandb.config.get("ent_coef", 0.0),
-#             verbose=1,
-#         )
-#     elif algo == "DQN":
-#         model = DQN(
-#             "MlpPolicy", env,
-#             learning_rate=wandb.config.learning_rate,
-#             buffer_size=wandb.config.buffer_size,
-#             learning_starts=1000,
-#             batch_size=wandb.config.batch_size_dqn,
-#             gamma=wandb.config.gamma,
-#             train_freq=(1, "step"),
-#             target_update_interval=wandb.config.target_update_interval,
-#             exploration_fraction=wandb.config.exploration_fraction,
-#             exploration_final_eps=wandb.config.exploration_final_eps,
-#             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-#             verbose=1,
-#         )
-#     elif algo == "A2C":
-#         model = A2C(
-#             policy_ppo_a2c, env,
-#             learning_rate=wandb.config.learning_rate,
-#             n_steps=wandb.config.n_steps_a2c,
-#             gamma=wandb.config.gamma,
-#             vf_coef=wandb.config.vf_coef,
-#             ent_coef=wandb.config.ent_coef,
-#             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-#             verbose=1,
-#         )
-#     elif algo == "RNN_PPO":  # or reuse "PPO" and gate via a config flag
-        
-#         final_batch_size = coerce_batch_size(
-#             n_steps=wandb.config.n_steps,
-#             batch_size=wandb.config.batch_size_ppo
-#         )
-        
-#         model = RecurrentPPO(
-#             "MlpLstmPolicy",
-#             env,
-#             learning_rate=wandb.config.learning_rate,
-#             n_steps=wandb.config.n_steps,
-#             batch_size=final_batch_size, # Use the corrected batch size here
-#             n_epochs=wandb.config.n_epochs,
-#             gamma=wandb.config.gamma,
-#             gae_lambda=wandb.config.gae_lambda,
-#             clip_range=wandb.config.clip_range,
-#             policy_kwargs=dict(
-#                 net_arch=list(wandb.config.net_arch),
-#                 lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
-#                 n_lstm_layers=wandb.config.get("n_lstm_layers", 2),
-#             ),
-#             verbose=1,
-#         )
-#     else:
-#         raise ValueError(f"Algorithm {algo} not yet wired for continuous mode")
-
-#     callback = WandbCallback(
-#         model_save_path=f"models/{run.id}",
-#         model_save_freq=50_000,
-#         verbose=2,
-#         log="all",
-#     )
-    
-
-#     # 4️⃣ Iterate over all simulation combos
-#     total_steps = 0
-
-#     for sim_count, combo in enumerate(combos, 1):
-#         (test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
-#          close_users, close_distance, seed, distance, gop,
-#          intrarefresh, ABR, nest_profile) = combo
-
-#         argv = [
-#             "40.0", "12000.0", "10000", f"{distance}", f"{bitrate}",
-#             "0.1", f"{nxr}", f"{nbg}", "2e7", f"{is_ul}",
-#             f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
-#             f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}", "1", f"{sim_count}"
-#         ]
-
-#         # --- Generate a unique RUN_ID ---
-#         slurm_id = os.environ.get("SLURM_JOB_ID")
-#         pid = os.getpid()
-#         rand = random.randint(1000, 9999)
-#         RUN_ID = f"{slurm_id or pid}_{sim_count}_{rand}"
-
-#         # --- Override endpoints per simulation ---
-#         env_vars = os.environ.copy()
-#         env_vars["RUN_ID"] = RUN_ID
-#         env_vars["ZMQ_ACTION_EP"]  = f"ipc:///tmp/xr_{RUN_ID}_action"
-#         env_vars["ZMQ_STEP_EP"]    = f"ipc:///tmp/xr_{RUN_ID}_step"
-#         env_vars["ZMQ_TRAINER_EP"] = f"ipc:///tmp/xr_{RUN_ID}_trainer"
-#         env_vars["WANDB_RUN_GROUP"] = f"sim_{RUN_ID}"
-
-#         # --- Print endpoints for debugging ---
-#         print(f"\n🚀 Launching simulation {sim_count}/{len(combos)} with RUN_ID={RUN_ID}")
-#         print(f"  ACTION={env_vars['ZMQ_ACTION_EP']}")
-#         print(f"  STEP  ={env_vars['ZMQ_STEP_EP']}")
-#         print(f"  TRAINER={env_vars['ZMQ_TRAINER_EP']}")
-
-#         log_path = Path("Results") / f"combo_{sim_count}" / "sim.log"
-#         log_path.parent.mkdir(parents=True, exist_ok=True)
-
-#         # --- Launch Rust simulator with those env vars ---
-#         sim_proc = subprocess.Popen(
-#             [str(exe), *argv],
-#             stdout=subprocess.PIPE,
-#             stderr=subprocess.STDOUT,
-#             text=True,
-#             env=env_vars,
-#         )
-
-#         # --- Train for a fixed number of steps ---
-#         steps_this_episode = wandb.config.get("steps_per_episode", 10000)
-#         model.learn(total_timesteps=steps_this_episode, reset_num_timesteps=False, callback=callback)
-
-#         # --- Stop the simulator ---
-#         sim_proc.terminate()
-#         print(f"🧩 Finished simulation {sim_count} ({steps_this_episode} steps)")
-
-
-
-#     # 8️⃣ Save the final model once
-#     print(f"{Colors.GREEN}--- Training complete. Saving final model after {total_steps} steps ---{Colors.ENDC}")
-#     final_model_path = f"models/{run.id}/final_model.zip"
-#     model.save(final_model_path)
-#     wandb.finish()
-
-#     server.close()
-#     print("🧹 All combos done. Server closed.")
 def train_over_all_combos(exe: Path, combos):
     """
     Start RL once; for each combo, spawn one Rust simulator episode.
@@ -841,15 +670,19 @@ def train_over_all_combos(exe: Path, combos):
 
     print(f"RL loop started on {trainer_ep}")
 
+    print(f"All combinations: {len(combos)}")
+
+    time.sleep(5.5)
+
     # ---- For each combo: launch one sim episode with the SAME endpoints ----
     for sim_count, combo in enumerate(combos, 1):
         (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
          close_users, close_distance, seed, distance, gop,
-         intrarefresh, ABR, nest_profile) = combo
+         intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
 
         argv = [
             f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
-            "0.1", f"{nxr}", f"{nbg}", "2e7", f"{is_ul}",
+            f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
             f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
             f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
             "1", f"{sim_count}"
@@ -892,6 +725,22 @@ def find_project_root(start: Path) -> Path:
         if (p / "Cargo.toml").exists():
             return p
     raise RuntimeError("Cargo.toml not found.")
+
+
+def rebuild_rust_binary(example_name="XR_sim"):
+    """Force recompile the Rust example in --release mode before running."""
+    project_root = find_project_root(Path(__file__).parent)
+    print(f"🔨 Rebuilding Rust example `{example_name}` in release mode...")
+    cmd = ["cargo", "build", "--release", "--example", example_name]
+    start_time = time.time()
+    result = subprocess.run(cmd, cwd=project_root, text=True, capture_output=True)
+    duration = time.time() - start_time
+    if result.returncode != 0:
+        print(f"❌ Cargo build failed after {duration:.1f}s:\n{result.stderr}")
+        sys.exit(1)
+    else:
+        print(f"✅ Rust binary rebuilt successfully in {duration:.1f}s")
+
 
 def find_exe(release=True):
     root = find_project_root(Path(__file__).parent)
@@ -950,17 +799,20 @@ def main():
     # time.sleep(1.0)  # Give it a moment to bind sockets
 
     # === 2️⃣ Build all parameter combinations ===
-    TEST_TYPE = ["STD"]
-    simTime = [40.0]
+    # TEST_TYPE = ["STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+    TEST_TYPE = [ "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+
+    simTime = [70.0]
+
     k_queue = 10000
     mean_length_BG = 12000.0
-    rate_bps_src_BG = 20e6
+    rate_bps_src_BG = [10e6, 20e6, 40e6]
     distance_list = [1.5]
     distance_close_users = [1.5]
     num_close_users = [0]
-    N_XR = [1]
-    PL = 0.1
-    fps_list = [90.0]
+    N_XR = [1, 2, 3, 4]
+    PL = [0.0001, 0.01, 0.1, 0.25]
+    fps_list = [60.0, 90.0, 120.0 ]
     initial_bitrate_mbps = [10.0, 20.0, 40.0]
     ABR_ENABLED = [3]
     nest_profiles = [1]
@@ -976,26 +828,16 @@ def main():
         simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
         video_samples, fps_list, num_close_users, distance_close_users,
         RANDOM_SEEDS, distance_list, GoP_sizes, intrarefresh_choice,
-        ABR_ENABLED, nest_profiles
+        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
     ))
 
     random.shuffle(combos)  # optional
 
+    print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
+    
+    rebuild_rust_binary(EXAMPLE_NAME)
     exe = find_exe(release=True)
-    train_over_all_combos(exe, combos)
-
-    # # === 3️⃣ Run all simulations sequentially ===
-    # for sim_count, (test, nbg, nxr, is_ul, bitrate, video_sample, FPS, close_users,
-    #                 close_distance, seed, distance, gop, intrarefresh, ABR, nest_profile) in enumerate(combos, 1):
-        
-    #     argv = [
-    #         f"{simTime}", f"{mean_length_BG}", f"{k_queue}", f"{distance}", f"{bitrate}",
-    #         f"{PL}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
-    #         f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
-    #         f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
-    #         f"{everest_tests}", f"{sim_count}",
-    #     ]
-    #     run_episode(exe, argv, sim_count)
+    train_over_all_combos_iter(exe, combos)
 
     # === 4️⃣ Close ZMQ server ===
     server.close()

@@ -324,9 +324,9 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 23 {
         eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue> \
-<distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> \
-<video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> \
-<Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id>", args[0]);
+                <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> \
+                <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> \
+                <Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id>", args[0]);
         std::process::exit(2);
     }
     let params = parse_cli_to_params(&args);
@@ -386,8 +386,6 @@ fn main_old() {
         "RANDOM" => (false,false, false, true), 
         _ => (false, false, false, false), // Default/STD case
     };
-
-
 
     // Use the test type from parameter as suffix directly
     let suffix = if ["BW", "JI", "PL", "STD", "RANDOM"].contains(&test_type.as_str()) {

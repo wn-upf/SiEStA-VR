@@ -1842,7 +1842,7 @@ impl BitrateManager {
             3 => { // RL 
                 let ladder_mbps = (10..=MAX_MBPS_LADDER as usize).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
-                print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
+                // print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
 
                 let action_ep  = std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
                 let reward_ep  = std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
@@ -2091,7 +2091,7 @@ impl BitrateManager {
         const TIME_WARMUP_ABR: u64 = 5; 
 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
-            println!("No ABR (warmup) {} -> {}", format_elapsed!(now), TIME_WARMUP_ABR); 
+            println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name()); 
             let bitrate_bps = self.last_target_bitrate_bps; 
             bitrate_bps 
         }

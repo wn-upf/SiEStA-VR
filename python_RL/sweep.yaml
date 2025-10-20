@@ -8,6 +8,9 @@ parameters:
   algorithm:
     values: ['PPO', 'DQN', 'A2C', 'RNN_PPO']
 
+
+  use_vectorized_obs:
+    values: [true, false]
   # --- Core Hyperparameters (Shared across models) ---
   learning_rate:
     distribution: log_uniform_values

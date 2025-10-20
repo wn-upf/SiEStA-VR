@@ -30,7 +30,7 @@ TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different em
 simTime=150.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
-rate_bps_src_BG=20E6;   ## BG traffic arrival rate
+rate_bps_src_BG=50E6;   ## BG traffic arrival rate
 
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
