@@ -9,6 +9,15 @@ import zmq
 from sb3_contrib import RecurrentPPO
 policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
+
+from pathlib import Path
+from itertools import product
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+import random
+import subprocess
+import sys
+import pprint
 # --- Stable Baselines 3 Imports ---
 from stable_baselines3 import PPO, DQN, A2C
 import argparse
@@ -55,11 +64,13 @@ class Colors:
     YELLOW = '\033[93m'
     ENDC = '\033[0m'
 
-# OBSERVATION_SHAPE = (11,)
-# ACTION_ENDPOINT = "tcp://*:5555"
-# STEP_ENDPOINT = "tcp://*:5556"
-# TRAINER_ENDPOINT = "tcp://*:5557"
-# TRAINER_ENDPOINT = "tcp://localhost:5557"
+
+def _obs_from_payload_dict(d):
+    if "obs_flat" in d:
+        return d["obs_flat"]
+    if "obs" in d:
+        return d["obs"]
+    raise KeyError("Neither 'obs_flat' nor 'obs' in payload")
 
 
 OBSERVATION_KEYS = [
@@ -88,22 +99,158 @@ def coerce_batch_size(n_steps: int, batch_size: int, n_envs: int = 1) -> int:
     return total  # fallback
 
 
+class Colors:
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    ENDC = '\033[0m'
 
+class ZmqServer:
+    """A standalone ZMQ server that acts as a bridge between Rust simulations
+    and a Python-based RL training agent."""
+    
+    def __init__(self, action_ep: str, step_ep: str, trainer_ep: str):
+
+
+        self.ctx = zmq.Context()
+        # Sockets for Rust Simulations (ROUTER for req/rep, PULL for one-way data)
+        self.router = self.ctx.socket(zmq.ROUTER)
+        self.router.bind(action_ep)
+        self.pull = self.ctx.socket(zmq.PULL)
+        self.pull.bind(step_ep)
+        
+        # Socket for Python Trainer Client (REP for req/rep)
+        self.rep_socket = self.ctx.socket(zmq.REP)
+        self.rep_socket.bind(trainer_ep)
+        
+        self.active_sim_id = None
+        print(f"{Colors.GREEN}✅ ZMQ Server Bridge is running.{Colors.ENDC}")
+        print(f"📡 Listening for Rust sims on {action_ep} and {step_ep}")
+        print(f"🤖 Listening for Python trainer on {trainer_ep}")
+
+    def _obs_from_json(self, obs_json):
+        # --- FIX ---
+        # The observation from Rust is now a pre-ordered list (Vec<f32>).
+        # We no longer need to sort it by key. We just return it as is.
+        # This resolves the TypeError.
+        if isinstance(obs_json, list):
+            return obs_json
+        # Fallback for old dictionary-based observations
+        print(f"{Colors.YELLOW}Warning: Received a dictionary-based observation. Consider updating all clients.{Colors.ENDC}")
+        return [obs_json[k] for k in sorted(obs_json)]
+
+
+    def run_forever(self):
+        """Main server loop."""
+        while True:
+            # Wait for a command from the training agent ('reset' or 'step')
+            print(f"\n{Colors.YELLOW}SERVER: Waiting for command from trainer...{Colors.ENDC}")
+            req = self.rep_socket.recv_json()
+            command = req.get("command")
+            
+            if command == "reset":
+                print(f"{Colors.BLUE}SERVER: Received 'reset' command.{Colors.ENDC}")
+                # 1. Get the very first observation from a new Rust sim
+                print("SERVER: Waiting for initial observation from a Rust simulation...")
+                sim_id, payload = self.router.recv_multipart()
+                req_obs = json.loads(payload.decode("utf-8"))
+                initial_obs = _obs_from_payload_dict(req_obs)
+                
+                self.active_sim_id = sim_id
+                # 2. Send a dummy action to unblock the Rust sim
+                self.router.send_multipart([self.active_sim_id, json.dumps({"action_idx": 0}).encode("utf-8")])
+                
+                # 3. Reply to the trainer with the initial observation
+                self.rep_socket.send_json({"obs": initial_obs})
+                print(f"{Colors.GREEN}SERVER: Reset complete for sim {sim_id.decode()}. Sent initial obs to trainer.{Colors.ENDC}")
+
+            elif command == "step":
+                action = req.get("action")
+                # print(f"SERVER: Received 'step' command with action {action}.")
+                
+                # 1. Wait for the transition data from Rust (PULL socket)
+                transition = self.pull.recv_json()
+                # Ensure we have the right simulation's data if multiple sims are running
+                while self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
+                    print(f"SERVER: Skipping transition from {transition.get('sim_id')}, waiting for {self.active_sim_id.decode()}")
+                    transition = self.pull.recv_json()
+
+                reward = float(transition["reward"])
+                done = bool(transition["done"])
+                # next_obs = self._obs_from_json(transition["next_obs"])
+                # next_obs = _obs_from_payload_dict(transition)
+                next_obs_field = transition.get("next_obs")
+                if next_obs_field is None:
+                    raise KeyError(f"Transition missing 'next_obs'; got keys: {list(transition.keys())}")
+
+                # If Rust sends a plain list -> use it directly.
+                # If Rust sends a dict like {"obs_flat": [...], "seq_len": ..., ...} -> normalize it.
+                if isinstance(next_obs_field, dict):
+                    next_obs = _obs_from_payload_dict(next_obs_field)
+                else:
+                    next_obs = next_obs_field
+                
+                # 2. If not done, sync with Rust and send the new action
+                if not done:
+                    # This recv is just to sync with the Rust sim's next action request
+                    sim_id, _ = self.router.recv_multipart() 
+                    # Send the real action from the agent
+                    self.router.send_multipart([sim_id, json.dumps({"action_idx": int(action)}).encode("utf-8")])
+
+                # 3. Reply to the trainer with the step result
+                self.rep_socket.send_json({
+                    "next_obs": next_obs,
+                    "reward": reward,
+                    "done": done
+                })
+                # print(f"SERVER: Step complete. Sent transition data to trainer.")
+                if done:
+                    print(f"{Colors.YELLOW}SERVER: Episode finished for sim {self.active_sim_id.decode()}.{Colors.ENDC}")
+                    self.active_sim_id = None # Ready for a new episode/sim
+            
+    def close(self):
+        """Cleanly close all sockets and terminate the context."""
+        self.router.close()
+        self.pull.close()
+        self.rep_socket.close()
+        self.ctx.term()
+
+
+import threading
+
+def start_zmq_server_thread(env_vars):
+
+    ACTION_ENDPOINT  = env_vars.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
+    STEP_ENDPOINT    = env_vars.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
+    TRAINER_ENDPOINT = env_vars.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
+
+    print(f"📡 Binding server to:")
+    print(f"  ACTION_ENDPOINT  = {ACTION_ENDPOINT}")
+    print(f"  STEP_ENDPOINT    = {STEP_ENDPOINT}")
+    print(f"  TRAINER_ENDPOINT = {TRAINER_ENDPOINT}")
+
+    server = ZmqServer(ACTION_ENDPOINT, STEP_ENDPOINT, TRAINER_ENDPOINT)
+    t = threading.Thread(target=server.run_forever, daemon=True)
+    t.start()
+
+    return server, t
 
 class ZmqEnvClientVEC(gym.Env):
     """Gym env that talks to your trainer server via ZMQ (REQ/REP)."""
     metadata = {"render_modes": []}
 
-    def __init__(self):
+    def __init__(self, trainer_ep):
         super().__init__()
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=OBSERVATION_SHAPE, dtype=np.float32
         )
         self.action_space = spaces.Discrete(ACTION_DIM)
 
+        # TRAINER_ENDPOINT = os.getenv("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
+
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.REQ)
-        self.socket.connect(TRAINER_ENDPOINT)
+        self.socket.connect(trainer_ep)
 
         self.step_count = 0
         self.global_step = 0
@@ -111,7 +258,7 @@ class ZmqEnvClientVEC(gym.Env):
         self.ep_len = 0
         self.run_return_cumsum = 0.0
 
-        print("✅ Python ZMQ Client connected to server.")
+        print(f"✅ Python ZMQ Client connected to server {TRAINER_ENDPOINT}.")
 
     # ---------- helpers ----------
     @staticmethod
@@ -283,16 +430,16 @@ class LastRowExtractor(BaseFeaturesExtractor):
 
 
 # --- Main Training Function for W&B Sweep (VEC/windowed obs) ---
-def train_sweep_vec():
+def train_sweep_vec(trainer_ep: str ):
     # 1) Initialize W&B run
     run = wandb.init(
         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
         entity=os.environ.get("WANDB_ENTITY"),
         save_code=True,
     )
-
+    # os.environ.update(env_vars)
     # 2) Build env (windowed obs)
-    env = ZmqEnvClientVEC()
+    env = ZmqEnvClientVEC(trainer_ep)
 
     # 3) Select and configure the model based on wandb.config
     model = None
@@ -505,6 +652,354 @@ def train_sweep():
 
     wandb.finish()
 
+
+
+# def train_over_all_combos(exe: Path, combos):
+#     """Train one single PPO agent over all parameter combinations sequentially."""
+#     # 1️⃣ Start the ZMQ server once
+#     server, thread = start_zmq_server_thread(os.environ)
+#     time.sleep(1.0)
+
+#     # 2️⃣ Build the ZMQ gym environment
+#     env = ZmqEnvClientVEC()
+
+#     # 3️⃣ Initialize W&B and the RL model (once!)
+#     run = wandb.init(
+#         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
+#         entity=os.environ.get("WANDB_ENTITY"),
+#         save_code=True,
+#     )
+
+#     algo = wandb.config.algorithm
+#     print(f"{Colors.GREEN}--- Continuous training over all combos with {algo} ---{Colors.ENDC}")
+
+#     if algo == "PPO":
+#         model = PPO(
+#             policy_ppo_a2c, env,
+#             learning_rate=wandb.config.learning_rate,
+#             n_steps=wandb.config.n_steps,
+#             batch_size=wandb.config.batch_size_ppo,
+#             n_epochs=wandb.config.n_epochs,
+#             gamma=wandb.config.gamma,
+#             gae_lambda=wandb.config.gae_lambda,
+#             clip_range=wandb.config.clip_range,
+#             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+#             ent_coef=wandb.config.get("ent_coef", 0.0),
+#             verbose=1,
+#         )
+#     elif algo == "DQN":
+#         model = DQN(
+#             "MlpPolicy", env,
+#             learning_rate=wandb.config.learning_rate,
+#             buffer_size=wandb.config.buffer_size,
+#             learning_starts=1000,
+#             batch_size=wandb.config.batch_size_dqn,
+#             gamma=wandb.config.gamma,
+#             train_freq=(1, "step"),
+#             target_update_interval=wandb.config.target_update_interval,
+#             exploration_fraction=wandb.config.exploration_fraction,
+#             exploration_final_eps=wandb.config.exploration_final_eps,
+#             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+#             verbose=1,
+#         )
+#     elif algo == "A2C":
+#         model = A2C(
+#             policy_ppo_a2c, env,
+#             learning_rate=wandb.config.learning_rate,
+#             n_steps=wandb.config.n_steps_a2c,
+#             gamma=wandb.config.gamma,
+#             vf_coef=wandb.config.vf_coef,
+#             ent_coef=wandb.config.ent_coef,
+#             policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
+#             verbose=1,
+#         )
+#     elif algo == "RNN_PPO":  # or reuse "PPO" and gate via a config flag
+        
+#         final_batch_size = coerce_batch_size(
+#             n_steps=wandb.config.n_steps,
+#             batch_size=wandb.config.batch_size_ppo
+#         )
+        
+#         model = RecurrentPPO(
+#             "MlpLstmPolicy",
+#             env,
+#             learning_rate=wandb.config.learning_rate,
+#             n_steps=wandb.config.n_steps,
+#             batch_size=final_batch_size, # Use the corrected batch size here
+#             n_epochs=wandb.config.n_epochs,
+#             gamma=wandb.config.gamma,
+#             gae_lambda=wandb.config.gae_lambda,
+#             clip_range=wandb.config.clip_range,
+#             policy_kwargs=dict(
+#                 net_arch=list(wandb.config.net_arch),
+#                 lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
+#                 n_lstm_layers=wandb.config.get("n_lstm_layers", 2),
+#             ),
+#             verbose=1,
+#         )
+#     else:
+#         raise ValueError(f"Algorithm {algo} not yet wired for continuous mode")
+
+#     callback = WandbCallback(
+#         model_save_path=f"models/{run.id}",
+#         model_save_freq=50_000,
+#         verbose=2,
+#         log="all",
+#     )
+    
+
+#     # 4️⃣ Iterate over all simulation combos
+#     total_steps = 0
+
+#     for sim_count, combo in enumerate(combos, 1):
+#         (test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
+#          close_users, close_distance, seed, distance, gop,
+#          intrarefresh, ABR, nest_profile) = combo
+
+#         argv = [
+#             "40.0", "12000.0", "10000", f"{distance}", f"{bitrate}",
+#             "0.1", f"{nxr}", f"{nbg}", "2e7", f"{is_ul}",
+#             f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
+#             f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}", "1", f"{sim_count}"
+#         ]
+
+#         # --- Generate a unique RUN_ID ---
+#         slurm_id = os.environ.get("SLURM_JOB_ID")
+#         pid = os.getpid()
+#         rand = random.randint(1000, 9999)
+#         RUN_ID = f"{slurm_id or pid}_{sim_count}_{rand}"
+
+#         # --- Override endpoints per simulation ---
+#         env_vars = os.environ.copy()
+#         env_vars["RUN_ID"] = RUN_ID
+#         env_vars["ZMQ_ACTION_EP"]  = f"ipc:///tmp/xr_{RUN_ID}_action"
+#         env_vars["ZMQ_STEP_EP"]    = f"ipc:///tmp/xr_{RUN_ID}_step"
+#         env_vars["ZMQ_TRAINER_EP"] = f"ipc:///tmp/xr_{RUN_ID}_trainer"
+#         env_vars["WANDB_RUN_GROUP"] = f"sim_{RUN_ID}"
+
+#         # --- Print endpoints for debugging ---
+#         print(f"\n🚀 Launching simulation {sim_count}/{len(combos)} with RUN_ID={RUN_ID}")
+#         print(f"  ACTION={env_vars['ZMQ_ACTION_EP']}")
+#         print(f"  STEP  ={env_vars['ZMQ_STEP_EP']}")
+#         print(f"  TRAINER={env_vars['ZMQ_TRAINER_EP']}")
+
+#         log_path = Path("Results") / f"combo_{sim_count}" / "sim.log"
+#         log_path.parent.mkdir(parents=True, exist_ok=True)
+
+#         # --- Launch Rust simulator with those env vars ---
+#         sim_proc = subprocess.Popen(
+#             [str(exe), *argv],
+#             stdout=subprocess.PIPE,
+#             stderr=subprocess.STDOUT,
+#             text=True,
+#             env=env_vars,
+#         )
+
+#         # --- Train for a fixed number of steps ---
+#         steps_this_episode = wandb.config.get("steps_per_episode", 10000)
+#         model.learn(total_timesteps=steps_this_episode, reset_num_timesteps=False, callback=callback)
+
+#         # --- Stop the simulator ---
+#         sim_proc.terminate()
+#         print(f"🧩 Finished simulation {sim_count} ({steps_this_episode} steps)")
+
+
+
+#     # 8️⃣ Save the final model once
+#     print(f"{Colors.GREEN}--- Training complete. Saving final model after {total_steps} steps ---{Colors.ENDC}")
+#     final_model_path = f"models/{run.id}/final_model.zip"
+#     model.save(final_model_path)
+#     wandb.finish()
+
+#     server.close()
+#     print("🧹 All combos done. Server closed.")
+def train_over_all_combos(exe: Path, combos):
+    """
+    Start RL once; for each combo, spawn one Rust simulator episode.
+    All processes share the same ZMQ endpoints for the whole run.
+    """
+    # ---- Fixed endpoints for the entire sweep ----
+    base_id = os.environ.get("SLURM_JOB_ID") or os.getpid()
+    RUN_ID = f"{base_id}_train"
+
+    action_ep  = f"ipc:///tmp/xr_{RUN_ID}_action"
+    step_ep    = f"ipc:///tmp/xr_{RUN_ID}_step"
+    trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
+
+    # ---- Start ZMQ server once ----
+    env_server = {
+        "ZMQ_ACTION_EP":  action_ep,
+        "ZMQ_STEP_EP":    step_ep,
+        "ZMQ_TRAINER_EP": trainer_ep,
+    }
+    server, thread = start_zmq_server_thread(env_server)
+    time.sleep(0.5)
+
+    # ---- Start RL loop once (points to fixed trainer_ep) ----
+    pool = ThreadPoolExecutor(max_workers=2)
+    fut_rl = pool.submit(train_sweep_vec, trainer_ep)  # <- runs until N_STEPS_RL
+
+    print(f"RL loop started on {trainer_ep}")
+
+    # ---- For each combo: launch one sim episode with the SAME endpoints ----
+    for sim_count, combo in enumerate(combos, 1):
+        (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
+         close_users, close_distance, seed, distance, gop,
+         intrarefresh, ABR, nest_profile) = combo
+
+        argv = [
+            f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
+            "0.1", f"{nxr}", f"{nbg}", "2e7", f"{is_ul}",
+            f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
+            f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
+            "1", f"{sim_count}"
+        ]
+
+        # The simulator gets the *same* endpoints; only metadata like RUN_GROUP changes if you want
+        env_sim = os.environ.copy()
+        env_sim["ZMQ_ACTION_EP"]  = action_ep
+        env_sim["ZMQ_STEP_EP"]    = step_ep
+        env_sim["ZMQ_TRAINER_EP"] = trainer_ep
+        env_sim["WANDB_RUN_GROUP"] = f"episode_{sim_count}"  # optional
+
+        log_path = Path("Results") / f"combo_{sim_count}" / "sim.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n🚀 Launching sim episode {sim_count}/{len(combos)}")
+        print(f"  ACTION={action_ep}")
+        print(f"  STEP  ={step_ep}")
+        print(f"  TRAINER={trainer_ep}")
+
+        # Start one simulator; it should produce obs, run, finish one ep, and exit
+        ret = run_sim(exe, argv, env_sim, log_path)
+        print(f"✅ Episode {sim_count} simulator exited with code {ret}")
+
+        # At this point SB3 will have seen done=True → env.reset() → server will
+        # wait for the *next* simulator to connect on the same endpoints.
+
+    print("🧹 All combos launched; waiting for RL to finish (or end by timesteps).")
+    # Optional: if you want to stop RL early, adjust model.learn timesteps or add a stop flag.
+
+    # Clean up
+    server.close()
+    pool.shutdown(wait=False)
+
+
+EXAMPLE_NAME = "XR_sim"
+
+def find_project_root(start: Path) -> Path:
+    for p in [start.resolve(), *start.resolve().parents]:
+        if (p / "Cargo.toml").exists():
+            return p
+    raise RuntimeError("Cargo.toml not found.")
+
+def find_exe(release=True):
+    root = find_project_root(Path(__file__).parent)
+    target_dir = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=root
+    ).decode())["target_directory"]
+    suffix = ".exe" if sys.platform.startswith("win") else ""
+    return Path(target_dir) / ("release" if release else "debug") / "examples" / f"{EXAMPLE_NAME}{suffix}"
+
+
+def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", buffering=1) as f:
+        f.write(f"# Started: {datetime.now().isoformat()}\nCMD: {' '.join([str(exe), *argv])}\n\n")
+        proc = subprocess.Popen([str(exe), *argv],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env)
+        for line in proc.stdout:
+            f.write(line)
+            print(line, end="")
+        return proc.wait()
+
+
+def run_episode(exe: Path, sim_args: list[str], sim_count: int):
+    """Launch one Rust simulator + RL training pair for a given configuration."""
+    slurm_id = os.environ.get("SLURM_JOB_ID")
+    pid = os.getpid()
+    rand = random.randint(1000, 9999)
+    RUN_ID = f"{slurm_id or pid}_{sim_count}_{rand}"
+
+    env = os.environ.copy()
+    env["RUN_ID"] = RUN_ID
+    env["ZMQ_ACTION_EP"]  = f"ipc:///tmp/xr_{RUN_ID}_action"
+    env["ZMQ_STEP_EP"]    = f"ipc:///tmp/xr_{RUN_ID}_step"
+    env["ZMQ_TRAINER_EP"] = f"ipc:///tmp/xr_{RUN_ID}_trainer"
+    env["WANDB_RUN_GROUP"] = f"sim_{RUN_ID}"
+
+    log_path = Path("Results") / f"episode_{RUN_ID}" / "sim.log"
+    print(f"\n🚀 Launching episode {sim_count} with RUN_ID={RUN_ID}")
+    print(f"ZMQ endpoints:\n  ACTION={env['ZMQ_ACTION_EP']}\n  STEP={env['ZMQ_STEP_EP']}\n  TRAINER={env['ZMQ_TRAINER_EP']}")
+
+    # --- Launch simulator + RL concurrently ---
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_sim = pool.submit(run_sim, exe, sim_args, env, log_path)
+        time.sleep(2.0)  # let sockets bind
+        fut_rl = pool.submit(train_sweep_vec)
+        code_sim = fut_sim.result()
+        code_rl = fut_rl.result()
+        print(f"✅ Episode {sim_count} done (sim_exit={code_sim}, rl_exit={code_rl})")
+
+
+def main():
+    # === 1️⃣ Start ZMQ server in background ===
+    # server, thread = start_zmq_server_thread(os.environ)
+    # time.sleep(1.0)  # Give it a moment to bind sockets
+
+    # === 2️⃣ Build all parameter combinations ===
+    TEST_TYPE = ["STD"]
+    simTime = [40.0]
+    k_queue = 10000
+    mean_length_BG = 12000.0
+    rate_bps_src_BG = 20e6
+    distance_list = [1.5]
+    distance_close_users = [1.5]
+    num_close_users = [0]
+    N_XR = [1]
+    PL = 0.1
+    fps_list = [90.0]
+    initial_bitrate_mbps = [10.0, 20.0, 40.0]
+    ABR_ENABLED = [3]
+    nest_profiles = [1]
+    RANDOM_SEEDS = list(range(1, 11))
+    video_samples = ["snow"]
+    N_BGs = [0]
+    IS_UL_BG = [0]
+    intrarefresh_choice = [1]
+    GoP_sizes = [90]
+    everest_tests = 1
+
+    combos = list(product(
+        simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
+        video_samples, fps_list, num_close_users, distance_close_users,
+        RANDOM_SEEDS, distance_list, GoP_sizes, intrarefresh_choice,
+        ABR_ENABLED, nest_profiles
+    ))
+
+    random.shuffle(combos)  # optional
+
+    exe = find_exe(release=True)
+    train_over_all_combos(exe, combos)
+
+    # # === 3️⃣ Run all simulations sequentially ===
+    # for sim_count, (test, nbg, nxr, is_ul, bitrate, video_sample, FPS, close_users,
+    #                 close_distance, seed, distance, gop, intrarefresh, ABR, nest_profile) in enumerate(combos, 1):
+        
+    #     argv = [
+    #         f"{simTime}", f"{mean_length_BG}", f"{k_queue}", f"{distance}", f"{bitrate}",
+    #         f"{PL}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
+    #         f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
+    #         f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
+    #         f"{everest_tests}", f"{sim_count}",
+    #     ]
+    #     run_episode(exe, argv, sim_count)
+
+    # === 4️⃣ Close ZMQ server ===
+    server.close()
+    print("🧹 All episodes finished. Server closed.")
+
 if __name__ == "__main__":
-    # train_sweep() 
-    train_sweep_vec()
+    main()

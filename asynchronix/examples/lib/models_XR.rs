@@ -2824,7 +2824,7 @@ impl XRServer {
                 // push and build next window
                 history.push(current_obs);
                 let next_win_flat = history.as_flat_padded();
-                println!("SESSION ENDDD2!");
+                // println!("SESSION ENDDD2!");
 
                 // FINAL transition (windowed)
                 let transition = RLTransition {
@@ -2842,7 +2842,7 @@ impl XRServer {
 
                 // Reset history window for next episode
                 *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
-                println!("SESSION ENDDD3!");
+                // println!("SESSION ENDDD3!");
                 drop(con); // releases the lock
             }
             _ => {}
