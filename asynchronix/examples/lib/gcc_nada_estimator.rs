@@ -1,4 +1,4 @@
-
+#![allow(warnings)]
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant, self}, f64::{NAN, INFINITY}, 

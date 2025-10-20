@@ -3008,7 +3008,7 @@ impl XRServer {
                     let payload_size = buf.len(); 
 
                     let bandwidth_sample_bps = (payload_size as f32 * 8.0 * 1_000_000.0) / time_elapsed_probing as f32;
-                    println!("Available bandwidth: {} bps", bandwidth_sample_bps);
+                    // println!("Available bandwidth: {} bps", bandwidth_sample_bps);
 
                     if let Some(foman) = self.fov_optix_manager.clone().as_mut(){
                         let mut guard = foman.lock().unwrap(); 

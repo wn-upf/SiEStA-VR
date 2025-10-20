@@ -1,3 +1,4 @@
+#![allow(warnings)] // some problems in this code guarantee warnings.
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant, self}, f64::{NAN, INFINITY}, 
@@ -1154,7 +1155,7 @@ impl FOBitrateEstimator{
         }
             
         let mut is_small_sample = false;
-        let mut bitrate_sample_kbps = self.UpdateWindow(at_time, amount,
+        let bitrate_sample_kbps = self.UpdateWindow(at_time, amount,
                                                 rate_window_ms, &mut is_small_sample);
         if bitrate_sample_kbps < 0.0
         {
@@ -1179,18 +1180,18 @@ impl FOBitrateEstimator{
         // current estimate. With low values of uncertainty_symmetry_cap_ we add more
         // uncertainty to increases than to decreases. For higher values we approach
         // symmetry.
-        let mut sample_uncertainty =
+        let sample_uncertainty =
             scale * (self.bitrate_estimate_kbps_ - bitrate_sample_kbps).abs() /
             (self.bitrate_estimate_kbps_ +
             f64::min(bitrate_sample_kbps,
                         self.uncertainty_symmetry_cap_ as f64));
 
-        let mut  sample_var = sample_uncertainty * sample_uncertainty;
+        let  sample_var = sample_uncertainty * sample_uncertainty;
         // Update a bayesian estimate of the rate, weighting it lower if the sample
         // uncertainty is large.
         // The bitrate estimate uncertainty is increased with each update to model
         // that the bitrate changes over time.
-        let mut pred_bitrate_estimate_var = self.bitrate_estimate_var_ + 5.0;
+        let pred_bitrate_estimate_var = self.bitrate_estimate_var_ + 5.0;
         self.bitrate_estimate_kbps_ = (sample_var * self.bitrate_estimate_kbps_ +
                                     pred_bitrate_estimate_var * bitrate_sample_kbps) /
                                 (sample_var + pred_bitrate_estimate_var);

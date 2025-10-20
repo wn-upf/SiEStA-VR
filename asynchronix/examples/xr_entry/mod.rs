@@ -1,14 +1,12 @@
-#[allow(unused_imports)]
-#[allow(dead_code)]
+// asynchronix/examples/xr_entry.rs
+use anyhow::Result;
 #[allow(unused)]
 ////////////////////////////////////// XR SIMULATOR ////////////////////////////
 ///
 ///     Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
 ///     
-
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
-use lib::models_mm1k::NetworkPattern;
 use tai_time::TaiTime;
 // use xkbcommon::xkb::Table;
 // use crate::lib::models_XR::BitrateMode;
@@ -24,14 +22,9 @@ use rand::rngs::StdRng;
 
 use rand::Rng;
 
-mod lib; // for calling m own local library
-// mod lib;        // <- this exposes examples/lib/* as `crate::lib`
-mod xr_entry;   // <- brings in examples/xr_entry.rs as submodule
+// mod lib; // for calling m own local library
 
-use xr_entry::{SimParams, parse_cli_to_params, run_sim};
-
-
-use crate::lib::models_mm1k::{EmulatedLink, QueueModule, MAX_EMULATED_QUEUE_PACKETS};
+use crate::lib::models_mm1k::{EmulatedLink, QueueModule, MAX_EMULATED_QUEUE_PACKETS, NetworkPattern};
 use crate::lib::{
     exponential,
     PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, PREFIX_ID_BG, 
@@ -43,6 +36,9 @@ use crate::lib::{
     // MAX_AMPDU_SIZE,
     // P_TX,
 };
+
+
+
 use std::fs;
 
 use std::env;
@@ -53,6 +49,7 @@ use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer, BIT
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 1;
+
 
 
 
@@ -252,6 +249,9 @@ impl VRPair {
 }
 
 
+
+
+
 /// Truncated exponential sampler with mean `mean` before truncation and hard bounds [a,b].
 /// We adjust lambda to match the target mean approximately after truncation.
 fn truncated_exponential_seconds<R: Rng>(rng: &mut R, mean: f64, a: f64, b: f64) -> f64 {
@@ -316,63 +316,99 @@ fn generate_session_timeline<R: Rng>(
 
     sessions
 }
+#[derive(Clone, Debug)]
+pub struct SimParams {
+    pub stoptime: f64,
+    pub mean_length_bg: f64,
+    pub k_queue: usize,
+    pub distance: f64,
+    pub initial_bitrate: f64,   // Mbps
+    pub pl_prob: f64,
+    pub n_xr: usize,
+    pub n_bg: usize,
+    pub rate_bps_bg_in: f64,
+    pub is_ul_bg_traffic: usize,
+    pub test_type: String,      // "BW" | "JI" | "PL" | "STD" | "RANDOM"
+    pub video_filename: String,
+    pub fps: f32,
+    pub n_close: usize,
+    pub distance_close: f64,
+    pub seed: u64,
+    pub gop_size: usize,
+    pub intra_refresh: usize,   // 0/1
+    pub abr: usize,             // 0 CBR | 1 Nest-VR | 2 Everest | 3 RL | 4 GCC | 5 NADA | 6 FovOptix
+    pub nest_vr_choice: usize,  // 0 Speedy | 1 Balanced | 2 Anxious
+    pub test_distances_everest: usize, // 0/1
+    pub sim_id: usize,
+}
 
-
-
-fn main() {
-    env::set_var("RUST_BACKTRACE", "1");
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 23 {
-        eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue> \
-<distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> \
-<video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> \
-<Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id>", args[0]);
-        std::process::exit(2);
-    }
-    let params = parse_cli_to_params(&args);
-    if let Err(e) = run_sim(params) {
-        eprintln!("Simulation failed: {e:?}");
-        std::process::exit(1);
+pub fn parse_cli_to_params(args: &[String]) -> SimParams {
+    assert!(args.len() == 23, "unexpected number of args");
+    SimParams {
+        stoptime:               args[1].parse().unwrap(),
+        mean_length_bg:         args[2].parse().unwrap(),
+        k_queue:                args[3].parse().unwrap(),
+        distance:               args[4].parse().unwrap(),
+        initial_bitrate:        args[5].parse().unwrap(),
+        pl_prob:                args[6].parse().unwrap(),
+        n_xr:                   args[7].parse().unwrap(),
+        n_bg:                   args[8].parse().unwrap(),
+        rate_bps_bg_in:         args[9].parse().unwrap(),
+        is_ul_bg_traffic:       args[10].parse().unwrap(),
+        test_type:              args[11].clone(),
+        video_filename:         args[12].clone(),
+        fps:                    args[13].parse().unwrap(),
+        n_close:                args[14].parse().unwrap(),
+        distance_close:         args[15].parse().unwrap(),
+        seed:                   args[16].parse().unwrap(),
+        gop_size:               args[17].parse().unwrap(),
+        intra_refresh:          args[18].parse().unwrap(),
+        abr:                    args[19].parse().unwrap(),
+        nest_vr_choice:         args[20].parse().unwrap(),
+        test_distances_everest: args[21].parse().unwrap(),
+        sim_id:                 args[22].parse().unwrap(),
     }
 }
 
+// ---- Pull the content of your current `main()` here ----
+// Return Ok(()) on success; bubble up errors with anyhow.
+pub fn run_sim(params: SimParams) -> Result<()> {
 
-
-fn main_old() {
     env::set_var("RUST_BACKTRACE", "1");
 
     // println!("CUDA_VISIBLE_DEVICES={:?}", std::env::var("CUDA_VISIBLE_DEVICES"));
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 23 {
-        eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue>
-        <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size>\n<Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id>", args[0]);
-        return;
-    }
+    // 1) Unpack everything (keeps names identical to your CLI version)
+    let SimParams {
+        stoptime,
+        mean_length_bg,
+        k_queue,
+        distance,
+        initial_bitrate,
+        pl_prob,
+        n_xr,
+        n_bg,
+        rate_bps_bg_in,
+        is_ul_bg_traffic,
+        test_type,
+        video_filename,
+        fps,
+        n_close,
+        distance_close,
+        seed,
+        gop_size,
+        intra_refresh,
+        abr,
+        nest_vr_choice,
+        test_distances_everest,
+        sim_id,
+    } = params;
 
-    // Parse arguments
-    let stoptime: f64           =       args[1].parse().unwrap();
-    let mean_length_bg: f64     =       args[2].parse().unwrap();
-    let k_queue: usize          =       args[3].parse().unwrap();
-    let distance: f64           =       args[4].parse().expect("Invalid distance");
-    let initial_bitrate: f64    =       args[5].parse().expect("Invalid bitrate (Mbps)");
-    let pl_prob: f64            =       args[6].parse().expect("Invalid PL");
-    let n_xr: usize             =       args[7].parse().expect("Invalid N_xr");
-    let n_bg: usize             =       args[8].parse().expect("Invalid N_bg"); // New parameter for background STAs
-    let rate_bps_bg_in     =       args[9].parse().expect("Invalid BG arrival rate");
-    let is_ul_bg_traffic: usize =       args[10].parse().expect("Invalid IS_UL");
-    let test_type: String       =       args[11].parse().expect("Invalid emulated Test"); // New test type parameter
-    let video_filename: String  =       args[12].parse().expect("Invalid video filename"); 
-    let fps:f32                 =       args[13].parse().expect("Invalid FPS"); 
-    let n_close: usize          =       args[14].parse().expect("Invalid N_close_users"); 
-    let distance_close: f64     =       args[15].parse().expect("Invalid Distance_close_users"); 
-    let seed: u64               =       args[16].parse().unwrap();
-    let gop_size: usize         =       args[17].parse().expect("Invalid GoP size"); 
-    let intra_refresh: usize    =       args[18].parse().expect("Invalid intra-refresh (0 or 1)"); 
-    let abr: usize              =       args[19].parse().expect("Invalid ABR: 0 -> CBR | 1 -> Nest-VR | 2 -> Everest | 3 -> ReinforcementLearner "); 
-    let nest_vr_choice     =       args[20].parse().expect("Invalid NeSt profile"); 
-    let test_distances_everest: usize = args[21].parse().expect("Invalid Coordinates option"); 
-    let sim_id :                usize = args[22].parse().expect("Invalid sim_id");
+    // 2) Handy deriveds (exactly like your main)
+    let sim_unique_string = format!("Simu_{}", sim_id);
+    let test_distances_everest_bool = test_distances_everest != 0;
+
+
 
     let sim_unique_string = format!("Simu_{}", sim_id);  
     
@@ -466,7 +502,7 @@ fn main_old() {
 
 
     if !emu_effects.is_empty(){
-        print_red!("Emulated patterns: \n{:#?}", emu_effects); 
+        crate::print_red!("Emulated patterns: \n{:#?}", emu_effects); 
     }
 
    
@@ -678,7 +714,7 @@ fn main_old() {
         }
         // let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
-        print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
+        crate::print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i ,sessions); 
         let mut sessions = sessions;
         sessions.sort_by(|a,b| a.0.partial_cmp(&b.0).unwrap());
 
@@ -801,4 +837,6 @@ fn main_old() {
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
     };
+    Ok(())
 }
+
