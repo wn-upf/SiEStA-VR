@@ -11,6 +11,7 @@ parameters:
 
   use_vectorized_obs:
     values: [true, false]
+    
   # --- Core Hyperparameters (Shared across models) ---
   learning_rate:
     distribution: log_uniform_values
