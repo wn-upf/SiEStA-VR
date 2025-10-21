@@ -35,10 +35,21 @@ import torch as th
 from gymnasium import spaces
 
 import torch.nn as nn
+
+
+
+import subprocess
+import signal
+import atexit
+import os
+
+# Keep global list of Rust child processes
+RUST_PROCS = []
+
 #CONSTS
 ##############################
 
-N_STEPS_RL=1_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
+N_STEPS_RL= 2_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
 FEAT_DIM = 11
 WINDOW_LEN = 5
 OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
@@ -46,18 +57,41 @@ OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
 ACTION_DIM = 20
 policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
-
-
 ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
 STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
 TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
 
 
+#################################################
+### SIMULATION PARAMS
+TEST_TYPE = [ "STD"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+
+simTime = [30.0]
+
+k_queue = 10000
+mean_length_BG = 12000.0
+rate_bps_src_BG = [10e6, 20e6, 40e6]
+distance_list = [1.5]
+distance_close_users = [1.5]
+num_close_users = [0]
+N_XR = [1, 2, 3, 4]
+PL = [0.0001, 0.01, 0.1, 0.25]
+fps_list = [60.0, 90.0, 120.0 ]
+initial_bitrate_mbps = [10.0, 20.0, 40.0]
+ABR_ENABLED = [3]
+nest_profiles = [1]
+RANDOM_SEEDS = list(range(1, 11))
+video_samples = ["snow"]
+N_BGs = [0]
+IS_UL_BG = [0]
+intrarefresh_choice = [1]
+GoP_sizes = [90]
+everest_tests = 1
 
 ###############################3
 
-absl_logging.set_verbosity(absl_logging.ERROR)
 
+absl_logging.set_verbosity(absl_logging.ERROR)
 class Colors:
     BLUE = '\033[94m'
     GREEN = '\033[92m'
@@ -718,6 +752,26 @@ def train_over_all_combos(exe: Path, combos):
     pool.shutdown(wait=False)
 
 
+
+def cleanup_rust_processes():
+    """Kill all Rust simulator subprocesses still running."""
+    global RUST_PROCS
+    for p in RUST_PROCS:
+        if p.poll() is None:  # still running
+            try:
+                print(f"[CLEANUP] Terminating Rust process pid={p.pid}")
+                p.terminate()
+                try:
+                    p.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    print(f"[CLEANUP] Killing stubborn process pid={p.pid}")
+                    p.kill()
+            except Exception as e:
+                print(f"[CLEANUP] Error killing pid={p.pid}: {e}")
+    RUST_PROCS.clear()
+
+
+
 EXAMPLE_NAME = "XR_sim"
 
 def find_project_root(start: Path) -> Path:
@@ -759,6 +813,9 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
         proc = subprocess.Popen([str(exe), *argv],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, env=env)
+
+        RUST_PROCS.append(proc)  ## track rust globally 
+
         for line in proc.stdout:
             f.write(line)
             print(line, end="")
@@ -800,29 +857,6 @@ def main():
 
     # === 2️⃣ Build all parameter combinations ===
     # TEST_TYPE = ["STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
-    TEST_TYPE = [ "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
-
-    simTime = [70.0]
-
-    k_queue = 10000
-    mean_length_BG = 12000.0
-    rate_bps_src_BG = [10e6, 20e6, 40e6]
-    distance_list = [1.5]
-    distance_close_users = [1.5]
-    num_close_users = [0]
-    N_XR = [1, 2, 3, 4]
-    PL = [0.0001, 0.01, 0.1, 0.25]
-    fps_list = [60.0, 90.0, 120.0 ]
-    initial_bitrate_mbps = [10.0, 20.0, 40.0]
-    ABR_ENABLED = [3]
-    nest_profiles = [1]
-    RANDOM_SEEDS = list(range(1, 11))
-    video_samples = ["snow"]
-    N_BGs = [0]
-    IS_UL_BG = [0]
-    intrarefresh_choice = [1]
-    GoP_sizes = [90]
-    everest_tests = 1
 
     combos = list(product(
         simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
@@ -844,4 +878,12 @@ def main():
     print("🧹 All episodes finished. Server closed.")
 
 if __name__ == "__main__":
+
+        
+    atexit.register(cleanup_rust_processes)
+
+    # Handle Ctrl-C / SIGTERM gracefully
+    signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
+    signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
+    
     main()

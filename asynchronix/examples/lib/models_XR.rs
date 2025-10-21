@@ -2324,7 +2324,7 @@ impl BitrateManager {
                             .min(bitrate_ladder_mbps.len().saturating_sub(1));
 
                         // Compute reward/done for transition (your logic)
-                        let reward = self.rl_reward_function(&current_obs);
+                        let reward = self.rl_naive_reward_function(&current_obs);
                         let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
                         let prev_action = *last_action_idx.lock().unwrap();
 
@@ -2356,8 +2356,8 @@ impl BitrateManager {
                         let target_mbps = bitrate_ladder_mbps[next_action_idx];
                         self.last_target_bitrate_bps = target_mbps * 1e6;
                         print_blue!(
-                            "[RL {}] New Action: {}, Target Bitrate: {:.2} Mbps",
-                            ip_server, next_action_idx, target_mbps
+                            "[{} RL {}] New Action: {}, Target Bitrate: {:.2} Mbps",
+                            format_elapsed!(now), ip_server, next_action_idx, target_mbps
                         );
 
                         self.last_target_bitrate_bps
@@ -2455,9 +2455,9 @@ impl BitrateManager {
 
     }
 
-    pub fn vmaf_manual_function( &self, bitrate: f32 ) -> f32{ // Empircal values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
+    pub fn vmaf_manual_function( &self, bitrate_mbps: f32 ) -> f32{ // Empircal values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
                              // Snow sample, intra-refresh against 100 Mbps (median fit)
-        100.0 - 89.40 * (-0.0615 * bitrate).exp()
+        100.0 - 89.40 * (-0.0615 * bitrate_mbps).exp()
     }
 
     pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 {
@@ -2467,7 +2467,7 @@ impl BitrateManager {
         let gamma = -0.04;       // rtt ~2 to 50 ms -> 0 to - 2
         let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
 
-        let bitrate_term = alpha * obs.last_target_bitrate_mbps;
+        let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
         let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards. 
         let rtt_term = gamma * obs.rtt_ms_avg_s;
         let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
@@ -2818,7 +2818,7 @@ impl XRServer {
                 // prev window BEFORE pushing current_obs
                 let prev_win_flat = history.as_flat_padded();
 
-                let reward = self.bitrate_manager.rl_reward_function(&current_obs);
+                let reward = self.bitrate_manager.rl_naive_reward_function(&current_obs);
                 let prev_action = *last_action_idx.lock().unwrap();
 
                 // push and build next window
