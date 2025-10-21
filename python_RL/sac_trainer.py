@@ -1,3 +1,7 @@
+#sac_trainer.py
+from stable_baselines3 import SAC
+# Continuous action bounds in Mbps (adjust to your ladder / encoder limits)
+
 import os
 import time
 import json
@@ -55,12 +59,18 @@ WINDOW_LEN = 5
 OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
 
 ACTION_DIM = 20
+
+ACT_MIN_MBPS = 5.0
+ACT_MAX_MBPS = 120.0
+
+
+
 policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
 STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
 TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
-N_STEPS_EARLY_STOP = 200_000
+
 
 #################################################
 ### SIMULATION PARAMS
@@ -89,7 +99,128 @@ GoP_sizes = [90]
 everest_tests = 1
 
 ###############################3
+from stable_baselines3.common.callbacks import BaseCallback
 
+class StuckActionEarlyStop(BaseCallback):
+    """
+    Stop training early if the chosen action doesn't change for N consecutive episodes.
+    """
+    def __init__(self, patience_episodes=200_000, verbose=1):
+        super().__init__(verbose)
+        self.patience_episodes = patience_episodes
+        self.last_action = None
+        self.same_action_count = 0
+        self.last_episode = 0
+
+    def _on_step(self) -> bool:
+        # Called at every environment step
+        if "train/action" in self.locals:
+            current_action = int(self.locals["train/action"])
+        elif "actions" in self.locals:
+            # fallback if recorded under different key
+            current_action = int(np.mean(self.locals["actions"]))
+        else:
+            return True  # nothing to do yet
+
+        if self.last_action is None:
+            self.last_action = current_action
+            return True
+
+        if current_action == self.last_action:
+            self.same_action_count += 1
+        else:
+            self.same_action_count = 0
+            self.last_action = current_action
+
+        # Optional progress print
+        if self.verbose > 0 and self.same_action_count % 10_000 == 0 and self.same_action_count > 0:
+            print(f"[EarlyStop] Action {current_action} repeated {self.same_action_count} times...")
+
+        # Early stop condition
+        if self.same_action_count > self.patience_episodes:
+            print(f"\n🛑 Early stopping: same action repeated {self.same_action_count} times.")
+            return False  # returning False halts training
+
+        return True
+
+def train_sac_single(trainer_ep: str):
+    run = wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "xr-abr"),
+        entity=os.environ.get("WANDB_ENTITY"),
+        save_code=True,
+        config=dict(
+            algo="SAC",
+            learning_rate=3e-4,
+            gamma=0.99,
+            tau=0.02,
+            buffer_size=500_000,
+            batch_size=256,
+            train_freq=1,           # grad step every env step
+            gradient_steps=1,       # 1 grad step per call
+            ent_coef="auto",
+            net_arch=[256, 256],
+            use_vectorized_obs=True,
+        ),
+        name = os.environ.get("WANDB_NAME") or f"SAC_{wandb.config.learning_rate}_{'-'.join(map(str, wandb.config.net_arch))}",
+    )
+
+    use_vec = wandb.config.get("use_vectorized_obs", True)
+    if use_vec:
+        print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
+        env = ZmqEnvClientVEC_Continuous(trainer_ep)    
+        policy = "MlpPolicy"
+        policy_kwargs = dict(
+            features_extractor_class=LastRowExtractor,
+            net_arch=[256, 256, 256],        )
+    else:
+        print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
+        env = ZmqEnvClient(trainer_ep)
+        policy = "MlpPolicy"
+        policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
+
+    model = SAC(
+        policy,
+        env,
+        learning_rate=wandb.config.learning_rate,
+        gamma=wandb.config.gamma,
+        tau=wandb.config.tau,
+        buffer_size= 1_000_000,
+        learning_starts=10_000, 
+        batch_size=wandb.config.batch_size,
+        train_freq=wandb.config.train_freq,    # ("step") implied
+        gradient_steps=wandb.config.gradient_steps,
+        ent_coef=wandb.config.ent_coef,
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+    )
+
+     callback =  CallbackList([
+            WandbCallback(
+                model_save_path=f"models/{run.id}",
+                model_save_freq=50_000,
+                verbose=2,
+                log="all",
+                ),
+            StuckActionEarlyStop(patience_episodes = N_STEPS_EARLY_STOP, verbose=1)
+            ]
+        )
+
+    model.learn(total_timesteps=N_STEPS_RL, callback=callback)
+
+    final_model_path = f"models/{run.id}/final_model.zip"
+    model.save(final_model_path)
+    art = wandb.Artifact(
+        name=f"SAC-{run.id}-final",
+        type="model",
+        description=f"Final SAC after {N_STEPS_RL} steps"
+    )
+    art.add_file(final_model_path)
+    run.log_artifact(art)
+    wandb.finish()
+
+
+
+################# LIBS ################## 
 
 absl_logging.set_verbosity(absl_logging.ERROR)
 class Colors:
@@ -139,53 +270,6 @@ class Colors:
     YELLOW = '\033[93m'
     ENDC = '\033[0m'
 
-
-from stable_baselines3.common.callbacks import BaseCallback
-
-class StuckActionEarlyStop(BaseCallback):
-    """
-    Stop training early if the chosen action doesn't change for N consecutive episodes.
-    """
-    def __init__(self, patience_episodes=200_000, verbose=1):
-        super().__init__(verbose)
-        self.patience_episodes = patience_episodes
-        self.last_action = None
-        self.same_action_count = 0
-        self.last_episode = 0
-
-    def _on_step(self) -> bool:
-        # Called at every environment step
-        if "train/action" in self.locals:
-            current_action = int(self.locals["train/action"])
-        elif "actions" in self.locals:
-            # fallback if recorded under different key
-            current_action = int(np.mean(self.locals["actions"]))
-        else:
-            return True  # nothing to do yet
-
-        if self.last_action is None:
-            self.last_action = current_action
-            return True
-
-        if current_action == self.last_action:
-            self.same_action_count += 1
-        else:
-            self.same_action_count = 0
-            self.last_action = current_action
-
-        # Optional progress print
-        if self.verbose > 0 and self.same_action_count % 10_000 == 0 and self.same_action_count > 0:
-            print(f"[EarlyStop] Action {current_action} repeated {self.same_action_count} times...")
-
-        # Early stop condition
-        if self.same_action_count > self.patience_episodes:
-            print(f"\n🛑 Early stopping: same action repeated {self.same_action_count} times.")
-            return False  # returning False halts training
-
-        return True
-
-
-
 class ZmqServer:
     """A standalone ZMQ server that acts as a bridge between Rust simulations
     and a Python-based RL training agent."""
@@ -231,63 +315,59 @@ class ZmqServer:
             
             if command == "reset":
                 print(f"{Colors.BLUE}SERVER: Received 'reset' command.{Colors.ENDC}")
-                # 1. Get the very first observation from a new Rust sim
+                # 1) Get the first obs from a connecting Rust sim
                 print("SERVER: Waiting for initial observation from a Rust simulation...")
                 sim_id, payload = self.router.recv_multipart()
                 req_obs = json.loads(payload.decode("utf-8"))
                 initial_obs = _obs_from_payload_dict(req_obs)
-                
+
                 self.active_sim_id = sim_id
-                # 2. Send a dummy action to unblock the Rust sim
-                self.router.send_multipart([self.active_sim_id, json.dumps({"action_idx": 0}).encode("utf-8")])
-                
-                # 3. Reply to the trainer with the initial observation
+
+                # 2) Send a dummy *continuous* action to unblock Rust
+                init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
+                self.router.send_multipart([
+                    self.active_sim_id,
+                    json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
+                ])
+
+                # 3) Reply to the trainer with the initial observation
                 self.rep_socket.send_json({"obs": initial_obs})
-                print(f"{Colors.GREEN}SERVER: Reset complete for sim {sim_id.decode()}. Sent initial obs to trainer.{Colors.ENDC}")
+                print(f"{Colors.GREEN}SERVER: Reset done for sim {sim_id.decode()}, sent bitrate={init_bitrate:.2f} Mbps.{Colors.ENDC}")
+
 
             elif command == "step":
                 action = req.get("action")
-                # print(f"SERVER: Received 'step' command with action {action}.")
-                
-                # 1. Wait for the transition data from Rust (PULL socket)
+                if isinstance(action, (list, tuple, np.ndarray)):
+                    action = float(np.asarray(action, dtype=np.float32).ravel()[0])
+                else:
+                    action = float(action)
+                action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))  # clamp
+
                 transition = self.pull.recv_json()
-                # Ensure we have the right simulation's data if multiple sims are running
                 while self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
                     print(f"SERVER: Skipping transition from {transition.get('sim_id')}, waiting for {self.active_sim_id.decode()}")
                     transition = self.pull.recv_json()
 
                 reward = float(transition["reward"])
                 done = bool(transition["done"])
-                # next_obs = self._obs_from_json(transition["next_obs"])
-                # next_obs = _obs_from_payload_dict(transition)
+
                 next_obs_field = transition.get("next_obs")
                 if next_obs_field is None:
                     raise KeyError(f"Transition missing 'next_obs'; got keys: {list(transition.keys())}")
 
-                # If Rust sends a plain list -> use it directly.
-                # If Rust sends a dict like {"obs_flat": [...], "seq_len": ..., ...} -> normalize it.
-                if isinstance(next_obs_field, dict):
-                    next_obs = _obs_from_payload_dict(next_obs_field)
-                else:
-                    next_obs = next_obs_field
-                
-                # 2. If not done, sync with Rust and send the new action
-                if not done:
-                    # This recv is just to sync with the Rust sim's next action request
-                    sim_id, _ = self.router.recv_multipart() 
-                    # Send the real action from the agent
-                    self.router.send_multipart([sim_id, json.dumps({"action_idx": int(action)}).encode("utf-8")])
+                next_obs = _obs_from_payload_dict(next_obs_field) if isinstance(next_obs_field, dict) else next_obs_field
 
-                # 3. Reply to the trainer with the step result
-                self.rep_socket.send_json({
-                    "next_obs": next_obs,
-                    "reward": reward,
-                    "done": done
-                })
-                # print(f"SERVER: Step complete. Sent transition data to trainer.")
+                if not done:
+                    sim_id, _ = self.router.recv_multipart()
+                    self.router.send_multipart([sim_id, json.dumps({"bitrate_mbps": action}).encode("utf-8")])
+
+                self.rep_socket.send_json({"next_obs": next_obs, "reward": reward, "done": done})
+
                 if done:
                     print(f"{Colors.YELLOW}SERVER: Episode finished for sim {self.active_sim_id.decode()}.{Colors.ENDC}")
-                    self.active_sim_id = None # Ready for a new episode/sim
+                    self.active_sim_id = None
+
+
             
     def close(self):
         """Cleanly close all sockets and terminate the context."""
@@ -317,7 +397,7 @@ def start_zmq_server_thread(env_vars):
     return server, t
 
 
-class ZmqEnvClientVEC(gym.Env):
+class ZmqEnvClientVEC_Continuous(gym.Env):
     """Gym env that talks to your trainer server via ZMQ (REQ/REP)."""
     metadata = {"render_modes": []}
 
@@ -326,9 +406,13 @@ class ZmqEnvClientVEC(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=OBSERVATION_SHAPE, dtype=np.float32
         )
-        self.action_space = spaces.Discrete(ACTION_DIM)
-
-        # TRAINER_ENDPOINT = os.getenv("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
+        # Continuous action in Mbps
+        self.action_space = spaces.Box(
+            low=np.array([ACT_MIN_MBPS], dtype=np.float32),
+            high=np.array([ACT_MAX_MBPS], dtype=np.float32),
+            dtype=np.float32,
+            shape=(1,),
+        )
 
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.REQ)
@@ -341,7 +425,6 @@ class ZmqEnvClientVEC(gym.Env):
         self.run_return_cumsum = 0.0
 
         print(f"✅ Python ZMQ Client connected to server {TRAINER_ENDPOINT}.")
-
     # ---------- helpers ----------
     @staticmethod
     def _parse_obs_payload(payload):
@@ -445,7 +528,9 @@ class ZmqEnvClientVEC(gym.Env):
 
     def step(self, action):
         t0 = time.time()
-        self.socket.send_json({"command": "step", "action": int(action)})
+        # instead of int(action)
+        self.socket.send_json({"command": "step", "action": float(np.asarray(action).ravel()[0])})
+
         response = self.socket.recv_json()
         pull_latency_ms = (time.time() - t0) * 1000.0
         obs_payload = response.get("next_obs")
@@ -469,7 +554,7 @@ class ZmqEnvClientVEC(gym.Env):
         log_dict = {
             "train/reward": reward,
             "train/return_cumsum": self.run_return_cumsum,
-            "train/action": int(action),
+            "train/action": float(np.asarray(action).ravel()[0]),
             "train/done": int(done),
             "timing/pull_latency_ms": pull_latency_ms,
             "obs/seq_len": meta["seq_len"],
@@ -502,7 +587,7 @@ class ZmqEnvClientVEC(gym.Env):
 
 
 
-class ZmqEnvClient(ZmqEnvClientVEC):
+class ZmqEnvClient(ZmqEnvClientVEC_Continuous):
     """Simpler env version that only uses the last observation (no history window)."""
     def __init__(self, trainer_ep):
         super().__init__(trainer_ep)
@@ -538,131 +623,6 @@ class LastRowExtractor(BaseFeaturesExtractor):
         return obs[:, -self.feat_dim:]
 
 
-# --- Main Training Function for W&B Sweep (VEC/windowed obs) ---
-def train_sweep_vec(trainer_ep: str ):
-    # 1) Initialize W&B run
-    run = wandb.init(
-        project=os.environ.get("WANDB_PROJECT", "xr-abr"),
-        entity=os.environ.get("WANDB_ENTITY"),
-        save_code=True,
-    )
-    # os.environ.update(env_vars)
-    # 2) Build env (windowed obs)
-    # env = ZmqEnvClientVEC(trainer_ep)
-    if wandb.config.get("use_vectorized_obs", True):
-        print(f"{Colors.BLUE}Using vectorized (windowed) observations.{Colors.ENDC}")
-        env = ZmqEnvClientVEC(trainer_ep)
-        policy = policy_ppo_a2c
-    else:
-        print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
-        env = ZmqEnvClient(trainer_ep)
-        # Use feature extractor that trims window, if any
-        policy = "MlpPolicy"
-    # 3) Select and configure the model based on wandb.config
-    model = None
-    algo = wandb.config.algorithm
-
-    print(f"{Colors.GREEN}--- Starting run for algorithm: {algo} ---{Colors.ENDC}")
-    print(f"{Colors.BLUE}{pprint.pformat(dict(wandb.config))}{Colors.ENDC}")
-
-    if algo == "PPO":
-        model = PPO(
-            policy_ppo_a2c, env,
-            learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps,
-            batch_size=wandb.config.batch_size_ppo,
-            n_epochs=wandb.config.n_epochs,
-            gamma=wandb.config.gamma,
-            gae_lambda=wandb.config.gae_lambda,
-            clip_range=wandb.config.clip_range,
-            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-            ent_coef=wandb.config.get("ent_coef", 0.0),
-            verbose=1,
-        )
-
-    elif algo == "DQN":
-        model = DQN(
-            "MlpPolicy", env,
-            learning_rate=wandb.config.learning_rate,
-            buffer_size=wandb.config.buffer_size,
-            learning_starts=30000,
-            batch_size=wandb.config.batch_size_dqn,
-            gamma=wandb.config.gamma,
-            train_freq=(wandb.config.train_freq, "step"),
-            target_update_interval=wandb.config.target_update_interval,
-            exploration_fraction=wandb.config.exploration_fraction,
-            exploration_final_eps=wandb.config.exploration_final_eps,
-            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-            verbose=1,
-        )
-
-    elif algo == "A2C":
-        model = A2C(
-            policy_ppo_a2c, env,
-            learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps_a2c,
-            gamma=wandb.config.gamma,
-            vf_coef=wandb.config.vf_coef,
-            ent_coef=wandb.config.ent_coef,
-            policy_kwargs=dict(net_arch=list(wandb.config.net_arch)),
-            verbose=1,
-        )
-
-    elif algo == "RNN_PPO":
-        final_batch_size = coerce_batch_size(
-            n_steps=wandb.config.n_steps,
-            batch_size=wandb.config.batch_size_ppo
-        )
-        model = RecurrentPPO(
-            "MlpLstmPolicy",
-            env,
-            learning_rate=wandb.config.learning_rate,
-            n_steps=wandb.config.n_steps,
-            batch_size=final_batch_size,
-            n_epochs=wandb.config.n_epochs,
-            gamma=wandb.config.gamma,
-            gae_lambda=wandb.config.gae_lambda,
-            clip_range=wandb.config.clip_range,
-            policy_kwargs=dict(
-                net_arch=list(wandb.config.net_arch),
-                lstm_hidden_size=wandb.config.get("lstm_hidden_size", 128),
-                n_lstm_layers=wandb.config.get("n_lstm_layers", 2),
-            ),
-            verbose=1,
-        )
-    else:
-        raise ValueError(f"Unknown algorithm: {algo}")
-
-    # 4) Callback and learning
-    callback = CallbackList([
-            WandbCallback(
-                model_save_path=f"models/{run.id}",
-                model_save_freq=50_000,
-                verbose=2,
-                log="all",
-                ),
-            StuckActionEarlyStop(patience_episodes = N_STEPS_EARLY_STOP, verbose=1)
-            ]
-        )
-
-    total_steps = N_STEPS_RL
-    model.learn(total_timesteps=total_steps, callback=callback)
-
-    # 5) Save final model as artifact
-    print(f"{Colors.GREEN}--- Training complete. Saving final model. ---{Colors.ENDC}")
-    final_model_path = f"models/{run.id}/final_model.zip"
-    model.save(final_model_path)
-
-    final_artifact = wandb.Artifact(
-        name=f"{algo}-{run.id}-final",
-        type="model",
-        description=f"Final model for a {algo} run after {total_steps} steps."
-    )
-    final_artifact.add_file(final_model_path)
-    run.log_artifact(final_artifact)
-
-    wandb.finish()
-
 def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     """
     Run multiple shuffled passes over all simulation combos.
@@ -686,7 +646,7 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
 
     # ---- Start RL thread (same endpoints for all episodes) ----
     pool = ThreadPoolExecutor(max_workers=2)
-    fut_rl = pool.submit(train_sweep_vec, trainer_ep)
+    fut_rl = pool.submit(train_sac_single, trainer_ep)
     print(f"RL loop started on {trainer_ep}")
 
     # ---- Outer training loop over multiple passes ----
@@ -862,3 +822,42 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
     
     main()
+
+def main():
+    # === 1️⃣ Start ZMQ server in background ===
+    # server, thread = start_zmq_server_thread(os.environ)
+    # time.sleep(1.0)  # Give it a moment to bind sockets
+
+    # === 2️⃣ Build all parameter combinations ===
+    # TEST_TYPE = ["STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+
+    combos = list(product(
+        simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
+        video_samples, fps_list, num_close_users, distance_close_users,
+        RANDOM_SEEDS, distance_list, GoP_sizes, intrarefresh_choice,
+        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
+    ))
+
+    random.shuffle(combos)  # optional
+
+    print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
+    
+    rebuild_rust_binary(EXAMPLE_NAME)
+    exe = find_exe(release=True)
+    train_over_all_combos_iter(exe, combos)
+
+    # === 4️⃣ Close ZMQ server ===
+    server.close()
+    print("🧹 All episodes finished. Server closed.")
+
+if __name__ == "__main__":
+
+        
+    atexit.register(cleanup_rust_processes)
+
+    # Handle Ctrl-C / SIGTERM gracefully
+    signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
+    signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
+    
+    main()
+

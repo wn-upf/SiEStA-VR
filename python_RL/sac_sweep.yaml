@@ -1,0 +1,26 @@
+program: sac_trainer.py
+method: grid   # or bayes
+metric:
+  name: episode/return
+  goal: maximize
+parameters:
+  algo:
+    value: SAC
+  learning_rate:
+    values: [3e-4, 1e-4]
+  tau:
+    values: [0.02, 0.01]
+  batch_size:
+    values: [512, 256, 128]
+  gradient_steps:
+    values: [1, 2, 8]
+  train_freq:
+    values: [1, 4]
+  ent_coef:
+    values: ["auto"]
+  net_arch:
+    values:
+      - [256, 256]
+      - [256, 256, 256]
+  use_vectorized_obs:
+    values: [true, false]

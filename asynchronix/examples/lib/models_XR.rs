@@ -1220,6 +1220,7 @@ pub enum BitrateMode {
             last_action_idx: Arc<Mutex<usize>>,
             last_decision_instant: Arc<Mutex<TaiTime<0>>>,
             pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
+            action_space: ActionSpace, 
         }, 
         GCCPort{
             gcc_estimator: GccBandwidthEstimator, 
@@ -1335,13 +1336,16 @@ impl RLObservationVector{
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RLTransition {
-    pub sim_id: String, 
+    pub sim_id: String,
     pub prev_obs:  Vec<f32>,
-    pub action: usize,
+    pub action: usize,                  // snapped index (if continuous used)
     pub reward: f32,
     pub next_obs:  Vec<f32>,
     pub done: bool,
+    #[serde(default)]
+    pub cont_action_mbps: Option<f32>,  // NEW: raw continuous action, if any
 }
+
 
 
 // pub struct RLStep {
@@ -1350,13 +1354,11 @@ pub struct RLTransition {
     // pub done: bool, 
 // }
 pub trait RLConnector {
-    fn select_action(&mut self, obs: &RLObservation) -> usize; // returns the chosen action, or continuous bitrate choice. 
-
+    fn select_action(&mut self, obs: &RLObservation) -> RLAction;
     fn post_transition(&mut self, transition: &RLTransition);
-    
-    fn reset_window(&mut self); 
-
+    fn reset_window(&mut self);
 }
+
 const RL_WINDOW_OBSERVATION_SIZE: usize = 5; 
 const FEAT_DIM: usize  = 11; // keep in sync with RLObservation::to_vec().len()
 
@@ -1407,9 +1409,52 @@ pub struct RLRequestRNN {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct RLResponse { pub action_idx: usize }
+#[serde(untagged)]
+pub enum RLResponse {
+    Discrete { action_idx: usize },
+    Continuous { bitrate_mbps: f32 },
+}
 
 
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ActionSpace {
+    /// Classic discrete ladder indices: 0..N-1
+    Discrete,
+
+    /// Continuous action in Mbps (with optional snapping onto the ladder)
+    Continuous {
+        min_mbps: f32,
+        max_mbps: f32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RLAction {
+    Discrete(usize),        // ladder index
+    ContinuousMbps(f32),    // raw Mbps
+}
+fn idx_to_mbps(ladder: &[f32], idx: usize) -> (usize, f32) {
+    let i = idx.min(ladder.len().saturating_sub(1));
+    (i, ladder[i])
+}
+
+fn nearest_idx(ladder: &[f32], mbps: f32) -> usize {
+    let mut best_i = 0usize;
+    let mut best_d = f32::INFINITY;
+    for (i, &r) in ladder.iter().enumerate() {
+        let d = (r - mbps).abs();
+        if d < best_d {
+            best_d = d; best_i = i;
+        }
+    }
+    best_i
+}
+
+fn snap_to_ladder(ladder: &[f32], mbps: f32) -> (usize, f32) {
+        let i = nearest_idx(ladder, mbps);
+        (i, ladder[i])
+        }
 
 pub struct ZmqConnector{
     action_socket: zmq::Socket, // REQ socket for blocking action selection
@@ -1479,8 +1524,8 @@ pub struct RLRequest{ pub obs: Vec<f32>}
 // pub struct RLResponse{pub action_idx: usize}
 
 impl RLConnector for ZmqConnector {
-    fn select_action(&mut self, obs: &RLObservation) -> usize {
-        // 1) Build prev window FLAT (no push yet!)
+    fn select_action(&mut self, obs: &RLObservation) -> RLAction {
+        // 1) Build prev window (no push yet)
         let prev_flat = self.window.as_flat_padded();
         let req = RLRequestRNN {
             sim_id: self.sim_id.clone(),
@@ -1492,7 +1537,7 @@ impl RLConnector for ZmqConnector {
         let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
         self.action_socket.send(request_json.as_bytes(), 0).expect("send obs window");
 
-        // 2) recv action
+        // 2) recv action (discrete or continuous)
         let response_bytes = self.action_socket.recv_bytes(0).unwrap_or_else(|e| {
             if let zmq::Error::EAGAIN = e {
                 eprintln!("RUST ERROR: Timed out waiting for action from Python agent!");
@@ -1500,12 +1545,16 @@ impl RLConnector for ZmqConnector {
             }
             panic!("ZMQ Error: {}", e);
         });
-        let response: RLResponse = serde_json::from_slice(&response_bytes).expect("deserialize RLResponse");
 
-        // 3) push CURRENT obs into window now (the env state we just acted on)
+        let parsed: RLResponse = serde_json::from_slice(&response_bytes).expect("deserialize RLResponse");
+
+        // 3) push CURRENT obs now
         self.window.push_obs(obs);
 
-        response.action_idx
+        match parsed {
+            RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
+            RLResponse::Continuous { bitrate_mbps } => RLAction::ContinuousMbps(bitrate_mbps),
+        }
     }
 
     fn post_transition(&mut self, transition: &RLTransition) {
@@ -1847,6 +1896,8 @@ impl BitrateManager {
                 let action_ep  = std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
                 let reward_ep  = std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
 
+                let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) }; 
+
 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
@@ -1855,6 +1906,7 @@ impl BitrateManager {
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
+                    action_space, 
                 } 
             }
 
@@ -2299,69 +2351,104 @@ impl BitrateManager {
                     last_action_idx,
                     last_decision_instant,
                     pending_obs,
+                    action_space,
                 } => {
-                        if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
-                            return self.last_target_bitrate_bps;
+                    // Respect step interval
+                    if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
+                        return self.last_target_bitrate_bps;
+                    }
+
+                    // Build current obs (already computed above as `obs`)
+                    let current_obs = obs.clone();
+
+                    // Take history out, or create new
+                    let mut history = pending_obs
+                        .lock().unwrap()
+                        .take()
+                        .unwrap_or_else(|| RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+
+                    // Window BEFORE pushing current obs
+                    let prev_win_flat = history.as_flat_padded();
+
+                    // Ask the agent
+                    let action = connector.lock().unwrap().select_action(&current_obs);
+
+                    // Reward/Done
+                    let reward = self.rl_naive_reward_function(&current_obs);
+                    let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
+                    let prev_idx_logged = *last_action_idx.lock().unwrap();
+
+                    // Push current obs, compute next window
+                    history.push(current_obs.clone());
+                    let next_win_flat = history.as_flat_padded();
+
+                    // Map action -> (final_mbps, snapped_idx)
+                    let (final_mbps, snapped_idx, cont_raw_opt) = match (action_space, action) {
+                        (ActionSpace::Discrete, RLAction::Discrete(i)) => {
+                            let (idx, mbps) = idx_to_mbps(bitrate_ladder_mbps, i);
+                            (mbps, idx, None)
                         }
-                        // println!("reinforcement learner mode"); 
+                        (ActionSpace::Discrete, RLAction::ContinuousMbps(v)) => {
+                            // Defensive: if Python sends continuous while env expects discrete,
+                            // snap to nearest rung.
+                            let (idx, mbps) = snap_to_ladder(bitrate_ladder_mbps, v);
+                            (mbps, idx, Some(v))
+                        }
+                        (ActionSpace::Continuous { min_mbps, max_mbps }, RLAction::Discrete(i)) => {
+                            // Map ladder index to evenly-spaced value over [min,max]
+                            let n = bitrate_ladder_mbps.len().max(2);
+                            let alpha = (i as f32) / ((n - 1) as f32);
+                            let raw = (min_mbps + alpha * (max_mbps - min_mbps)).clamp(*min_mbps, *max_mbps);
+                            let idx = nearest_idx(bitrate_ladder_mbps, raw);
+                            (raw, idx, Some(raw))
+                        }
+                        (ActionSpace::Continuous { min_mbps, max_mbps }, RLAction::ContinuousMbps(v)) => {
+                            let raw = v.clamp(*min_mbps, *max_mbps);
+                            
+                                let idx = nearest_idx(bitrate_ladder_mbps, raw);
+                                (raw, idx, Some(raw))
+                            
+                        }
+                    };
 
-                       let current_obs = obs.clone();
-                        // Take (move) history out; None means we're at the first step
-                        let mut history_opt = pending_obs.lock().unwrap().take();
+                    // Post transition (send snapped index for compatibility + optional raw)
+                    let transition = RLTransition {
+                        sim_id: self.sim_unique_string.clone(),
+                        prev_obs: prev_win_flat,
+                        action: prev_idx_logged,
+                        reward,
+                        next_obs: next_win_flat,
+                        done,
+                        cont_action_mbps: cont_raw_opt,
+                    };
+                    connector.lock().unwrap().post_transition(&transition);
 
-                        // Ensure history exists
-                        let mut history = history_opt.unwrap_or_else(|| RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
-
-                        // ---- prev window (BEFORE pushing current_obs) ----
-                        let prev_win_flat = history.as_flat_padded();
-
-                        // Get the next action from the agent (you still send only current_obs here;
-                        // later you can switch select_action to accept the window too)
-                        let next_action_idx = connector
-                            .lock()
-                            .unwrap()
-                            .select_action(&current_obs)
-                            .min(bitrate_ladder_mbps.len().saturating_sub(1));
-
-                        // Compute reward/done for transition (your logic)
-                        let reward = self.rl_naive_reward_function(&current_obs);
-                        let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
-                        let prev_action = *last_action_idx.lock().unwrap();
-
-                        // print_green!("Obs:\n{:#?}\nREWARD: {} ", current_obs, reward); 
-                        // ---- push current_obs and build next window ----
-                        history.push(current_obs);
-                        let next_win_flat = history.as_flat_padded();
-
-                        // Send transition with WINDOWED vectors
-                        let transition = RLTransition {
-                            sim_id: self.sim_unique_string.clone(),
-                            prev_obs: prev_win_flat,   // length = window_len * FEAT_DIM
-                            action: prev_action,
-                            reward,
-                            next_obs: next_win_flat,   // length = window_len * FEAT_DIM
-                            done,
-                        };
-                        connector.lock().unwrap().post_transition(&transition);
-                        if done {
-                            *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
-                        }   
-
-                        // Put updated history back for the next step
+                    // Store updated history / action / instant
+                    if done {
+                        *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+                    } else {
                         *pending_obs.lock().unwrap() = Some(history);
-                        *last_action_idx.lock().unwrap() = next_action_idx;
-                        *last_decision_instant.lock().unwrap() = now;
+                    }
+                    *last_action_idx.lock().unwrap() = snapped_idx;
+                    *last_decision_instant.lock().unwrap() = now;
 
-                        // Apply action
-                        let target_mbps = bitrate_ladder_mbps[next_action_idx];
-                        self.last_target_bitrate_bps = target_mbps * 1e6;
-                        print_blue!(
-                            "[{} RL {}] New Action: {}, Target Bitrate: {:.2} Mbps",
-                            format_elapsed!(now), ip_server, next_action_idx, target_mbps
-                        );
+                    // Apply bitrate
+                    self.last_target_bitrate_bps = final_mbps * 1e6;
 
-                        self.last_target_bitrate_bps
-                                        
+                    match cont_raw_opt {
+                        Some(raw) => {print_blue!(
+                            "[{} RL {}] Action: raw={:.2} Mbps -> final={:.2} Mbps (idx={})",
+                            format_elapsed!(now), ip_server, raw, final_mbps, snapped_idx
+                            );
+                        },
+                        None => {print_blue!(
+                            "[{} RL {}] Action: idx={} -> final={:.2} Mbps",
+                            format_elapsed!(now), ip_server, snapped_idx, final_mbps
+                            );
+                        },
+                    }
+
+                    self.last_target_bitrate_bps
                 }
 
                 BitrateMode::NADACiscoPort {} => {
@@ -2834,6 +2921,7 @@ impl XRServer {
                     reward,
                     next_obs: next_win_flat,
                     done: true,
+                    cont_action_mbps: Some(self.bitrate_manager.last_target_bitrate_bps / 1e6)
                 };
                 con.post_transition(&transition);     // <--- use `con`, don't re-lock
                 // print_red!("[RL] POSTING FINAL TRANSITION);
