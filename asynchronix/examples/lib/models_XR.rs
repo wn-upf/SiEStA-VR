@@ -166,6 +166,9 @@ pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 pub const ALPHA_THROUGHPUT: f32 = 0.1; 
 
+
+pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1; 
+
 /// Number of consecutive good matches required to re-establish synchronization
 
 // static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
@@ -1263,7 +1266,12 @@ pub struct RLObservation {
     pub frame_interarrival_std_ms: f32, 
 
     pub flr_avg_s: f32, 
-    pub buffer_level_avg_s: f32, 
+    pub pl_sum_period: usize, 
+    pub frame_size_avg_bytes: f32, 
+
+    pub ow_delay_period_ewma: f32, 
+    pub f_ow_delay_period_ewma: f32, 
+    // pub buffer_level_avg_s: f32, 
     pub rebuffer_event_sum: u8, 
 
 }
@@ -1283,7 +1291,13 @@ impl RLObservation {
             self.frame_interarrival_avg_ms,
             self.frame_interarrival_std_ms,
             self.flr_avg_s,
-            self.buffer_level_avg_s,
+            self.pl_sum_period as f32,
+
+            self.frame_size_avg_bytes, 
+
+            self.ow_delay_period_ewma, 
+            self.f_ow_delay_period_ewma, 
+
             self.rebuffer_event_sum as f32, // Cast u8 to f32
         ]
     }
@@ -1661,6 +1675,11 @@ impl TimedVecFLR{
         // Prune old values outside the time window
         let cutoff = time_f32 - self.period;
 
+        self.prune_old(cutoff);
+    }
+
+
+      fn prune_old(&mut self, cutoff: f32) {
         while let Some(&(t, _)) = self.vec_flr.front() {
             if t < cutoff {
                 self.vec_flr.pop_front();
@@ -1682,30 +1701,20 @@ impl TimedVecFLR{
         let cutoff = time_f32 - self.period;
 
         // Remove outdated entries
-        while let Some(&(t, _)) = self.vec_flr.front() {
-            if t < cutoff {
-                self.vec_flr.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        while let Some(&(t, _)) = self.vec_shard_loss.front() {
-            if t < cutoff {
-                self.vec_shard_loss.pop_front();
-            } else {
-                break;
-            }
-        }
+        self.prune_old(cutoff);
 
         // Sum *and remove* all currently stored FLR values (only once)
         let sum: usize = self.vec_flr.drain(..).map(|(_, v)| v).sum();
         sum
     }
 
-    pub fn sum_shard_loss(&self) -> usize {
-        self.vec_shard_loss.iter().map(|&(_, v)| v).sum()
+
+    pub fn sum_shard_loss(&mut self, time_f32: f32) -> usize {
+        let cutoff: f32 = time_f32 - self.period;
+        self.prune_old(cutoff);
+        self.vec_shard_loss.drain(..).map(|(_, v)| v).sum()
     }
+
 }
 
 
@@ -1761,8 +1770,8 @@ pub struct BitrateManager {
     frame_index: usize,
 
     frame_interval_average: SlidingWindowAverage<f32>,
-    encoder_latency_average: SlidingWindowAverage<f32>,
-    network_latency_average: SlidingWindowAverage<f32>,
+    // encoder_latency_average: SlidingWindowAverage<f32>,
+    // network_latency_average: SlidingWindowAverage<f32>,
 
     bitrate_average_mbps: SlidingWindowAverage<f32>,
 
@@ -1799,13 +1808,16 @@ pub struct BitrateManager {
     aimd_manager: Option<Arc<Mutex<FOAimdRateControl>>>, 
 
     framerate: f32, 
+
+    ewma_fowd: f32, 
+    ewma_owd:  f32, 
+    bytes_size_avg: SlidingWindowAverage<f32>, 
 }
 
 
 
 impl BitrateManager {
     
-
      pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, fps: f32, ) -> Self {
         
         let decrement: usize = match nest_vr_profile {
@@ -1873,9 +1885,7 @@ impl BitrateManager {
                                             bitrate_inc_prob: 0.25, 
                                             nfr_thresh: 0.99,
                                             rtt_thresh_ms: 22.0, 
-                                            capacity_scaling_factor: 0.9,},
-
-                                            
+                                            capacity_scaling_factor: 0.9,},            
                     }
                 }
             2 => {  
@@ -1937,8 +1947,8 @@ impl BitrateManager {
 
             frame_index: 0,
             frame_interval_average: SlidingWindowAverage::new(0.0, max_history_size),
-            encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
-            network_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
+            // encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size), // Unused in this simulator. 
+            // network_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
 
             bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
             // last_target_bitrate_mbps: initial_bitrate_mbps,
@@ -1973,6 +1983,11 @@ impl BitrateManager {
             last_nada_target_bitrate_mbps: None, 
             aimd_manager: None, 
             framerate: fps, 
+
+            ewma_fowd: 0.0, 
+            ewma_owd: 0.0, 
+            bytes_size_avg: SlidingWindowAverage::new(initial_bitrate_mbps / initial_framerate * 1e6,
+                        max_history_size )
         }
     }
 
@@ -1984,12 +1999,16 @@ impl BitrateManager {
 
         // Clear sliding window averages
         self.frame_interval_average.clear();
-        self.encoder_latency_average.clear();
-        self.network_latency_average.clear();
+        // self.encoder_latency_average.clear();
+        // self.network_latency_average.clear();
         self.rtt_average.clear();
         self.peak_throughput_average.clear();
         self.frame_interarrival_average.clear();
         self.bitrate_average_mbps.clear();
+        self.ewma_owd = 0.0; 
+        self.ewma_fowd = 0.0; 
+        self.bytes_size_avg.clear(); 
+
 
         // Reset bitrate state
         match &mut self.bitrate_mode {
@@ -2088,20 +2107,25 @@ impl BitrateManager {
             _ => {}, 
         }
 
+
+        let fowd = network_stats.filtered_ow_delay; 
+        let owd = network_stats.ow_delay; 
+        
+        self.ewma_fowd = ALPHA_EWMA_FOWD_OBS * fowd + (1.0 - ALPHA_EWMA_FOWD_OBS) * self.ewma_fowd;   // used for RL observations   
+        self.ewma_owd = ALPHA_EWMA_FOWD_OBS * owd + (1.0 - ALPHA_EWMA_FOWD_OBS) * self.ewma_owd;      // used for RL observations
+
         self.rtt_average.submit_sample(network_rtt.as_secs_f32());
 
-        self.peak_throughput_average
-            .submit_sample(peak_throughput_bps);
-
-        self.frame_interarrival_average
-            .submit_sample(frame_interarrival_s);
+        self.peak_throughput_average.submit_sample(peak_throughput_bps);
+        self.frame_interarrival_average.submit_sample(frame_interarrival_s);
+        self.bytes_size_avg.submit_sample(network_stats.bytes_in_frame as f32);
 
         self.jitbuf_avg_count.push_new(network_stats.buffer_level_decoder as usize, now.duration_since(TaiTime::EPOCH).as_secs_f32());
-        
         self.last_rebuffer_avg_sum = network_stats.rebuffering_events_last_s; // discrete, no averaging. It's counted on the XRClient and sent over UL messages.
 
 
-        const T_USER_WIN : f32 = 5.0; // from original paper 
+        /// EVEREST METRICS COMPUTE ///////
+        const T_USER_WIN : f32 = 5.0; // from original Everest paper 
 
         let everest_capacity_sample = network_stats.everest_capacity_update; 
         let everest_throughput_sample = network_stats.everest_throughput_update; 
@@ -2513,16 +2537,15 @@ impl BitrateManager {
         //         (1.0 / self.framerate )) ; // percentage according to encoded frames window average, 
         //  
         let window_s = self.flr_shardloss_count.period; // the window period (e.g., 1 s)
-        let frames_sent = self.framerate * window_s;
-        let frames_lost = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()) as f32;
+        let frames_sent_expectation = self.framerate * window_s;
+        let t_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        let frames_lost = self.flr_shardloss_count.sum_flr(t_elapsed) as f32;
+        let pl_lost_period    = self.flr_shardloss_count.sum_shard_loss(t_elapsed); 
 
         // normalize to a ratio [0.0, 1.5]
-        let flr_avg_s = (frames_lost / frames_sent).min(1.5);
+        let flr_avg_s = (frames_lost / frames_sent_expectation ).min(1.5); // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
 
-                                                                       // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
-        // let flr_sum = self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32()); 
-        
-        let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
+        // let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
         let rebuffer_event_sum = self.last_rebuffer_avg_sum; 
 
         RLObservation{
@@ -2535,23 +2558,26 @@ impl BitrateManager {
             frame_interarrival_avg_ms,
             frame_interarrival_std_ms,  
             flr_avg_s,
-            // flr_sum,
-            buffer_level_avg_s, 
+            pl_sum_period: pl_lost_period, 
+            frame_size_avg_bytes: self.bytes_size_avg.get_average(), 
+            ow_delay_period_ewma: self.ewma_owd, 
+            f_ow_delay_period_ewma: self.ewma_fowd, 
+            // buffer_level_avg_s, 
             rebuffer_event_sum, 
         }
 
     }
 
-    pub fn vmaf_manual_function( &self, bitrate_mbps: f32 ) -> f32{ // Empircal values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
+    pub fn vmaf_manual_function( &self, bitrate_mbps: f32 ) -> f32{ // values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
                              // Snow sample, intra-refresh against 100 Mbps (median fit)
         100.0 - 89.40 * (-0.0615 * bitrate_mbps).exp()
     }
 
-    pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 {
+    pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 { // only first term is positive, others are penalties. 
 
-        let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
+        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
         let beta = 1.0;   // flr 0 to 1
-        let gamma = -0.04;       // rtt ~2 to 50 ms -> 0 to - 2
+        let gamma = - 0.04;       // rtt ~2 to 50 ms -> 0 to - 2
         let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
 
         let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
@@ -2560,9 +2586,10 @@ impl BitrateManager {
         let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
 
         let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
-        reward = f32::max(reward, 0.0); // clip rewards to 0 
+        reward = f32::max(reward, -1.0); // clip rewards to 0 
         reward
     }
+
     pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
         let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
 

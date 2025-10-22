@@ -54,7 +54,7 @@ RUST_PROCS = []
 ##############################
 
 N_STEPS_RL= 2_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
-FEAT_DIM = 11
+FEAT_DIM = 14
 WINDOW_LEN = 5
 OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
 
@@ -85,7 +85,7 @@ distance_list = [1.5]
 distance_close_users = [1.5]
 num_close_users = [0]
 N_XR = [1, 2, 3, 4]
-PL = [0.0001, 0.01, 0.1, 0.25]
+PL = [0.0001, 0.01, 0.1, 0.15]
 fps_list = [60.0, 90.0, 120.0 ]
 initial_bitrate_mbps = [10.0, 20.0, 40.0]
 ABR_ENABLED = [3]

@@ -55,7 +55,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring these 2 from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
+pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
 // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
@@ -1337,9 +1337,16 @@ impl StreamSocket {
                     let max_time = values.iter().map(|shard| shard.rx_instant).max().unwrap();
 
                     frame_span = max_time.duration_since(min_time).as_secs_f32();
+                    
+                    
+                    
                     frame_interarrival = max_time
                         .duration_since(self.prev_frame_rx_instant)
                         .as_secs_f32();
+                    
+                    if self.prev_frame_rx_instant == TaiTime::EPOCH{
+                        frame_interarrival = Duration::ZERO.as_secs_f32(); // prevent very high values at begginning of simulation.  
+                    }
 
                     self.prev_frame_rx_instant = max_time;
 
