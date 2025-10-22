@@ -11,7 +11,8 @@ import gymnasium as gym
 from gymnasium import spaces
 import zmq
 from sb3_contrib import RecurrentPPO
-
+from sb3_contrib import RecurrentSAC
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from pathlib import Path
 from itertools import product
@@ -145,27 +146,124 @@ class StuckActionEarlyStop(BaseCallback):
 
         return True
 
+
+
+def train_recurrent_sac(trainer_ep: str):
+        """
+        Train script modified to sweep over SAC, SAC (Windowed),
+        RecurrentSAC (LSTM), and RecurrentSAC (GRU).
+        """
+        run = wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "xr-abr"),
+            entity=os.environ.get("WANDB_ENTITY"),
+            save_code=True,
+        )
+
+        config = wandb.config
+        # This new config key controls which model/env/policy combo to use
+        model_policy_config = config.get("model_policy_config", "SAC_Mlp_Window")
+        
+        policy_kwargs = dict(net_arch=list(config.net_arch))
+        
+        if model_policy_config == "SAC_Mlp_Window":
+            print(f"{Colors.BLUE}Using SAC with windowed observations (last row via extractor).{Colors.ENDC}")
+            model_class = SAC
+            policy = "MlpPolicy"
+            env = ZmqEnvClientVEC_Continuous(trainer_ep) # Assumed to be VecEnv
+            policy_kwargs["features_extractor_class"] = LastRowExtractor
+        
+        elif model_policy_config == "SAC_Mlp_Frame":
+            print(f"{Colors.BLUE}Using SAC with single-frame observations.{Colors.ENDC}")
+            model_class = SAC
+            policy = "MlpPolicy"
+            # Wrap the non-vec env in a DummyVecEnv for API consistency
+            env = DummyVecEnv([lambda: ZmqEnvClient(trainer_ep)])
+
+        elif model_policy_config == "RecurrentSAC_Lstm":
+            print(f"{Colors.BLUE}Using RecurrentSAC (LSTM) with single-frame observations.{Colors.ENDC}")
+            model_class = RecurrentSAC
+            policy = "MlpLstmPolicy"
+            # RecurrentSAC MUST use a single-frame env, wrapped in a VecEnv
+            env = DummyVecEnv([lambda: ZmqEnvClient(trainer_ep)])
+            # Add recurrent-specific kwargs from the config
+            policy_kwargs["n_lstm_layers"] = config.get("n_recurrent_layers", 1)
+            policy_kwargs["lstm_hidden_size"] = config.get("recurrent_hidden_size", 64)
+
+        elif model_policy_config == "RecurrentSAC_Gru":
+            print(f"{Colors.BLUE}Using RecurrentSAC (GRU) with single-frame observations.{Colors.ENDC}")
+            model_class = RecurrentSAC
+            policy = "MlpGruPolicy"
+            # RecurrentSAC MUST use a single-frame env, wrapped in a VecEnv
+            env = DummyVecEnv([lambda: ZmqEnvClient(trainer_ep)])
+            # Add recurrent-specific kwargs from the config
+            policy_kwargs["n_gru_layers"] = config.get("n_recurrent_layers", 1)
+            policy_kwargs["gru_hidden_size"] = config.get("recurrent_hidden_size", 64)
+
+        else:
+            print(f"{Colors.RED}Error: Unknown model_policy_config: {model_policy_config}{Colors.ENDC}")
+            raise ValueError(f"Unknown model_policy_config: {model_policy_config}")
+
+        # Handle ent_coef being passed as a string (e.g., "0.1") vs "auto"
+        ent_coef_val = config.ent_coef
+        if isinstance(ent_coef_val, str) and not ent_coef_val.startswith("auto"):
+            try:
+                ent_coef_val = float(ent_coef_val)
+            except ValueError:
+                print(f"{Colors.YELLOW}Warning: Could not convert ent_coef '{ent_coef_val}' to float. Defaulting to 'auto'.{Colors.ENDC}")
+                ent_coef_val = "auto"
+
+        model = model_class(
+            policy,
+            env,
+            learning_rate=config.learning_rate,
+            gamma=config.gamma,
+            tau=config.tau,
+            buffer_size=config.buffer_size, # <-- This is now correctly pulled from config
+            learning_starts=config.learning_starts, # <-- Added this to config
+            batch_size=config.batch_size,
+            train_freq=config.train_freq,
+            gradient_steps=config.gradient_steps,
+            ent_coef=ent_coef_val,
+            policy_kwargs=policy_kwargs,
+            verbose=1,
+            tensorboard_log=f"runs/{run.id}",
+        )
+
+        callback = WandbCallback(
+            model_save_path=f"models/{run.id}",
+            model_save_freq=50_000,
+            verbose=2,
+            log="all",
+        )
+
+        print(f"{Colors.BLUE}Starting training for {model_policy_config}...{Colors.ENDC}")
+        # Recurrent policies handle their own state resets.
+        model.learn(total_timesteps=N_STEPS_RL, callback=callback)
+
+        final_model_path = f"models/{run.id}/final_model.zip"
+        model.save(final_model_path)
+        
+        art_name = f"{model_policy_config}-{run.id}-final".replace("_", "-") # Clean name
+        art = wandb.Artifact(
+            name=art_name,
+            type="model",
+            description=f"Final {model_policy_config} model after {N_STEPS_RL} steps"
+        )
+        art.add_file(final_model_path)
+        run.log_artifact(art)
+        print(f"{Colors.BLUE}Training finished. Model saved and artifact logged.{Colors.ENDC}")
+        wandb.finish()
+
+
+
+
+
+
 def train_sac_single(trainer_ep: str):
     run = wandb.init(
         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
         entity=os.environ.get("WANDB_ENTITY"),
         save_code=True,
-        # config=dict(
-        #     algo="SAC",
-        #     learning_rate=3e-4,
-        #     gamma=0.99,
-        #     tau=0.02,
-        #     buffer_size=500_000,
-        #     batch_size=256,
-        #     train_freq=1,           # grad step every env step
-        #     gradient_steps=1,       # 1 grad step per call
-        #     ent_coef="auto",
-        #     net_arch=[256, 256],
-        #     use_vectorized_obs=True,
-        # ),
-        # name = f"SAC_{'-'.join(map(str, wandb.config.net_arch))}",
-        # sync_tensorboard=True, # Recommended for SB3
-
     )
 
     use_vec = wandb.config.get("use_vectorized_obs", True)
@@ -188,7 +286,7 @@ def train_sac_single(trainer_ep: str):
         learning_rate=wandb.config.learning_rate,
         gamma=wandb.config.gamma, # This will be pulled from sweep config
         tau=wandb.config.tau,
-        buffer_size= 1_000_000,   # This is hardcoded, not from sweep
+        buffer_size= wandb.config.buffer_size,   # This is hardcoded, not from sweep
         learning_starts=10_000, 
         batch_size=wandb.config.batch_size,
         train_freq=wandb.config.train_freq,    # ("step") implied
@@ -205,17 +303,6 @@ def train_sac_single(trainer_ep: str):
                         verbose=2,
                         log="all",
                         )
-
-    # callback =  CallbackList([ 
-    #                 WandbCallback(
-    #                     model_save_path=f"models/{run.id}",
-    #                     model_save_freq=50_000,
-    #                     verbose=2,
-    #                     log="all",
-    #                     ),
-    #                 StuckActionEarlyStop(patience_episodes = N_STEPS_EARLY_STOP, verbose=1)
-    #                 ]
-    #             )
 
     model.learn(total_timesteps=N_STEPS_RL, callback=callback)
 
@@ -453,7 +540,7 @@ class ZmqEnvClientVEC_Continuous(gym.Env):
         self.ep_len = 0
         self.run_return_cumsum = 0.0
 
-        print(f"✅ Python ZMQ Client connected to server {TRAINER_ENDPOINT}.")
+        print(f"✅ Python ZMQ Client connected to server {trainer_ep}.")
     # ---------- helpers ----------
     @staticmethod
     def _parse_obs_payload(payload):
@@ -663,7 +750,7 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     action_ep  = f"ipc:///tmp/xr_{RUN_ID}_action"
     step_ep    = f"ipc:///tmp/xr_{RUN_ID}_step"
     trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
-
+    
     # ---- Start the shared ZMQ server ----
     env_server = {
         "ZMQ_ACTION_EP":  action_ep,
@@ -671,17 +758,15 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
         "ZMQ_TRAINER_EP": trainer_ep,
     }
     server, thread = start_zmq_server_thread(env_server)
-    time.sleep(0.5)
+    time.sleep(1.5)
+    pool = ThreadPoolExecutor(max_workers=10)
+    # fut_rl = pool.submit(train_sac_single, trainer_ep)
+    fut_rl = pool.submit(train_recurrent_sac, trainer_ep)
 
     # ---- Start RL thread (same endpoints for all episodes) ----
-    pool = ThreadPoolExecutor(max_workers=2)
-    fut_rl = pool.submit(train_sac_single, trainer_ep)
     print(f"RL loop started on {trainer_ep}")
 
-    time.sleep(3.0)
-
-
-
+    time.sleep(8.0)
 
     # ---- Outer training loop over multiple passes ----
     for pass_idx in range(1, num_passes + 1):
@@ -789,34 +874,6 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
             f.write(line)
             print(line, end="")
         return proc.wait()
-
-
-def run_episode(exe: Path, sim_args: list[str], sim_count: int):
-    """Launch one Rust simulator + RL training pair for a given configuration."""
-    slurm_id = os.environ.get("SLURM_JOB_ID")
-    pid = os.getpid()
-    rand = random.randint(1000, 9999)
-    RUN_ID = f"{slurm_id or pid}_{sim_count}_{rand}"
-
-    env = os.environ.copy()
-    env["RUN_ID"] = RUN_ID
-    env["ZMQ_ACTION_EP"]  = f"ipc:///tmp/xr_{RUN_ID}_action"
-    env["ZMQ_STEP_EP"]    = f"ipc:///tmp/xr_{RUN_ID}_step"
-    env["ZMQ_TRAINER_EP"] = f"ipc:///tmp/xr_{RUN_ID}_trainer"
-    env["WANDB_RUN_GROUP"] = f"sim_{RUN_ID}"
-
-    log_path = Path("Results") / f"episode_{RUN_ID}" / "sim.log"
-    print(f"\n🚀 Launching episode {sim_count} with RUN_ID={RUN_ID}")
-    print(f"ZMQ endpoints:\n  ACTION={env['ZMQ_ACTION_EP']}\n  STEP={env['ZMQ_STEP_EP']}\n  TRAINER={env['ZMQ_TRAINER_EP']}")
-
-    # --- Launch simulator + RL concurrently ---
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_sim = pool.submit(run_sim, exe, sim_args, env, log_path)
-        time.sleep(2.0)  # let sockets bind
-        fut_rl = pool.submit(train_sweep_vec)
-        code_sim = fut_sim.result()
-        code_rl = fut_rl.result()
-        print(f"✅ Episode {sim_count} done (sim_exit={code_sim}, rl_exit={code_rl})")
 
 
 

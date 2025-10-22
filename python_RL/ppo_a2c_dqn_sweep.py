@@ -703,7 +703,7 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     time.sleep(0.5)
 
     # ---- Start RL thread (same endpoints for all episodes) ----
-    pool = ThreadPoolExecutor(max_workers=2)
+    pool = ThreadPoolExecutor(max_workers=5)
     fut_rl = pool.submit(train_sweep_vec, trainer_ep)
     print(f"RL loop started on {trainer_ep}")
 
@@ -834,7 +834,7 @@ def run_episode(exe: Path, sim_args: list[str], sim_count: int):
     print(f"ZMQ endpoints:\n  ACTION={env['ZMQ_ACTION_EP']}\n  STEP={env['ZMQ_STEP_EP']}\n  TRAINER={env['ZMQ_TRAINER_EP']}")
 
     # --- Launch simulator + RL concurrently ---
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         fut_sim = pool.submit(run_sim, exe, sim_args, env, log_path)
         time.sleep(2.0)  # let sockets bind
         fut_rl = pool.submit(train_sweep_vec)

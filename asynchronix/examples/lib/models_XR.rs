@@ -1489,47 +1489,18 @@ pub struct ZmqConnector{
     step_socket: zmq::Socket,   // PUSH socket for sending (obs, reward, done) steps
     sim_id: String, 
     window: ObsWindow, 
+
+    last_good_action: Mutex<RLAction>, 
 }
 impl ZmqConnector {
-    // pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str) -> Self {
-    //     // --- Action Socket (DEALER) ---
-    //     // let action_socket = ctx.socket(zmq::DEALER).expect("Failed to create DEALER socket");
-    //     // action_socket
-    //     //     .set_identity(simu_id.as_bytes())
-    //     //     .expect("Failed to set DEALER identity");
-
-
-    //     let action_socket = ctx.socket(zmq::DEALER).unwrap();
-    //     action_socket.set_identity(simu_id.as_bytes()).unwrap();
-
-
-    //     action_socket
-    //         .set_rcvtimeo(60_000)
-    //         .expect("Failed to set receive timeout");
-       
-    //     action_socket.connect(&action_ep).unwrap();
-    
-    //     println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
-
-    //     // --- Reward Socket (PUSH) ---
-    //     let reward_socket = ctx.socket(zmq::PUSH).expect("Failed to create PUSH socket");
-    //     reward_socket
-    //         .connect(reward_ep)
-    //         .expect("Failed to connect PUSH socket");
-    //     println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
-
-    //     Self {
-    //         action_socket,
-    //         step_socket: reward_socket,
-    //         sim_id: simu_id.to_string(),
-    //         window: ObsWindow::new(window_len),
-    //     }
-    // }
+   
     pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str, window_len: usize) -> Self {
             let action_socket = ctx.socket(zmq::DEALER).unwrap();
             action_socket.set_identity(simu_id.as_bytes()).unwrap();
-            action_socket.set_rcvtimeo(60_000).unwrap();
+            action_socket.set_rcvtimeo(90_000).unwrap();
             action_socket.connect(action_ep).unwrap();
+
+            
             println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
 
             let reward_socket = ctx.socket(zmq::PUSH).unwrap();
@@ -1541,6 +1512,8 @@ impl ZmqConnector {
                 step_socket: reward_socket,
                 sim_id: simu_id.to_string(),
                 window: ObsWindow::new(window_len),
+
+                last_good_action: Mutex::new(RLAction::Discrete((1))), 
             }
         }
 
@@ -1553,12 +1526,9 @@ pub struct RLRequest{ pub obs: Vec<f32>}
 
 impl RLConnector for ZmqConnector {
     fn select_action(&mut self, obs: &RLObservation) -> RLAction {
-        // 1) Build prev window (no push yet)
+        // 1) Build prev window (same as before)
         let prev_flat = self.window.as_flat_padded();
-
         let feat_dim = obs.to_vec().len(); 
-
-
         let req = RLRequestRNN {
             sim_id: self.sim_id.clone(),
             obs_flat: prev_flat,
@@ -1569,23 +1539,43 @@ impl RLConnector for ZmqConnector {
         let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
         self.action_socket.send(request_json.as_bytes(), 0).expect("send obs window");
 
-        // 2) recv action (discrete or continuous)
-        let response_bytes = self.action_socket.recv_bytes(0).unwrap_or_else(|e| {
-            if let zmq::Error::EAGAIN = e {
-                eprintln!("RUST ERROR: Timed out waiting for action from Python agent!");
-                panic!("ZMQ Timeout");
+        // 2) Try to recv action, but handle timeout gracefully
+        match self.action_socket.recv_bytes(0) {
+            Ok(response_bytes) => {
+                // --- SUCCESS: Agent replied in time ---
+                let parsed: RLResponse = serde_json::from_slice(&response_bytes)
+                    .expect("deserialize RLResponse");
+
+                // 3) Push current obs *after* success
+                self.window.push_obs(obs);
+
+                let new_action = match parsed {
+                    RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
+                    RLResponse::Continuous { bitrate_mbps } => RLAction::ContinuousMbps(bitrate_mbps),
+                };
+
+                // Store this as the new last_good_action
+                *self.last_good_action.lock().unwrap() = new_action.clone();
+                
+                // Return the new action
+                new_action
+            },
+            Err(e) if e == zmq::Error::EAGAIN => {
+                // --- TIMEOUT: Agent is busy ---
+                // THIS IS THE ROBUST FIX: DO NOT PANIC.
+                eprintln!("RUST WARNING: Timed out waiting for Python agent. Re-using last action.");
+                
+                // 3) We still push the obs to keep the history window correct
+                self.window.push_obs(obs);
+                
+                // Return the LAST known good action
+                self.last_good_action.lock().unwrap().clone()
+            },
+            Err(e) => {
+                // --- OTHER ZMQ ERROR ---
+                // A real error occurred, so we still panic
+                panic!("ZMQ Error on recv: {}", e);
             }
-            panic!("ZMQ Error: {}", e);
-        });
-
-        let parsed: RLResponse = serde_json::from_slice(&response_bytes).expect("deserialize RLResponse");
-
-        // 3) push CURRENT obs now
-        self.window.push_obs(obs);
-
-        match parsed {
-            RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
-            RLResponse::Continuous { bitrate_mbps } => RLAction::ContinuousMbps(bitrate_mbps),
         }
     }
 
@@ -2182,7 +2172,7 @@ impl BitrateManager {
     }
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
-        const TIME_WARMUP_ABR: u64 = 5; 
+        const TIME_WARMUP_ABR: u64 = 2; 
 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
             println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name()); 
@@ -2413,6 +2403,9 @@ impl BitrateManager {
                     let prev_win_flat = history.as_flat_padded();
 
                     // Ask the agent
+
+                    
+
                     let action = connector.lock().unwrap().select_action(&current_obs);
 
                     // Reward/Done

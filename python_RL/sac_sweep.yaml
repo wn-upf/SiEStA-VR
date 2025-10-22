@@ -4,6 +4,14 @@ metric:
   name: episode/return
   goal: maximize
 parameters:
+
+  model_policy_config:
+    values:
+      - "SAC_Mlp_Window"
+      - "SAC_Mlp_Frame"
+      - "RecurrentSAC_Lstm"
+      - "RecurrentSAC_Gru"
+
   algo:
     value: SAC
   learning_rate:
@@ -16,15 +24,25 @@ parameters:
     values: [1, 2, 8]
   train_freq:
     values: [1, 4]
+
+  buffer_size: 
+    values: [2000, 10000, 50000, 100000, 500000]
   ent_coef:
-    values: ["auto"]
+    values: ["auto", 0.1, 0.35, 0.5, 0.7 ]
   net_arch:
     values:
       - [256, 256]
       - [256, 256, 256]
+      - [512, 512]
+      - [512, 512, 512]
+
   use_vectorized_obs:
     values: [true, false]
 
   gamma:
     values: [0.999, 0.99, 0.9, ]
 
+  n_recurrent_layers:
+    values: [1, 2, 3, 4]
+  recurrent_hidden_size:
+    values: [64, 128, 256, 512]
