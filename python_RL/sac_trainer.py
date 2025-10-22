@@ -11,7 +11,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import zmq
 from sb3_contrib import RecurrentPPO
-from sb3_contrib import RecurrentSAC
+# from sb3_contrib import RecurrentSAC
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from pathlib import Path
@@ -148,116 +148,6 @@ class StuckActionEarlyStop(BaseCallback):
 
 
 
-def train_recurrent_sac(trainer_ep: str):
-        """
-        Train script modified to sweep over SAC, SAC (Windowed),
-        RecurrentSAC (LSTM), and RecurrentSAC (GRU).
-        """
-        run = wandb.init(
-            project=os.environ.get("WANDB_PROJECT", "xr-abr"),
-            entity=os.environ.get("WANDB_ENTITY"),
-            save_code=True,
-        )
-
-        config = wandb.config
-        # This new config key controls which model/env/policy combo to use
-        model_policy_config = config.get("model_policy_config", "SAC_Mlp_Window")
-        
-        policy_kwargs = dict(net_arch=list(config.net_arch))
-        
-        if model_policy_config == "SAC_Mlp_Window":
-            print(f"{Colors.BLUE}Using SAC with windowed observations (last row via extractor).{Colors.ENDC}")
-            model_class = SAC
-            policy = "MlpPolicy"
-            env = ZmqEnvClientVEC_Continuous(trainer_ep) # Assumed to be VecEnv
-            policy_kwargs["features_extractor_class"] = LastRowExtractor
-        
-        elif model_policy_config == "SAC_Mlp_Frame":
-            print(f"{Colors.BLUE}Using SAC with single-frame observations.{Colors.ENDC}")
-            model_class = SAC
-            policy = "MlpPolicy"
-            # Wrap the non-vec env in a DummyVecEnv for API consistency
-            env = DummyVecEnv([lambda: ZmqEnvClient(trainer_ep)])
-
-        elif model_policy_config == "RecurrentSAC_Lstm":
-            print(f"{Colors.BLUE}Using RecurrentSAC (LSTM) with single-frame observations.{Colors.ENDC}")
-            model_class = RecurrentSAC
-            policy = "MlpLstmPolicy"
-            # RecurrentSAC MUST use a single-frame env, wrapped in a VecEnv
-            env = DummyVecEnv([lambda: ZmqEnvClient(trainer_ep)])
-            # Add recurrent-specific kwargs from the config
-            policy_kwargs["n_lstm_layers"] = config.get("n_recurrent_layers", 1)
-            policy_kwargs["lstm_hidden_size"] = config.get("recurrent_hidden_size", 64)
-
-        elif model_policy_config == "RecurrentSAC_Gru":
-            print(f"{Colors.BLUE}Using RecurrentSAC (GRU) with single-frame observations.{Colors.ENDC}")
-            model_class = RecurrentSAC
-            policy = "MlpGruPolicy"
-            # RecurrentSAC MUST use a single-frame env, wrapped in a VecEnv
-            env = DummyVecEnv([lambda: ZmqEnvClient(trainer_ep)])
-            # Add recurrent-specific kwargs from the config
-            policy_kwargs["n_gru_layers"] = config.get("n_recurrent_layers", 1)
-            policy_kwargs["gru_hidden_size"] = config.get("recurrent_hidden_size", 64)
-
-        else:
-            print(f"{Colors.RED}Error: Unknown model_policy_config: {model_policy_config}{Colors.ENDC}")
-            raise ValueError(f"Unknown model_policy_config: {model_policy_config}")
-
-        # Handle ent_coef being passed as a string (e.g., "0.1") vs "auto"
-        ent_coef_val = config.ent_coef
-        if isinstance(ent_coef_val, str) and not ent_coef_val.startswith("auto"):
-            try:
-                ent_coef_val = float(ent_coef_val)
-            except ValueError:
-                print(f"{Colors.YELLOW}Warning: Could not convert ent_coef '{ent_coef_val}' to float. Defaulting to 'auto'.{Colors.ENDC}")
-                ent_coef_val = "auto"
-
-        model = model_class(
-            policy,
-            env,
-            learning_rate=config.learning_rate,
-            gamma=config.gamma,
-            tau=config.tau,
-            buffer_size=config.buffer_size, # <-- This is now correctly pulled from config
-            learning_starts=config.learning_starts, # <-- Added this to config
-            batch_size=config.batch_size,
-            train_freq=config.train_freq,
-            gradient_steps=config.gradient_steps,
-            ent_coef=ent_coef_val,
-            policy_kwargs=policy_kwargs,
-            verbose=1,
-            tensorboard_log=f"runs/{run.id}",
-        )
-
-        callback = WandbCallback(
-            model_save_path=f"models/{run.id}",
-            model_save_freq=50_000,
-            verbose=2,
-            log="all",
-        )
-
-        print(f"{Colors.BLUE}Starting training for {model_policy_config}...{Colors.ENDC}")
-        # Recurrent policies handle their own state resets.
-        model.learn(total_timesteps=N_STEPS_RL, callback=callback)
-
-        final_model_path = f"models/{run.id}/final_model.zip"
-        model.save(final_model_path)
-        
-        art_name = f"{model_policy_config}-{run.id}-final".replace("_", "-") # Clean name
-        art = wandb.Artifact(
-            name=art_name,
-            type="model",
-            description=f"Final {model_policy_config} model after {N_STEPS_RL} steps"
-        )
-        art.add_file(final_model_path)
-        run.log_artifact(art)
-        print(f"{Colors.BLUE}Training finished. Model saved and artifact logged.{Colors.ENDC}")
-        wandb.finish()
-
-
-
-
-
 
 def train_sac_single(trainer_ep: str):
     run = wandb.init(
@@ -287,7 +177,7 @@ def train_sac_single(trainer_ep: str):
         gamma=wandb.config.gamma, # This will be pulled from sweep config
         tau=wandb.config.tau,
         buffer_size= wandb.config.buffer_size,   # This is hardcoded, not from sweep
-        learning_starts=10_000, 
+        learning_starts=600_000, 
         batch_size=wandb.config.batch_size,
         train_freq=wandb.config.train_freq,    # ("step") implied
         gradient_steps=wandb.config.gradient_steps,
@@ -420,9 +310,31 @@ class ZmqServer:
             
             if command == "reset":
                 print(f"{Colors.BLUE}SERVER: Received 'reset' command.{Colors.ENDC}")
-                # 1) Get the first obs from a connecting Rust sim
-                print("SERVER: Waiting for initial observation from a Rust simulation...")
-                sim_id, payload = self.router.recv_multipart()
+
+                # 1) Wait for obs, retrying for up to 15 seconds
+                print("SERVER: Waiting for initial observation from a Rust simulation (max 15s)...")
+
+                # Setup a poller to watch the router socket for incoming messages
+                poller = zmq.Poller()
+                poller.register(self.router, zmq.POLLIN) # POLLIN means "waiting to receive"
+
+                # Poll for 15,000 milliseconds (15 seconds)
+                socks = dict(poller.poll(timeout=15000))
+
+                # Check if our socket has a message
+                if self.router in socks and socks[self.router] == zmq.POLLIN:
+                    # Yes, message is ready. Receive it.
+                    # This recv_multipart() is now guaranteed not to block
+                    sim_id, payload = self.router.recv_multipart()
+                else:
+                    # No, we timed out after 15 seconds
+                    print(f"{Colors.RED}SERVER: ERROR - Timed out waiting for initial obs from Rust.{Colors.ENDC}")
+                    # Reply to the trainer with an error
+                    self.rep_socket.send_json({"error": "Timeout waiting for sim", "obs": None})
+                    continue  # Stop this reset attempt and wait for the next command
+
+                # --- Original code continues from here ---
+                # If we got here, we successfully received the message
                 req_obs = json.loads(payload.decode("utf-8"))
                 initial_obs = _obs_from_payload_dict(req_obs)
 
@@ -438,7 +350,6 @@ class ZmqServer:
                 # 3) Reply to the trainer with the initial observation
                 self.rep_socket.send_json({"obs": initial_obs})
                 print(f"{Colors.GREEN}SERVER: Reset done for sim {sim_id.decode()}, sent bitrate={init_bitrate:.2f} Mbps.{Colors.ENDC}")
-
 
             elif command == "step":
                 action = req.get("action")
@@ -760,8 +671,8 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     server, thread = start_zmq_server_thread(env_server)
     time.sleep(1.5)
     pool = ThreadPoolExecutor(max_workers=10)
-    # fut_rl = pool.submit(train_sac_single, trainer_ep)
-    fut_rl = pool.submit(train_recurrent_sac, trainer_ep)
+    fut_rl = pool.submit(train_sac_single, trainer_ep)
+    # fut_rl = pool.submit(train_recurrent_sac, trainer_ep)
 
     # ---- Start RL thread (same endpoints for all episodes) ----
     print(f"RL loop started on {trainer_ep}")

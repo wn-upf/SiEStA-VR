@@ -1,5 +1,5 @@
 program: sac_trainer.py
-method: grid   # or bayes
+method: bayes   # or bayes
 metric:
   name: episode/return
   goal: maximize
@@ -15,7 +15,7 @@ parameters:
   algo:
     value: SAC
   learning_rate:
-    values: [3e-4, 1e-4, 3e-5, 1e-5]
+    values: [3e-5, 1e-5, 3e-6, 2e-7]
   tau:
     values: [0.02, 0.01]
   batch_size:
@@ -28,7 +28,7 @@ parameters:
   buffer_size: 
     values: [2000, 10000, 50000, 100000, 500000]
   ent_coef:
-    values: ["auto", 0.1, 0.35, 0.5, 0.7 ]
+    values: [0.35, 0.1,  0.5, 0.7 ]
   net_arch:
     values:
       - [256, 256]
@@ -40,9 +40,9 @@ parameters:
     values: [true, false]
 
   gamma:
-    values: [0.999, 0.99, 0.9, ]
+    values: [0.999, 0.99, 0.9, 0.7 ]
 
-  n_recurrent_layers:
-    values: [1, 2, 3, 4]
-  recurrent_hidden_size:
-    values: [64, 128, 256, 512]
+  # n_recurrent_layers:
+  #   values: [1, 2, 3, 4]
+  # recurrent_hidden_size:
+  #   values: [64, 128, 256, 512]
