@@ -261,11 +261,12 @@ OBSERVATION_KEYS = [
     "frame_interarrival_std_ms",
     "flr_avg_s",
     "pl_sum_period",
-    "frame_avg_bytes",
-    "ow_delay_ewma",
-    "fow_delay_ewma", 
-    "rebuffer_event_sum", 
+    "frame_size_avg_bytes",        
+    "ow_delay_period_ewma",        
+    "f_ow_delay_period_ewma",      
+    "rebuffer_event_sum",
 ]
+
 
 
 def coerce_batch_size(n_steps: int, batch_size: int, n_envs: int = 1) -> int:

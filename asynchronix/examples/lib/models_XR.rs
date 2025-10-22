@@ -1310,14 +1310,22 @@ impl RLObservation {
 pub struct RLObservationVector{
     observations: Vec<RLObservation>, 
     max_len: u8, 
+    FEAT_DIM: usize, 
+    
 }
 
 impl RLObservationVector{
     pub fn new(max_len: u8) -> Self { 
-        debug_assert_eq!(FEAT_DIM, RLObservation::default().to_vec().len());
-        Self{ observations: Vec::new(), max_len}}
+        // debug_assert_eq!(FEAT_DIM, RLObservation::default().to_vec().len());
+        Self{ observations: Vec::new(), max_len, FEAT_DIM: 0, }}
 
     pub fn push(&mut self, o: RLObservation){
+        
+        if self.FEAT_DIM == 0{
+            self.FEAT_DIM = o.to_vec().len(); 
+        }
+        
+        
         self.observations.push(o); 
         if self.observations.len() as u8 > self.max_len {
             self.observations.remove(0); 
@@ -1332,15 +1340,15 @@ impl RLObservationVector{
     /// Layout: [o_{t-k+1}, ..., o_t] row-major, zeros for missing prefix.
     pub fn as_flat_padded(&self) -> Vec<f32> {
         let cap = self.max_len as usize;
-        let mut out = vec![0.0f32; cap * FEAT_DIM];
+        let mut out = vec![0.0f32; cap * self.FEAT_DIM];
 
         // copy rows to the tail to keep left padding at the front
         let len = self.observations.len();
         let start_row = cap.saturating_sub(len);
         for (i, o) in self.observations.iter().enumerate() {
             let row = o.to_vec();                    // len == FEAT_DIM
-            let dst = (start_row + i) * FEAT_DIM;
-            out[dst..dst + FEAT_DIM].copy_from_slice(&row[..FEAT_DIM]);
+            let dst = (start_row + i) * self.FEAT_DIM;
+            out[dst..dst + self.FEAT_DIM].copy_from_slice(&row[..self.FEAT_DIM]);
         }
         out
     }
@@ -1374,22 +1382,28 @@ pub trait RLConnector {
 }
 
 const RL_WINDOW_OBSERVATION_SIZE: usize = 5; 
-const FEAT_DIM: usize  = 11; // keep in sync with RLObservation::to_vec().len()
 
 #[derive(Debug, Clone)]
 pub struct ObsWindow {
     buf: VecDeque<Vec<f32>>,
     cap: usize,
+    FEAT_DIM: usize, // keep in sync with RLObservation::to_vec().len()
+
 }
 
 impl ObsWindow {
     pub fn new(cap: usize) -> Self {
-        Self { buf: VecDeque::with_capacity(cap), cap }
+        Self { buf: VecDeque::with_capacity(cap), cap, FEAT_DIM: 0,  }
     }
 
     pub fn clear(&mut self) { self.buf.clear(); }
 
     pub fn push_obs(&mut self, obs: &RLObservation) {
+
+        if self.FEAT_DIM == 0{
+            self.FEAT_DIM = obs.to_vec().len(); 
+        }
+
         if self.buf.len() == self.cap {
             self.buf.pop_front();
         }
@@ -1402,12 +1416,12 @@ impl ObsWindow {
     /// Return a flattened window of size (cap * FEAT_DIM), left-padded with zeros.
     /// Layout: [o_{t-k+1}, ..., o_{t}] row-major.
     pub fn as_flat_padded(&self) -> Vec<f32> {
-        let mut out = vec![0.0f32; self.cap * FEAT_DIM];
+        let mut out = vec![0.0f32; self.cap * self.FEAT_DIM];
         // copy the existing rows to the tail of out to keep left padding zeros
         let start_row = self.cap - self.buf.len();
         for (i, row) in self.buf.iter().enumerate() {
-            let dst = (start_row + i) * FEAT_DIM;
-            out[dst..dst + FEAT_DIM].copy_from_slice(&row[..FEAT_DIM]);
+            let dst = (start_row + i) * self.FEAT_DIM;
+            out[dst..dst + self.FEAT_DIM].copy_from_slice(&row[..self.FEAT_DIM]);
         }
         out
     }
@@ -1541,11 +1555,15 @@ impl RLConnector for ZmqConnector {
     fn select_action(&mut self, obs: &RLObservation) -> RLAction {
         // 1) Build prev window (no push yet)
         let prev_flat = self.window.as_flat_padded();
+
+        let feat_dim = obs.to_vec().len(); 
+
+
         let req = RLRequestRNN {
             sim_id: self.sim_id.clone(),
             obs_flat: prev_flat,
             seq_len: self.window.seq_len() as u8,
-            feat_dim: FEAT_DIM as u8,
+            feat_dim: feat_dim as u8,
             window_len: self.window.cap as u8,
         };
         let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
