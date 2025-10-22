@@ -862,7 +862,7 @@ def main():
 
     print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
     
-    rebuild_rust_binary(EXAMPLE_NAME)
+    # rebuild_rust_binary(EXAMPLE_NAME)
     exe = find_exe(release=True)
     train_over_all_combos_iter(exe, combos)
 

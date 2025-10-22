@@ -11,8 +11,6 @@
 
 source ~/.bashrc
 
-source ~/.bashrc
-
 PROJECT_DIR="$SLURM_SUBMIT_DIR"
 LOG_DIR="$PROJECT_DIR/../logs_hpc"
 SWEEP_ID="wn-upf/asynchronix-python_RL/abv10stl"
