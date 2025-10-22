@@ -7,7 +7,7 @@ parameters:
   algo:
     value: SAC
   learning_rate:
-    values: [3e-4, 1e-4]
+    values: [3e-4, 1e-4, 3e-5, 1e-5]
   tau:
     values: [0.02, 0.01]
   batch_size:
@@ -24,3 +24,7 @@ parameters:
       - [256, 256, 256]
   use_vectorized_obs:
     values: [true, false]
+
+  gamma:
+    values: [0.999, 0.99, 0.9, ]
+

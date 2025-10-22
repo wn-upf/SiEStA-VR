@@ -40,12 +40,14 @@ from gymnasium import spaces
 
 import torch.nn as nn
 
+from stable_baselines3.common.callbacks import CallbackList
 
 
 import subprocess
 import signal
 import atexit
 import os
+import shutil
 
 # Keep global list of Rust child processes
 RUST_PROCS = []
@@ -53,7 +55,7 @@ RUST_PROCS = []
 #CONSTS
 ##############################
 
-N_STEPS_RL= 2_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
+N_STEPS_RL= 7_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
 FEAT_DIM = 14
 WINDOW_LEN = 5
 OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
@@ -61,7 +63,7 @@ OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
 ACTION_DIM = 20
 
 ACT_MIN_MBPS = 5.0
-ACT_MAX_MBPS = 120.0
+ACT_MAX_MBPS = 100.0
 
 
 
@@ -76,7 +78,7 @@ TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_train
 ### SIMULATION PARAMS
 TEST_TYPE = [ "STD"]                     # "BW", "JI", "PL", "RANDOM", "STD"
 
-simTime = [30.0]
+simTime = [60.0]
 
 k_queue = 10000
 mean_length_BG = 12000.0
@@ -148,20 +150,22 @@ def train_sac_single(trainer_ep: str):
         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
         entity=os.environ.get("WANDB_ENTITY"),
         save_code=True,
-        config=dict(
-            algo="SAC",
-            learning_rate=3e-4,
-            gamma=0.99,
-            tau=0.02,
-            buffer_size=500_000,
-            batch_size=256,
-            train_freq=1,           # grad step every env step
-            gradient_steps=1,       # 1 grad step per call
-            ent_coef="auto",
-            net_arch=[256, 256],
-            use_vectorized_obs=True,
-        ),
-        name = os.environ.get("WANDB_NAME") or f"SAC_{wandb.config.learning_rate}_{'-'.join(map(str, wandb.config.net_arch))}",
+        # config=dict(
+        #     algo="SAC",
+        #     learning_rate=3e-4,
+        #     gamma=0.99,
+        #     tau=0.02,
+        #     buffer_size=500_000,
+        #     batch_size=256,
+        #     train_freq=1,           # grad step every env step
+        #     gradient_steps=1,       # 1 grad step per call
+        #     ent_coef="auto",
+        #     net_arch=[256, 256],
+        #     use_vectorized_obs=True,
+        # ),
+        # name = f"SAC_{'-'.join(map(str, wandb.config.net_arch))}",
+        # sync_tensorboard=True, # Recommended for SB3
+
     )
 
     use_vec = wandb.config.get("use_vectorized_obs", True)
@@ -171,7 +175,7 @@ def train_sac_single(trainer_ep: str):
         policy = "MlpPolicy"
         policy_kwargs = dict(
             features_extractor_class=LastRowExtractor,
-            net_arch=[256, 256, 256],        )
+            net_arch=list(wandb.config.net_arch),        )
     else:
         print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
         env = ZmqEnvClient(trainer_ep)
@@ -182,9 +186,9 @@ def train_sac_single(trainer_ep: str):
         policy,
         env,
         learning_rate=wandb.config.learning_rate,
-        gamma=wandb.config.gamma,
+        gamma=wandb.config.gamma, # This will be pulled from sweep config
         tau=wandb.config.tau,
-        buffer_size= 1_000_000,
+        buffer_size= 1_000_000,   # This is hardcoded, not from sweep
         learning_starts=10_000, 
         batch_size=wandb.config.batch_size,
         train_freq=wandb.config.train_freq,    # ("step") implied
@@ -192,18 +196,26 @@ def train_sac_single(trainer_ep: str):
         ent_coef=wandb.config.ent_coef,
         policy_kwargs=policy_kwargs,
         verbose=1,
+        tensorboard_log=f"runs/{run.id}", # Added for WandbCallback
     )
 
-     callback =  CallbackList([
-            WandbCallback(
-                model_save_path=f"models/{run.id}",
-                model_save_freq=50_000,
-                verbose=2,
-                log="all",
-                ),
-            StuckActionEarlyStop(patience_episodes = N_STEPS_EARLY_STOP, verbose=1)
-            ]
-        )
+    callback =  WandbCallback(
+                        model_save_path=f"models/{run.id}",
+                        model_save_freq=50_000,
+                        verbose=2,
+                        log="all",
+                        )
+
+    # callback =  CallbackList([ 
+    #                 WandbCallback(
+    #                     model_save_path=f"models/{run.id}",
+    #                     model_save_freq=50_000,
+    #                     verbose=2,
+    #                     log="all",
+    #                     ),
+    #                 StuckActionEarlyStop(patience_episodes = N_STEPS_EARLY_STOP, verbose=1)
+    #                 ]
+    #             )
 
     model.learn(total_timesteps=N_STEPS_RL, callback=callback)
 
@@ -287,6 +299,8 @@ class ZmqServer:
         # Socket for Python Trainer Client (REP for req/rep)
         self.rep_socket = self.ctx.socket(zmq.REP)
         self.rep_socket.bind(trainer_ep)
+
+        self.sim_is_done = False 
         
         self.active_sim_id = None
         print(f"{Colors.GREEN}✅ ZMQ Server Bridge is running.{Colors.ENDC}")
@@ -343,6 +357,19 @@ class ZmqServer:
                     action = float(action)
                 action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))  # clamp
 
+                # 1. First, send the action to the waiting Rust sim.
+                #    (Only if the sim isn't already done)
+                if not self.sim_is_done:
+                    try:
+                        # Wait for sim's REQ for the next action
+                        sim_id, _ = self.router.recv_multipart()
+                        # Send the action
+                        self.router.send_multipart([sim_id, json.dumps({"bitrate_mbps": action}).encode("utf-8")])
+                    except Exception as e:
+                        print(f"SERVER: Error sending action to sim: {e}")
+                        # Handle error if needed
+
+                # 2. Now, wait for the sim to PUSH its transition data.
                 transition = self.pull.recv_json()
                 while self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
                     print(f"SERVER: Skipping transition from {transition.get('sim_id')}, waiting for {self.active_sim_id.decode()}")
@@ -350,6 +377,7 @@ class ZmqServer:
 
                 reward = float(transition["reward"])
                 done = bool(transition["done"])
+                self.sim_is_done = done  # <-- Store the 'done' state
 
                 next_obs_field = transition.get("next_obs")
                 if next_obs_field is None:
@@ -357,10 +385,7 @@ class ZmqServer:
 
                 next_obs = _obs_from_payload_dict(next_obs_field) if isinstance(next_obs_field, dict) else next_obs_field
 
-                if not done:
-                    sim_id, _ = self.router.recv_multipart()
-                    self.router.send_multipart([sim_id, json.dumps({"bitrate_mbps": action}).encode("utf-8")])
-
+                # 3. Finally, send the transition data back to the (blocked) agent.
                 self.rep_socket.send_json({"next_obs": next_obs, "reward": reward, "done": done})
 
                 if done:
@@ -649,6 +674,11 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     fut_rl = pool.submit(train_sac_single, trainer_ep)
     print(f"RL loop started on {trainer_ep}")
 
+    time.sleep(3.0)
+
+
+
+
     # ---- Outer training loop over multiple passes ----
     for pass_idx in range(1, num_passes + 1):
         random.shuffle(combos)
@@ -785,51 +815,41 @@ def run_episode(exe: Path, sim_args: list[str], sim_count: int):
         print(f"✅ Episode {sim_count} done (sim_exit={code_sim}, rl_exit={code_rl})")
 
 
-def main():
-    # === 1️⃣ Start ZMQ server in background ===
-    # server, thread = start_zmq_server_thread(os.environ)
-    # time.sleep(1.0)  # Give it a moment to bind sockets
 
-    # === 2️⃣ Build all parameter combinations ===
-    # TEST_TYPE = ["STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+def clear_results_directory(dir_path: Path):
+    """Safely removes and recreates a directory."""
+    try:
+        if dir_path.exists() and dir_path.is_dir():
+            print(f"--- Clearing old results from {dir_path} ---")
+            shutil.rmtree(dir_path)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        print(f"--- Created empty directory {dir_path} ---")
 
-    combos = list(product(
-        simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
-        video_samples, fps_list, num_close_users, distance_close_users,
-        RANDOM_SEEDS, distance_list, GoP_sizes, intrarefresh_choice,
-        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
-    ))
+    except OSError as e:
+        print(f"Error clearing directory {dir_path}: {e}")
+        print("Please check file permissions and if any files are in use.")
 
-    random.shuffle(combos)  # optional
 
-    print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
-    
-    rebuild_rust_binary(EXAMPLE_NAME)
-    exe = find_exe(release=True)
-    train_over_all_combos_iter(exe, combos)
+def periodic_clear(dir_path: Path, interval_s: int = 60):
+    """Runs in background and clears directory every `interval_s` seconds."""
+    while True:
+        time.sleep(interval_s)
+        clear_results_directory(dir_path)
 
-    # === 4️⃣ Close ZMQ server ===
-    server.close()
-    print("🧹 All episodes finished. Server closed.")
-
-if __name__ == "__main__":
-
-        
-    atexit.register(cleanup_rust_processes)
-
-    # Handle Ctrl-C / SIGTERM gracefully
-    signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
-    signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
-    
-    main()
 
 def main():
-    # === 1️⃣ Start ZMQ server in background ===
-    # server, thread = start_zmq_server_thread(os.environ)
-    # time.sleep(1.0)  # Give it a moment to bind sockets
 
-    # === 2️⃣ Build all parameter combinations ===
+
+    # === Build all parameter combinations ===
     # TEST_TYPE = ["STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+
+    results_dir = Path("Results")
+    clear_results_directory(results_dir)
+
+    # Start background thread (daemon so it ends with main process)
+    thread = threading.Thread(target=periodic_clear, args=(results_dir, 60), daemon=True)
+    thread.start()
+
 
     combos = list(product(
         simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
