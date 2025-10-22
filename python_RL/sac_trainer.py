@@ -260,7 +260,10 @@ OBSERVATION_KEYS = [
     "frame_interarrival_avg_ms",
     "frame_interarrival_std_ms",
     "flr_avg_s",
-    "buffer_level_avg_s",
+    "pl_sum_period",
+    "frame_avg_bytes",
+    "ow_delay_ewma",
+    "fow_delay_ewma", 
     "rebuffer_event_sum", 
 ]
 

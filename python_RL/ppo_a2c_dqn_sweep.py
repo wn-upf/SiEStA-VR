@@ -108,6 +108,21 @@ def _obs_from_payload_dict(d):
     raise KeyError("Neither 'obs_flat' nor 'obs' in payload")
 
 
+# OBSERVATION_KEYS = [
+#     "t_elapsed_s",
+#     "last_target_bitrate_mbps",
+#     "rtt_ms_avg_s",
+#     "rtt_ms_std_s",
+#     "bandwidth_mbps_avg_s",
+#     "bandwidth_mbps_std_s",
+#     "frame_interarrival_avg_ms",
+#     "frame_interarrival_std_ms",
+#     "flr_avg_s",
+#     "buffer_level_avg_s",
+#     "rebuffer_event_sum", 
+# ]
+
+
 OBSERVATION_KEYS = [
     "t_elapsed_s",
     "last_target_bitrate_mbps",
@@ -118,10 +133,12 @@ OBSERVATION_KEYS = [
     "frame_interarrival_avg_ms",
     "frame_interarrival_std_ms",
     "flr_avg_s",
-    "buffer_level_avg_s",
+    "pl_sum_period",
+    "frame_avg_bytes",
+    "ow_delay_ewma",
+    "fow_delay_ewma", 
     "rebuffer_event_sum", 
 ]
-
 
 def coerce_batch_size(n_steps: int, batch_size: int, n_envs: int = 1) -> int:
     total = n_steps * n_envs
