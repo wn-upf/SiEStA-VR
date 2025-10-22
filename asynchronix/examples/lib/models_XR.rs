@@ -6154,7 +6154,7 @@ impl STA_extended {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move{
 
-
+            const LIMIT_MOVEMENT_RADIUS :f64 = 1.0; // circle of 1m radius. 
             let delta_t = 0.01; //  is reasonable? 
 
             // Step length = speed * delta_t
@@ -6175,10 +6175,10 @@ impl STA_extended {
                 let new_y = self.sta_coordinates.y + dy;
 
                 // Boundaries: within ±0.5 m around initial position
-                let min_x = self.orig_sta_coordinates.x - 0.5;
-                let max_x = self.orig_sta_coordinates.x + 0.5;
-                let min_y = self.orig_sta_coordinates.y - 0.5;
-                let max_y = self.orig_sta_coordinates.y + 0.5;
+                let min_x = self.orig_sta_coordinates.x - LIMIT_MOVEMENT_RADIUS;
+                let max_x = self.orig_sta_coordinates.x + LIMIT_MOVEMENT_RADIUS;
+                let min_y = self.orig_sta_coordinates.y - LIMIT_MOVEMENT_RADIUS;
+                let max_y = self.orig_sta_coordinates.y + LIMIT_MOVEMENT_RADIUS;
 
                 // Reflect if out of bounds
                 self.sta_coordinates.x = if new_x < min_x {
