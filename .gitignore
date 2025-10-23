@@ -18,3 +18,4 @@ video_samples_vmaf/*
 *.hevc
 *wandb*
 simu_decode_samples/*
+python_RL/runs/*

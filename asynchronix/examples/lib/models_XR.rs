@@ -1483,6 +1483,15 @@ fn snap_to_ladder(ladder: &[f32], mbps: f32) -> (usize, f32) {
         let i = nearest_idx(ladder, mbps);
         (i, ladder[i])
         }
+// fn dump_bytes(label: &str, bytes: &[u8]) {
+    
+//     let binding = bytes.iter().cloned().take(200).collect::<Vec<_>>();
+//     let snippet = String::from_utf8_lossy(&binding);
+    
+//     // let bytes_clone = bytes.clone(); 
+//     // let snippet = String::from_utf8_lossy(&bytes_clone.iter().cloned().take(200).collect::<Vec<_>>());
+//     println!("[ZMQ-DUMP_rust] {} ({} bytes): {}", label, bytes.len(), snippet);
+// }
 
 pub struct ZmqConnector{
     action_socket: zmq::Socket, // REQ socket for blocking action selection
@@ -1492,105 +1501,160 @@ pub struct ZmqConnector{
 
     last_good_action: Mutex<RLAction>, 
 }
+
 impl ZmqConnector {
-   
     pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str, window_len: usize) -> Self {
-            let action_socket = ctx.socket(zmq::DEALER).unwrap();
-            action_socket.set_identity(simu_id.as_bytes()).unwrap();
-            action_socket.set_rcvtimeo(15_000).unwrap();
-            action_socket.connect(action_ep).unwrap();
+        // --- Action Socket (DEALER) ---
+        // This socket sends obs and receives actions
+        let action_socket = ctx.socket(zmq::DEALER).unwrap();
+        // Set a unique identity for the ROUTER to track this client
+        action_socket.set_identity(simu_id.as_bytes()).unwrap();
+        // Set a timeout for receiving actions
+        action_socket.set_rcvtimeo(15_000).unwrap();
+        action_socket.set_linger(0).unwrap(); 
+        action_socket.connect(action_ep).unwrap();
+        println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
 
-            
-            println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
+        // --- Step Socket (PUSH) ---
+        // This socket just sends transitions (reward, done, info)
+        let reward_socket = ctx.socket(zmq::PUSH).unwrap();
+        reward_socket.set_linger(0).unwrap(); 
 
-            let reward_socket = ctx.socket(zmq::PUSH).unwrap();
-            reward_socket.connect(reward_ep).unwrap();
-            println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
+        reward_socket.connect(reward_ep).unwrap();
 
-            Self {
-                action_socket,
-                step_socket: reward_socket,
-                sim_id: simu_id.to_string(),
-                window: ObsWindow::new(window_len),
+        println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
 
-                last_good_action: Mutex::new(RLAction::Discrete((1))), 
-            }
+        Self {
+            action_socket,
+            step_socket: reward_socket,
+            sim_id: simu_id.to_string(),
+            window: ObsWindow::new(window_len),
+            // Default action
+            last_good_action: Mutex::new(RLAction::Discrete(1)),
         }
-
+    }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct RLRequest{ pub obs: Vec<f32>}
-// #[derive(Serialize, Deserialize)]
-// pub struct RLResponse{pub action_idx: usize}
+
 
 impl RLConnector for ZmqConnector {
-    fn select_action(&mut self, obs: &RLObservation) -> RLAction {
-        // 1) Build prev window (same as before)
+    /**
+     * This is the corrected request-reply flow.
+     * 1. Send the observation to the Python ROUTER.
+     * 2. Block and wait for the ROUTER to reply with an action.
+     */
+   fn select_action(&mut self, obs: &RLObservation) -> RLAction {
+        // 1. Build the observation payload
         let prev_flat = self.window.as_flat_padded();
-        let feat_dim = obs.to_vec().len(); 
+        let feat_dim = obs.to_vec().len();
+        
         let req = RLRequestRNN {
             sim_id: self.sim_id.clone(),
-            obs_flat: prev_flat,
+            obs_flat: prev_flat, // Send the *previous* window state
             seq_len: self.window.seq_len() as u8,
             feat_dim: feat_dim as u8,
             window_len: self.window.cap as u8,
         };
         let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
-        self.action_socket.send(request_json.as_bytes(), 0).expect("send obs window");
 
-        // 2) Try to recv action, but handle timeout gracefully
-        match self.action_socket.recv_bytes(0) {
-            Ok(response_bytes) => {
-                // --- SUCCESS: Agent replied in time ---
-                let parsed: RLResponse = serde_json::from_slice(&response_bytes)
-                    .expect("deserialize RLResponse");
-
-                // 3) Push current obs *after* success
-                self.window.push_obs(obs);
-
-                let new_action = match parsed {
-                    RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
-                    RLResponse::Continuous { bitrate_mbps } => RLAction::ContinuousMbps(bitrate_mbps),
-                };
-
-                // Store this as the new last_good_action
-                *self.last_good_action.lock().unwrap() = new_action.clone();
-                
-                // Return the new action
-                new_action
-            },
-            Err(e) if e == zmq::Error::EAGAIN => {
-                // --- TIMEOUT: Agent is busy ---
-                // THIS IS THE ROBUST FIX: DO NOT PANIC.
-                eprintln!("RUST WARNING: Timed out waiting for Python agent. Re-using last action.");
-                
-                // 3) We still push the obs to keep the history window correct
-                self.window.push_obs(obs);
-                
-                // Return the LAST known good action
-                self.last_good_action.lock().unwrap().clone()
-            },
+        // 2. Send the observation request
+        match self.action_socket.send(request_json.as_bytes(), 0) {
+            Ok(_) => {
+                // println!("[ZmqConnector] DEALER Sent obs successfully");
+            }
             Err(e) => {
-                // --- OTHER ZMQ ERROR ---
-                // A real error occurred, so we still panic
-                panic!("ZMQ Error on recv: {}", e);
+                eprintln!("[ZmqConnector] ❌ Failed to send obs: {}. Re-using last action.", e);
+                self.window.push_obs(obs); // Still push obs to window
+                return self.last_good_action.lock().unwrap().clone();
+            }
+        }
+        // println!("[ZMQ] Rust DEALER waiting for action reply…");
+        
+        // 3. Wait for the action response
+        // --- FIX: Use recv_multipart to consume all frames ---
+        match self.action_socket.recv_multipart(0) {
+            Ok(parts) => {
+                // The DEALER strips its identity, leaving [b'', payload]
+                // We must take the *last* part.
+                if let Some(response_bytes) = parts.last() {
+                    if response_bytes.is_empty() {
+                        // This catches the case where we just get [b''] or something invalid
+                        eprintln!("[ZmqConnector] ❌ Received empty payload part. Full parts: {:?}", 
+                                  parts.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>());
+                        self.window.push_obs(obs); // Push obs
+                        return self.last_good_action.lock().unwrap().clone();
+                    }
+
+                    // println!("GOT RESPONSE (last part of {}): {:?}", parts.len(), response_bytes);
+                    let parsed: RLResponse = match serde_json::from_slice(response_bytes) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("[ZmqConnector] ❌ Failed to deserialize action: {}. Payload: {:?}", e, String::from_utf8_lossy(response_bytes));
+                            self.window.push_obs(obs); // Push obs
+                            return self.last_good_action.lock().unwrap().clone();
+                        }
+                    };
+
+                    // Update the observation window *after* successfully sending the previous state
+                    self.window.push_obs(obs);
+
+                    let new_action = match parsed {
+                        RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
+                        RLResponse::Continuous { bitrate_mbps } => RLAction::ContinuousMbps(bitrate_mbps),
+                    };
+
+                    // Save this as the last known-good action
+                    *self.last_good_action.lock().unwrap() = new_action.clone();
+                    new_action
+                } else {
+                    // This should not happen, but good to guard against
+                    eprintln!("[ZmqConnector] ❌ Received empty multipart message.");
+                    self.window.push_obs(obs); // Push obs
+                    self.last_good_action.lock().unwrap().clone()
+                }
+            }
+            Err(e) if e == zmq::Error::EAGAIN => {
+                // Timeout waiting for Python
+                eprintln!("⚠️ Timeout waiting for action. Re-using last action.");
+                self.window.push_obs(obs); // Push obs
+                self.last_good_action.lock().unwrap().clone()
+            }
+            Err(e) => {
+                // A real socket error
+                eprintln!("❌ ZMQ Error on recv action: {}. Re-using last action.", e);
+                self.window.push_obs(obs); // Push obs
+                self.last_good_action.lock().unwrap().clone()
             }
         }
     }
 
+    /**
+     * Send transition data (reward, done, info) on the separate PUSH socket.
+     * This is "fire and forget" - no reply.
+     */
     fn post_transition(&mut self, transition: &RLTransition) {
         let transition_json = serde_json::to_string(transition).expect("Failed to serialize RLTransition");
-        // println!(
-        //     "Sending transition: sim_id {}, action {}, reward {:.2}",
-        //     transition.sim_id, transition.action, transition.reward
-        // );
-        self.step_socket.send(transition_json.as_bytes(), 0).expect("Failed to send transition");
+        // dump_bytes("→ PUSH SEND (transition)", transition_json.as_bytes());
+        match self.step_socket.send(transition_json.as_bytes(), 0) {
+            Ok(_) => {
+                // println!("[ZmqConnector] Sent transition successfully");
+            }
+            Err(e) => {
+                 eprintln!("[ZmqConnector] ❌ Failed to send transition: {}", e);
+            }
+        }
     }
-    fn reset_window(&mut self) { self.window.clear(); }
 
+    fn reset_window(&mut self) {
+        self.window.clear();
+    }
 }
 
+
+#[derive(Serialize, Deserialize)]
+pub struct RLRequest{ pub obs: Vec<f32>}
+// #[derive(Serialize, Deserialize)]
+// pub struct RLResponse{pub action_idx: usize}
 
 
 
@@ -1916,7 +1980,7 @@ impl BitrateManager {
 
                 let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) }; 
                 
-                println!("CONFIGURING RLer"); 
+                println!("[RUST] CONFIGURING RL on sockets | A: {action_ep}, R: {reward_ep}"); 
 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
@@ -2173,7 +2237,7 @@ impl BitrateManager {
     }
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
-        const TIME_WARMUP_ABR: u64 = 2; 
+        const TIME_WARMUP_ABR: u64 = 5; 
 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
             // println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name()); 

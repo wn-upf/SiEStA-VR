@@ -147,7 +147,7 @@ class StuckActionEarlyStop(BaseCallback):
 
 
 
-def train_sac_single(trainer_ep: str):
+def train_sac_single(action_ep: str, step_ep: str):
     run = wandb.init(
         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
         entity=os.environ.get("WANDB_ENTITY"),
@@ -155,19 +155,23 @@ def train_sac_single(trainer_ep: str):
     )
 
     use_vec = wandb.config.get("use_vectorized_obs", True)
-    if use_vec:
-        print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
-        env = ZmqEnvClientVEC_Continuous(trainer_ep)    
-        policy = "MlpPolicy"
-        policy_kwargs = dict(
-            features_extractor_class=LastRowExtractor,
-            net_arch=list(wandb.config.net_arch),        )
-    else:
-        print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
-        env = ZmqEnvClient(trainer_ep)
-        policy = "MlpPolicy"
-        policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
+    
+    
+    # if use_vec:
 
+    print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
+    env = SimpleDirectZmqEnv(action_ep, step_ep)    
+    policy = "MlpPolicy"
+    policy_kwargs = dict(
+        features_extractor_class=LastRowExtractor,
+        net_arch=list(wandb.config.net_arch),        )
+    # else:
+    #     print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
+    #     env = ZmqEnvClient(action_ep)
+    #     policy = "MlpPolicy"
+    #     policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
+
+    print(f'{Colors.BLUE} setting up model SAC')
     model = SAC(
         policy,
         env,
@@ -192,7 +196,7 @@ def train_sac_single(trainer_ep: str):
                         verbose=2,
                         log="all",
                         )
-
+    print('before learning!')
     model.learn(total_timesteps=N_STEPS_RL, callback=callback)
 
     final_model_path = f"models/{run.id}/final_model.zip"
@@ -216,29 +220,21 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
 
     # --- 1. Set up Environment and Base Policy Kwargs ---
     use_vec = wandb.config.get("use_vectorized_obs", True)
-    if use_vec:
-        print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
-        env = ZmqEnvClientVEC_Continuous(trainer_ep)    
-        policy = "MlpPolicy"
-        policy_kwargs = dict(
-            features_extractor_class=LastRowExtractor,
-            net_arch=list(wandb.config.net_arch),
-        )
-    else:
-        print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
-        env = ZmqEnvClient(trainer_ep)
-        policy = "MlpPolicy"
-        policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
+    # if use_vec:
+    print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
+    env = DirectZmqEnvClient(trainer_ep, )    
+    policy = "MlpPolicy"
+    policy_kwargs = dict(
+        features_extractor_class=LastRowExtractor,
+        net_arch=list(wandb.config.net_arch),
+    )
+    # else:
+    #     print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
+    #     env = ZmqEnvClient(trainer_ep)
+    #     policy = "MlpPolicy"
+    #     policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
 
-    # --- SANITY CHECK: MANUALLY RESET ENV *BEFORE* CREATING MODEL ---
-    # print(f"{Colors.MAGENTA}TRAINER THREAD: Manually calling env.reset() for the first time...{Colors.ENDC}")
-    # try:
-    #     initial_obs, info = env.reset()
-    #     print(f"{Colors.GREEN}TRAINER THREAD: Manual reset successful. Got obs shape: {initial_obs.shape}{Colors.ENDC}")
-    # except Exception as e:
-    #     print(f"{Colors.RED}TRAINER THREAD: CRASHED during manual reset: {e}{Colors.ENDC}")
-    #     return # Stop the thread
-    # # -----------------------------
+    
 
     # --- 2. Build Common Model Parameters ---
     # These are shared by both SAC and TD3
@@ -409,202 +405,6 @@ class ZmqServer:
         return [obs_json[k] for k in sorted(obs_json)]
 
 
-  
-    # def run_forever(self):
-    #     """
-    #     Main server loop with proper caching for both reset and step requests.
-    #     """
-        
-    #     # --- Server State ---
-    #     self.active_sim_id = None
-    #     self.cached_initial_obs = None
-    #     self.cached_sim_id = None
-    #     self.trainer_is_waiting_for_reset = False
-        
-    #     # NEW: Cache for step requests
-    #     self.cached_step_req = None  # Stores (sim_id, payload)
-    #     self.trainer_is_waiting_for_step = False
-    #     self.pending_action = None
-        
-    #     # --- Poller ---
-    #     poller = zmq.Poller()
-    #     poller.register(self.router, zmq.POLLIN)     # From Rust sims (REQ)
-    #     poller.register(self.rep_socket, zmq.POLLIN) # From Python trainer (REQ)
-    #     poller.register(self.pull, zmq.POLLIN)       # From Rust sims (PUSH)
-
-    #     print(f"{Colors.GREEN}✅ ZMQ Server Bridge is running (non-blocking mode).{Colors.ENDC}")
-
-    #     while True:
-    #         # Wait for a message on *any* registered socket
-    #         socks = dict(poller.poll())
-
-    #         # --- CASE 1: Message from Python Trainer (REP socket) ---
-    #         if self.rep_socket in socks:
-    #             req = self.rep_socket.recv_json()
-    #             command = req.get("command")
-    #             print(f"SERVER: Received command '{command}' from trainer.")
-
-    #             if command == "reset":
-    #                 self.sim_is_done = False
-    #                 self.active_sim_id = None
-    #                 self.cached_step_req = None
-    #                 self.trainer_is_waiting_for_step = False
-    #                 self.pending_action = None
-
-    #                 # Check if Rust has *already* sent its obs
-    #                 if self.cached_initial_obs is not None:
-    #                     # --- HAPPY PATH 1: Rust was first ---
-    #                     print(f"{Colors.GREEN}SERVER: Servicing 'reset'. Rust sim already checked in.{Colors.ENDC}")
-                        
-    #                     self.active_sim_id = self.cached_sim_id
-    #                     init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
-    #                     self.router.send_multipart([
-    #                         self.active_sim_id,
-    #                         json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
-    #                     ])
-    #                     self.rep_socket.send_json({"obs": self.cached_initial_obs})
-                        
-    #                     self.cached_initial_obs = None
-    #                     self.cached_sim_id = None
-                        
-    #                 else:
-    #                     # --- WAIT PATH 1: Trainer was first ---
-    #                     # print(f"{Colors.YELLOW}SERVER: Trainer is waiting for reset. Now waiting for Rust sim...{Colors.ENDC}")
-    #                     self.trainer_is_waiting_for_reset = True
-                
-    #             elif command == "step":
-    #                 action = req.get("action")
-    #                 if isinstance(action, (list, tuple, np.ndarray)):
-    #                     action = float(np.asarray(action, dtype=np.float32).ravel()[0])
-    #                 else:
-    #                     action = float(action)
-    #                 action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))
-
-    #                 if self.sim_is_done:
-    #                     # print(f"{Colors.YELLOW}SERVER: 'step' called, but sim is already done.{Colors.ENDC}")
-    #                     self.rep_socket.send_json({"next_obs": [], "reward": 0.0, "done": True})
-    #                     continue
-                    
-    #                 # Check if Rust already sent its step REQ
-    #                 if self.cached_step_req is not None:
-    #                     # --- HAPPY PATH: Rust was first ---
-    #                     sim_id, _ = self.cached_step_req
-    #                     # print(f"{Colors.GREEN}SERVER: Servicing 'step'. Rust sim already waiting.{Colors.ENDC}")
-                        
-    #                     # Send action to unblock Rust
-    #                     self.router.send_multipart([
-    #                         sim_id, 
-    #                         json.dumps({"bitrate_mbps": action}).encode("utf-8")
-    #                     ])
-                        
-    #                     # Clear cache and wait for PUSH
-    #                     self.cached_step_req = None
-    #                     self.trainer_is_waiting_for_step = True
-    #                     self.pending_action = action
-    #                     # Don't reply to trainer yet - wait for PUSH
-                        
-    #                 else:
-    #                     # --- WAIT PATH: Trainer was first ---
-    #                     # print(f"{Colors.YELLOW}SERVER: Trainer sent 'step'. Waiting for Rust REQ...{Colors.ENDC}")
-    #                     self.trainer_is_waiting_for_step = True
-    #                     self.pending_action = action
-    #                     # Don't reply to trainer yet
-
-
-    #         # --- CASE 2: Message from a Rust Sim (ROUTER socket - REQ) ---
-    #         if self.router in socks:
-    #             sim_id, payload = self.router.recv_multipart()
-                
-    #             # Check if this is initial obs for reset
-    #             if self.trainer_is_waiting_for_reset:
-    #                 # --- HAPPY PATH: Trainer is waiting for reset ---
-    #                 print(f"{Colors.GREEN}SERVER: Got initial obs from sim {sim_id.decode()}. Servicing 'reset'...{Colors.ENDC}")
-
-    #                 req_data = json.loads(payload.decode("utf-8"))
-    #                 obs_list = req_data.get("obs_flat") 
-    #                 if obs_list is None:
-    #                     obs_list = req_data.get("obs", req_data)
-    #                 initial_obs = self._obs_from_json(obs_list)
-    #                 self.active_sim_id = sim_id
-                    
-    #                 init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
-    #                 self.router.send_multipart([
-    #                     self.active_sim_id,
-    #                     json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
-    #                 ])
-    #                 self.rep_socket.send_json({"obs": initial_obs})
-                    
-    #                 self.trainer_is_waiting_for_reset = False
-                
-    #             elif self.active_sim_id is None and not self.trainer_is_waiting_for_reset:
-    #                 # --- WAIT PATH: Rust sent initial obs first ---
-    #                 print(f"{Colors.YELLOW}SERVER: Got initial obs from {sim_id.decode()}. Caching it and waiting for trainer 'reset'...{Colors.ENDC}")
-                    
-    #                 req_data = json.loads(payload.decode("utf-8"))
-    #                 obs_list = req_data.get("obs_flat") 
-    #                 if obs_list is None:
-    #                     obs_list = req_data.get("obs", req_data)
-                    
-    #                 self.cached_initial_obs = self._obs_from_json(obs_list)
-    #                 self.cached_sim_id = sim_id
-
-    #             elif self.trainer_is_waiting_for_step:
-    #                 # --- HAPPY PATH: Trainer sent step first, now Rust REQ arrived ---
-    #                 print(f"{Colors.GREEN}SERVER: Got step REQ from Rust. Sending action={self.pending_action:.2f}{Colors.ENDC}")
-                    
-    #                 self.router.send_multipart([
-    #                     sim_id,
-    #                     json.dumps({"bitrate_mbps": self.pending_action}).encode("utf-8")
-    #                 ])
-    #                 # Don't clear trainer_is_waiting_for_step yet - wait for PUSH
-                    
-    #             else:
-    #                 # --- WAIT PATH: Rust sent step REQ first ---
-    #                 print(f"{Colors.YELLOW}SERVER: Got step REQ from Rust {sim_id.decode()}. Caching it...{Colors.ENDC}")
-    #                 self.cached_step_req = (sim_id, payload)
-
-            
-    #         # --- CASE 3: Message from a Rust Sim (PULL socket - PUSH data) ---
-    #         if self.pull in socks:
-    #             transition = self.pull.recv_json()
-                
-    #             # Only process if we're expecting this transition
-    #             if self.trainer_is_waiting_for_step:
-    #                 # Validate it's from the right sim
-    #                 if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
-    #                     print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim {transition.get('sim_id')}{Colors.ENDC}")
-    #                     continue
-                    
-    #                 # print(f"{Colors.GREEN}SERVER: Got PUSH transition. Replying to trainer.{Colors.ENDC}")
-                    
-    #                 reward = float(transition["reward"])
-    #                 done = bool(transition["done"])
-    #                 self.sim_is_done = done
-                    
-    #                 next_obs_field = transition.get("next_obs")
-    #                 if next_obs_field is None:
-    #                     print(f"{Colors.RED}SERVER: PUSH missing 'next_obs'!{Colors.ENDC}")
-    #                     next_obs = []
-    #                 else:
-    #                     next_obs = self._obs_from_json(next_obs_field)
-
-    #                 # Reply to trainer
-    #                 self.rep_socket.send_json({
-    #                     "next_obs": next_obs, 
-    #                     "reward": reward, 
-    #                     "done": done
-    #                 })
-                    
-    #                 # Clear waiting state
-    #                 self.trainer_is_waiting_for_step = False
-    #                 self.pending_action = None
-                    
-    #                 if done:
-    #                     print(f"{Colors.YELLOW}SERVER: Episode finished.{Colors.ENDC}")
-    #                     self.active_sim_id = None
-    #             else:
-    #                 # Stray PUSH (from previous episode or out of sync)
-    #                 print(f"{Colors.MAGENTA}SERVER: Discarding stray PUSH from sim {transition.get('sim_id')}.{Colors.ENDC}")   
     def run_forever(self):
         """
         Main server loop with proper caching for both reset and step requests.
@@ -672,6 +472,8 @@ class ZmqServer:
                 
                 elif command == "step":
                     action = req.get("action")
+
+                    print(f'{Colors.MAGENTA}action rcv= {action}')
                     if isinstance(action, (list, tuple, np.ndarray)):
                         action = float(np.asarray(action, dtype=np.float32).ravel()[0])
                     else:
@@ -845,6 +647,330 @@ class ZmqServer:
         self.rep_socket.close()
         self.ctx.term()
 
+
+class SimpleDirectZmqEnv(gym.Env):
+    """
+    FIXED: Handles the 3-frame ROUTER/DEALER pattern correctly.
+    
+    - Rust (DEALER) sends: [Payload]
+    - Python (ROUTER) receives: [Identity, EmptyFrame, Payload]
+    
+    - Python (ROUTER) sends: [Identity, EmptyFrame, Payload]
+    - Rust (DEALER) receives: [Payload]
+    """
+    metadata = {"render_modes": []}
+
+    def __init__(self, action_ep: str, transition_ep: str):
+        super().__init__()
+        print(f'initializing SimpleDirectZMQENV', flush=True)
+
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=OBSERVATION_SHAPE, dtype=np.float32
+        )
+        self.action_space = spaces.Box(
+            low=np.array([ACT_MIN_MBPS], dtype=np.float32),
+            high=np.array([ACT_MAX_MBPS], dtype=np.float32),
+            dtype=np.float32,
+            shape=(1,),
+        )
+
+        self.ctx = zmq.Context()
+        
+        # ROUTER socket - receives obs from Rust DEALER, sends actions back
+        self.action_socket = self.ctx.socket(zmq.ROUTER)
+        # self.action_socket.set_rcvtimeo(1000)  # 30 second timeout
+        # self.action_socket.setsockopt(zmq.LINGER, 0)
+        self.action_socket.bind(action_ep)
+        
+        # PULL socket - receives transitions from Rust PUSH
+        self.transition_socket = self.ctx.socket(zmq.PULL)
+        # self.transition_socket.set_rcvtimeo(1000)  # 30 second timeout
+        # self.transition_socket.setsockopt(zmq.LINGER, 0)
+        self.transition_socket.bind(transition_ep)
+
+        self.step_count = 0
+        self.global_step = 0
+        self.ep_return = 0.0
+        self.ep_len = 0
+        self.run_return_cumsum = 0.0
+        
+        # This will hold the (identity, obs, meta) for the *next* step
+        # It is populated by reset() and by the end of step()
+        self.pending_obs_info = None  
+        self.last_obs_for_done = np.zeros(OBSERVATION_SHAPE, dtype=np.float32)
+
+        print(f"✅ Python Server listening:", flush = True)
+        print(f"   Action ROUTER ← {action_ep}", flush= True)
+        print(f"   Transition PULL ← {transition_ep}", flush = True)
+
+    @staticmethod
+    def _parse_obs_payload(payload):
+        """Parse observation from various formats."""
+        if isinstance(payload, (list, np.ndarray)):
+            raw = np.asarray(payload, dtype=np.float32).ravel()
+            feat_dim = FEAT_DIM
+            window_len = WINDOW_LEN
+            if raw.size == feat_dim:
+                flat = np.zeros((window_len * feat_dim,), dtype=np.float32)
+                flat[-feat_dim:] = raw
+                seq_len = 1
+            else:
+                expect = window_len * feat_dim
+                if raw.size < expect:
+                    flat = np.pad(raw, (expect - raw.size, 0))
+                else:
+                    flat = raw[-expect:]
+                seq_len = min(window_len, max(1, flat.size // feat_dim))
+            mask = np.zeros(window_len, dtype=bool)
+            mask[-seq_len:] = True
+            meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
+            return flat.astype(np.float32, copy=False), meta
+
+        if "obs_flat" in payload:
+            flat = np.asarray(payload["obs_flat"], dtype=np.float32).ravel()
+            seq_len = int(payload.get("seq_len", WINDOW_LEN))
+            feat_dim = int(payload.get("feat_dim", FEAT_DIM))
+            window_len = int(payload.get("window_len", WINDOW_LEN))
+        elif "obs" in payload:
+            raw = np.asarray(payload["obs"], dtype=np.float32).ravel()
+            feat_dim = FEAT_DIM
+            window_len = WINDOW_LEN
+            if raw.size == feat_dim:
+                flat = np.zeros((window_len * feat_dim,), dtype=np.float32)
+                flat[-feat_dim:] = raw
+                seq_len = 1
+            else:
+                expect = window_len * feat_dim
+                flat = raw[-expect:] if raw.size >= expect else np.pad(raw, (expect - raw.size, 0))
+                seq_len = min(window_len, max(1, flat.size // feat_dim))
+        else:
+            raise KeyError(f"Cannot parse obs payload: {payload.keys()}")
+
+        expect = window_len * feat_dim
+        if flat.size != expect:
+            flat = flat[-expect:] if flat.size > expect else np.pad(flat, (expect - flat.size, 0))
+        mask = np.zeros(window_len, dtype=bool)
+        mask[-seq_len:] = True
+        meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
+        return flat.astype(np.float32, copy=False), meta
+
+    def reset(self, *, seed=None, options=None):
+        """
+        Reset waits for Rust to send its first observation,
+        then returns it so the RL agent can compute the first action.
+        """
+        super().reset(seed=seed)
+        print(f"\n--- Episode boundary (Python) ---")
+        self.ep_return = 0.0
+        self.ep_len = 0
+        
+        # If reset is called after a `done`, pending_obs_info might be None.
+        # If reset is called mid-episode (by a wrapper), we clear the old one.
+        self.pending_obs_info = None 
+        
+        # Wait for Rust to send initial observation
+        try:
+            print("🔄 Waiting for Rust to send initial observation...")
+            
+            # --- FIX: Receive all 3 frames ---
+            parts = self.action_socket.recv_multipart()
+            # dump_frames("ROUTER RECV reset", parts)
+
+            # parts is a list of frames. Router/Dealer patterns can be
+            # either [identity, payload] or [identity, b'', payload].
+            if len(parts) == 2:
+                identity, obs_msg = parts
+            elif len(parts) == 3 and parts[1] == b'':
+                identity, _, obs_msg = parts
+            else:
+                # Unexpected shape — log and try to be informative
+                raise RuntimeError(f"Unexpected multipart frame count: {len(parts)} frames: {parts}")
+            # dump_frames("ROUTER SEND reset-response", [identity, b'', json.dumps(action_response).encode()])
+
+            obs_request = json.loads(obs_msg)
+            
+            # Parse and store
+            obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
+            flat_obs, meta = self._parse_obs_payload(obs_payload)
+            
+            # Store for step() to use
+            self.pending_obs_info = (identity, flat_obs, meta)
+            self.last_obs_for_done = flat_obs.copy()
+            
+            print("✅ Received initial observation from Rust")
+            return flat_obs, {"obs_meta": meta}
+            
+        except zmq.ZMQError as e:
+            print(f"❌ Error during reset: {e}")
+            raise
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON Error during reset: {e}. Received: {obs_msg!r}")
+            raise
+
+    def step(self, action):
+        """
+        Send the action for the pending observation,
+        then wait for the *transition* first.
+        If not done, *then* wait for the next observation.
+        """
+        t0 = time.time()
+        
+        # Clamp action
+        action_val = float(np.asarray(action).ravel()[0])
+        action_val = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action_val))
+
+        # Send action for the pending observation
+        if self.pending_obs_info is None:
+            raise RuntimeError("step() called before reset() or after an episode finished.")
+        
+        identity, current_obs, current_meta = self.pending_obs_info
+        self.pending_obs_info = None # Clear it, we've used it
+        
+        # Send action response to Rust
+        action_response = {"bitrate_mbps": action_val}
+
+        try:
+            # --- FIX: Send all 3 frames ---
+            # self.action_socket.send(identity, zmq.SNDMORE)      # Frame 1: Identity
+            # self.action_socket.send(b'', zmq.SNDMORE)           # Frame 2: Empty Delimiter
+            # self.action_socket.send_json(action_response)       # Frame 3: Payload
+            msg = [
+                identity, 
+                b'', 
+                json.dumps(action_response).encode('utf-8')
+            ]
+            self.action_socket.send_multipart(msg)
+            
+            # --- End Fix ---
+        except zmq.ZMQError as e:
+            print(f"❌ Error sending action: {e}")
+            raise
+
+        action_latency_ms = (time.time() - t0) * 1000.0
+
+        t2 = time.time()
+        try:
+            transition = self.transition_socket.recv_json()
+        except zmq.ZMQError as e:
+            print(f"❌ Error receiving transition: {e}")
+            raise
+        
+        transition_latency_ms = (time.time() - t2) * 1000.0
+
+        # Extract transition data
+        reward = float(transition["reward"])
+        done = bool(transition["done"])
+        truncated = False # Assuming no truncation from sim
+
+        # Stats
+        self.ep_return += reward
+        self.ep_len += 1
+        self.global_step += 1
+        self.run_return_cumsum += reward
+        self.step_count += 1
+
+        # Now, handle logic based on `done`
+        if done:
+            # --- EPISODE IS DONE ---
+            # The Rust sim has exited (or will soon).
+            # Do *not* wait for a new observation.
+            print("✅ Received final transition (done=True)")
+            next_obs = self.last_obs_for_done # Return last valid obs
+            next_meta = current_meta
+            self.pending_obs_info = None # Ensure it's clear for reset()
+        
+        else:
+            # --- EPISODE CONTINUES ---
+            # The Rust sim is still running and *will* send a new obs.
+            # Now we wait for the NEXT observation.
+            t1 = time.time()
+            try:
+                # --- FIX: Receive all 3 frames ---
+                parts = self.action_socket.recv_multipart()
+                # dump_frames("ROUTER RECV next-obs", parts)
+                # parts is a list of frames. Router/Dealer patterns can be
+                # either [identity, payload] or [identity, b'', payload].
+                if len(parts) == 2:
+                    identity, obs_msg = parts
+                elif len(parts) == 3 and parts[1] == b'':
+                    identity, _, obs_msg = parts
+                else:
+                    # Unexpected shape — log and try to be informative
+                    raise RuntimeError(f"Unexpected multipart frame count: {len(parts)} frames: {parts}")
+        
+                obs_request = json.loads(obs_msg)
+                
+            except zmq.ZMQError as e:
+                print(f"❌ Error receiving next observation: {e}")
+                raise
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON Error in step: {e}. Received: {obs_msg!r}")
+                raise
+            except Exception as e:
+                print(f"[JSON-ERROR] Failed to parse obs_msg during step: {e}. raw={obs_msg!r}")
+                raise
+            obs_recv_latency = (time.time() - t1) * 1000.0
+
+            # Parse next observation
+            obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
+            next_obs, next_meta = self._parse_obs_payload(obs_payload)
+
+            # Store next obs for the *next* step() call
+            self.pending_obs_info = (identity, next_obs, next_meta)
+            self.last_obs_for_done = next_obs.copy()
+            
+            log_dict = {
+                "timing/obs_recv_latency_ms": obs_recv_latency,
+                "obs/seq_len": next_meta["seq_len"],
+            }
+            if wandb.run is not None:
+                wandb.log(log_dict)
+
+
+        # Logging (common to both paths)
+        log_dict = {
+            "train/reward": reward,
+            "train/return_cumsum": self.run_return_cumsum,
+            "train/action": action_val,
+            "train/done": int(done),
+            "timing/action_latency_ms": action_latency_ms,
+            "timing/transition_latency_ms": transition_latency_ms,
+        }
+
+        for k, v in transition.items():
+            if k in ("reward", "done", "next_obs", "prev_obs", "action", "sim_id"):
+                continue
+            if isinstance(v, (int, float)):
+                log_dict[f"sim/{k}"] = v
+
+        if wandb.run is not None:
+            wandb.log(log_dict)
+
+        if done:
+            if wandb.run is not None:
+                wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
+                wandb.run.summary["episodes"] = wandb.run.summary.get("episodes", 0) + 1
+            self.ep_return = 0.0
+            self.ep_len = 0
+
+        info = {"obs_meta": next_meta}
+        return next_obs, reward, done, truncated, info
+
+    def close(self):
+        self.action_socket.close()
+        self.transition_socket.close()
+        self.ctx.term()
+
+
+# def dump_frames(label, frames):
+#     parts_info = ", ".join(f"{len(f)}B" for f in frames)
+#     preview = [f[:100] for f in frames]
+#     print(f"[ZMQ-DUMP] {label}: {len(frames)} frames ({parts_info})")
+#     for i, f in enumerate(preview):
+#         try:
+#             print(f"  frame[{i}]: {f.decode('utf-8', errors='replace')[:120]}")
+#         except Exception:
+#             print(f"  frame[{i}]: {f!r}")
 
 import threading
 
@@ -1091,7 +1217,6 @@ class LastRowExtractor(BaseFeaturesExtractor):
         # obs: [B, WINDOW_LEN*FEAT_DIM] → return last row: [B, FEAT_DIM]
         return obs[:, -self.feat_dim:]
 
-
 def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     """
     Run multiple shuffled passes over all simulation combos.
@@ -1102,25 +1227,25 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
 
     action_ep  = f"ipc:///tmp/xr_{RUN_ID}_action"
     step_ep    = f"ipc:///tmp/xr_{RUN_ID}_step"
-    trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
+    # trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
     
     pool = ThreadPoolExecutor(max_workers=5)
-    fut_rl = pool.submit(train_sac_single, trainer_ep)
-    time.sleep(7.5)
+    fut_rl = pool.submit(train_sac_single, action_ep, step_ep)
+    time.sleep(10.0)
 
     # ---- Start the shared ZMQ server ----
     env_server = {
         "ZMQ_ACTION_EP":  action_ep,
         "ZMQ_STEP_EP":    step_ep,
-        "ZMQ_TRAINER_EP": trainer_ep,
+        # "ZMQ_TRAINER_EP": trainer_ep,
     }
-    server, thread = start_zmq_server_thread(env_server)
+    # server, thread = start_zmq_server_thread(env_server)
 
 
     # ---- Start RL thread (same endpoints for all episodes) ----
-    print(f"RL loop started on {trainer_ep}")
+    print(f"RL loop started on:\n\t{action_ep},\n\t{step_ep}")
 
-    time.sleep(5.0)
+    # time.sleep(15.0)
 
     # ---- Outer training loop over multiple passes ----
     for pass_idx in range(1, num_passes + 1):
@@ -1143,7 +1268,6 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
             env_sim = os.environ.copy()
             env_sim["ZMQ_ACTION_EP"]  = action_ep
             env_sim["ZMQ_STEP_EP"]    = step_ep
-            env_sim["ZMQ_TRAINER_EP"] = trainer_ep
             env_sim["WANDB_RUN_GROUP"] = f"pass_{pass_idx}_episode_{sim_count}"
 
             log_path = Path("Results") / f"pass_{pass_idx}_combo_{sim_count}" / "sim.log"
@@ -1156,10 +1280,8 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
         print(f"🎯 Finished pass {pass_idx}/{num_passes}")
 
     print("🧹 All passes done — waiting for RL to finish or reach its timestep limit.")
-    server.close()
+    # server.close()
     pool.shutdown(wait=False)
-
-
 
 def cleanup_rust_processes():
     """Kill all Rust simulator subprocesses still running."""
@@ -1276,12 +1398,12 @@ def main():
 
     print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
     
-    # rebuild_rust_binary(EXAMPLE_NAME)
+    rebuild_rust_binary(EXAMPLE_NAME)
     exe = find_exe(release=True)
     train_over_all_combos_iter(exe, combos)
 
     # === 4️⃣ Close ZMQ server ===
-    server.close()
+    # server.close()
     print("🧹 All episodes finished. Server closed.")
 
 if __name__ == "__main__":
