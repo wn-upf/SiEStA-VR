@@ -24,6 +24,8 @@ import pprint
 from stable_baselines3 import PPO, DQN, A2C
 import argparse
 
+import multiprocessing as mp
+
 # --- W&B Imports ---
 import wandb
 from wandb.integration.sb3 import WandbCallback
@@ -210,8 +212,8 @@ def train_sac_single(action_ep: str, step_ep: str):
     run.log_artifact(art)
     wandb.finish()
 
-def train_agent_single(trainer_ep: str):  # Renamed for clarity
-    print(f"TRAINER THREAD: Started. Connecting to {trainer_ep}")
+def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
+    # print(f"TRAINER THREAD: Started. Connecting to {trainer_ep}", )
     run = wandb.init(
         project=os.environ.get("WANDB_PROJECT", "xr-abr"),
         entity=os.environ.get("WANDB_ENTITY"),
@@ -221,8 +223,8 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
     # --- 1. Set up Environment and Base Policy Kwargs ---
     use_vec = wandb.config.get("use_vectorized_obs", True)
     # if use_vec:
-    print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
-    env = DirectZmqEnvClient(trainer_ep, )    
+    print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}",  flush = True)
+    env = SimpleDirectZmqEnv(action_ep, step_ep)    
     policy = "MlpPolicy"
     policy_kwargs = dict(
         features_extractor_class=LastRowExtractor,
@@ -234,8 +236,7 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
     #     policy = "MlpPolicy"
     #     policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
 
-    
-
+    gradnorm = wandb.config.get("max_grad_norm", 1.0)
     # --- 2. Build Common Model Parameters ---
     # These are shared by both SAC and TD3
     model_kwargs = {
@@ -251,11 +252,11 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
         "gradient_steps": wandb.config.gradient_steps,
         "verbose": 1,
         "tensorboard_log": f"runs/{run.id}",
-        "max_grad_norm": wandb.config.max_grad_norm, # Used by both
+        # "max_grad_norm": gradnorm, # Used by both
     }
 
     # --- 3. Add Algorithm-Specific Parameters ---
-    algo = wandb.config.algo
+    algo = wandb.config.get("algo", "SAC") # Default to SAC if not specified
     if algo == "SAC":
         model_class = SAC
         # print(f"{Colors.YELLOW}saaac")
@@ -266,7 +267,7 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
         # Add SAC-specific params to model_kwargs
         model_kwargs['ent_coef'] = wandb.config.ent_coef
         model_kwargs['target_entropy'] = wandb.config.target_entropy
-        print(f"{Colors.GREEN}Creating SAC model.{Colors.ENDC}")
+        print(f"{Colors.GREEN}Creating SAC model.{Colors.ENDC}", flush = True)
         
     elif algo == "TD3":
         model_class = TD3
@@ -277,13 +278,18 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
         model_kwargs['action_noise'] = NormalActionNoise(
             mean=np.zeros(n_actions), sigma=noise_sigma * np.ones(n_actions)
         )
-        print(f"{Colors.GREEN}Creating TD3 model.{Colors.ENDC}")
+        model_kwargs['max_grad_norm'] = wandb.config.max_grad_norm
+
+        print(f"{Colors.GREEN}Creating TD3 model.{Colors.ENDC}",  flush = True)
         
         # Note: TD3 will ignore ent_coef, target_entropy, log_std_init
         # from the wandb.config, which is fine.
-        print("TRAINER THREAD: 2. Model created.")
+        # print("TRAINER THREAD: 2. Model created.")
     else:
         raise ValueError(f"Unknown algorithm: {algo}. Must be 'SAC' or 'TD3'.")
+    
+    
+    print("TRAINER THREAD: 2. Model created.")
 
     # Add the final policy_kwargs to the model_kwargs
     model_kwargs['policy_kwargs'] = policy_kwargs
@@ -295,8 +301,8 @@ def train_agent_single(trainer_ep: str):  # Renamed for clarity
     callback = WandbCallback(
         model_save_path=f"models/{run.id}",
         model_save_freq=50_000,
-        verbose=2,
-        log="all", # Be careful: "all" logs gradients and can be very slow/large.
+        verbose=1,
+        log="parameters", # Be careful: "all" logs gradients and can be very slow/large.
                    # Consider setting to log=None or log="parameters".
     )
     print(f"{Colors.YELLOW}TRAINER THREAD: 3. Calling model.learn()...")
@@ -1228,10 +1234,19 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     action_ep  = f"ipc:///tmp/xr_{RUN_ID}_action"
     step_ep    = f"ipc:///tmp/xr_{RUN_ID}_step"
     # trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
-    
-    pool = ThreadPoolExecutor(max_workers=5)
-    fut_rl = pool.submit(train_sac_single, action_ep, step_ep)
-    time.sleep(10.0)
+
+    trainer_process = mp.Process(
+        target=train_agent_single, 
+        args=(action_ep, step_ep),
+        daemon=True # Make it a daemon so it exits when the main script exits
+    )
+    trainer_process.start()
+
+    # pool = ThreadPoolExecutor(max_workers=5)
+    # fut_rl = pool.submit(train_agent_single, action_ep, step_ep)
+    # fut_rl = pool.submit(train_sac_single, action_ep, step_ep)
+
+    time.sleep(15.0) ## TODO: WAIT UNTIL TRAINER IS READY (TempFile)
 
     # ---- Start the shared ZMQ server ----
     env_server = {

@@ -43,7 +43,8 @@ parameters:
     values:
       [1000, 10000, 50000]
   max_grad_norm:
-    values: [1, 5, 10, 50]
+    values: 
+      [1.0, 5.0, 10.0, 50.0]
 
   log_std_init:
     values: [-1.0, -2.0, -3.0]
