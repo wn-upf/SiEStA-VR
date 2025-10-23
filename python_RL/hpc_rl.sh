@@ -13,7 +13,7 @@ source ~/.bashrc
 
 PROJECT_DIR="$SLURM_SUBMIT_DIR"
 LOG_DIR="$PROJECT_DIR/../logs_hpc"
-SWEEP_ID="wn-upf/asynchronix-python_RL/84v7n19j"
+SWEEP_ID="wn-upf/asynchronix-python_RL/vc44vtdr"
 
 # --- go to python_RL folder inside project ---
 cd "$PROJECT_DIR" || { echo "❌ Cannot cd to $PROJECT_DIR/python_RL"; exit 1; }
