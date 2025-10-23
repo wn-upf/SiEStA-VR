@@ -652,7 +652,7 @@ class ZmqServer:
                         self.active_sim_id = self.cached_sim_id
                         init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
                         self.router.send_multipart([
-                            self.active_sim_id,
+                            self.active_sim_id.encode(),
                             json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
                         ])
                         self.rep_socket.send_json({"obs": self.cached_initial_obs})
@@ -748,7 +748,7 @@ class ZmqServer:
                     
                     init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
                     self.router.send_multipart([
-                        self.active_sim_id,
+                        self.active_sim_id.encode(),
                         json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
                     ])
                     self.rep_socket.send_json({"obs": initial_obs})
@@ -792,7 +792,7 @@ class ZmqServer:
                     # Validate it's from the right sim
                     if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
                         print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim, changing to SIM ID {transition.get('sim_id')}{Colors.ENDC}")
-                        self.active_sim_id = transition.get('sim_id').decode()
+                        self.active_sim_id = transition.get('sim_id')
                         continue
                     
                     print(f"{Colors.GREEN}SERVER: Got PUSH transition. Replying to trainer.{Colors.ENDC}")
