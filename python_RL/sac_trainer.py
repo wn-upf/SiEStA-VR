@@ -267,6 +267,8 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
         # Add SAC-specific params to model_kwargs
         model_kwargs['ent_coef'] = wandb.config.ent_coef
         model_kwargs['target_entropy'] = wandb.config.target_entropy
+        model_kwargs['max_grad_norm'] = wandb.config.max_grad_norm
+
         print(f"{Colors.GREEN}Creating SAC model.{Colors.ENDC}", flush = True)
         
     elif algo == "TD3":
@@ -278,7 +280,7 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
         model_kwargs['action_noise'] = NormalActionNoise(
             mean=np.zeros(n_actions), sigma=noise_sigma * np.ones(n_actions)
         )
-        model_kwargs['max_grad_norm'] = wandb.config.max_grad_norm
+        # model_kwargs['max_grad_norm'] = wandb.config.max_grad_norm
 
         print(f"{Colors.GREEN}Creating TD3 model.{Colors.ENDC}",  flush = True)
         
