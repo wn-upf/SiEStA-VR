@@ -404,202 +404,7 @@ class ZmqServer:
         return [obs_json[k] for k in sorted(obs_json)]
 
 
-  
-    # def run_forever(self):
-    #     """
-    #     Main server loop with proper caching for both reset and step requests.
-    #     """
-        
-    #     # --- Server State ---
-    #     self.active_sim_id = None
-    #     self.cached_initial_obs = None
-    #     self.cached_sim_id = None
-    #     self.trainer_is_waiting_for_reset = False
-        
-    #     # NEW: Cache for step requests
-    #     self.cached_step_req = None  # Stores (sim_id, payload)
-    #     self.trainer_is_waiting_for_step = False
-    #     self.pending_action = None
-        
-    #     # --- Poller ---
-    #     poller = zmq.Poller()
-    #     poller.register(self.router, zmq.POLLIN)     # From Rust sims (REQ)
-    #     poller.register(self.rep_socket, zmq.POLLIN) # From Python trainer (REQ)
-    #     poller.register(self.pull, zmq.POLLIN)       # From Rust sims (PUSH)
-
-    #     print(f"{Colors.GREEN}✅ ZMQ Server Bridge is running (non-blocking mode).{Colors.ENDC}")
-
-    #     while True:
-    #         # Wait for a message on *any* registered socket
-    #         socks = dict(poller.poll())
-
-    #         # --- CASE 1: Message from Python Trainer (REP socket) ---
-    #         if self.rep_socket in socks:
-    #             req = self.rep_socket.recv_json()
-    #             command = req.get("command")
-    #             print(f"SERVER: Received command '{command}' from trainer.")
-
-    #             if command == "reset":
-    #                 self.sim_is_done = False
-    #                 self.active_sim_id = None
-    #                 self.cached_step_req = None
-    #                 self.trainer_is_waiting_for_step = False
-    #                 self.pending_action = None
-
-    #                 # Check if Rust has *already* sent its obs
-    #                 if self.cached_initial_obs is not None:
-    #                     # --- HAPPY PATH 1: Rust was first ---
-    #                     print(f"{Colors.GREEN}SERVER: Servicing 'reset'. Rust sim already checked in.{Colors.ENDC}")
-                        
-    #                     self.active_sim_id = self.cached_sim_id
-    #                     init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
-    #                     self.router.send_multipart([
-    #                         self.active_sim_id,
-    #                         json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
-    #                     ])
-    #                     self.rep_socket.send_json({"obs": self.cached_initial_obs})
-                        
-    #                     self.cached_initial_obs = None
-    #                     self.cached_sim_id = None
-                        
-    #                 else:
-    #                     # --- WAIT PATH 1: Trainer was first ---
-    #                     # print(f"{Colors.YELLOW}SERVER: Trainer is waiting for reset. Now waiting for Rust sim...{Colors.ENDC}")
-    #                     self.trainer_is_waiting_for_reset = True
-                
-    #             elif command == "step":
-    #                 action = req.get("action")
-    #                 if isinstance(action, (list, tuple, np.ndarray)):
-    #                     action = float(np.asarray(action, dtype=np.float32).ravel()[0])
-    #                 else:
-    #                     action = float(action)
-    #                 action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))
-
-    #                 if self.sim_is_done:
-    #                     # print(f"{Colors.YELLOW}SERVER: 'step' called, but sim is already done.{Colors.ENDC}")
-    #                     self.rep_socket.send_json({"next_obs": [], "reward": 0.0, "done": True})
-    #                     continue
-                    
-    #                 # Check if Rust already sent its step REQ
-    #                 if self.cached_step_req is not None:
-    #                     # --- HAPPY PATH: Rust was first ---
-    #                     sim_id, _ = self.cached_step_req
-    #                     # print(f"{Colors.GREEN}SERVER: Servicing 'step'. Rust sim already waiting.{Colors.ENDC}")
-                        
-    #                     # Send action to unblock Rust
-    #                     self.router.send_multipart([
-    #                         sim_id, 
-    #                         json.dumps({"bitrate_mbps": action}).encode("utf-8")
-    #                     ])
-                        
-    #                     # Clear cache and wait for PUSH
-    #                     self.cached_step_req = None
-    #                     self.trainer_is_waiting_for_step = True
-    #                     self.pending_action = action
-    #                     # Don't reply to trainer yet - wait for PUSH
-                        
-    #                 else:
-    #                     # --- WAIT PATH: Trainer was first ---
-    #                     # print(f"{Colors.YELLOW}SERVER: Trainer sent 'step'. Waiting for Rust REQ...{Colors.ENDC}")
-    #                     self.trainer_is_waiting_for_step = True
-    #                     self.pending_action = action
-    #                     # Don't reply to trainer yet
-
-
-    #         # --- CASE 2: Message from a Rust Sim (ROUTER socket - REQ) ---
-    #         if self.router in socks:
-    #             sim_id, payload = self.router.recv_multipart()
-                
-    #             # Check if this is initial obs for reset
-    #             if self.trainer_is_waiting_for_reset:
-    #                 # --- HAPPY PATH: Trainer is waiting for reset ---
-    #                 print(f"{Colors.GREEN}SERVER: Got initial obs from sim {sim_id.decode()}. Servicing 'reset'...{Colors.ENDC}")
-
-    #                 req_data = json.loads(payload.decode("utf-8"))
-    #                 obs_list = req_data.get("obs_flat") 
-    #                 if obs_list is None:
-    #                     obs_list = req_data.get("obs", req_data)
-    #                 initial_obs = self._obs_from_json(obs_list)
-    #                 self.active_sim_id = sim_id
-                    
-    #                 init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
-    #                 self.router.send_multipart([
-    #                     self.active_sim_id,
-    #                     json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
-    #                 ])
-    #                 self.rep_socket.send_json({"obs": initial_obs})
-                    
-    #                 self.trainer_is_waiting_for_reset = False
-                
-    #             elif self.active_sim_id is None and not self.trainer_is_waiting_for_reset:
-    #                 # --- WAIT PATH: Rust sent initial obs first ---
-    #                 print(f"{Colors.YELLOW}SERVER: Got initial obs from {sim_id.decode()}. Caching it and waiting for trainer 'reset'...{Colors.ENDC}")
-                    
-    #                 req_data = json.loads(payload.decode("utf-8"))
-    #                 obs_list = req_data.get("obs_flat") 
-    #                 if obs_list is None:
-    #                     obs_list = req_data.get("obs", req_data)
-                    
-    #                 self.cached_initial_obs = self._obs_from_json(obs_list)
-    #                 self.cached_sim_id = sim_id
-
-    #             elif self.trainer_is_waiting_for_step:
-    #                 # --- HAPPY PATH: Trainer sent step first, now Rust REQ arrived ---
-    #                 print(f"{Colors.GREEN}SERVER: Got step REQ from Rust. Sending action={self.pending_action:.2f}{Colors.ENDC}")
-                    
-    #                 self.router.send_multipart([
-    #                     sim_id,
-    #                     json.dumps({"bitrate_mbps": self.pending_action}).encode("utf-8")
-    #                 ])
-    #                 # Don't clear trainer_is_waiting_for_step yet - wait for PUSH
-                    
-    #             else:
-    #                 # --- WAIT PATH: Rust sent step REQ first ---
-    #                 print(f"{Colors.YELLOW}SERVER: Got step REQ from Rust {sim_id.decode()}. Caching it...{Colors.ENDC}")
-    #                 self.cached_step_req = (sim_id, payload)
-
-            
-    #         # --- CASE 3: Message from a Rust Sim (PULL socket - PUSH data) ---
-    #         if self.pull in socks:
-    #             transition = self.pull.recv_json()
-                
-    #             # Only process if we're expecting this transition
-    #             if self.trainer_is_waiting_for_step:
-    #                 # Validate it's from the right sim
-    #                 if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
-    #                     print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim {transition.get('sim_id')}{Colors.ENDC}")
-    #                     continue
-                    
-    #                 # print(f"{Colors.GREEN}SERVER: Got PUSH transition. Replying to trainer.{Colors.ENDC}")
-                    
-    #                 reward = float(transition["reward"])
-    #                 done = bool(transition["done"])
-    #                 self.sim_is_done = done
-                    
-    #                 next_obs_field = transition.get("next_obs")
-    #                 if next_obs_field is None:
-    #                     print(f"{Colors.RED}SERVER: PUSH missing 'next_obs'!{Colors.ENDC}")
-    #                     next_obs = []
-    #                 else:
-    #                     next_obs = self._obs_from_json(next_obs_field)
-
-    #                 # Reply to trainer
-    #                 self.rep_socket.send_json({
-    #                     "next_obs": next_obs, 
-    #                     "reward": reward, 
-    #                     "done": done
-    #                 })
-                    
-    #                 # Clear waiting state
-    #                 self.trainer_is_waiting_for_step = False
-    #                 self.pending_action = None
-                    
-    #                 if done:
-    #                     print(f"{Colors.YELLOW}SERVER: Episode finished.{Colors.ENDC}")
-    #                     self.active_sim_id = None
-    #             else:
-    #                 # Stray PUSH (from previous episode or out of sync)
-    #                 print(f"{Colors.MAGENTA}SERVER: Discarding stray PUSH from sim {transition.get('sim_id')}.{Colors.ENDC}")   
+    
     def run_forever(self):
         """
         Main server loop with proper caching for both reset and step requests.
@@ -744,7 +549,7 @@ class ZmqServer:
                     if obs_list is None:
                         obs_list = req_data.get("obs", req_data)
                     initial_obs = self._obs_from_json(obs_list)
-                    self.active_sim_id = sim_id
+                    self.active_sim_id = sim_id.decode()
                     
                     init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
                     self.router.send_multipart([
@@ -765,7 +570,7 @@ class ZmqServer:
                         obs_list = req_data.get("obs", req_data)
                     
                     self.cached_initial_obs = self._obs_from_json(obs_list)
-                    self.cached_sim_id = sim_id
+                    self.cached_sim_id = sim_id.decode()
 
                 elif self.trainer_is_waiting_for_step:
                     # --- HAPPY PATH: Trainer sent step first, now Rust REQ arrived ---
@@ -790,7 +595,7 @@ class ZmqServer:
                 # Check if we're expecting this transition
                 if self.trainer_is_waiting_for_step:
                     # Validate it's from the right sim
-                    if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
+                    if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id:
                         print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim, changing to SIM ID {transition.get('sim_id')}{Colors.ENDC}")
                         self.active_sim_id = transition.get('sim_id')
                         continue
