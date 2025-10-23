@@ -791,7 +791,8 @@ class ZmqServer:
                 if self.trainer_is_waiting_for_step:
                     # Validate it's from the right sim
                     if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
-                        print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim {transition.get('sim_id')}{Colors.ENDC}")
+                        print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim, changing to SIM ID {transition.get('sim_id')}{Colors.ENDC}")
+                        self.active_sim_id = transition.get('sim_id')
                         continue
                     
                     print(f"{Colors.GREEN}SERVER: Got PUSH transition. Replying to trainer.{Colors.ENDC}")
