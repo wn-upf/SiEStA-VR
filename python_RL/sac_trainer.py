@@ -267,7 +267,7 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
         # Add SAC-specific params to model_kwargs
         model_kwargs['ent_coef'] = wandb.config.ent_coef
         model_kwargs['target_entropy'] = wandb.config.target_entropy
-        model_kwargs['max_grad_norm'] = wandb.config.max_grad_norm
+        # model_kwargs['max_grad_norm'] = wandb.config.max_grad_norm
 
         print(f"{Colors.GREEN}Creating SAC model.{Colors.ENDC}", flush = True)
         
@@ -761,6 +761,14 @@ class SimpleDirectZmqEnv(gym.Env):
         mask[-seq_len:] = True
         meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
         return flat.astype(np.float32, copy=False), meta
+    @staticmethod
+    def _log_last_row(log_dict, flat_obs):
+        """Log only the most recent row for readability."""
+        feat_dim = FEAT_DIM
+        last_row = flat_obs[-feat_dim:]
+        for i, v in enumerate(last_row):
+            key = OBSERVATION_KEYS[i] if i < len(OBSERVATION_KEYS) else f"feat_{i}"
+            log_dict[f"obs_last/{key}"] = float(v)
 
     def reset(self, *, seed=None, options=None):
         """
@@ -944,6 +952,9 @@ class SimpleDirectZmqEnv(gym.Env):
             "timing/action_latency_ms": action_latency_ms,
             "timing/transition_latency_ms": transition_latency_ms,
         }
+
+        self._log_last_row(log_dict, flat_obs)
+
 
         for k, v in transition.items():
             if k in ("reward", "done", "next_obs", "prev_obs", "action", "sim_id"):
