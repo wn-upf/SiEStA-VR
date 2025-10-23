@@ -1497,7 +1497,7 @@ impl ZmqConnector {
     pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str, window_len: usize) -> Self {
             let action_socket = ctx.socket(zmq::DEALER).unwrap();
             action_socket.set_identity(simu_id.as_bytes()).unwrap();
-            action_socket.set_rcvtimeo(90_000).unwrap();
+            action_socket.set_rcvtimeo(15_000).unwrap();
             action_socket.connect(action_ep).unwrap();
 
             
@@ -1915,7 +1915,8 @@ impl BitrateManager {
                 let reward_ep  = std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
 
                 let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) }; 
-
+                
+                println!("CONFIGURING RLer"); 
 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
@@ -2175,7 +2176,7 @@ impl BitrateManager {
         const TIME_WARMUP_ABR: u64 = 2; 
 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
-            println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name()); 
+            // println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name()); 
             let bitrate_bps = self.last_target_bitrate_bps; 
             bitrate_bps 
         }
@@ -2184,19 +2185,16 @@ impl BitrateManager {
 
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
-            if let BitrateMode::GCCPort { ref mut gcc_estimator , ..} = self.bitrate_mode {
-                let bitrate_bps = gcc_estimator.get_target_bitrate_bps();
-                self.last_target_bitrate_bps = bitrate_bps as f32;  // Done here because only in this case we need mut access to gcc_estimator. 
-            }
+            let bitrate_bps: f32 = match &self.bitrate_mode { // match all other cases. 
 
-            let bitrate_bps = match &self.bitrate_mode { // match all other cases. 
+                
                 BitrateMode::ConstantMbps(bitrate_mbps) => {
                     self.last_target_bitrate_bps = *bitrate_mbps as f32 * 1E6;
                     // self.last_target_bitrate_mbps = *bitrate_mbps as f32;
 
                     print_prettyy!(DebugColor::Navy, "[{}] CBR -> Bitrate = {} Mbps", ip_server ,bitrate_mbps);
 
-                    *bitrate_mbps as f32 * 1e6
+                    *bitrate_mbps as f32 * 1e6 as f32
                 }
 
                 BitrateMode::EVeREst { bitrate_ladder_mbps }
@@ -2386,9 +2384,9 @@ impl BitrateManager {
                     action_space,
                 } => {
                     // Respect step interval
-                    if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
-                        return self.last_target_bitrate_bps;
-                    }
+                    // if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
+                    //     return self.last_target_bitrate_bps;
+                    // }
 
                     // Build current obs (already computed above as `obs`)
                     let current_obs = obs.clone();
@@ -2485,6 +2483,13 @@ impl BitrateManager {
 
                     self.last_target_bitrate_bps
                 }
+
+                BitrateMode::GCCPort { ref gcc_estimator , ..} =>  { 
+                    let bitrate_bps = gcc_estimator.get_target_bitrate_bps();
+                    self.last_target_bitrate_bps = bitrate_bps as f32;
+                    self.last_target_bitrate_bps       
+                }
+
 
                 BitrateMode::NADACiscoPort {} => {
                     if let Some(last_order_bitrate_mbps ) = self.last_nada_target_bitrate_mbps{

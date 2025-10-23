@@ -1,7 +1,5 @@
 #sac_trainer.py
-from stable_baselines3 import SAC
-# Continuous action bounds in Mbps (adjust to your ladder / encoder limits)
-
+from stable_baselines3 import SAC, TD3
 import os
 import time
 import json
@@ -13,7 +11,7 @@ import zmq
 from sb3_contrib import RecurrentPPO
 # from sb3_contrib import RecurrentSAC
 from stable_baselines3.common.vec_env import DummyVecEnv
-
+from stable_baselines3.common.noise import NormalActionNoise  # <-- ADD THIS
 from pathlib import Path
 from itertools import product
 from datetime import datetime
@@ -177,7 +175,7 @@ def train_sac_single(trainer_ep: str):
         gamma=wandb.config.gamma, # This will be pulled from sweep config
         tau=wandb.config.tau,
         buffer_size= wandb.config.buffer_size,   # This is hardcoded, not from sweep
-        learning_starts=600_000, 
+        learning_starts=wandb.config.learning_starts, 
         batch_size=wandb.config.batch_size,
         train_freq=wandb.config.train_freq,    # ("step") implied
         gradient_steps=wandb.config.gradient_steps,
@@ -185,6 +183,7 @@ def train_sac_single(trainer_ep: str):
         policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log=f"runs/{run.id}", # Added for WandbCallback
+        target_entropy=wandb.config.target_entropy,
     )
 
     callback =  WandbCallback(
@@ -207,7 +206,117 @@ def train_sac_single(trainer_ep: str):
     run.log_artifact(art)
     wandb.finish()
 
+def train_agent_single(trainer_ep: str):  # Renamed for clarity
+    print(f"TRAINER THREAD: Started. Connecting to {trainer_ep}")
+    run = wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "xr-abr"),
+        entity=os.environ.get("WANDB_ENTITY"),
+        save_code=True,
+    )
 
+    # --- 1. Set up Environment and Base Policy Kwargs ---
+    use_vec = wandb.config.get("use_vectorized_obs", True)
+    if use_vec:
+        print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
+        env = ZmqEnvClientVEC_Continuous(trainer_ep)    
+        policy = "MlpPolicy"
+        policy_kwargs = dict(
+            features_extractor_class=LastRowExtractor,
+            net_arch=list(wandb.config.net_arch),
+        )
+    else:
+        print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
+        env = ZmqEnvClient(trainer_ep)
+        policy = "MlpPolicy"
+        policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
+
+    # --- SANITY CHECK: MANUALLY RESET ENV *BEFORE* CREATING MODEL ---
+    # print(f"{Colors.MAGENTA}TRAINER THREAD: Manually calling env.reset() for the first time...{Colors.ENDC}")
+    # try:
+    #     initial_obs, info = env.reset()
+    #     print(f"{Colors.GREEN}TRAINER THREAD: Manual reset successful. Got obs shape: {initial_obs.shape}{Colors.ENDC}")
+    # except Exception as e:
+    #     print(f"{Colors.RED}TRAINER THREAD: CRASHED during manual reset: {e}{Colors.ENDC}")
+    #     return # Stop the thread
+    # # -----------------------------
+
+    # --- 2. Build Common Model Parameters ---
+    # These are shared by both SAC and TD3
+    model_kwargs = {
+        "policy": policy,
+        "env": env,
+        "learning_rate": wandb.config.learning_rate,
+        "gamma": wandb.config.gamma,
+        "tau": wandb.config.tau,
+        "buffer_size": wandb.config.buffer_size,
+        "learning_starts": wandb.config.learning_starts,
+        "batch_size": wandb.config.batch_size,
+        "train_freq": wandb.config.train_freq,
+        "gradient_steps": wandb.config.gradient_steps,
+        "verbose": 1,
+        "tensorboard_log": f"runs/{run.id}",
+        "max_grad_norm": wandb.config.max_grad_norm, # Used by both
+    }
+
+    # --- 3. Add Algorithm-Specific Parameters ---
+    algo = wandb.config.algo
+    if algo == "SAC":
+        model_class = SAC
+        # print(f"{Colors.YELLOW}saaac")
+
+        # Add SAC-specific params to policy_kwargs
+        policy_kwargs['log_std_init'] = wandb.config.log_std_init
+        
+        # Add SAC-specific params to model_kwargs
+        model_kwargs['ent_coef'] = wandb.config.ent_coef
+        model_kwargs['target_entropy'] = wandb.config.target_entropy
+        print(f"{Colors.GREEN}Creating SAC model.{Colors.ENDC}")
+        
+    elif algo == "TD3":
+        model_class = TD3
+        # print(f"{Colors.YELLOW}td33")
+        # TD3 requires action noise. We can make its standard deviation tunable.
+        n_actions = env.action_space.shape[-1]
+        noise_sigma = wandb.config.get("action_noise_sigma", 0.1) # Get from config or use 0.1
+        model_kwargs['action_noise'] = NormalActionNoise(
+            mean=np.zeros(n_actions), sigma=noise_sigma * np.ones(n_actions)
+        )
+        print(f"{Colors.GREEN}Creating TD3 model.{Colors.ENDC}")
+        
+        # Note: TD3 will ignore ent_coef, target_entropy, log_std_init
+        # from the wandb.config, which is fine.
+        print("TRAINER THREAD: 2. Model created.")
+    else:
+        raise ValueError(f"Unknown algorithm: {algo}. Must be 'SAC' or 'TD3'.")
+
+    # Add the final policy_kwargs to the model_kwargs
+    model_kwargs['policy_kwargs'] = policy_kwargs
+
+    # --- 4. Instantiate the Model ---
+    model = model_class(**model_kwargs)
+
+    # --- 5. Set up Callback and Learn ---
+    callback = WandbCallback(
+        model_save_path=f"models/{run.id}",
+        model_save_freq=50_000,
+        verbose=2,
+        log="all", # Be careful: "all" logs gradients and can be very slow/large.
+                   # Consider setting to log=None or log="parameters".
+    )
+    print(f"{Colors.YELLOW}TRAINER THREAD: 3. Calling model.learn()...")
+    model.learn(total_timesteps=N_STEPS_RL, callback=callback)
+
+    # --- 6. Save Final Model ---
+    final_model_path = f"models/{run.id}/final_model.zip"
+    model.save(final_model_path)
+    art = wandb.Artifact(
+        name=f"{algo.upper()}-{run.id}-final", # Use algo in artifact name
+        type="model",
+        description=f"Final {algo.upper()} after {N_STEPS_RL} steps"
+    )
+    art.add_file(final_model_path)
+    run.log_artifact(art)
+    wandb.finish()
 
 ################# LIBS ################## 
 
@@ -216,6 +325,7 @@ class Colors:
     BLUE = '\033[94m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
+    MAGENTA = '\033[95m'
     ENDC = '\033[0m'
 
 
@@ -257,12 +367,6 @@ def coerce_batch_size(n_steps: int, batch_size: int, n_envs: int = 1) -> int:
     return total  # fallback
 
 
-class Colors:
-    BLUE = '\033[94m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    ENDC = '\033[0m'
-
 class ZmqServer:
     """A standalone ZMQ server that acts as a bridge between Rust simulations
     and a Python-based RL training agent."""
@@ -300,102 +404,309 @@ class ZmqServer:
         return [obs_json[k] for k in sorted(obs_json)]
 
 
+    # def run_forever(self):
+    #     """Main server loop."""
+    #     while True:
+    #         print("while iter")
+    #         # Wait for a command from the training agent ('reset' or 'step')
+    #         # print(f"\n{Colors.YELLOW}SERVER: Waiting for command from trainer...{Colors.ENDC}")
+    #         req = self.rep_socket.recv_json()
+    #         command = req.get("command")
+            
+    #         if command == "reset":
+    #             self.sim_is_done = False
+    #             print(f"{Colors.BLUE}SERVER: Received 'reset' command.{Colors.ENDC}")
+
+    #             # 1) Wait for obs, retrying for up to 15 seconds
+    #             print("SERVER: Waiting for initial observation from a Rust simulation (max 15s)...")
+
+    #             # Setup a poller to watch the router socket for incoming messages
+    #             poller = zmq.Poller()
+    #             poller.register(self.router, zmq.POLLIN) # POLLIN means "waiting to receive"
+
+    #             # Poll for 15,000 milliseconds (15 seconds)
+    #             socks = dict(poller.poll(timeout=300000))
+
+    #             # Check if our socket has a message
+    #             if self.router in socks and socks[self.router] == zmq.POLLIN:
+    #                 # Yes, message is ready. Receive it.
+    #                 # This recv_multipart() is now guaranteed not to block
+    #                 sim_id, payload = self.router.recv_multipart()
+    #             else:
+    #                 # No, we timed out after 15 seconds
+    #                 print(f"{Colors.RED}SERVER: ERROR - Timed out waiting for initial obs from Rust.{Colors.ENDC}")
+    #                 # Reply to the trainer with an error
+    #                 self.rep_socket.send_json({"error": "Timeout waiting for sim", "obs": None})
+    #                 continue  # Stop this reset attempt and wait for the next command
+                
+    #             print("REQ DATA")
+    #             # --- Original code continues from here ---
+    #             # If we got here, we successfully received the message
+    #             # req_obs = json.loads(payload.decode("utf-8"))
+    #             # initial_obs = _obs_from_payload_dict(req_obs)
+    #             req_data = json.loads(payload.decode("utf-8"))
+
+    #             # 2. Extract the observation list from the 'obs_flat' key
+    #             #    (matching your RLRequestRNN struct)
+    #             obs_list = req_data.get("obs_flat") 
+    #             if obs_list is None:
+    #                 # Handle cases where the key might be different
+    #                 obs_list = req_data.get("obs", req_data)
+    #             initial_obs = self._obs_from_json(obs_list)
+
+
+    #             self.active_sim_id = sim_id
+
+    #             # 2) Send a dummy *continuous* action to unblock Rust
+    #             init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
+    #             self.router.send_multipart([
+    #                 self.active_sim_id,
+    #                 json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
+    #             ])
+
+    #             # 3) Reply to the trainer with the initial observation
+    #             self.rep_socket.send_json({"obs": initial_obs})
+    #             print(f"{Colors.GREEN}SERVER: Reset done for sim {sim_id.decode()}, sent bitrate={init_bitrate:.2f} Mbps.{Colors.ENDC}")
+
+    #         elif command == "step":
+    #             action = req.get("action")
+    #             if isinstance(action, (list, tuple, np.ndarray)):
+    #                 action = float(np.asarray(action, dtype=np.float32).ravel()[0])
+    #             else:
+    #                 action = float(action)
+    #             action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))  # clamp
+
+    #             # 1. First, send the action to the waiting Rust sim.
+    #             #    (Only if the sim isn't already done)
+    #             if not self.sim_is_done:
+    #                 try:
+    #                     # Wait for sim's REQ for the next action
+    #                     sim_id, _ = self.router.recv_multipart()
+    #                     # Send the action
+    #                     self.router.send_multipart([sim_id, json.dumps({"bitrate_mbps": action}).encode("utf-8")])
+    #                 except Exception as e:
+    #                     print(f"SERVER: Error sending action to sim: {e}")
+    #                     # Handle error if needed
+
+    #             # 2. Now, wait for the sim to PUSH its transition data.
+    #             transition = self.pull.recv_json()
+    #             while self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
+    #                 print(f"SERVER: Skipping transition from {transition.get('sim_id')}, waiting for {self.active_sim_id.decode()}")
+    #                 transition = self.pull.recv_json()
+
+    #             reward = float(transition["reward"])
+    #             done = bool(transition["done"])
+    #             self.sim_is_done = done  # <-- Store the 'done' state
+
+    #             next_obs_field = transition.get("next_obs")
+    #             if next_obs_field is None:
+    #                 raise KeyError(f"Transition missing 'next_obs'; got keys: {list(transition.keys())}")
+
+    #             next_obs = _obs_from_payload_dict(next_obs_field) if isinstance(next_obs_field, dict) else next_obs_field
+
+    #             # 3. Finally, send the transition data back to the (blocked) agent.
+    #             self.rep_socket.send_json({"next_obs": next_obs, "reward": reward, "done": done})
+
+    #             if done:
+    #                 print(f"{Colors.YELLOW}SERVER: Episode finished for sim {self.active_sim_id.decode()}.{Colors.ENDC}")
+    #                 self.active_sim_id = None
     def run_forever(self):
-        """Main server loop."""
+        """
+        Main server loop with proper caching for both reset and step requests.
+        """
+        
+        # --- Server State ---
+        self.active_sim_id = None
+        self.cached_initial_obs = None
+        self.cached_sim_id = None
+        self.trainer_is_waiting_for_reset = False
+        
+        # NEW: Cache for step requests
+        self.cached_step_req = None  # Stores (sim_id, payload)
+        self.trainer_is_waiting_for_step = False
+        self.pending_action = None
+        
+        # --- Poller ---
+        poller = zmq.Poller()
+        poller.register(self.router, zmq.POLLIN)     # From Rust sims (REQ)
+        poller.register(self.rep_socket, zmq.POLLIN) # From Python trainer (REQ)
+        poller.register(self.pull, zmq.POLLIN)       # From Rust sims (PUSH)
+
+        print(f"{Colors.GREEN}✅ ZMQ Server Bridge is running (non-blocking mode).{Colors.ENDC}")
+
         while True:
-            # Wait for a command from the training agent ('reset' or 'step')
-            # print(f"\n{Colors.YELLOW}SERVER: Waiting for command from trainer...{Colors.ENDC}")
-            req = self.rep_socket.recv_json()
-            command = req.get("command")
-            
-            if command == "reset":
-                print(f"{Colors.BLUE}SERVER: Received 'reset' command.{Colors.ENDC}")
+            # Wait for a message on *any* registered socket
+            socks = dict(poller.poll())
 
-                # 1) Wait for obs, retrying for up to 15 seconds
-                print("SERVER: Waiting for initial observation from a Rust simulation (max 15s)...")
+            # --- CASE 1: Message from Python Trainer (REP socket) ---
+            if self.rep_socket in socks:
+                req = self.rep_socket.recv_json()
+                command = req.get("command")
+                print(f"SERVER: Received command '{command}' from trainer.")
 
-                # Setup a poller to watch the router socket for incoming messages
-                poller = zmq.Poller()
-                poller.register(self.router, zmq.POLLIN) # POLLIN means "waiting to receive"
-
-                # Poll for 15,000 milliseconds (15 seconds)
-                socks = dict(poller.poll(timeout=15000))
-
-                # Check if our socket has a message
-                if self.router in socks and socks[self.router] == zmq.POLLIN:
-                    # Yes, message is ready. Receive it.
-                    # This recv_multipart() is now guaranteed not to block
-                    sim_id, payload = self.router.recv_multipart()
-                else:
-                    # No, we timed out after 15 seconds
-                    print(f"{Colors.RED}SERVER: ERROR - Timed out waiting for initial obs from Rust.{Colors.ENDC}")
-                    # Reply to the trainer with an error
-                    self.rep_socket.send_json({"error": "Timeout waiting for sim", "obs": None})
-                    continue  # Stop this reset attempt and wait for the next command
-
-                # --- Original code continues from here ---
-                # If we got here, we successfully received the message
-                req_obs = json.loads(payload.decode("utf-8"))
-                initial_obs = _obs_from_payload_dict(req_obs)
-
-                self.active_sim_id = sim_id
-
-                # 2) Send a dummy *continuous* action to unblock Rust
-                init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
-                self.router.send_multipart([
-                    self.active_sim_id,
-                    json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
-                ])
-
-                # 3) Reply to the trainer with the initial observation
-                self.rep_socket.send_json({"obs": initial_obs})
-                print(f"{Colors.GREEN}SERVER: Reset done for sim {sim_id.decode()}, sent bitrate={init_bitrate:.2f} Mbps.{Colors.ENDC}")
-
-            elif command == "step":
-                action = req.get("action")
-                if isinstance(action, (list, tuple, np.ndarray)):
-                    action = float(np.asarray(action, dtype=np.float32).ravel()[0])
-                else:
-                    action = float(action)
-                action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))  # clamp
-
-                # 1. First, send the action to the waiting Rust sim.
-                #    (Only if the sim isn't already done)
-                if not self.sim_is_done:
-                    try:
-                        # Wait for sim's REQ for the next action
-                        sim_id, _ = self.router.recv_multipart()
-                        # Send the action
-                        self.router.send_multipart([sim_id, json.dumps({"bitrate_mbps": action}).encode("utf-8")])
-                    except Exception as e:
-                        print(f"SERVER: Error sending action to sim: {e}")
-                        # Handle error if needed
-
-                # 2. Now, wait for the sim to PUSH its transition data.
-                transition = self.pull.recv_json()
-                while self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
-                    print(f"SERVER: Skipping transition from {transition.get('sim_id')}, waiting for {self.active_sim_id.decode()}")
-                    transition = self.pull.recv_json()
-
-                reward = float(transition["reward"])
-                done = bool(transition["done"])
-                self.sim_is_done = done  # <-- Store the 'done' state
-
-                next_obs_field = transition.get("next_obs")
-                if next_obs_field is None:
-                    raise KeyError(f"Transition missing 'next_obs'; got keys: {list(transition.keys())}")
-
-                next_obs = _obs_from_payload_dict(next_obs_field) if isinstance(next_obs_field, dict) else next_obs_field
-
-                # 3. Finally, send the transition data back to the (blocked) agent.
-                self.rep_socket.send_json({"next_obs": next_obs, "reward": reward, "done": done})
-
-                if done:
-                    print(f"{Colors.YELLOW}SERVER: Episode finished for sim {self.active_sim_id.decode()}.{Colors.ENDC}")
+                if command == "reset":
+                    self.sim_is_done = False
                     self.active_sim_id = None
+                    self.cached_step_req = None
+                    self.trainer_is_waiting_for_step = False
+                    self.pending_action = None
 
+                    # Check if Rust has *already* sent its obs
+                    if self.cached_initial_obs is not None:
+                        # --- HAPPY PATH 1: Rust was first ---
+                        print(f"{Colors.GREEN}SERVER: Servicing 'reset'. Rust sim already checked in.{Colors.ENDC}")
+                        
+                        self.active_sim_id = self.cached_sim_id
+                        init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
+                        self.router.send_multipart([
+                            self.active_sim_id,
+                            json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
+                        ])
+                        self.rep_socket.send_json({"obs": self.cached_initial_obs})
+                        
+                        self.cached_initial_obs = None
+                        self.cached_sim_id = None
+                        
+                    else:
+                        # --- WAIT PATH 1: Trainer was first ---
+                        # print(f"{Colors.YELLOW}SERVER: Trainer is waiting for reset. Now waiting for Rust sim...{Colors.ENDC}")
+                        self.trainer_is_waiting_for_reset = True
+                
+                elif command == "step":
+                    action = req.get("action")
+                    if isinstance(action, (list, tuple, np.ndarray)):
+                        action = float(np.asarray(action, dtype=np.float32).ravel()[0])
+                    else:
+                        action = float(action)
+                    action = max(ACT_MIN_MBPS, min(ACT_MAX_MBPS, action))
+
+                    if self.sim_is_done:
+                        # print(f"{Colors.YELLOW}SERVER: 'step' called, but sim is already done.{Colors.ENDC}")
+                        self.rep_socket.send_json({"next_obs": [], "reward": 0.0, "done": True})
+                        continue
+                    
+                    # Check if Rust already sent its step REQ
+                    if self.cached_step_req is not None:
+                        # --- HAPPY PATH: Rust was first ---
+                        sim_id, _ = self.cached_step_req
+                        # print(f"{Colors.GREEN}SERVER: Servicing 'step'. Rust sim already waiting.{Colors.ENDC}")
+                        
+                        # Send action to unblock Rust
+                        self.router.send_multipart([
+                            sim_id, 
+                            json.dumps({"bitrate_mbps": action}).encode("utf-8")
+                        ])
+                        
+                        # Clear cache and wait for PUSH
+                        self.cached_step_req = None
+                        self.trainer_is_waiting_for_step = True
+                        self.pending_action = action
+                        # Don't reply to trainer yet - wait for PUSH
+                        
+                    else:
+                        # --- WAIT PATH: Trainer was first ---
+                        # print(f"{Colors.YELLOW}SERVER: Trainer sent 'step'. Waiting for Rust REQ...{Colors.ENDC}")
+                        self.trainer_is_waiting_for_step = True
+                        self.pending_action = action
+                        # Don't reply to trainer yet
+
+
+            # --- CASE 2: Message from a Rust Sim (ROUTER socket - REQ) ---
+            if self.router in socks:
+                sim_id, payload = self.router.recv_multipart()
+                
+                # Check if this is initial obs for reset
+                if self.trainer_is_waiting_for_reset:
+                    # --- HAPPY PATH: Trainer is waiting for reset ---
+                    print(f"{Colors.GREEN}SERVER: Got initial obs from sim {sim_id.decode()}. Servicing 'reset'...{Colors.ENDC}")
+
+                    req_data = json.loads(payload.decode("utf-8"))
+                    obs_list = req_data.get("obs_flat") 
+                    if obs_list is None:
+                        obs_list = req_data.get("obs", req_data)
+                    initial_obs = self._obs_from_json(obs_list)
+                    self.active_sim_id = sim_id
+                    
+                    init_bitrate = float(os.environ.get("INIT_BITRATE_MBPS", ACT_MIN_MBPS))
+                    self.router.send_multipart([
+                        self.active_sim_id,
+                        json.dumps({"bitrate_mbps": init_bitrate}).encode("utf-8")
+                    ])
+                    self.rep_socket.send_json({"obs": initial_obs})
+                    
+                    self.trainer_is_waiting_for_reset = False
+                
+                elif self.active_sim_id is None and not self.trainer_is_waiting_for_reset:
+                    # --- WAIT PATH: Rust sent initial obs first ---
+                    print(f"{Colors.YELLOW}SERVER: Got initial obs from {sim_id.decode()}. Caching it and waiting for trainer 'reset'...{Colors.ENDC}")
+                    
+                    req_data = json.loads(payload.decode("utf-8"))
+                    obs_list = req_data.get("obs_flat") 
+                    if obs_list is None:
+                        obs_list = req_data.get("obs", req_data)
+                    
+                    self.cached_initial_obs = self._obs_from_json(obs_list)
+                    self.cached_sim_id = sim_id
+
+                elif self.trainer_is_waiting_for_step:
+                    # --- HAPPY PATH: Trainer sent step first, now Rust REQ arrived ---
+                    print(f"{Colors.GREEN}SERVER: Got step REQ from Rust. Sending action={self.pending_action:.2f}{Colors.ENDC}")
+                    
+                    self.router.send_multipart([
+                        sim_id,
+                        json.dumps({"bitrate_mbps": self.pending_action}).encode("utf-8")
+                    ])
+                    # Don't clear trainer_is_waiting_for_step yet - wait for PUSH
+                    
+                else:
+                    # --- WAIT PATH: Rust sent step REQ first ---
+                    print(f"{Colors.YELLOW}SERVER: Got step REQ from Rust {sim_id.decode()}. Caching it...{Colors.ENDC}")
+                    self.cached_step_req = (sim_id, payload)
 
             
+            # --- CASE 3: Message from a Rust Sim (PULL socket - PUSH data) ---
+            if self.pull in socks:
+                transition = self.pull.recv_json()
+                
+                # Only process if we're expecting this transition
+                if self.trainer_is_waiting_for_step:
+                    # Validate it's from the right sim
+                    if self.active_sim_id is not None and transition.get("sim_id") != self.active_sim_id.decode():
+                        print(f"{Colors.YELLOW}SERVER: Skipping PUSH from wrong sim {transition.get('sim_id')}{Colors.ENDC}")
+                        continue
+                    
+                    # print(f"{Colors.GREEN}SERVER: Got PUSH transition. Replying to trainer.{Colors.ENDC}")
+                    
+                    reward = float(transition["reward"])
+                    done = bool(transition["done"])
+                    self.sim_is_done = done
+                    
+                    next_obs_field = transition.get("next_obs")
+                    if next_obs_field is None:
+                        print(f"{Colors.RED}SERVER: PUSH missing 'next_obs'!{Colors.ENDC}")
+                        next_obs = []
+                    else:
+                        next_obs = self._obs_from_json(next_obs_field)
+
+                    # Reply to trainer
+                    self.rep_socket.send_json({
+                        "next_obs": next_obs, 
+                        "reward": reward, 
+                        "done": done
+                    })
+                    
+                    # Clear waiting state
+                    self.trainer_is_waiting_for_step = False
+                    self.pending_action = None
+                    
+                    if done:
+                        print(f"{Colors.YELLOW}SERVER: Episode finished.{Colors.ENDC}")
+                        self.active_sim_id = None
+                else:
+                    # Stray PUSH (from previous episode or out of sync)
+                    print(f"{Colors.MAGENTA}SERVER: Discarding stray PUSH from sim {transition.get('sim_id')}.{Colors.ENDC}")   
+    
+    
     def close(self):
         """Cleanly close all sockets and terminate the context."""
         self.router.close()
@@ -662,6 +973,10 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     step_ep    = f"ipc:///tmp/xr_{RUN_ID}_step"
     trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
     
+    pool = ThreadPoolExecutor(max_workers=5)
+    fut_rl = pool.submit(train_sac_single, trainer_ep)
+    time.sleep(7.5)
+
     # ---- Start the shared ZMQ server ----
     env_server = {
         "ZMQ_ACTION_EP":  action_ep,
@@ -669,15 +984,13 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
         "ZMQ_TRAINER_EP": trainer_ep,
     }
     server, thread = start_zmq_server_thread(env_server)
-    time.sleep(1.5)
-    pool = ThreadPoolExecutor(max_workers=10)
-    fut_rl = pool.submit(train_sac_single, trainer_ep)
+
     # fut_rl = pool.submit(train_recurrent_sac, trainer_ep)
 
     # ---- Start RL thread (same endpoints for all episodes) ----
     print(f"RL loop started on {trainer_ep}")
 
-    time.sleep(8.0)
+    time.sleep(5.0)
 
     # ---- Outer training loop over multiple passes ----
     for pass_idx in range(1, num_passes + 1):
@@ -822,7 +1135,6 @@ def main():
     thread = threading.Thread(target=periodic_clear, args=(results_dir, 60), daemon=True)
     thread.start()
 
-
     combos = list(product(
         simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
         video_samples, fps_list, num_close_users, distance_close_users,
@@ -834,7 +1146,7 @@ def main():
 
     print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
     
-    # rebuild_rust_binary(EXAMPLE_NAME)
+    rebuild_rust_binary(EXAMPLE_NAME)
     exe = find_exe(release=True)
     train_over_all_combos_iter(exe, combos)
 

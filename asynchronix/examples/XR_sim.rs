@@ -111,19 +111,25 @@ impl VRPair {
         let mut initial_bitrate= initial_bitrate_orig; 
 
         let mut abr_choice; 
+        let framerate; 
     
         // UNCOMMENT (when not evaluating RL in same scenario) . 
         // if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
 
             if pair_index == 0{ 
                 abr_choice = abr_enabled; 
+                framerate = fps; 
                 // do nothing, it's correct
             }
             else{
                 // abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2 (or 4 for GCC)
                 let choices = [0, 1, 2, 4];
+
+                let fps_choices = [90.0, 120.0, 60.0]; // Random FPS -> More entropy, less bias
                 let mut rng = thread_rng();
                 abr_choice = *choices.choose(&mut rng).unwrap();
+
+                framerate = *fps_choices.choose(&mut rng).unwrap();
 
 
                 if abr_choice == 0 { // CBR (RANDOM)
@@ -167,7 +173,7 @@ impl VRPair {
             server_ip,
             client_ip,
             t0,
-            fps,
+            framerate,
             initial_bitrate as f32,
             name_folder,
             patterns, 
@@ -180,7 +186,7 @@ impl VRPair {
             simu_unique_str, // for identifying each simulation on the RLConnector
         );
 
-        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, abr_choice, simu_unique_str, bm_string);
+        let mut xr_client = XRClient::new(client_ip, framerate, t0, name_folder, test, abr_choice, simu_unique_str, bm_string);
 
         let mut sta_server = STA_extended::new(
             // initial_bitrate * 1e6,
