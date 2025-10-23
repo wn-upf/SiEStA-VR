@@ -953,7 +953,7 @@ class SimpleDirectZmqEnv(gym.Env):
             "timing/transition_latency_ms": transition_latency_ms,
         }
 
-        self._log_last_row(log_dict, flat_obs)
+        self._log_last_row(log_dict, next_obs)
 
 
         for k, v in transition.items():
