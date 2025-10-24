@@ -2543,19 +2543,23 @@ struct FrameSizeTable {
     col_index: HashMap<u32, usize>,      // 5 -> 0, 10 -> 1, ...
     // Column-major: framesizes[col_idx][frame_idx] -> bytes
     framesizes: Vec<Vec<u32>>,           // use u32 to halve memory on 64-bit
+    start_offset: usize,                 // <-- ADD THIS FIELD
 }
 
 impl FrameSizeTable {
 
     // Return interpolated frame size (bytes) for arbitrary Mbps
-    #[inline(always)]
+   #[inline(always)]
     fn bytes_interp_cached(&self, want_mbps: f32, frame_idx: usize,
                            last_lo: &Cell<usize>, last_hi: &Cell<usize>) -> usize
     {
+        // Get the pre-calculated random offset
+        let offset_idx = |idx: usize, v_len: usize| (idx + self.start_offset) % v_len;
+
         // --- Fast path: exact integer Mbps match
         if let Some(&col_idx) = self.col_index.get(&(want_mbps.round() as u32)) {
             let v = &self.framesizes[col_idx];
-            return v[frame_idx % v.len()] as usize;
+            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
         }
 
         let mbps_cols = &self.mbps_cols;
@@ -2566,10 +2570,12 @@ impl FrameSizeTable {
 
         // --- Clamp to bounds
         if want_mbps <= mbps_cols[0] as f32 {
-            return self.framesizes[0][frame_idx % self.framesizes[0].len()] as usize;
+            let v = &self.framesizes[0];
+            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
         }
         if want_mbps >= mbps_cols[n - 1] as f32 {
-            return self.framesizes[n - 1][frame_idx % self.framesizes[n - 1].len()] as usize;
+            let v = &self.framesizes[n - 1];
+            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
         }
 
         // --- Try cached indices
@@ -2582,8 +2588,10 @@ impl FrameSizeTable {
             let m1 = mbps_cols[hi] as f32;
             if want_mbps >= m0 && want_mbps <= m1 {
                 let f = (want_mbps - m0) / (m1 - m0);
-                let v0 = self.framesizes[lo][frame_idx % self.framesizes[lo].len()] as f32;
-                let v1 = self.framesizes[hi][frame_idx % self.framesizes[hi].len()] as f32;
+                let v0_vec = &self.framesizes[lo];
+                let v1_vec = &self.framesizes[hi];
+                let v0 = v0_vec[offset_idx(frame_idx, v0_vec.len())] as f32; // <-- Use offset
+                let v1 = v1_vec[offset_idx(frame_idx, v1_vec.len())] as f32; // <-- Use offset
                 return ((v0 + f * (v1 - v0)).round() as u32) as usize;
             }
         }
@@ -2601,18 +2609,21 @@ impl FrameSizeTable {
         let m1 = mbps_cols[hi] as f32;
         let f = (want_mbps - m0) / (m1 - m0);
 
-        let v0 = self.framesizes[lo][frame_idx % self.framesizes[lo].len()] as f32;
-        let v1 = self.framesizes[hi][frame_idx % self.framesizes[hi].len()] as f32;
+        let v0_vec = &self.framesizes[lo];
+        let v1_vec = &self.framesizes[hi];
+        let v0 = v0_vec[offset_idx(frame_idx, v0_vec.len())] as f32; // <-- Use offset
+        let v1 = v1_vec[offset_idx(frame_idx, v1_vec.len())] as f32; // <-- Use offset
         ((v0 + f * (v1 - v0)).round() as u32) as usize
     }
 
-
     #[inline(always)]
     fn bytes_interp(&self, want_mbps: f32, frame_idx: usize) -> usize {
+        let offset_idx = |idx: usize, v_len: usize| (idx + self.start_offset) % v_len;
+
         // Fast path: exact match
         if let Some(&col_idx) = self.col_index.get(&(want_mbps.round() as u32)) {
             let v = &self.framesizes[col_idx];
-            return v[frame_idx % v.len()] as usize;
+            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
         }
 
         // Find bracketing columns
@@ -2622,10 +2633,12 @@ impl FrameSizeTable {
             return 0;
         }
         if want_mbps <= mbps_cols[0] as f32 {
-            return self.framesizes[0][frame_idx % self.framesizes[0].len()] as usize;
+            let v = &self.framesizes[0];
+            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
         }
         if want_mbps >= mbps_cols[n - 1] as f32 {
-            return self.framesizes[n - 1][frame_idx % self.framesizes[n - 1].len()] as usize;
+            let v = &self.framesizes[n - 1];
+            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
         }
 
         // Binary search avoids O(n)
@@ -2639,8 +2652,10 @@ impl FrameSizeTable {
         let m1 = mbps_cols[hi] as f32;
         let f = (want_mbps - m0) / (m1 - m0); // interpolation factor in [0,1]
 
-        let v0 = self.framesizes[lo][frame_idx % self.framesizes[lo].len()] as f32;
-        let v1 = self.framesizes[hi][frame_idx % self.framesizes[hi].len()] as f32;
+        let v0_vec = &self.framesizes[lo];
+        let v1_vec = &self.framesizes[hi];
+        let v0 = v0_vec[offset_idx(frame_idx, v0_vec.len())] as f32; // <-- Use offset
+        let v1 = v1_vec[offset_idx(frame_idx, v1_vec.len())] as f32; // <-- Use offset
 
         ((v0 + f * (v1 - v0)).round() as u32) as usize
     }
@@ -2682,25 +2697,31 @@ impl FrameSizeTable {
             }
         }
 
+        let num_frames = framesizes.get(0).map_or(0, |v| v.len());
+        
+        let start_offset = if num_frames > 1 {
+            let middle_frame = num_frames / 2;
+            // gen_range is exclusive of the upper bound: [0, middle_frame)
+            if middle_frame > 0 {
+                rand::thread_rng().gen_range(0..middle_frame)
+            } else {
+                0 // Not enough frames to randomize (e.g., num_frames = 1)
+            }
+        } else {
+            0 // No frames or only one frame
+        };
+
+
         let col_index = mbps_cols
             .iter()
             .enumerate()
             .map(|(i, &m)| (m, i))
             .collect::<HashMap<_, _>>();
 
-        Ok(Self { fps, mbps_cols, col_index, framesizes })
+        Ok(Self { fps, mbps_cols, col_index, framesizes, start_offset})
     }
 
-    #[inline]
-    fn column_for_mbps(&self, mbps: u32) -> Option<usize> {
-        self.col_index.get(&mbps).copied()
-    }
 
-    #[inline]
-    fn bytes(&self, col_idx: usize, frame_idx: usize) -> usize {
-        let v = &self.framesizes[col_idx];
-        if v.is_empty() { 0 } else { v[frame_idx % v.len()] as usize }
-    }
 }
 
 #[inline]

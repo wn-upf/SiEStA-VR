@@ -4,11 +4,11 @@
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
 ####### SBATCH --gres=gpu:1
-#SBATCH --constraint=nvenc
-###### #SBATCH --exclusive
-#SBATCH --mem=128G               # memory
+####### SBATCH --constraint=nvenc
+######  SBATCH --exclusive
+#SBATCH --mem=64G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
-#SBATCH --cpus-per-task=64        # example
+#SBATCH --cpus-per-task=32        # example
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
 
@@ -25,7 +25,7 @@ NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("RANDOM") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+TEST_TYPE=("RANDOM" "BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
 simTime=100.0
 k_queue=10000
@@ -43,7 +43,7 @@ initial_bitrate_mbps=( 100.0 )
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach, 4=> GCC, 5 => NADA (TODO) 6 => FovOptix (TODO)
 
-ABR_ENABLED=( 0 )
+ABR_ENABLED=( 0 1 2 4 5 6 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
 RANDOM_SEEDS=({1..10})
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
@@ -253,26 +253,25 @@ rm "$temp_file" # Clean up the un-shuffled file
 
 
 
-## I have 6000 scenarios here with many seeds, I want to repeat this process 15 times for RL: 
 
-RL_STEPS=20 ## should be enough for training 10 agents 
-for RL_ITERATION in $(seq 1 $RL_REPETITIONS); do
-    if [ "$SERIAL_EXECUTION" -eq 1 ]; then
-        echo "Starting randomized SERIAL execution of $SIM_COUNT simulations..."
-        # Execute commands one by one, using a subshell for execution to ensure $cmd is treated correctly
-        while IFS= read -r cmd; do
-            echo "Executing: $cmd"
-            /bin/bash -c "$cmd"
-            # sleep 5
+# RL_STEPS=1 ## should be enough for training 10 agents 
+# for RL_ITERATION in $(seq 1 $RL_REPETITIONS); do
+if [ "$SERIAL_EXECUTION" -eq 1 ]; then
+    echo "Starting randomized SERIAL execution of $SIM_COUNT simulations..."
+    # Execute commands one by one, using a subshell for execution to ensure $cmd is treated correctly
+    while IFS= read -r cmd; do
+        echo "Executing: $cmd"
+        /bin/bash -c "$cmd"
+        # sleep 5
 
-        done < "$SHUFFLED_CMDS"
-        
-    elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
-        echo "Starting randomized PARALLEL execution of $SIM_COUNT simulations with $NUMBER_OF_JOBS threads..."
-        # Use GNU parallel on the shuffled list
-        parallel -j "$NUMBER_OF_JOBS" < "$SHUFFLED_CMDS"
+    done < "$SHUFFLED_CMDS"
+    
+elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
+    echo "Starting randomized PARALLEL execution of $SIM_COUNT simulations with $NUMBER_OF_JOBS threads..."
+    # Use GNU parallel on the shuffled list
+    parallel -j "$NUMBER_OF_JOBS" < "$SHUFFLED_CMDS"
     fi
-done 
+# done 
 
 
 rm "$temp_file"
