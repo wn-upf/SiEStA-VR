@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tai_time::TaiTime;
-
+use std::io::Read;
 #[allow(unused)]
 #[derive(Clone)]
 struct HistoryFrame {
@@ -148,12 +148,22 @@ impl CsvSink {
         let dir = Path::new("Results").join(folder);
         create_dir_all(&dir)?;
         let path = dir.join(format!("{file_stem}.csv"));
-        // Open once; append without truncation
-        let mut file = OpenOptions::new().create(true).append(true).read(true).open(&path)?;
-        let is_empty = file.metadata()?.len() == 0;
-        let mut wtr = Writer::from_writer(BufWriter::with_capacity(1 << 22, file)); // 4–8 MiB
 
-        // // Write header if new file
+        // Open for append only, not read
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+
+        // Recheck header by scanning first byte, not metadata length
+        let is_empty = {
+            // reopen in read mode just to peek
+            let mut check = std::fs::File::open(&path)?;
+            let mut buf = [0u8; 1];
+            check.read(&mut buf)? == 0
+        };
+
+        // let mut wtr = csv::Writer::from_writer(BufWriter::with_capacity(1 << 22, file));
+        let mut wtr = csv::WriterBuilder::new()
+            .has_headers(false) // <-- This is the fix  
+            .from_writer(BufWriter::with_capacity(1 << 22, file));  
         if is_empty {
             wtr.write_record([
                 "timestamp","frame_index","frame_size_bytes","server_fps","client_fps",
@@ -166,20 +176,17 @@ impl CsvSink {
             wtr.flush()?;
         }
 
-        let (tx, rx) = bounded::<StatsRow>(8192); // backpressure instead of swap
+        // same as before
+        let (tx, rx) = bounded::<StatsRow>(8192);
         thread::spawn(move || {
-            // writer thread: batch + timed flush
             let mut wtr = wtr;
-            let mut since_flush = std::time::Instant::now();
-            let mut batch = 0usize;
+            let mut batch = 0;
             while let Ok(row) = rx.recv() {
-                // serialize without heap strings
                 if wtr.serialize(row).is_err() { break; }
                 batch += 1;
                 if batch >= BATCH_SIZE_CSV {
                     let _ = wtr.flush();
                     batch = 0;
-                    since_flush = std::time::Instant::now();
                 }
             }
             let _ = wtr.flush();

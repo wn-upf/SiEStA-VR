@@ -814,53 +814,22 @@ impl EmulatedLink {
     _: (),
     context: &'a Context<Self>,
 ) -> impl Future<Output = ()> + Send + 'a {
-    async move {
-        let ready = self.queue_mechanism.process_emu_queued_packets(context);
-        for pkt in ready {
-            self.output.send(pkt).await;
-        }
-        if let Some(next_deadline) = self.queue_mechanism.queue
-            .iter()
-            .filter_map(|p| p.emulated_added_delay_deadline)
-            .min()
-        {
-            let now   = context.scheduler.time();
-            let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
-            context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
+        async move {
+            let ready = self.queue_mechanism.process_emu_queued_packets(context);
+            for pkt in ready {
+                self.output.send(pkt).await;
+            }
+            if let Some(next_deadline) = self.queue_mechanism.queue
+                .iter()
+                .filter_map(|p| p.emulated_added_delay_deadline)
+                .min()
+            {
+                let now   = context.scheduler.time();
+                let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
+                context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
+            }
         }
     }
-}
-  
-    // pub fn flush_queue<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-    //     async move {
-    //         // Process all delayed packets that have reached their deadline
-    //         let ready = self.queue_mechanism.process_emu_queued_packets(context);
-    //         for pkt in ready {
-    //             self.output.send(pkt).await;
-    //         }
-
-    //         if !self.queue_mechanism.queue.is_empty() {
-    //             if let Some(next_deadline) = self.queue_mechanism
-    //                                   .queue
-    //                                   .iter()
-    //                                   .filter_map(|p| p.emulated_added_delay_deadline)
-    //                                   .min()
-    //             {   
-    //                 let now   = context.scheduler.time();
-    //                 let delay = next_deadline.duration_since(now)
-    //                                         .max(Duration::from_nanos(1));
-    //                 context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
-    //             }
-    //         }
-
-
-
-    //     }
-    // }
 }
 
 impl Model for EmulatedLink {}
@@ -1030,23 +999,6 @@ impl QueueMechanism {
         }
     }
 
-    // pub fn should_purge_queue(&self, current_time: TaiTime<0>) -> bool {
-    //     // Check each bandwidth pattern's end time
-    //     for pattern in &self.network_emulator.patterns {
-    //         if let NetworkPattern::Bandwidth { valid_until, .. } = pattern {
-    //             // If we've just passed the end time of a pattern, purge the queue
-    //             if current_time >= *valid_until
-    //                 && current_time
-    //                     <= valid_until
-    //                         .checked_add(Duration::from_millis(200))
-    //                         .unwrap_or(*valid_until)
-    //             {
-    //                 return true;
-    //             }
-    //         }
-    //     }
-    //     false
-    // }
 
     pub fn enqueue_or_transmit(
         &mut self,
@@ -1160,76 +1112,6 @@ impl QueueMechanism {
             self.queue = keep;
             ready
     }
-    // pub fn process_emu_queued_packets(
-    //     &mut self,
-    //     context: &Context<EmulatedLink>,
-    // ) -> Vec<MpduPacket> {
-    //     let now = context.scheduler.time();
-    //     let mut transmitted_packets: Vec<MpduPacket> = Vec::new();
-    //     let mut index = 0;
-    //     // print_red!("****PROCESSING ENQUED PACKETS*****\n Len of self queue: {}", self.queue.len()); 
-
-
-        
-    //     let mut indexes_to_remove = vec![];
-    //     while index < self.queue.len() {
-    //         if let Some(packet) = self.queue.get_mut(index) {
-    //             match packet.emulated_added_delay_deadline {
-    //                 Some(delay) if delay == TaiTime::EPOCH => {
-    //                     // Remove and process the packet
-    //                     debug_bgprint!(DebugColor::DarkGreen, "[DBG EMU QUEUE PROCESS] Delay ZERO Packet ALVR: {}. Now = {} | (F_index: {} , {} / {} )", 
-    //                     format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32(), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count );
-    //                     // let packet = self.queue.remove(index).unwrap();
-    //                     indexes_to_remove.push(index);
-    //                     transmitted_packets.push(packet.clone());
-    //                     // Don't increment index as we've removed the current element
-    //                 }
-    //                 Some(delay) => {
-    //                     const EPSILON: f32 = 1e-9;
-
-    //                     // Compare with a small tolerance
-    //                     if (now.duration_since(TaiTime::EPOCH).as_secs_f32()
-    //                         - delay.duration_since(TaiTime::EPOCH).as_secs_f32())
-    //                     .abs()
-    //                         < EPSILON
-    //                     {
-    //                         transmitted_packets.push(packet.clone());
-
-    //                         self.queue.remove(index);
-
-    //                         // continue; // skip incrementing index
-    //                     } else {
-    //                         // debug_bgprint!(DebugColor::Mint, "[DBG EMU QUEUE] Delay of Packet ALVR: {}. Now = {:.9}, deadline = {:.9} | (F_index: {} , {}/{} )",
-    //                         // format_elapsed!(delay), now.duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.emulated_added_delay_deadline.unwrap().duration_since(TaiTime::EPOCH).as_secs_f32() ,packet.header_alvr.next_packet_index, packet.header_alvr.shard_index, packet.header_alvr.shards_count );
-    //                         index += 1;
-    //                     }
-
-    //                     // Packet still needs to wait
-    //                 }
-    //                 None => {
-    //                     // Packet dropped
-    //                     self.queue.remove(index);
-    //                     print_pretty!(
-    //                         DebugColor::Red,
-    //                         "[EMU QUEUE DROP] Dropped packet ID {}",
-    //                         index
-    //                     );
-    //                 }
-    //             }
-    //         } else {
-    //             break;
-    //         }
-    //     }
-    //     indexes_to_remove.sort_unstable();
-    //     indexes_to_remove.reverse();
-
-    //     for &index in &indexes_to_remove {
-    //         print!("actually Removed: ");
-    //         let packet = self.queue.remove(index).unwrap();
-    //         packet.print(DebugColor::LightBlue);
-    //     }
-    //     transmitted_packets
-    // }
 }
 
 

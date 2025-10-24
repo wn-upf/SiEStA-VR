@@ -701,7 +701,7 @@ impl FovOptixStruct{
     }
 
 
-    pub fn report_fovoptix_stats_server(&mut self, client_stats: NetworkStatisticsPacket, tx_time_s: f32, rx_time_s: f32, ) {
+    pub fn report_fovoptix_stats_server(&mut self, client_stats: NetworkStatisticsPacket, tx_time_s: f32, rx_time_s: f32, now:TaiTime<0> ) {
         let mut send_delta_ms=0.0;
         let mut recv_delta_ms=0.0;
 
@@ -724,7 +724,8 @@ impl FovOptixStruct{
         let mut current_state="".to_string();
         let mut next_state="".to_string();
         let mut difference=0.0;
-        let delta_flag=true;//INTER_ARRIVAL_MANGER.lock().ComputeDeltas((frame.frame_send_timestamp as f64 *0.001) as i64, (client_stats.frame_arrival_timestamp as f64 *0.001)as i64, (Utc::now().timestamp_micros() as f64 *0.001) as i64, frame.total_size_for_this_frame, &mut timestamp_delta, &mut arrival_time_delta_ms, &mut packet_size_delta);
+        let delta_flag=true;
+        //INTER_ARRIVAL_MANGER.lock().ComputeDeltas((frame.frame_send_timestamp as f64 *0.001) as i64, (client_stats.frame_arrival_timestamp as f64 *0.001)as i64, (Utc::now().timestamp_micros() as f64 *0.001) as i64, frame.total_size_for_this_frame, &mut timestamp_delta, &mut arrival_time_delta_ms, &mut packet_size_delta);
         let mut b_s=f32::default();
         let mut bitrate_estimate_rtc=f64::default();
 
@@ -774,7 +775,13 @@ impl FovOptixStruct{
         // }
         
         //看ratecontrolinput中estimate bandwidth值是不是0，现在不加不减，或者是multiple赠的时候出问题了
-        target_bitrate_bps_inrtc=(self.aimd.Update(&self.rc, (Utc::now().timestamp_micros() as f64 *0.001) as i64)/1024.0/1024.0).to_string();
+        
+        let time_millis = now.duration_since(TaiTime::EPOCH).as_micros() as f64 * 0.001;  
+        
+        target_bitrate_bps_inrtc=(self.aimd.Update(&self.rc, time_millis as i64)/1024.0/1024.0).to_string(); // using TaiTime reference
+
+        // target_bitrate_bps_inrtc=(self.aimd.Update(&self.rc, (Utc::now().timestamp_micros() as f64 *0.001) as i64)/1024.0/1024.0).to_string();
+        
         difference=self.aimd.current_bitrate_-self.prev_target_bitrate_inrtc;
         let prev_target_bitrate=self.prev_target_bitrate_inrtc;
         self.prev_target_bitrate_inrtc=self.aimd.current_bitrate_;

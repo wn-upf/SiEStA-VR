@@ -25,7 +25,7 @@ NUMBER_OF_JOBS=2
 SERIAL_EXECUTION=1
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+TEST_TYPE=("BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
 simTime=150.0
 k_queue=10000
@@ -38,12 +38,12 @@ num_close_users=( 0 )     ## number of users with alternate distance
 N_XR=( 1) 
 PL=0.1
 
-fps_list=( 90.0 )
+fps_list=(60.0 90.0 120.0 )
 initial_bitrate_mbps=( 10.0 20.0 40.0 ) 
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach, 4=> GCC, 5 => NADA (TODO) 6 => FovOptix (TODO)
 
-ABR_ENABLED=( 6 )
+ABR_ENABLED=( 5 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
 RANDOM_SEEDS=({1..10})
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )

@@ -1218,6 +1218,7 @@ pub const NADA_RTT_HISTORY_SIZE : usize = 15;
 
 
 //RTCP NADA Feedback Report, from NADA Receiver
+#[derive(Debug,)]
 pub struct NADAFeedbackReport{
     pub rmode:i8, 
     pub x_curr:f64, 
@@ -1375,9 +1376,13 @@ impl NadaSender {
        6. clip rate r_ref within the range of [RMIN, RMAX]
        x_prev = x_curr & t_last = t_curr
      **/
-    pub fn update_on_receive_feedback(&mut self, send_timestamp:i64, 
-        feedback_report: NADAFeedbackReport, video_fps:f64){
-        self.t_curr = Utc::now().timestamp_micros();
+    pub fn update_on_receive_feedback(&mut self, now: TaiTime<0>,  send_timestamp:i64, feedback_report: NADAFeedbackReport, video_fps:f64){
+        
+        // println!("Received NADA feedback report: fps: {}, report: {:#?} ", video_fps, feedback_report ); 
+        
+        // self.t_curr = Utc::now().timestamp_micros();
+        self.t_curr = now.duration_since(TaiTime::EPOCH).as_micros() as i64; 
+        
         self.rmode = match feedback_report.rmode{
             0 => RateUpdateMode::AcceleratedRampUp,
             1 => RateUpdateMode::GradualUpdate,
@@ -1495,7 +1500,7 @@ impl NadaReceiver{
             p_loss: 0.0, 
             p_mark: 0.0,
             r_recv: 0, 
-            t_last: Utc::now().timestamp_micros(), 
+            t_last: 0, 
             d_queue_history: SlidingWindowAverage::new(
                 0,
                 15,
@@ -1562,13 +1567,15 @@ impl NadaReceiver{
         // let t_curr = Utc::now().timestamp_micros();
         
         let t_curr = now.duration_since(TaiTime::EPOCH).as_micros() as i64;
-
-        
+        // print!("[NADA]time to report?"); 
         let time_diff_ms = (t_curr - self.t_last)/1000;
 
-        if time_diff_ms > NADA_PARAM_DELTA{
 
-            self.d_tilde = self.d_queue_history.get_average() as f64/1000.0; // /1000 for us to ms
+        // println!("time diff in ms : now (micros): {} , last: {} -> DIFF: {}", t_curr, self.t_last, time_diff_ms) ; 
+        if time_diff_ms > NADA_PARAM_DELTA{
+            // println!("Time diff > {}", NADA_PARAM_DELTA);
+
+            self.d_tilde = self.d_queue_history.get_average() as f64 / 1000.0; // /1000 for us to ms
             // Calculate non-linear warping of delay if packet loss exists
              if had_packet_loss {
                 self.compute_d_tilde(had_packet_loss);
@@ -1625,14 +1632,14 @@ impl NadaReceiver{
 
     pub fn update_receive_loss_rate(&mut self, received_bytes: usize){
         let total_num_packets = (received_bytes as f32 / 1500.0).ceil() as u32;
-        let num_packets_lost = 0;    // ...OK? 
+        let num_packets_lost = 0;                                           // ......OK? 
         // received bytes in nal + size of header (VideoPacketHeader)
         let size_of_timestamp = std::mem::size_of::<Duration>();
         let size_of_send_timestamp = std::mem::size_of::<i64>();
         self.total_received_bytes += received_bytes + size_of_timestamp + size_of_send_timestamp;
         
         // total & lost packets to compute p_inst
-        self.total_packets_lost += num_packets_lost;   // Comment when replicating: THIS IS ALWAYS ZERO? So packets lost is useless as metric??. 
+        self.total_packets_lost += num_packets_lost;   // Comment when replicating: THIS IS ALWAYS ZERO? So packets lost is useless as metric in this implementation??. 
         self.total_num_packets += total_num_packets;    
 
         let elapsed = self.receive_rate_timer.elapsed();

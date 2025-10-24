@@ -296,16 +296,16 @@ fn generate_session_timeline<R: Rng>(
     sim_init_time: f64, 
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
-    let start_time_pause = truncated_exponential_seconds(rng, 30.0, 10.0, 40.0);
+    let start_time_pause = truncated_exponential_seconds(rng, 15.0, 8.0, 25.0);
     // let start_time_pause = sim_init_time; 
 
     let mut t = start_time_pause;
     let mut sessions = Vec::new();
     
     while t < stoptime {
-        let dur = rng.gen_range(20.0..=40.0);
+        let dur = rng.gen_range(8.0..=20.0);
 
-        let pause = truncated_exponential_seconds(rng, 15.0, 10.0, 40.0);
+        let pause = truncated_exponential_seconds(rng, 10.0, 8.0, 15.0);
 
         let start = t;
         let end = (t + dur).min(stoptime);
@@ -698,7 +698,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     for (i, (addr_client, addr_server)) in xr_client_addresses.iter().zip(&xr_server_addresses).enumerate() {
         let init: f64 = SIM_START_TIME as f64; 
-        
         
         let mut sessions = if test_distances_everest_bool 
             {

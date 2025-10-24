@@ -2563,8 +2563,11 @@ impl BitrateManager {
                         self.last_target_bitrate_bps
                     }
                     else{
-                        panic!("WHATS HAPPPPPPPPPPENING CATCH!"); 
-                        self.last_target_bitrate_bps 
+                        // panic!("WHATS HAPPPPPPPPPPENING CATCH!"); 
+                        
+                        // print_dblue!("NADA not configured yet, bitrate : {} Mbps ", self.last_target_bitrate_bps/1e6); 
+                        self.last_target_bitrate_bps = NADA_INITIAL_RATE as f32; 
+                        self.last_target_bitrate_bps   
                     }
                 }, 
 
@@ -2870,9 +2873,8 @@ impl XRServer {
         sim_unique_string: &str, 
 
     ) -> Self {
+
         let system_time = SystemTime::UNIX_EPOCH;
-
-
         let mut final_file; 
 
         if file_name_video.contains("randomVid"){
@@ -3072,7 +3074,7 @@ impl XRServer {
                     debug_debug!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
 
                     // let mut map_rtt_lock = map_clone.write().unwrap();
-                    let frame_id = network_stats.frame_index as u32;
+                    let frame_id: u32 = network_stats.frame_index as u32;
                     let rtt: Duration;
                     // if let send_instant = map_clone.get(&frame_id).unwrap()
                     if let Some((_, send_instant)) = map_clone.remove(&frame_id) {  
@@ -3082,7 +3084,7 @@ impl XRServer {
                             let val_rx = guard.last_reported_frame_rx_client_timestamp; 
                             
                             let send_instant_s = send_instant.duration_since(TaiTime::EPOCH).as_secs_f32(); 
-                            guard.report_fovoptix_stats_server(network_stats.clone(), send_instant_s, val_rx, );
+                            guard.report_fovoptix_stats_server(network_stats.clone(), send_instant_s, val_rx, now);
                         }
                         
                         rtt = now.duration_since(send_instant);
@@ -3109,14 +3111,21 @@ impl XRServer {
                             send_instant, 
                         );
 
-                        if netstats.nada_stats.nada_feedback{                                              // Should be equivalent to matching bitrate_mode to NADAPort
+                        if netstats.nada_stats.nada_feedback{         
+                            // print_dblue!("{} Received feedback: {:#?}", format_elapsed!(now), netstats.nada_stats.clone());                                      // Should be equivalent to matching bitrate_mode to NADAPort
                             let client_stats = netstats.nada_stats.clone(); 
                             let feedback_report  =  NADAFeedbackReport::new(client_stats.nada_rmode, client_stats.nada_xcurr, client_stats.nada_recv, client_stats.d_queue, client_stats.d_tilde, client_stats.plr);
                             if let Some(nada_sender_arc) = self.nada_sender.as_mut(){
                                 let mut guard = nada_sender_arc.lock().unwrap(); 
-                                guard.update_on_receive_feedback(send_instant.duration_since(TaiTime::EPOCH).as_micros() as i64, feedback_report, self.fps as f64);
+                                guard.update_on_receive_feedback(now, send_instant.duration_since(TaiTime::EPOCH).as_micros() as i64, feedback_report, self.fps as f64);
                                 self.bitrate_manager.last_nada_target_bitrate_mbps = Some(guard.get_target_bitrate() as f64 / 1024.0 / 1024.0) ;
                             }
+                        }
+                        else{
+                            if matches!(self.bitrate_manager.bitrate_mode, BitrateMode::NADACiscoPort{..}){
+                                // println!("NO FEEDBACK? ");
+                            }
+
                         }
                  
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
@@ -4504,7 +4513,6 @@ impl XRClient {
                 Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
 
             if self.abr_mode == 6 { // FovOptix only
-                println!("CONFIIG 6"); 
                 self.input_app_bw_probe = 
                     Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS)); 
 
@@ -5114,13 +5122,12 @@ impl XRClient {
                         }
                     }
                     
-                    
-                    
                     //////////////////////////////////////////////  // NADA rcv loop upon succesfully receiving a full frame. 
                     let mut nada_stats: NadaStats = NadaStats::default(); 
 
                     if let Some( nada_receiver_in) = self.nada_receiver.as_mut(){
-                            
+
+                        // println!("Nada receiver exists");                             
                         let mut nada_receiver = nada_receiver_in.lock().unwrap(); 
 
                         let frame_send_timestamp =     data.get_tx_time_first();  // as secs; 
@@ -5136,6 +5143,7 @@ impl XRClient {
 
                         //if there is a feedback to report
                         if is_feedback_on{
+                            // println!("FEEDBACK IS ON"); 
                             //send RTCP feedback report containing values of: rmode, x_curr, and r_recv
                             nada_stats.nada_feedback = true;
                             nada_stats.nada_xcurr = nada_receiver.x_curr;
