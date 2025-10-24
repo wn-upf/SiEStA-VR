@@ -211,7 +211,7 @@ impl VRPair {
             0.0,
         );
 
-        let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests); 
+        let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests, server_ip); 
 
         let mbox_xr_server = Mailbox::new();
         let mbox_xr_client = Mailbox::new();

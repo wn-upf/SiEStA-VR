@@ -134,3 +134,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [[test]]
 name = "integration"
 path = "tests/tests.rs"
+
+[profile.release]
+lto = true              # Link-time optimization
+codegen-units = 1       # Better optimization
+opt-level = 3           # Maximum optimization

@@ -202,7 +202,7 @@ impl VRPair {
             0.0,
         );
 
-        let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests); 
+        let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests, server_ip); 
 
         let mbox_xr_server = Mailbox::new();
         let mbox_xr_client = Mailbox::new();
@@ -496,16 +496,11 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     assert!(n_close <= n_xr, "n_close_users must not exceed total XR users");
 
+    let localhost_v4 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)), localhost_v4); 
 
-    let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)));
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
-
-    if !emu_effects.is_empty(){
-        crate::print_red!("Emulated patterns: \n{:#?}", emu_effects); 
-    }
-
-   
 
 
     for i in 0..n_close{ // to set up variable distance scenarios across users

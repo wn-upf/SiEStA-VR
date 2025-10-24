@@ -6,11 +6,12 @@ use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
 use std::hash::Hash;
+use std::net::IpAddr;
 // use std::hash::Hash;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
-use rand_distr::{Normal, Distribution};
+use rand_distr::{Normal, Distribution, Exp};
 use crate::lib::alvr_stream_socket::parse_shard_data;
 use crate::lib::{ SLOT, MacKey};
 use crate::lib::DebugColor; 
@@ -42,6 +43,9 @@ use rand::{SeedableRng};
 //         }
 //     }
 // }
+
+pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
+pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
 const DEBUG_EDCA: bool = false; 
 
@@ -101,18 +105,18 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
 
 
-pub const STEP1_TBEGIN: f64 = 15.0;
-pub const STEP1_TEND: f64 =   25.0;
+pub const STEP1_TBEGIN: f64 = 10.0;
+pub const STEP1_TEND: f64 =   20.0;
 
-pub const STEP2_TBEGIN: f64 = 35.0;
-pub const STEP2_TEND: f64 =   45.0;
+pub const STEP2_TBEGIN: f64 = 30.0;
+pub const STEP2_TEND: f64 =   40.0;
 
-pub const STEP3_TBEGIN: f64 = 65.0;
-pub const STEP3_TEND: f64 =   75.0;
+pub const STEP3_TBEGIN: f64 = 50.0;
+pub const STEP3_TEND: f64 =   60.0;
 
-pub const BANDWIDTH_LIMIT_S1: f64 = 90E6;
-pub const BANDWIDTH_LIMIT_S2: f64 = 50E6;
-pub const BANDWIDTH_LIMIT_S3: f64 = 30E6;
+pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
+pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
+pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -521,46 +525,57 @@ impl NetworkPattern {
             "effect_type",
 
             // OnOffPeriodic
-            "on_duration_secs",   "on_duration_nanos",
-            "off_duration_secs",  "off_duration_nanos",
+            "on_duration_s",
+            "off_duration_s",
             "current_state",
-            "last_change_secs",   "last_change_nanos",
+            "last_change_s",
 
             // ProbabilisticDrop
             "drop_probability",
-            "pd_valid_from_secs", "pd_valid_from_nanos",
-            "pd_valid_until_secs","pd_valid_until_nanos",
+            "pd_valid_from_s",
+            "pd_valid_until_s",
 
             // Bandwidth
-            "bw_max_bps",         "bw_current_tokens",
-            "bw_max_tokens",      "bw_token_refill_rate",
-            "bw_valid_from_secs", "bw_valid_from_nanos",
-            "bw_valid_until_secs","bw_valid_until_nanos",
+            "bw_max_bps",
+            "bw_current_tokens",
+            "bw_max_tokens",
+            "bw_token_refill_rate",
+            "bw_last_refill_s", // Added this field, as it's an f64 time
+            "bw_valid_from_s",
+            "bw_valid_until_s",
 
             // Jitter
-            "jit_mean_delay_secs","jit_mean_delay_nanos",
-            "jit_distribution",   "jit_variance",
-            "jit_correlation_pct","jit_last_delay_secs",
-            "jit_last_delay_nanos",
-            "jit_valid_from_secs","jit_valid_from_nanos",
-            "jit_valid_until_secs","jit_valid_until_nanos",
+            "jit_mean_delay_s",
+            "jit_distribution",
+            "jit_variance",
+            "jit_correlation_pct",
+            "jit_last_delay_s",
+            "jit_valid_from_s",
+            "jit_valid_until_s",
         ]
     }
 
 
-
-    /// Turn *this* variant into one row of Strings, matching exactly the above headers.
     pub fn to_csv_row(&self) -> Vec<String> {
-        // convenience closures
-        let d2s = |d: &Duration| d.as_secs().to_string();
-        let d2n = |d: &Duration| d.subsec_nanos().to_string();
-        let t2s = |t: &TaiTime<0>| t.as_secs().to_string();
-        let t2n = |t: &TaiTime<0>| t.subsec_nanos().to_string();
+        // convenience closures to convert time values to f64 strings
+        let d2f = |d: &Duration| d.as_secs_f64().to_string();
+        let t2f = |t: &TaiTime<0>| t.duration_since(TaiTime::EPOCH).as_secs_f64().to_string();
+        let f2s = |f: &f64| f.to_string();
 
         // start with effect_type
-        let mut row = vec![format!("{:?}", self)  // but we'll overwrite below
-            .split('(').next().unwrap().to_string()
-        ];
+        // let mut row = vec![format!("{:?}", self)
+        //     .split('(')
+        //     .next()
+        //     .unwrap()
+        //     .to_string()];
+        let mut row = vec![match self {
+            NetworkPattern::OnOffPeriodic { .. } => "OnOffPeriodic",
+            NetworkPattern::ProbabilisticDrop { .. } => "ProbabilisticDrop",
+            NetworkPattern::Bandwidth { .. } => "Bandwidth",
+            NetworkPattern::Jitter { .. } => "Jitter",
+            NetworkPattern::Constant => "Constant",
+        }.to_string()];
+
 
         // now push _all_ possible columns in the same order as csv_headers()
         match self {
@@ -570,18 +585,14 @@ impl NetworkPattern {
                 current_state,
                 last_state_change,
             } => {
-                row.push(d2s(on_duration));
-                row.push(d2n(on_duration));
-                row.push(d2s(off_duration));
-                row.push(d2n(off_duration));
+                row.push(d2f(on_duration));
+                row.push(d2f(off_duration));
                 row.push(current_state.to_string());
-                row.push(t2s(last_state_change));
-                row.push(t2n(last_state_change));
+                row.push(t2f(last_state_change));
 
                 // fill the rest with empties
-                row.extend(std::iter::repeat(String::new()).take(
-                    NetworkPattern::csv_headers().len() - row.len(),
-                ));
+                row.extend(std::iter::repeat(String::new())
+                    .take(Self::csv_headers().len() - row.len()));
             }
 
             NetworkPattern::ProbabilisticDrop {
@@ -589,18 +600,16 @@ impl NetworkPattern {
                 valid_from,
                 valid_until,
             } => {
-                // push blanks for OnOffPeriodic
-                row.extend((0..7).map(|_| String::new()));
+                // push blanks for OnOffPeriodic (4 fields)
+                row.extend((0..4).map(|_| String::new()));
 
                 row.push(drop_probability.to_string());
-                row.push(t2s(valid_from));
-                row.push(t2n(valid_from));
-                row.push(t2s(valid_until));
-                row.push(t2n(valid_until));
+                row.push(t2f(valid_from));
+                row.push(t2f(valid_until));
 
                 // fill the rest
                 row.extend(std::iter::repeat(String::new())
-                    .take(NetworkPattern::csv_headers().len() - row.len()));
+                    .take(Self::csv_headers().len() - row.len()));
             }
 
             NetworkPattern::Bandwidth {
@@ -608,24 +617,24 @@ impl NetworkPattern {
                 current_tokens,
                 max_tokens,
                 token_refill_rate,
-                last_refill, 
+                last_refill,
                 valid_from,
                 valid_until,
             } => {
-                // blanks for OnOffPeriodic + ProbabilisticDrop
-                row.extend((0..12).map(|_| String::new()));
+                // blanks for OnOffPeriodic (4) + ProbabilisticDrop (3) = 7 fields
+                row.extend((0..7).map(|_| String::new()));
 
-                row.push(max_bps.to_string());
-                row.push(current_tokens.to_string());
-                row.push(max_tokens.to_string());
-                row.push(token_refill_rate.to_string());
-                row.push(t2s(valid_from));
-                row.push(t2n(valid_from));
-                row.push(t2s(valid_until));
-                row.push(t2n(valid_until));
+                row.push(f2s(max_bps));
+                row.push(f2s(current_tokens));
+                row.push(f2s(max_tokens));
+                row.push(f2s(token_refill_rate));
+                row.push(f2s(last_refill)); // Pushing the f64 last_refill time
+                row.push(t2f(valid_from));
+                row.push(t2f(valid_until));
 
+                // fill the rest
                 row.extend(std::iter::repeat(String::new())
-                    .take(NetworkPattern::csv_headers().len() - row.len()));
+                    .take(Self::csv_headers().len() - row.len()));
             }
 
             NetworkPattern::Jitter {
@@ -637,26 +646,26 @@ impl NetworkPattern {
                 valid_from,
                 valid_until,
             } => {
-                // blanks for the first three variants
-                row.extend((0..20).map(|_| String::new()));
+                // blanks for OnOff (4) + ProbDrop (3) + Bandwidth (7) = 14 fields
+                row.extend((0..14).map(|_| String::new()));
 
-                row.push(d2s(mean_delay));
-                row.push(d2n(mean_delay));
+                row.push(d2f(mean_delay));
                 row.push(format!("{:?}", distribution_type));
-                row.push(variance.to_string());
+                row.push(f2s(variance));
                 row.push(correlation_pct.to_string());
-                row.push(d2s(last_delay));
-                row.push(d2n(last_delay));
-                row.push(t2s(valid_from));
-                row.push(t2n(valid_from));
-                row.push(t2s(valid_until));
-                row.push(t2n(valid_until));
+                row.push(d2f(last_delay));
+                row.push(t2f(valid_from));
+                row.push(t2f(valid_until));
+                
+                // fill the rest (should be 0)
+                row.extend(std::iter::repeat(String::new())
+                    .take(Self::csv_headers().len() - row.len()));
             }
 
             NetworkPattern::Constant => {
                 // nothing else to push—just pad out the full width
                 row.extend(std::iter::repeat(String::new())
-                    .take(NetworkPattern::csv_headers().len() - 1));
+                    .take(Self::csv_headers().len() - 1));
             }
         }
 
@@ -755,19 +764,21 @@ impl EmulatedLink {
         max_queue_size: usize,
         now: TaiTime<0>,
         emulated_tests: Option<(bool, bool, bool, bool)>,
+        id_sta: IpAddr, 
     ) -> Self {
 
         let queue_mechanism: QueueMechanism;
 
         if let Some(values_tests) = emulated_tests {
             queue_mechanism =
-                QueueMechanism::new(max_queue_size, now, values_tests);
+                QueueMechanism::new(max_queue_size, now, values_tests, id_sta);
         } else {
             print_yellow!("NO PATTERNS?", ); 
             queue_mechanism = QueueMechanism::new(
                 MAX_EMULATED_QUEUE_PACKETS,
                 TaiTime::EPOCH,
                 (false, false, false, false),
+                id_sta
             );
         }
 
@@ -794,6 +805,8 @@ impl EmulatedLink {
                         .duration_since(now)
                         .max(Duration::from_nanos(1));
                     // Schedule a flush event
+                    
+                    self.queue_mechanism.next_flush_scheduled = Some(deadline); 
                     context
                         .scheduler
                         .schedule_event(delay, Self::flush_queue, ())
@@ -810,8 +823,39 @@ impl EmulatedLink {
         }
     }
 
-    /// Scheduled event: attempt to emit all ready packets from the internal queue
+
     pub fn flush_queue<'a>(
+    &'a mut self,
+    _: (),
+    context: &'a Context<Self>,
+) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+
+            self.queue_mechanism.next_flush_scheduled = None;
+            // This now efficiently gets only the ready packets
+            let ready = self.queue_mechanism.process_emu_queued_packets(context);
+            for pkt in ready {
+                self.output.send(pkt).await;
+            }
+
+            // *** OPTIMIZATION ***
+            // Efficiently schedule the next flush based on the *new* front packet.
+            if let Some(next_pkt) = self.queue_mechanism.queue.front() {
+                if let Some(next_deadline) = next_pkt.emulated_added_delay_deadline {
+                    let now   = context.scheduler.time();
+                    let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
+                    self.queue_mechanism.next_flush_scheduled = Some(next_deadline);
+                    
+                    context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
+                }
+            }
+
+        }
+    }
+
+
+    /// Scheduled event: attempt to emit all ready packets from the internal queue
+    pub fn flush_queue_slow<'a>( // traverses whole queue. 
     &'a mut self,
     _: (),
     context: &'a Context<Self>,
@@ -847,6 +891,9 @@ pub struct QueueMechanism {
     queue: VecDeque<MpduPacket>,              // Packet queue
     network_emulator: NetworkPatternEmulator, // Bandwidth pattern
     max_queue_size: usize,
+    next_flush_scheduled: Option<TaiTime<0>>, 
+    last_bw_pattern_logged: Option<(TaiTime<0>, usize)>, // (last_log_time, pattern_index)    
+    id_sta: IpAddr, 
 }
 
 impl QueueMechanism {
@@ -854,8 +901,9 @@ impl QueueMechanism {
         max_emulated_queue_packets: usize,
         _now: TaiTime<0>,
         tests: (bool, bool, bool, bool),
+        id_sta: IpAddr, 
     ) -> Self {
-        let mut network_emulator = NetworkPatternEmulator::new();
+        let mut network_emulator = NetworkPatternEmulator::new(id_sta);
 
         let valid_from: TaiTime<0> = TaiTime::EPOCH
             .checked_add(Duration::from_secs_f64(STEP1_TBEGIN))
@@ -915,8 +963,8 @@ impl QueueMechanism {
                 RandomEventKind::Bandwidth,         // Event type: Bandwidth limit
                 overall_start,                      // Overall window start time
                 overall_end,                        // Overall window end time
-                Duration::from_millis(200),         // Minimum duration per event
-                Duration::from_millis(2000),        // Maximum duration per event
+                Duration::from_millis(3000),         // Minimum duration per event
+                Duration::from_millis(15000),        // Maximum duration per event
                 JitterDistributionType::Uniform,    // Distribution for event duration
                 50e6,                                // Maximum bps (1Mbps) as mean_value
                 40e6,                                // Variance 
@@ -927,21 +975,22 @@ impl QueueMechanism {
         if test_bw {
 
             print_red!("****BW PATTERNS ADDED*****", ); 
-            let mtu = 1500.0 * 8.0; 
+            
+        
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
-                mtu,
+                MTU_EMULATED,
                 BANDWIDTH_LIMIT_S1,
                 valid_from,
                 valid_until,
             ));
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
-                mtu, 
+                MTU_EMULATED, 
                 BANDWIDTH_LIMIT_S2,
                 valid_from2,
                 valid_until2,
             ));
             network_emulator.add_pattern(NetworkPattern::new_bandwidth(
-                mtu, 
+                MTU_EMULATED, 
                 BANDWIDTH_LIMIT_S3,
                 valid_from3,
                 valid_until3,
@@ -998,6 +1047,9 @@ impl QueueMechanism {
             queue: VecDeque::new(),
             network_emulator,
             max_queue_size: max_emulated_queue_packets,
+            next_flush_scheduled: None, 
+            last_bw_pattern_logged: None, 
+            id_sta, 
         }
     }
 
@@ -1014,6 +1066,10 @@ impl QueueMechanism {
         // let mut _dbg_delay  = Duration::ZERO;
         // let _dbg_packet = packet.clone(); 
 
+        if self.network_emulator.last_update_time + REFILL_INTERVAL <= now {
+            self.network_emulator.refill_all_buckets(now);
+        }
+        self.log_active_bw_patterns(now, &packet);
         if packet.length_packet == 0 {
             packet.length_packet = packet.data_inner.len();   // fallback for early traffic
         }          
@@ -1035,16 +1091,35 @@ impl QueueMechanism {
 
                 // Enqueue the packet
                 if self.queue.len() < self.max_queue_size {
+
+                    let needs_flush = match self.next_flush_scheduled {
+                        None => true,
+                        Some(scheduled_time) => {
+                            // Only reschedule if this packet would be ready sooner
+                            delayed_packet.emulated_added_delay_deadline.unwrap() < scheduled_time
+                        }
+                    }; 
+
                     self.queue.push_back(delayed_packet.clone());
-                    EnqueueResult::Queued(delayed_packet)
+                    if needs_flush {
+                        EnqueueResult::Queued(delayed_packet)
+                    } else {
+                        // Don't trigger new scheduling
+                        EnqueueResult::Queued(MpduPacket { 
+                            emulated_added_delay_deadline: None, 
+                            ..delayed_packet 
+                        })
+                    }
+                    
                 } else {
-                    print_red!(
-                        "[NETEM FULL queue] Packet {} DROPPED (ALVR: F_id: {} , {} / {})",
-                        delayed_packet.packet_id,
-                        delayed_packet.header_alvr.next_packet_index,
-                        delayed_packet.header_alvr.shard_index,
-                        delayed_packet.header_alvr.shards_count
-                    );
+                    // print_red!(
+                    //     "[NETEM FULL queue] Packet DROPPED (ALVR Stream: {} | Frame_id: {} , {} / {})",
+                    //     // delayed_packet.packet_id,
+                    //     delayed_packet.header_alvr.stream_id, 
+                    //     delayed_packet.header_alvr.next_packet_index,
+                    //     delayed_packet.header_alvr.shard_index,
+                    //     delayed_packet.header_alvr.shards_count
+                    // );
                     EnqueueResult::Dropped
                 }
             }
@@ -1069,38 +1144,85 @@ impl QueueMechanism {
 
 
     }
-
     pub fn process_emu_queued_packets(
         &mut self,
         context: &Context<EmulatedLink>,
     ) -> Vec<MpduPacket> {
         let now = context.scheduler.time();
-
-        // Take the queue out to rebuild it in one pass.
-        let mut old = std::mem::take(&mut self.queue);
-        let mut keep: VecDeque<MpduPacket> = VecDeque::with_capacity(old.len());
         let mut ready: Vec<MpduPacket> = Vec::new();
 
-        while let Some(mut p) = old.pop_front() {
-            match p.emulated_added_delay_deadline {
-                Some(deadline) => {
-                    // Trigger when now >= deadline (exact float equality is brittle).
-                    if now >= deadline {
-                        ready.push(p); // transmit now
-                    } else {
-                        keep.push_back(p);
-                    }
+        // *** OPTIMIZATION ***
+        // Efficiently process only the ready packets from the front.
+        // This loop stops as soon as it finds a packet that is not ready.
+        while let Some(p) = self.queue.front() {
+            if let Some(deadline) = p.emulated_added_delay_deadline {
+                if now >= deadline {
+                    // Packet is ready, pop it and add to the ready list
+                    ready.push(self.queue.pop_front().unwrap()); // We know it's Some
+                } else {
+                    // The front packet is not ready, so no subsequent packet can be.
+                    break;
                 }
-                None => {
-                    // treat as dropped
-                    // (optional) log here if you want
-                }
+            } else {
+                // Packet has no deadline, treat as dropped (matches original logic)
+                self.queue.pop_front();
             }
+        }
+        ready
+    }
+    
+    fn log_active_bw_patterns(&mut self, now: TaiTime<0>, packet: &MpduPacket) {
+            // Log at most once per second to avoid spam
+            let should_log = match self.last_bw_pattern_logged {
+                None => true,
+                Some((last_time, _)) => {
+                    now.duration_since(last_time) >= Duration::from_secs(1)
+                }
+            };
+
+            if !should_log {
+                return;
             }
 
-            self.queue = keep;
-            ready
-    }
+            // Find active BW patterns
+            for (idx, pattern) in self.network_emulator.patterns.iter().enumerate() {
+                if let NetworkPattern::Bandwidth {
+                    max_bps,
+                    current_tokens,
+                    max_tokens,
+                    token_refill_rate,
+                    valid_from,
+                    valid_until,
+                    ..
+                } = pattern
+                {
+                    if now >= *valid_from && now <= *valid_until {
+                        // Format the message with traffic direction
+                        let direction = if packet.sta_src_id > packet.sta_dest_id {
+                            format!("UL: STA{}→AP", packet.sta_src_id)
+                        } else {
+                            format!("DL: AP→STA{}", packet.sta_dest_id)
+                        };
+
+                        crate::print_dblue!(
+                            "{:.6}[BW EMU {} ({:.5}->{:.5})] | {} | Limit: {:.2} Mbps | Tokens: {:.0}/{:.0} Mbits ",
+                            format_elapsed!(now),
+                            self.id_sta, 
+                            format_elapsed!(valid_from),
+                            format_elapsed!(valid_until), 
+                            direction,
+                            max_bps / 1e6,
+                            current_tokens / 1e6,
+                            max_tokens / 1e6,
+                            // token_refill_rate / 1e6
+                        );
+
+                        self.last_bw_pattern_logged = Some((now, idx));
+                        return; // Only log one pattern per call
+                    }
+                }
+            }
+        }
 }
 
 
@@ -1118,14 +1240,16 @@ pub struct NetworkPatternEmulator {
     last_update_time: TaiTime<0>,
     last_update_only_DBG_NETEM: TaiTime<0>,
     debug_counter: usize, // Counter to track the calls
+    ip_parent: IpAddr, 
 }
 impl NetworkPatternEmulator {
-    pub fn new() -> Self {
+    pub fn new(ip_parent: IpAddr) -> Self {
         Self {
             patterns: Vec::new(),
             last_update_time: TaiTime::default(),
             last_update_only_DBG_NETEM: TaiTime::default(),
             debug_counter: 0,
+            ip_parent, 
         }
     }
     
@@ -1145,20 +1269,54 @@ impl NetworkPatternEmulator {
         mean_value: f64,
         variance: f64,
     ) {
+        if count == 0 {
+            return; // Nothing to do
+        }
+
         let overall_duration = overall_end.duration_since(overall_start);
-        let max_offset_secs = overall_duration
-            .as_secs_f64()- (max_duration.as_secs_f64());
+        let overall_duration_secs = overall_duration.as_secs_f64();
 
+        // --- New logic for non-overlapping, exponential gaps ---
+
+        // 1. Estimate average event duration to calculate average gap time.
+        //    This is a heuristic to parameterize the exponential distribution.
+        let avg_duration_secs = (min_duration.as_secs_f64() + max_duration.as_secs_f64()) / 2.0;
+        let total_avg_event_time_secs = avg_duration_secs * (count as f64);
+
+        // 2. Calculate total time available for gaps.
+        //    We use .max(1e-9) to avoid division by zero if events take all the time.
+        let total_gap_time_secs = (overall_duration_secs - total_avg_event_time_secs).max(1e-9);
+
+        // 3. Calculate the mean time for one gap. We plan for 'count' gaps
+        //    (including the initial gap from overall_start).
+        let mean_gap_secs = total_gap_time_secs / (count as f64);
+
+        let min_gap_secs = 4.0; 
+
+        // 4. Create the exponential distribution for the gaps.
+        //    The rate (lambda) is 1 / mean.
+        let rate_lambda = 1.0 / mean_gap_secs;
+        let gap_dist = Exp::new(rate_lambda)
+            .expect("Failed to create exponential gap distribution. Check calculations.");
+
+        let mut current_time = overall_start; // This tracks the end of the last event
+        let mut events_added = 0;
         let mut rng = rand::thread_rng();
+        // --- End of new logic ---
 
-        for _ in 0..count {
-            // Randomly choose a start time within the overall window, leaving room for a full event duration.
-            let offset_secs = rng.gen_range(0.0..max_offset_secs);
-            let event_start = overall_start
-                .checked_add(Duration::from_secs_f64(offset_secs))
-                .expect("Time addition failed");
+        // Modified loop: Use a while loop to add "as many as possible"
+        while events_added < count {
+            // --- New: Generate gap and event_start ---
+            // Generate an exponentially distributed gap time.
+            let gap_secs_sample = gap_dist.sample(&mut rng);
+            let gap_secs = gap_secs_sample + min_gap_secs; 
 
-            // Determine event duration based on chosen distribution
+            let event_start = match current_time.checked_add(Duration::from_secs_f64(gap_secs)) {
+                Some(time) => time,
+                None => break, // Break if time addition overflows
+            };
+
+            // Determine event duration (existing logic)
             let duration_secs = match dist {
                 JitterDistributionType::Uniform => {
                     let min = min_duration.as_secs_f64();
@@ -1166,95 +1324,105 @@ impl NetworkPatternEmulator {
                     rng.gen_range(min..max)
                 }
                 JitterDistributionType::Gaussian => {
-                    // For Gaussian, we use a Normal distribution centered at the midpoint.
                     let center = (min_duration.as_secs_f64() + max_duration.as_secs_f64()) / 2.0;
-                    // Create a normal distribution; if variance <= 0, fallback to center.
+                    // Note: The 2nd param to Normal::new is std_dev, not variance.
+                    // Assuming 'variance' param *means* std_dev for this case.
                     let normal = Normal::new(center, variance).unwrap_or_else(|_| Normal::new(center, 0.1).unwrap());
-                    // Sample and then clamp the duration between min and max.
                     let sample = normal.sample(&mut rng);
                     sample.max(min_duration.as_secs_f64()).min(max_duration.as_secs_f64())
                 }
             };
             let event_duration = Duration::from_secs_f64(duration_secs);
-            let event_end = event_start
-                .checked_add(event_duration)
-                .expect("Time addition failed");
-                // Debug log: print event details before creation.
+            let event_end = match event_start.checked_add(event_duration) {
+                Some(time) => time,
+                None => break, // Break if time addition overflows
+            };
+
+            // Check if the event fits within the overall window.
+            if event_end > overall_end {
+                // This event doesn't fit, and no subsequent events will either.
+                break;
+            }
+
+            // Debug log (existing)
             print_prettyyyy!(
-                DebugColor::Green, 
+                DebugColor::Green,
                 "Creating event: {:?}, start: {:?}, duration: {:?}, intensity: {}",
                 event_type, event_start, event_duration, mean_value
-            ); 
-
-            let std_dev = variance;
-
-            println!(">>>std dev: {}", std_dev); 
-            println!(
-                "DEBUG: mean_value={} std_dev={} ratio={}",
-                mean_value, std_dev, std_dev / mean_value
             );
+            
+            let std_dev = variance.sqrt(); // Used for PacketLoss
+
 
             let normal = Normal::new(mean_value, std_dev).expect("Invalid distribution parameters");
             let mut drop_probability = normal.sample(&mut rng);
             drop_probability = drop_probability.clamp(0.0, 1.0);
-                            
-            // Create the event based on its type.
+
+            // Create the event based on its type. (existing logic)
             let pattern = match event_type {
                 RandomEventKind::PacketLoss => NetworkPattern::ProbabilisticDrop {
-                    drop_probability: drop_probability, // e.g. 0.8 for intense loss
+                    drop_probability: drop_probability,
                     valid_from: event_start,
                     valid_until: event_end,
                 },
                 RandomEventKind::Jitter => {
-                    // Use the distribution type to pick between jitter constructors.
                     match dist {
                         JitterDistributionType::Uniform => NetworkPattern::new_jitter_uniform(
-                            mean_value, // mean delay in ms
-                            variance,   // half-width in ms
-                            0.0,        // no correlation by default
+                            mean_value,
+                            variance,
+                            0.0,
                             event_start,
                             event_end,
                         ),
                         JitterDistributionType::Gaussian => NetworkPattern::new_jitter_gaussian(
-                            mean_value, // mean delay in ms
-                        variance,   // standard deviation in ms
-                        0.0,        // no correlation by default
+                            mean_value,
+                            variance, // Note: param is likely std_dev, not variance
+                            0.0,
+                            event_start,
+                            event_end,
+                        ),
+                    }
+                },
+                RandomEventKind::Bandwidth => {
+                    let normal_bw = Normal::new(mean_value, variance)
+                        .unwrap_or_else(|_| Normal::new(mean_value, 0.1 * mean_value).unwrap());
+                    
+                    let z: f64 = normal_bw.sample(&mut rand::thread_rng()).max(15e6); // minimum 15 Mbps
+                    
+                    crate::print_dblue!(
+                        "[{}] Bandwidth period: {:.5} -> {:.5} | sampled {:.2} Mbps",
+                        self.ip_parent, 
+                        format_elapsed!(event_start), 
+                        format_elapsed!(event_end), 
+                        z / 1e6
+                    );
+                    NetworkPattern::new_bandwidth(
+                        z,
+                        z,
                         event_start,
                         event_end,
-                    ),
+                    )
                 }
-            }, 
-            RandomEventKind::Bandwidth => {
-                // For bandwidth events, mean_value represents the max_bps limit.
-                let std_dev = variance.sqrt();
+            };
 
-                            // Define a normal distribution centered at mean_value (bps)
-                let normal_bw = Normal::new(mean_value, std_dev)
-                        .unwrap_or_else(|_| Normal::new(mean_value, 0.1 * mean_value).unwrap());
-                // Sample the effective bandwidth for this event
-                // let sampled_bw = normal_bw.sample(&mut rng).max(0.0); // avoid negatives
+            self.add_pattern(pattern);
 
-                let z: f64 = normal.sample(&mut rand::thread_rng()).max(5e6); // minimum 5 Mbps
-                crate::print_dblue!(
-                    // DebugColor::Cyan,
-                    "📶 Bandwidth event: {:.2} Mbps ± {:.2} variance → sampled {:.2} Mbps",
-                    mean_value / 1e6,
-                    variance / 1e6,
-                    z / 1e6
-                );
-                NetworkPattern::new_bandwidth(
-                    z, // max_bps for the event
-                    z, // here we use the same value for the token refill rate
-                    event_start,
-                    event_end,
-                )
-            }
-        };
-
-        // Finally, add the generated pattern to the emulator.
-        self.add_pattern(pattern);
+            events_added += 1;
+            current_time = event_end; // The next event's gap starts after this one ends
+            // --- End of new logic ---
         }
-    }
+
+        // --- New: Add log statement for shortfall ---
+        if events_added < count {
+            // TODO: Replace println! with your application's logger (e.g., log::warn!)
+            println!(
+                "WARN: Requested {} random events, but only {} could be added without overlap in the given time window.",
+                count, events_added
+            );
+        }
+
+        }
+    
 
     pub fn add_pattern(&mut self, pattern: NetworkPattern) {
         self.patterns.push(pattern);
@@ -1286,6 +1454,16 @@ impl NetworkPatternEmulator {
         }
         (any_active, just_ended)
     }
+
+     pub fn refill_all_buckets(&mut self, now: TaiTime<0>) {
+        for pattern in &mut self.patterns {
+            if let NetworkPattern::Bandwidth { .. } = pattern {
+                // Refill without packet accounting
+                pattern.bandwidth_account(now, None);
+            }
+        }
+    }
+
 
     #[allow(unused_assignments)]
     pub fn should_transmit_with_delay(
@@ -1321,8 +1499,8 @@ impl NetworkPatternEmulator {
             //     "{} [PATTERN TRANSITION] Bandwidth pattern just ended, need to purge queue",
             //     format_elapsed!(current_time)
             // );
-
-            return None; // Signal to drop the packet (and potentially purge queue)
+            // return Some(Duration::from_micros(16)); 
+            return None; // Signal to drop the packet, was causing excessive drops
         }
 
         // Find all active bandwidth patterns at the current time
@@ -1417,7 +1595,7 @@ impl NetworkPatternEmulator {
                 } => {
                         let pkt_bits = (packet.length_packet * 8) as f64;
                         let (can_send, delay) = pattern.bandwidth_account(current_time, Some(pkt_bits));
-
+                    
                         if can_send {
                             packet.has_consumed_emu_tokens = true;
                             return Some(Duration::ZERO);
@@ -1947,84 +2125,90 @@ impl QueueModule {
         }
         winner.into_values().collect()
     }
+    pub async fn cache_input_packet(&mut self, packet: MpduPacket) {
+        let key = (packet.sta_src_id, packet.sta_dest_id);
 
-    pub async fn cache_input_packet(&mut self, packet: MpduPacket){   // optimization to not iterate over whole queue each time we transmit. Done once per enqueued pac
+        // --- PRE-CALCULATION ---
+        // Do all immutable reading from `self` *before* the mutable borrow.
+        let is_ul = packet.sta_src_id > packet.sta_dest_id;
+        let mac_key_edca = if is_ul {
+            (packet.sta_src_id, packet.edca_ac)
+        } else {
+            (-1, packet.edca_ac)
+        };
 
-         let key = (packet.sta_src_id, packet.sta_dest_id);
+        // All immutable borrows happen here and end immediately
+        let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
+        let coords_queue = self.coords_queue; // Assuming Coords is Copy
+        let p_tx = self.p_tx;                 // f64 is Copy
 
-                // `or_insert_with` runs the expensive calculation *only* if this
-                // is the first packet for this flow.
-                let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
-                    // All this logic now runs ONCE per flow, not per-packet per-tick.
-                    let is_ul = packet.sta_src_id > packet.sta_dest_id;
-                    let mac_key_edca = if is_ul {
-                        (packet.sta_src_id, packet.edca_ac)
-                    } else {
-                        (-1, packet.edca_ac)
-                    };
+        // --- MUTABLE OPERATION ---
+        // Now, this mutable borrow of `self` is the *only* active borrow.
+        let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
+            // All this logic now runs ONCE per flow.
+            // We use the local variables, not `self`.
 
-                    // Calculate transmission delay for a single packet
-                    let resultz = airtime_ampdu(
-                        packet.length_packet as f64,
-                        1,
-                        self.coords_queue,
-                        packet.sta_src_coords,
-                        self.p_tx,
-                    );
+            // Calculate transmission delay for a single packet
+            let resultz = airtime_ampdu(
+                packet.length_packet as f64,
+                1,
+                coords_queue, // Use the variable
+                packet.sta_src_coords,
+                p_tx,         // Use the variable
+            );
 
-                    let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
+            // Binary search
+            let mut low = 1;
+            let mut high = MAX_AMPDU_SIZE;
+            let mut optimal_n_packets = 0;
+            let mut resultz_full_ampdu = airtime_ampdu(
+                packet.length_packet as f64 * high as f64,
+                high,
+                coords_queue, // Use the variable
+                packet.sta_src_coords,
+                p_tx,         // Use the variable
+            );
 
-                    // Binary search
-                    let mut low = 1;
-                    let mut high = MAX_AMPDU_SIZE;
-                    let mut optimal_n_packets = 0;
-                    let mut resultz_full_ampdu = airtime_ampdu(
-                        packet.length_packet as f64 * high as f64,
-                        high,
-                        self.coords_queue,
-                        packet.sta_src_coords,
-                        self.p_tx,
-                    );
+            while low <= high {
+                let mid = (low + high) / 2;
+                let test_resultz = airtime_ampdu(
+                    packet.length_packet as f64 * mid as f64,
+                    mid,
+                    coords_queue, // Use the variable
+                    packet.sta_src_coords,
+                    p_tx,         // Use the variable
+                );
 
-                    while low <= high {
-                        let mid = (low + high) / 2;
-                        let test_resultz = airtime_ampdu(
-                            packet.length_packet as f64 * mid as f64,
-                            mid,
-                            self.coords_queue,
-                            packet.sta_src_coords,
-                            self.p_tx,
-                        );
+                // Use the pre-calculated cap_s_edca variable
+                if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca {
+                    optimal_n_packets = mid;
+                    resultz_full_ampdu = test_resultz;
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            // Note: packet_count starts at 0, will be incremented below
+            StaRateInfo {
+                total_transmission_delay_single: resultz,
+                total_transmission_delay_fullampdu: resultz_full_ampdu,
+                fullampdu_max_size: optimal_n_packets as usize,
+                packet_count: 0,
+                weighted_rate_single: resultz, // First value for EWMA
+                weighted_rate_fullampdu: resultz_full_ampdu, // First value for EWMA
+                // Avoid division by zero if optimal_n_packets is 0
+                per_packet_channel_access_efficiency: resultz_full_ampdu / (optimal_n_packets.max(1) as f64),
+                expected_queue_delivery_ms: 0.0,
+            }
+        }); // <-- Mutable borrow of self.sta_stats_cache ends here
 
-                        if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca {
-                            optimal_n_packets = mid;
-                            resultz_full_ampdu = test_resultz;
-                            low = mid + 1;
-                        } else {
-                            high = mid - 1;
-                        }
-                    }
-                    // Note: packet_count starts at 0, will be incremented below
-                    StaRateInfo {
-                        total_transmission_delay_single: resultz,
-                        total_transmission_delay_fullampdu: resultz_full_ampdu,
-                        fullampdu_max_size: optimal_n_packets as usize,
-                        packet_count: 0,
-                        weighted_rate_single: resultz, // First value for EWMA
-                        weighted_rate_fullampdu: resultz_full_ampdu, // First value for EWMA
-                        // Avoid division by zero if optimal_n_packets is 0
-                        per_packet_channel_access_efficiency: resultz_full_ampdu / (optimal_n_packets.max(1) as f64),
-                        expected_queue_delivery_ms: 0.0,
-                    }
-                });
+        // --- UPDATE ---
+        // This part runs for EVERY packet, but it's very fast.
+        entry.packet_count += 1;
 
-                // --- INCREMENT AND UPDATE ---
-                // This part runs for EVERY packet, but it's very fast.
-                entry.packet_count += 1;
-
-                // Re-calculate the expected delivery time based on the new count
-                entry.expected_queue_delivery_ms =
-                    entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+        // Re-calculate the expected delivery time based on the new count
+        entry.expected_queue_delivery_ms =
+            entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
     }
 
 
@@ -2478,8 +2662,7 @@ impl QueueModule {
             let mut lost_packets: Vec<(usize, MpduPacket)> = Vec::new(); // Unused now; kept for debug if needed.
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, 
             // select first packet fairly to ensure channel access with reduced backlog for each user.
-            let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
-    
+            let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta().clone();    
             let mut ul_stas = HashSet::new();
             let mut is_dl : bool = false; 
 

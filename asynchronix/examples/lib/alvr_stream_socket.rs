@@ -2194,8 +2194,57 @@ impl<H: Serialize> StreamSender<H> {
                     }
                 };
             };
-        } else {
-            // Fallback for non-FFMPEG mode
+        } else {             // non-FFMPEG mode, fast!
+
+            if self.csv_trace.path.as_os_str().is_empty() {
+                let third_octet = get_third_octet(ip).unwrap(); 
+                
+                let csv_path_emu = get_prefix_path(&format!(
+                    "Results/{}/trace_emu_effects{}.csv",
+                    name_folder,
+                    third_octet,
+                ));
+
+                let parent_dir = std::path::Path::new(&csv_path_emu)
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("CSV path has no parent: {}", csv_path_emu))?;
+                std::fs::create_dir_all(parent_dir)
+                    .map_err(|e| anyhow::anyhow!("Failed to create results directory: {}", e))?;
+
+                // Try to atomically create the file and write headers only if we created it.
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true) // <- atomic create, fails if file exists
+                    .open(&csv_path_emu)
+                {
+                    Ok(file) => {
+                        // we created the file: write headers and the patterns
+                        let mut wtr2 = Writer::from_writer(file);
+                        wtr2.write_record(NetworkPattern::csv_headers())?;
+                        for emu in network_effects {
+                            wtr2.write_record(emu.to_csv_row())?;
+                        }
+                        wtr2.flush()?;
+                        print_green!("Created EMU EFFECTS CSV at (new): {csv_path_emu}", );
+                        self.csv_trace.path = csv_path_emu.into();
+
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // another thread/process already created it, just open for append if you need to
+                        // or skip entirely since headers already exist
+                        let _file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .append(true)
+                            .open(&csv_path_emu)
+                            .map_err(|e| anyhow::anyhow!("Failed to open existing CSV: {}", e))?;
+                        // print_green!("EMU EFFECTS CSV already exists; opened existing: {csv_path_emu}", );
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("Failed to create/open CSV: {}", e)),
+                }
+
+                // finally set the marker so this instance will not try to create again
+            }
+
             let fps = framerate.round() as u32;
             let table = get_table(final_file, fps)?; // global cached
 
@@ -2203,12 +2252,7 @@ impl<H: Serialize> StreamSender<H> {
                         // Cache column index on bitrate (avoid per-frame map lookup):
             let want_mbps = current_bitrate_mbps.round() as u32;
             
-            // let col = *self.col_cache.entry(want_mbps).or_insert_with(|| {
-            //     table.column_for_mbps(want_mbps)
-            //         .unwrap_or_else(|| panic!("Bitrate {} Mbps not in CSV", want_mbps))
-            // });
-
-            // let bytes_this_frame = table.bytes(col, id_frame);
+            
 
             let bytes_this_frame = table.bytes_interp_cached(current_bitrate_mbps as f32, id_frame, &self.last_lo, &self.last_hi); 
             // bytes interpolation, when current_bitrate is not in {5,10,15..max_bitrate} for fastness

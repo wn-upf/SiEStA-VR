@@ -2586,9 +2586,9 @@ impl BitrateManager {
                 //         let tps=guard.current_bitrate_/72./8.;
                 //     }
                 // }
-                _ => {
-                    self.last_target_bitrate_bps
-                }
+            //     _ => {
+            //         self.last_target_bitrate_bps
+            //     }
             };
             print_prettyy!(
                 DebugColor::Purple,
@@ -6470,6 +6470,7 @@ pub fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
                         }
                     }
                 }
+                
  
 pub fn minmax_bitrate(
     bitrate_bps: f32,
