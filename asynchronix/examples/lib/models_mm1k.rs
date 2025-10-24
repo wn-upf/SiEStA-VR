@@ -5,6 +5,7 @@ use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::PI;
 use std::future::Future;
+use std::hash::Hash;
 // use std::hash::Hash;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
@@ -72,6 +73,7 @@ pub const SOFTMAX_POLICY: bool = false;
 pub const LYAPUNOV_POLICY: bool = false;
 pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
+#[derive(Clone, Debug)]
 struct StaRateInfo {
     total_transmission_delay_single: f64,
     total_transmission_delay_fullampdu: f64,
@@ -1015,7 +1017,6 @@ impl QueueMechanism {
         if packet.length_packet == 0 {
             packet.length_packet = packet.data_inner.len();   // fallback for early traffic
         }          
-
         // Get the potential delay for the packet
         let reason = match self.network_emulator.should_transmit_with_delay(
             &mut packet,
@@ -1027,18 +1028,6 @@ impl QueueMechanism {
                 EnqueueResult::Transmitted(packet)
             }
             Some(delay) => {
-
-                // dbg_reason = "queued"; 
-                // _dbg_delay = delay; 
-
-                // db_debug_bgprint!(DebugColor::Chocolate, "[DBG Queue NETEM] Q_length: {} | ENQUEUED packet {} - delayed by {:.6} seconds (ALVR: frame {} shard {:4.0}/{:4.0})", 
-                //             self.queue.len(),
-                //             packet.packet_id,
-                //             delay.as_secs_f64(),
-                //             packet.header_alvr.next_packet_index,
-                //             packet.header_alvr.shard_index,
-                //             packet.header_alvr.shards_count - 1,
-                //         );
 
                 // Add the delay to the packet's queue_in_instant
                 let mut delayed_packet = packet.clone();
@@ -1746,6 +1735,9 @@ pub struct QueueModule {
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
     pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
+    
+    pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization 
+
 
     pub PL_probability: f64,
 
@@ -1755,6 +1747,7 @@ pub struct QueueModule {
     pub ampdu_id: u32, 
 
     pub shared_medium: Medium, 
+
 }
 
 
@@ -1824,8 +1817,8 @@ impl QueueModule {
 
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
-
             array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),  
+            sta_stats_cache: HashMap::new(), 
 
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
@@ -1955,25 +1948,86 @@ impl QueueModule {
         winner.into_values().collect()
     }
 
+    pub async fn cache_input_packet(&mut self, packet: MpduPacket){   // optimization to not iterate over whole queue each time we transmit. Done once per enqueued pac
 
-    // fn backoff_tick(&self) -> Vec<MacKey> {
-    //     let mut ready = Vec::new();
-    //     if let Ok(mut map) = self.array_dcf_values.lock() {
-    //         for (key, stats) in map.iter_mut() {
-    //             if stats.backoff_counter > 0 { stats.backoff_counter -= 1; }
-    //             if stats.backoff_counter == 0 {
-    //                 // For the AP we must check both src_id and AC match packets in queue
-    //                 if self.queue.iter().any(|p| {
-    //                     let tid = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
-    //                     (tid, p.edca_ac) == *key
-    //                 }) {
-    //                     ready.push(*key);
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     ready
-    // }
+         let key = (packet.sta_src_id, packet.sta_dest_id);
+
+                // `or_insert_with` runs the expensive calculation *only* if this
+                // is the first packet for this flow.
+                let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
+                    // All this logic now runs ONCE per flow, not per-packet per-tick.
+                    let is_ul = packet.sta_src_id > packet.sta_dest_id;
+                    let mac_key_edca = if is_ul {
+                        (packet.sta_src_id, packet.edca_ac)
+                    } else {
+                        (-1, packet.edca_ac)
+                    };
+
+                    // Calculate transmission delay for a single packet
+                    let resultz = airtime_ampdu(
+                        packet.length_packet as f64,
+                        1,
+                        self.coords_queue,
+                        packet.sta_src_coords,
+                        self.p_tx,
+                    );
+
+                    let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
+
+                    // Binary search
+                    let mut low = 1;
+                    let mut high = MAX_AMPDU_SIZE;
+                    let mut optimal_n_packets = 0;
+                    let mut resultz_full_ampdu = airtime_ampdu(
+                        packet.length_packet as f64 * high as f64,
+                        high,
+                        self.coords_queue,
+                        packet.sta_src_coords,
+                        self.p_tx,
+                    );
+
+                    while low <= high {
+                        let mid = (low + high) / 2;
+                        let test_resultz = airtime_ampdu(
+                            packet.length_packet as f64 * mid as f64,
+                            mid,
+                            self.coords_queue,
+                            packet.sta_src_coords,
+                            self.p_tx,
+                        );
+
+                        if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca {
+                            optimal_n_packets = mid;
+                            resultz_full_ampdu = test_resultz;
+                            low = mid + 1;
+                        } else {
+                            high = mid - 1;
+                        }
+                    }
+                    // Note: packet_count starts at 0, will be incremented below
+                    StaRateInfo {
+                        total_transmission_delay_single: resultz,
+                        total_transmission_delay_fullampdu: resultz_full_ampdu,
+                        fullampdu_max_size: optimal_n_packets as usize,
+                        packet_count: 0,
+                        weighted_rate_single: resultz, // First value for EWMA
+                        weighted_rate_fullampdu: resultz_full_ampdu, // First value for EWMA
+                        // Avoid division by zero if optimal_n_packets is 0
+                        per_packet_channel_access_efficiency: resultz_full_ampdu / (optimal_n_packets.max(1) as f64),
+                        expected_queue_delivery_ms: 0.0,
+                    }
+                });
+
+                // --- INCREMENT AND UPDATE ---
+                // This part runs for EVERY packet, but it's very fast.
+                entry.packet_count += 1;
+
+                // Re-calculate the expected delivery time based on the new count
+                entry.expected_queue_delivery_ms =
+                    entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+    }
+
+
 
     pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
         let now = ctx.scheduler.time();
@@ -1985,6 +2039,9 @@ impl QueueModule {
         
         
         if self.queue.len() < self.queue_maxsize {
+        
+            self.cache_input_packet(pkt.clone()); 
+
             self.queue.push_back(pkt);
             if !self.packet_being_served && self.shared_medium.is_idle(now) {
                 self.deque_schedule_service((), ctx).await;
@@ -2005,7 +2062,10 @@ impl QueueModule {
         
         
         if self.queue.len() < self.queue_maxsize {
+
             packet.queue_in_instant = now;
+            self.cache_input_packet(packet.clone()); 
+
             self.queue.push_back(packet.clone());
 
             debug_print!(
@@ -2082,45 +2142,17 @@ impl QueueModule {
             }
         }
 
-        // if let Some(stats_rx) = self.stats_rx.as_mut() {
-        //     // print!("OK1,");
-        //     if let Ok(mut queue_stats) = self.cumulative_stats_queue.lock() {
-        //         // print!("OK2,");
-
-        //         if let Ok(_array_STAs_stats) = self.array_stas_stats.lock() {
-        //             // print!("OK3,");
-
-        //             while let Ok(stats_update) = stats_rx.try_recv() {
-        //                 // println!("OK CUM");
-        //                 queue_stats.update_cumstats(
-        //                     stats_update.T_s,
-        //                     stats_update.T_q,
-        //                     stats_update.blocked_packet_counter,
-        //                     stats_update.arrived_packet_counter,
-        //                     stats_update.queue_length_when_out,
-        //                 );
-
-        //                 // println!("OK STATS");
-        //                 self.csv_metrics.update_stats(
-        //                     stats_update.now,
-        //                     stats_update.packet_id as usize,
-        //                     stats_update.queue_length_when_out,
-        //                     stats_update.T_s,
-        //                     stats_update.T_q,
-        //                     stats_update.length_packet,
-        //                     stats_update.sta_src_id,
-        //                     stats_update.sta_dest_id,
-        //                     stats_update.ampdu_id, 
-        //                     stats_update.is_collision, 
-        //                     stats_update.collision_backoff, 
-        //                 );
-        //             }
-        //         }
-        //     }
-        // }
     }
 
-    fn select_next_sta(&self) -> HashMap<(i32, i32), StaRateInfo> {
+
+
+    fn select_next_sta(&self) -> &HashMap<(i32, i32), StaRateInfo> {    // The entire slow loop is gone, O(1) lookup. 
+
+        &self.sta_stats_cache
+    }
+
+
+    fn select_next_sta_expensive(&self) -> HashMap<(i32, i32), StaRateInfo> {
         let mut sta_packets: HashMap<(i32, i32), StaRateInfo> = HashMap::new();
 
         // Iterate over packets in the queue to compute STA metrics
@@ -2379,14 +2411,42 @@ impl QueueModule {
             for packet in &self.aux_ampdu_serviced.mpdu_packets {
                 success_indices.push(packet.original_index);
             }
+            
+            // We need to tally how many packets we successfully remove per flow (key)
+            let mut packets_removed_by_key: HashMap<(i32, i32), usize> = HashMap::new();
+
             // Remove indices in descending order to avoid index shift.
             success_indices.sort_unstable_by(|a, b| b.cmp(a));
+            
             for idx in success_indices {
                 // Safety: ensure index is valid.
                 if idx < self.queue.len() {
-                    self.queue.remove(idx);
+                    // Remove the packet
+                    if let Some(removed_packet) = self.queue.remove(idx) {
+                        // Get its flow key
+                        let key = (removed_packet.sta_src_id, removed_packet.sta_dest_id);
+                        // Tally the removal
+                        *packets_removed_by_key.entry(key).or_insert(0) += 1;
+                    }
                 }
             }
+            
+            // Now, update the cache for all affected flows
+            for (key, count_removed) in packets_removed_by_key {
+                if let Some(entry) = self.sta_stats_cache.get_mut(&key) {
+                    // Decrement the packet count
+                    entry.packet_count = entry.packet_count.saturating_sub(count_removed);
+
+                    // Re-calculate expected delivery time
+                    // Using .max(1) to avoid division by zero if count hits zero and it's used elsewhere for rate calc
+                    entry.expected_queue_delivery_ms =
+                        entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+                    
+                    // Optional: Consider removing the entry if entry.packet_count == 0 
+                    // to keep the cache clean.
+                }
+            }
+
 
             if DEBUG_PRINT_ENABLED {
                 print_yellow!(
@@ -2396,6 +2456,9 @@ impl QueueModule {
                 );
                 self.aux_ampdu_serviced.print();
             }
+
+
+
 
 
             self.packet_being_served = true;
@@ -2416,12 +2479,6 @@ impl QueueModule {
             // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, 
             // select first packet fairly to ensure channel access with reduced backlog for each user.
             let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta();
-    
-            // debug_schedule!(
-            //     // DebugColor::Cyan, 
-            //     "{} | ***************** SCHEDULING *******************",
-            //     format_elapsed!(now)
-            // );
     
             let mut ul_stas = HashSet::new();
             let mut is_dl : bool = false; 
