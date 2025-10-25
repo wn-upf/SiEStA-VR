@@ -89,7 +89,7 @@ policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 
 #### RL INPUT ARGS (RUST)
-observation_type = [1] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
+observation_type = 1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
 reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
 T_ABR = 0.3 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
 #################################################
@@ -418,6 +418,8 @@ class MaskableDiscreteZmqEnv(gym.Env):
             "train_env/done": int(done),
             "train_env/valid_actions": self.current_action_mask.sum(),
         }
+        self._log_last_row(log_dict, next_obs)
+
         
         if wandb.run is not None:
             wandb.log(log_dict)
@@ -1419,7 +1421,7 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
         for sim_count, combo in enumerate(combos, 1):
             (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
              close_users, close_distance, seed, distance, gop,
-             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob, observation_type) = combo
+             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
 
             argv = [
                 f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
@@ -1557,7 +1559,7 @@ def main():
         simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
         video_samples, fps_list, num_close_users, distance_close_users,
         RANDOM_SEEDS, distance_list, GoP_sizes, intrarefresh_choice,
-        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL, observation_type, 
+        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL, 
     ))
 
     random.shuffle(combos)  # optional
