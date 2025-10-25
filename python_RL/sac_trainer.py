@@ -56,20 +56,6 @@ RUST_PROCS = []
 #CONSTS
 ##############################
 
-N_STEPS_RL= 10_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
-FEAT_DIM = 14
-WINDOW_LEN = 5
-OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
-
-ACTION_DIM = 20
-
-ACT_MIN_MBPS = 5.0
-ACT_MAX_MBPS = 100.0
-
-TIMEOUT_ZMQSERVER=2000
-
-policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
-
 ACTION_ENDPOINT  = os.environ.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
 STEP_ENDPOINT    = os.environ.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
 TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
@@ -77,6 +63,21 @@ TRAINER_ENDPOINT = os.environ.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_train
 
 ################################################
 # RL PARAMS
+
+N_STEPS_RL= 10_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
+FEAT_DIM = 14
+WINDOW_LEN = 5
+OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
+
+ACTION_DIM = 20
+ACT_MIN_MBPS = 5.0
+ACT_MAX_MBPS = 100.0
+
+TIMEOUT_ZMQSERVER=2000
+policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
+
+
+#### RL INPUT ARGS (RUST)
 observation_type = [1] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
 reward_mode = 1 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
 T_ABR = 0.3 ## update every 0.3 seconds. With lower value, more frequent steps in simulation but noisier updates. 
@@ -108,6 +109,43 @@ everest_tests = 1
 
 ###############################3
 from stable_baselines3.common.callbacks import BaseCallback
+
+
+class MetricsLoggerCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+    
+    def _on_step(self) -> bool:
+        # Only log periodically (every 1000 steps)
+        if self.n_calls % 1000 == 0:
+            logs = {}
+
+            # --- Entropy loss & KL divergence ---
+            if hasattr(self.model, "entropy_loss"):
+                logs["train/entropy_loss"] = float(self.model.entropy_loss)
+            if hasattr(self.model, "kl_divergence"):
+                logs["train/kl_divergence"] = float(self.model.kl_divergence)
+
+            # --- Policy loss, value loss, etc. (SAC/TD3 specific) ---
+            if hasattr(self.model, "logger"):
+                kv = self.model.logger.name_to_value
+                for key in ["train/value_loss", "train/policy_loss", "train/entropy_loss"]:
+                    if key in kv:
+                        logs[key] = kv[key]
+
+            # --- Explained variance ---
+            try:
+                ev = self.model.logger.name_to_value.get("train/explained_variance", None)
+                if ev is not None:
+                    logs["train/explained_variance"] = ev
+            except Exception:
+                pass
+
+            if len(logs) > 0:
+                wandb.log(logs, step=self.num_timesteps)
+        return True
+
+
 
 class StuckActionEarlyStop(BaseCallback):
     """
@@ -295,6 +333,12 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
     
     print("TRAINER THREAD: 2. Model created.")
 
+     wandb.config.update({
+        "reward_mode": reward_mode,        # e.g. 0 naive, 1 normalized, 2 shaping
+        "T_ABR": T_ABR,                    # e.g. 0.3
+        "observation_type": observation_type,  # 0,1,2 etc.
+    }, allow_val_change=True)
+
     # Add the final policy_kwargs to the model_kwargs
     model_kwargs['policy_kwargs'] = policy_kwargs
 
@@ -302,13 +346,24 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
     model = model_class(**model_kwargs)
 
     # --- 5. Set up Callback and Learn ---
-    callback = WandbCallback(
+    # callback = WandbCallback(
+    #     model_save_path=f"models/{run.id}",
+    #     model_save_freq=50_000,
+    #     verbose=1,
+    #     log="parameters", # Be careful: "all" logs gradients and can be very slow/large.
+    #                # Consider setting to log=None or log="parameters".
+    # )
+
+    callback = CallbackList([
+    MetricsLoggerCallback(),
+    WandbCallback(
         model_save_path=f"models/{run.id}",
         model_save_freq=50_000,
         verbose=1,
-        log="parameters", # Be careful: "all" logs gradients and can be very slow/large.
-                   # Consider setting to log=None or log="parameters".
+        log="parameters",
     )
+])
+
     print(f"{Colors.YELLOW}TRAINER THREAD: 3. Calling model.learn()...")
     model.learn(total_timesteps=N_STEPS_RL, callback=callback)
 
