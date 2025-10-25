@@ -43,6 +43,9 @@ import torch.nn as nn
 
 from stable_baselines3.common.callbacks import CallbackList
 
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers import ActionMasker
+
 
 import subprocess
 import signal
@@ -72,6 +75,8 @@ OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
 ACTION_DIM = 20
 ACT_MIN_MBPS = 5.0
 ACT_MAX_MBPS = 100.0
+BITRATE_LADDER_MBPS = list(range(5, 101, 5))
+
 
 TIMEOUT_ZMQSERVER=2000
 policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
@@ -80,13 +85,12 @@ policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 #### RL INPUT ARGS (RUST)
 observation_type = [2] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
 reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
-T_ABR = 1.0 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
+T_ABR = 0.3 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
 #################################################
 ### SIMULATION PARAMS
 
 simTime = [80.0]
-
-TEST_TYPE = [ "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
 k_queue = 10000
 mean_length_BG = 12000.0
 rate_bps_src_BG = [10e6, 20e6, 40e6]
@@ -109,7 +113,645 @@ everest_tests = 1
 
 ###############################3
 from stable_baselines3.common.callbacks import BaseCallback
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
+# =====================================================
+# 1. CHANGE ACTION SPACE TO DISCRETE
+# =====================================================
+MASKABLE_PPO_CONFIG_IMMEDIATE = {
+    "algo": "MaskablePPO",
+    "learning_rate": 3e-4,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "n_steps": 2048,
+    "batch_size": 64,
+    "n_epochs": 10,
+    "clip_range": 0.2,
+    "ent_coef": 0.01,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "net_arch": [256, 256],
+    "use_vectorized_obs": True,
+    "mask_expansion_strategy": "immediate_neighbors",  # Expand to ±1 neighbor
+}
+
+class MaskableDiscreteZmqEnv(gym.Env):
+    """
+    Modified environment for Maskable PPO with discrete actions.
+    Each action corresponds to a specific bitrate in BITRATE_LADDER_MBPS.
+    """
+    metadata = {"render_modes": []}
+
+    def __init__(self, action_ep: str, step_ep: str, bitrate_ladder_mbps: list,
+                 expansion_strategy='immediate_neighbors', expansion_param=None):
+        super().__init__()
+        
+        self.bitrate_ladder = bitrate_ladder_mbps
+        self.n_actions = len(bitrate_ladder_mbps)
+        self.expansion_strategy = expansion_strategy
+        self.expansion_param = expansion_param
+        
+        # CHANGE: Discrete action space instead of continuous Box
+        self.action_space = spaces.Discrete(self.n_actions)
+        
+        # Observation space remains the same
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(WINDOW_LEN * FEAT_DIM,), dtype=np.float32
+        )
+        
+        # ZMQ setup (same as before)
+        self.ctx = zmq.Context()
+        self.action_socket = self.ctx.socket(zmq.ROUTER)
+        self.action_socket.bind(action_ep)
+        self.transition_socket = self.ctx.socket(zmq.PULL)
+        self.transition_socket.bind(step_ep)
+        
+        # Episode tracking
+        self.step_count = 0
+        self.global_step = 0
+        self.ep_return = 0.0
+        self.ep_len = 0
+        self.run_return_cumsum = 0.0
+        self.pending_obs_info = None
+        self.last_obs_for_done = np.zeros((WINDOW_LEN * FEAT_DIM,), dtype=np.float32)
+        
+        # Store current action mask (binary array for each action)
+        self.current_action_mask = None
+        
+        print(f"{Colors.MAGENTA}[Env] Using mask expansion strategy: {expansion_strategy}{Colors.ENDC}")
+
+    def _convert_rust_mask_to_action_mask(self, rust_mask, expand_neighbors=True):
+        """
+        Convert the mask from Rust (which indices are valid) to 
+        a boolean array for each action index.
+        
+        Optionally expands the mask to include neighboring actions.
+        
+        Args:
+            rust_mask: List of booleans, one per bitrate in BITRATE_LADDER_MBPS
+            expand_neighbors: If True, apply the configured expansion strategy
+        
+        Returns:
+            numpy array of booleans, shape (n_actions,)
+        """
+        if rust_mask is None:
+            # No mask provided - all actions valid
+            return np.ones(self.n_actions, dtype=bool)
+        
+        # Ensure it's a numpy array
+        mask = np.array(rust_mask, dtype=bool)
+        
+        # Ensure at least one action is valid
+        if not mask.any():
+            print(f"{Colors.RED}[WARNING] All actions masked! Enabling all actions.{Colors.ENDC}")
+            mask = np.ones(self.n_actions, dtype=bool)
+        
+        # Expand mask to include neighbors if requested
+        if expand_neighbors:
+            mask = self._apply_expansion_strategy(mask)
+        
+        return mask
+    
+    def _apply_expansion_strategy(self, mask):
+        """
+        Apply the configured mask expansion strategy.
+        
+        Args:
+            mask: Original boolean numpy array of shape (n_actions,)
+        
+        Returns:
+            Expanded boolean numpy array of shape (n_actions,)
+        """
+        n_original = mask.sum()
+        
+        if self.expansion_strategy == 'immediate_neighbors':
+            expanded = MaskExpansionStrategy.immediate_neighbors(mask)
+        elif self.expansion_strategy == 'two_neighbors':
+            expanded = MaskExpansionStrategy.two_neighbors(mask)
+        elif self.expansion_strategy == 'range':
+            distance = self.expansion_param if self.expansion_param is not None else 1
+            expanded = MaskExpansionStrategy.range_expansion(mask, max_distance=distance)
+        elif self.expansion_strategy == 'percentage':
+            pct = self.expansion_param if self.expansion_param is not None else 10.0
+            expanded = MaskExpansionStrategy.percentage_expansion(
+                mask, self.bitrate_ladder, percentage=pct
+            )
+        elif self.expansion_strategy == 'fill_gaps':
+            expanded = MaskExpansionStrategy.fill_gaps(mask)
+        elif self.expansion_strategy == 'none':
+            expanded = mask
+        else:
+            print(f"{Colors.YELLOW}[WARNING] Unknown expansion strategy: {self.expansion_strategy}. Using original mask.{Colors.ENDC}")
+            expanded = mask
+        
+        n_expanded = expanded.sum()
+        
+        if n_expanded > n_original:
+            valid_bitrates_original = [self.bitrate_ladder[i] for i in np.where(mask)[0]]
+            valid_bitrates_expanded = [self.bitrate_ladder[i] for i in np.where(expanded)[0]]
+            # print(f"{Colors.CYAN}[Mask] Expanded {n_original} -> {n_expanded} actions{Colors.ENDC}")
+            # print(f"       Original: {valid_bitrates_original}")
+            # print(f"       Expanded: {valid_bitrates_expanded}")
+        
+        return expanded
+    
+    def _expand_mask_to_neighbors(self, mask):
+        """
+        DEPRECATED: Use _apply_expansion_strategy instead.
+        Kept for backwards compatibility.
+        """
+        return MaskExpansionStrategy.immediate_neighbors(mask)
+
+    def reset(self, *, seed=None, options=None):
+        """Reset and return initial observation with action mask in info."""
+        super().reset(seed=seed)
+        print(f"\n--- Episode boundary (Python) ---")
+        self.ep_return = 0.0
+        self.ep_len = 0
+        self.pending_obs_info = None
+        
+        try:
+            # Receive initial observation from Rust
+            parts = self.action_socket.recv_multipart()
+            if len(parts) == 2:
+                identity, obs_msg = parts
+            elif len(parts) == 3 and parts[1] == b'':
+                identity, _, obs_msg = parts
+            else:
+                raise RuntimeError(f"Unexpected frame count: {len(parts)}")
+            
+            obs_request = json.loads(obs_msg)
+            
+            # Extract and convert action mask
+            rust_mask = obs_request.get("action_mask")
+            self.current_action_mask = self._convert_rust_mask_to_action_mask(rust_mask)
+            
+            # Parse observation
+            obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
+            flat_obs, meta = self._parse_obs_payload(obs_payload)
+            
+            self.pending_obs_info = (identity, flat_obs, meta)
+            self.last_obs_for_done = flat_obs.copy()
+            
+            print(f"✅ Initial obs received. Action mask: {self.current_action_mask.sum()}/{self.n_actions} valid")
+            
+            # IMPORTANT: info dict must contain 'action_mask' for Maskable PPO
+            info = {
+                "obs_meta": meta,
+                "action_mask": self.current_action_mask  # Required by MaskablePPO
+            }
+            return flat_obs, info
+            
+        except Exception as e:
+            print(f"❌ Error during reset: {e}")
+            raise
+
+    def step(self, action):
+        """
+        Step with discrete action (index into bitrate ladder).
+        
+        Args:
+            action: int, index in range [0, n_actions)
+        """
+        # Convert discrete action to bitrate value
+        action_idx = int(action)
+        bitrate_mbps = self.bitrate_ladder[action_idx]
+        
+        # Send action
+        if self.pending_obs_info is None:
+            raise RuntimeError("step() called before reset()")
+        
+        identity, current_obs, current_meta = self.pending_obs_info
+        self.pending_obs_info = None
+        
+        action_response = {"bitrate_mbps": float(bitrate_mbps)}
+        
+        try:
+            msg = [identity, b'', json.dumps(action_response).encode('utf-8')]
+            self.action_socket.send_multipart(msg)
+        except zmq.ZMQError as e:
+            print(f"❌ Error sending action: {e}")
+            raise
+        
+        # Receive transition
+        try:
+            transition = self.transition_socket.recv_json()
+        except zmq.ZMQError as e:
+            print(f"❌ Error receiving transition: {e}")
+            raise
+        
+        reward = float(transition["reward"])
+        done = bool(transition["done"])
+        truncated = False
+        
+        # Update stats
+        self.ep_return += reward
+        self.ep_len += 1
+        self.global_step += 1
+        self.run_return_cumsum += reward
+        self.step_count += 1
+        
+        if done:
+            next_obs = self.last_obs_for_done
+            next_meta = current_meta
+            self.current_action_mask = np.ones(self.n_actions, dtype=bool)
+            self.pending_obs_info = None
+        else:
+            # Receive next observation
+            parts = self.action_socket.recv_multipart()
+            if len(parts) == 2:
+                identity, obs_msg = parts
+            elif len(parts) == 3 and parts[1] == b'':
+                identity, _, obs_msg = parts
+            else:
+                raise RuntimeError(f"Unexpected frame count: {len(parts)}")
+            
+            obs_request = json.loads(obs_msg)
+            
+            # Extract and convert next action mask
+            rust_mask = obs_request.get("action_mask")
+            self.current_action_mask = self._convert_rust_mask_to_action_mask(rust_mask)
+            
+            obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
+            next_obs, next_meta = self._parse_obs_payload(obs_payload)
+            
+            self.pending_obs_info = (identity, next_obs, next_meta)
+            self.last_obs_for_done = next_obs.copy()
+        
+        # Logging
+        log_dict = {
+            "train/reward": reward,
+            "train/return_cumsum": self.run_return_cumsum,
+            "train/action_idx": action_idx,
+            "train/action_bitrate_mbps": bitrate_mbps,
+            "train/done": int(done),
+            "train/valid_actions": self.current_action_mask.sum(),
+        }
+        
+        if wandb.run is not None:
+            wandb.log(log_dict)
+        
+        if done:
+            if wandb.run is not None:
+                wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
+            self.ep_return = 0.0
+            self.ep_len = 0
+        
+        # IMPORTANT: Return action_mask in info
+        info = {
+            "obs_meta": next_meta,
+            "action_mask": self.current_action_mask  # Required by MaskablePPO
+        }
+        return next_obs, reward, done, truncated, info
+
+    def close(self):
+        self.action_socket.close()
+        self.transition_socket.close()
+        self.ctx.term()
+
+    # Include _parse_obs_payload and other helper methods from your original code
+    @staticmethod
+    def _parse_obs_payload(payload):
+        """Parse observation from various formats."""
+        if isinstance(payload, (list, np.ndarray)):
+            raw = np.asarray(payload, dtype=np.float32).ravel()
+            feat_dim = FEAT_DIM
+            window_len = WINDOW_LEN
+            if raw.size == feat_dim:
+                flat = np.zeros((window_len * feat_dim,), dtype=np.float32)
+                flat[-feat_dim:] = raw
+                seq_len = 1
+            else:
+                expect = window_len * feat_dim
+                if raw.size < expect:
+                    flat = np.pad(raw, (expect - raw.size, 0))
+                else:
+                    flat = raw[-expect:]
+                seq_len = min(window_len, max(1, flat.size // feat_dim))
+            mask = np.zeros(window_len, dtype=bool)
+            mask[-seq_len:] = True
+            meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
+            return flat.astype(np.float32, copy=False), meta
+
+        if "obs_flat" in payload:
+            flat = np.asarray(payload["obs_flat"], dtype=np.float32).ravel()
+            seq_len = int(payload.get("seq_len", WINDOW_LEN))
+            feat_dim = int(payload.get("feat_dim", FEAT_DIM))
+            window_len = int(payload.get("window_len", WINDOW_LEN))
+        elif "obs" in payload:
+            raw = np.asarray(payload["obs"], dtype=np.float32).ravel()
+            feat_dim = FEAT_DIM
+            window_len = WINDOW_LEN
+            if raw.size == feat_dim:
+                flat = np.zeros((window_len * feat_dim,), dtype=np.float32)
+                flat[-feat_dim:] = raw
+                seq_len = 1
+            else:
+                expect = window_len * feat_dim
+                flat = raw[-expect:] if raw.size >= expect else np.pad(raw, (expect - raw.size, 0))
+                seq_len = min(window_len, max(1, flat.size // feat_dim))
+        else:
+            raise KeyError(f"Cannot parse obs payload: {payload.keys()}")
+
+        expect = window_len * feat_dim
+        if flat.size != expect:
+            flat = flat[-expect:] if flat.size > expect else np.pad(flat, (expect - flat.size, 0))
+        mask = np.zeros(window_len, dtype=bool)
+        mask[-seq_len:] = True
+        meta = dict(seq_len=seq_len, feat_dim=feat_dim, window_len=window_len, mask=mask)
+        return flat.astype(np.float32, copy=False), meta
+    @staticmethod
+    def _log_last_row(log_dict, flat_obs):
+        """Log only the most recent row for readability."""
+        feat_dim = FEAT_DIM
+        last_row = flat_obs[-feat_dim:]
+        for i, v in enumerate(last_row):
+            key = OBSERVATION_KEYS[i] if i < len(OBSERVATION_KEYS) else f"feat_{i}"
+            log_dict[f"obs_last/{key}"] = float(v)
+
+
+# =====================================================
+# 2. MASK CALLBACK FUNCTION (for ActionMasker wrapper)
+# =====================================================
+class MaskExpansionStrategy:
+    """Different strategies for expanding action masks to neighbors."""
+    
+    @staticmethod
+    def immediate_neighbors(mask):
+        """
+        Expand to immediate left/right neighbors only.
+        
+        Example: [F, F, T, F, F] -> [F, T, T, T, F]
+        """
+        expanded = mask.copy()
+        valid_indices = np.where(mask)[0]
+        
+        for idx in valid_indices:
+            if idx > 0:
+                expanded[idx - 1] = True
+            if idx < len(mask) - 1:
+                expanded[idx + 1] = True
+        
+        return expanded
+    @staticmethod
+    def range_expansion(mask, max_distance=1):
+        """
+        Expand by a configurable distance.
+        
+        Args:
+            mask: Original boolean mask
+            max_distance: How many steps away to expand (1 = immediate, 2 = two steps, etc.)
+        
+        Example with max_distance=2: [F, F, F, T, F, F, F] -> [F, T, T, T, T, T, F]
+        """
+        expanded = mask.copy()
+        valid_indices = np.where(mask)[0]
+        
+        for idx in valid_indices:
+            for offset in range(-max_distance, max_distance + 1):
+                if offset == 0:
+                    continue
+                neighbor_idx = idx + offset
+                if 0 <= neighbor_idx < len(mask):
+                    expanded[neighbor_idx] = True
+        
+        return expanded
+
+def mask_fn(env: gym.Env) -> np.ndarray:
+    """
+    Callback function that returns valid action mask.
+    This is called by the ActionMasker wrapper.
+    
+    Returns:
+        Boolean array of shape (n_actions,) where True = action is valid
+    """
+    # The environment stores the current mask
+    if hasattr(env, 'current_action_mask') and env.current_action_mask is not None:
+        return env.current_action_mask
+    
+    # Fallback: all actions valid
+    return np.ones(env.action_space.n, dtype=bool)
+
+# =====================================================
+# 3. UPDATED TRAINING FUNCTION
+# =====================================================
+
+def train_maskable_ppo(action_ep: str, step_ep: str):
+    """Train using Maskable PPO with discrete actions."""
+    
+    run = wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "xr-abr-maskable"),
+        entity=os.environ.get("WANDB_ENTITY"),
+        save_code=True,
+    )
+    
+    # Choose expansion strategy from config
+    expansion_strategy = wandb.config.get("mask_expansion_strategy", "immediate_neighbors")
+    expansion_param = wandb.config.get("mask_expansion_param", None)
+    
+    # Create base environment
+    base_env = MaskableDiscreteZmqEnv(
+        action_ep=action_ep,
+        step_ep=step_ep,
+        bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
+        expansion_strategy=expansion_strategy,
+        expansion_param=expansion_param
+    )
+    
+    # Wrap with ActionMasker - this applies the mask before each action
+    env = ActionMasker(base_env, mask_fn)
+    
+    print(f"{Colors.GREEN}Environment created with {len(BITRATE_LADDER_MBPS)} discrete actions{Colors.ENDC}")
+    print(f"{Colors.GREEN}Mask expansion: {expansion_strategy}{Colors.ENDC}")
+    
+    # Configure policy
+    policy_kwargs = dict(
+        net_arch=dict(
+            pi=list(wandb.config.net_arch),  # Actor network
+            vf=list(wandb.config.net_arch)   # Critic network
+        ),
+    )
+    
+    # If using windowed observations with feature extractor:
+    if wandb.config.get("use_vectorized_obs", True):
+        policy_kwargs['features_extractor_class'] = LastRowExtractor
+        policy_kwargs['features_extractor_kwargs'] = dict(feat_dim=FEAT_DIM)
+    
+    # Create MaskablePPO model
+    model = MaskablePPO(
+        policy=MaskableActorCriticPolicy,
+        env=env,
+        learning_rate=wandb.config.learning_rate,
+        n_steps=wandb.config.get("n_steps", 2048),
+        batch_size=wandb.config.batch_size,
+        n_epochs=wandb.config.get("n_epochs", 10),
+        gamma=wandb.config.gamma,
+        gae_lambda=wandb.config.get("gae_lambda", 0.95),
+        clip_range=wandb.config.get("clip_range", 0.2),
+        ent_coef=wandb.config.get("ent_coef", 0.01),
+        vf_coef=wandb.config.get("vf_coef", 0.5),
+        max_grad_norm=wandb.config.get("max_grad_norm", 0.5),
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+        tensorboard_log=f"runs/{run.id}",
+    )
+    
+    print(f"{Colors.GREEN}MaskablePPO model created{Colors.ENDC}")
+    
+    # Setup callbacks
+    callback = CallbackList([
+        MetricsLoggerCallback(),
+        WandbCallback(
+            model_save_path=f"models/{run.id}",
+            model_save_freq=50_000,
+            verbose=1,
+            log="parameters",
+        )
+    ])
+    
+    # Train
+    print(f"{Colors.YELLOW}{Colors.BLINK}Starting training...{Colors.ENDC}")
+    model.learn(total_timesteps=N_STEPS_RL, callback=callback)
+    
+    # Save final model
+    final_model_path = f"models/{run.id}/final_model.zip"
+    model.save(final_model_path)
+    
+    art = wandb.Artifact(
+        name=f"MaskablePPO-{run.id}-final",
+        type="model",
+        description=f"Final Maskable PPO after {N_STEPS_RL} steps"
+    )
+    art.add_file(final_model_path)
+    run.log_artifact(art)
+    wandb.finish()
+
+# =====================================================
+# 4. EXAMPLE WANDB CONFIG FOR MASKABLE PPO
+# =====================================================
+
+MASKABLE_PPO_CONFIG = {
+    "algo": "MaskablePPO",
+    "learning_rate": 3e-4,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "n_steps": 2048,  # Steps per environment per update
+    "batch_size": 64,
+    "n_epochs": 10,   # Number of epochs per update
+    "clip_range": 0.2,
+    "ent_coef": 0.01,  # Entropy coefficient
+    "vf_coef": 0.5,    # Value function coefficient
+    "max_grad_norm": 0.5,
+    "net_arch": [256, 256],
+    "use_vectorized_obs": True,
+}
+
+
+
+# --- START NEW CLASS ---
+class HeuristicActionWrapper(gym.Wrapper):
+    """
+    A wrapper that uses the `action_mask` from the `info` dict to modify
+    the continuous action from the agent before it's passed to the environment.
+    
+    It implements the "Hard Snapping" strategy.
+    """
+    def __init__(self, env: gym.Env, bitrate_ladder_mbps: list[float]):
+        super().__init__(env)
+        self.bitrate_ladder = bitrate_ladder_mbps
+        # This will hold the mask for the *current* observation
+        self.current_mask = None
+        # Store original action for logging
+        self.last_raw_action = None
+
+    def reset(self, **kwargs):
+        """
+        Reset the underlying environment and store the first action mask.
+        """
+        obs, info = self.env.reset(**kwargs)
+        self.current_mask = info.get("action_mask")
+        self.last_raw_action = None
+        
+        if self.current_mask:
+            print(f"{Colors.MAGENTA}[Wrapper] Got initial mask: {self.current_mask}{Colors.ENDC}")
+            
+        return obs, info
+
+    def step(self, action):
+        """
+        1. Snap the agent's `action` using the `current_mask`.
+        2. Pass the `snapped_action` to the real environment.
+        3. Get the `info` dict and store the *next* mask.
+        """
+        # `action` is the raw output from the SAC/TD3 policy
+        raw_action_mbps = float(np.asarray(action).ravel()[0])
+        self.last_raw_action = raw_action_mbps
+        
+        snapped_action = self._snap_action(raw_action_mbps)
+        
+        # Pass the *modified* action to the environment
+        next_obs, reward, done, truncated, info = self.env.step(snapped_action)
+        
+        # Store the mask for the *next* step
+        self.current_mask = info.get("action_mask")
+        
+        # Log the raw vs. snapped action
+        if wandb.run is not None:
+            wandb.log({
+                "train/action_raw": raw_action_mbps,
+                "train/action_snapped": snapped_action[0]
+            })
+
+        return next_obs, reward, done, truncated, info
+
+    def _snap_action(self, raw_action_mbps: float) -> np.ndarray:
+        """
+        Applies the masking logic.
+        You can edit this method to implement your other ideas.
+        """
+        if self.current_mask is None:
+            # No mask available (e.g., first step, or Rust didn't send one)
+            return np.array([raw_action_mbps], dtype=np.float32)
+
+        print( f'current_mask is:\t{self.current_mask}')
+        # Get all allowed bitrate values from the ladder
+        allowed_mbps = [
+            mbps for mbps, is_allowed in zip(self.bitrate_ladder, self.current_mask)
+            if is_allowed
+        ]
+
+        if not allowed_mbps:
+            # Fallback: Mask is all zeros (shouldn't happen) or empty.
+            # Let the agent's raw action pass through.
+            return np.array([raw_action_mbps], dtype=np.float32)
+
+        # --- STRATEGY 1: Hard Snapping (Default) ---
+        # Find the allowed bitrate closest to the agent's raw action.
+        # snapped_mbps = min(allowed_mbps, key=lambda x: abs(x - raw_action_mbps))
+        # final_action = snapped_mbps
+        
+        # if abs(raw_action_mbps - snapped_mbps) > 0.1: # Log if snapping occurred
+        #      print(f"{Colors.RED}[Wrapper] Snap: raw {raw_action_mbps:.2f} -> {snapped_mbps:.2f} (Mask: {self.current_mask}){Colors.ENDC}")
+
+        # --- STRATEGY 2: Soft Guidance (Proximal Policy) ---
+        # Uncomment this block to "pull" the agent's action toward the heuristic.
+        alpha = 0.5 # 0.0 = full agent, 1.0 = full heuristic
+        nearest_heuristic = min(allowed_mbps, key=lambda x: abs(x - raw_action_mbps))
+        final_action = (1.0 - alpha) * raw_action_mbps + alpha * nearest_heuristic
+        final_action = np.clip(final_action, ACT_MIN_MBPS, ACT_MAX_MBPS)
+
+        print(f'{Colors.BLUE}raw: {raw_action_mbps}, nearest heuristic: {nearest_heuristic}, final_action: {final_action} {Colors.ENDC}')
+
+        # --- STRATEGY 3: Noisy Heuristic ---
+        # Uncomment this block to pick the nearest heuristic and add noise.
+        # noise_std_dev = 1.0 # In Mbps
+        # nearest_heuristic = min(allowed_mmbps, key=lambda x: abs(x - raw_action_mbps))
+        # final_action = nearest_heuristic + np.random.normal(0.0, noise_std_dev)
+        # final_action = np.clip(final_action, ACT_MIN_MBPS, ACT_MAX_MBPS)
+
+
+        # Return the final action in the correct gym shape
+        return np.array([final_action], dtype=np.float32)
 
 class MetricsLoggerCallback(BaseCallback):
     def __init__(self, verbose=0):
@@ -146,112 +788,6 @@ class MetricsLoggerCallback(BaseCallback):
         return True
 
 
-
-class StuckActionEarlyStop(BaseCallback):
-    """
-    Stop training early if the chosen action doesn't change for N consecutive episodes.
-    """
-    def __init__(self, patience_episodes=200_000, verbose=1):
-        super().__init__(verbose)
-        self.patience_episodes = patience_episodes
-        self.last_action = None
-        self.same_action_count = 0
-        self.last_episode = 0
-
-    def _on_step(self) -> bool:
-        # Called at every environment step
-        if "train/action" in self.locals:
-            current_action = int(self.locals["train/action"])
-        elif "actions" in self.locals:
-            # fallback if recorded under different key
-            current_action = int(np.mean(self.locals["actions"]))
-        else:
-            return True  # nothing to do yet
-
-        if self.last_action is None:
-            self.last_action = current_action
-            return True
-
-        if current_action == self.last_action:
-            self.same_action_count += 1
-        else:
-            self.same_action_count = 0
-            self.last_action = current_action
-
-        # Optional progress print
-        if self.verbose > 0 and self.same_action_count % 10_000 == 0 and self.same_action_count > 0:
-            print(f"[EarlyStop] Action {current_action} repeated {self.same_action_count} times...")
-
-        # Early stop condition
-        if self.same_action_count > self.patience_episodes:
-            print(f"\n🛑 Early stopping: same action repeated {self.same_action_count} times.")
-            return False  # returning False halts training
-
-        return True
-
-def train_sac_single(action_ep: str, step_ep: str):
-    run = wandb.init(
-        project=os.environ.get("WANDB_PROJECT", "xr-abr"),
-        entity=os.environ.get("WANDB_ENTITY"),
-        save_code=True,
-    )
-
-    use_vec = wandb.config.get("use_vectorized_obs", True)
-    
-    
-    # if use_vec:
-
-    print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}")
-    env = SimpleDirectZmqEnv(action_ep, step_ep)    
-    policy = "MlpPolicy"
-    policy_kwargs = dict(
-        features_extractor_class=LastRowExtractor,
-        net_arch=list(wandb.config.net_arch),        )
-    # else:
-    #     print(f"{Colors.BLUE}Using single-frame observations.{Colors.ENDC}")
-    #     env = ZmqEnvClient(action_ep)
-    #     policy = "MlpPolicy"
-    #     policy_kwargs = dict(net_arch=list(wandb.config.net_arch))
-
-    print(f'{Colors.BLUE} setting up model SAC')
-    model = SAC(
-        policy,
-        env,
-        learning_rate=wandb.config.learning_rate,
-        gamma=wandb.config.gamma, # This will be pulled from sweep config
-        tau=wandb.config.tau,
-        buffer_size= wandb.config.buffer_size,   # This is hardcoded, not from sweep
-        learning_starts=wandb.config.learning_starts, 
-        batch_size=wandb.config.batch_size,
-        train_freq=wandb.config.train_freq,    # ("step") implied
-        gradient_steps=wandb.config.gradient_steps,
-        ent_coef=wandb.config.ent_coef,
-        policy_kwargs=policy_kwargs,
-        verbose=1,
-        tensorboard_log=f"runs/{run.id}", # Added for WandbCallback
-        target_entropy=wandb.config.target_entropy,
-    )
-
-    callback =  WandbCallback(
-                        model_save_path=f"models/{run.id}",
-                        model_save_freq=50_000,
-                        verbose=2,
-                        log="all",
-                        )
-    print('before learning!')
-    model.learn(total_timesteps=N_STEPS_RL, callback=callback)
-
-    final_model_path = f"models/{run.id}/final_model.zip"
-    model.save(final_model_path)
-    art = wandb.Artifact(
-        name=f"SAC-{run.id}-final",
-        type="model",
-        description=f"Final SAC after {N_STEPS_RL} steps"
-    )
-    art.add_file(final_model_path)
-    run.log_artifact(art)
-    wandb.finish()
-
 def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
     # print(f"TRAINER THREAD: Started. Connecting to {trainer_ep}", )
     run = wandb.init(
@@ -264,7 +800,10 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
     use_vec = wandb.config.get("use_vectorized_obs", True)
     # if use_vec:
     print(f"{Colors.BLUE}Using windowed observations (last row via extractor).{Colors.ENDC}",  flush = True)
-    env = SimpleDirectZmqEnv(action_ep, step_ep)    
+    env = SimpleDirectZmqEnv(action_ep, step_ep)
+
+    print(f"{Colors.MAGENTA}Wrapping environment with HeuristicActionWrapper.{Colors.ENDC}", flush=True)
+    env = HeuristicActionWrapper(env, BITRATE_LADDER_MBPS)    
     policy = "MlpPolicy"
     policy_kwargs = dict(
         features_extractor_class=LastRowExtractor,
@@ -316,7 +855,7 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
         # print(f"{Colors.YELLOW}td33")
         # TD3 requires action noise. We can make its standard deviation tunable.
         n_actions = env.action_space.shape[-1]
-        noise_sigma = wandb.config.get("action_noise_sigma", 0.1) # Get from config or use 0.1
+        noise_sigma = wandb.config.get("action_noise_sigma", 0.4) # Get from config or use 0.1
         model_kwargs['action_noise'] = NormalActionNoise(
             mean=np.zeros(n_actions), sigma=noise_sigma * np.ones(n_actions)
         )
@@ -387,7 +926,50 @@ class Colors:
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
     MAGENTA = '\033[95m'
+
     ENDC = '\033[0m'
+
+    CYAN    = '\033[36m'
+    WHITE   = '\033[37m'
+
+    # Bright (light) colors
+    LIGHT_BLACK   = '\033[90m'
+    LIGHT_RED     = '\033[91m'
+    LIGHT_GREEN   = '\033[92m'
+    LIGHT_YELLOW  = '\033[93m'
+    LIGHT_BLUE    = '\033[94m'
+    LIGHT_MAGENTA = '\033[95m'
+    LIGHT_CYAN    = '\033[96m'
+    LIGHT_WHITE   = '\033[97m'
+
+    # Background colors
+    BG_BLACK   = '\033[40m'
+    BG_RED     = '\033[41m'
+    BG_GREEN   = '\033[42m'
+    BG_YELLOW  = '\033[43m'
+    BG_BLUE    = '\033[44m'
+    BG_MAGENTA = '\033[45m'
+    BG_CYAN    = '\033[46m'
+    BG_WHITE   = '\033[47m'
+
+    # Bright backgrounds
+    BG_LIGHT_BLACK   = '\033[100m'
+    BG_LIGHT_RED     = '\033[101m'
+    BG_LIGHT_GREEN   = '\033[102m'
+    BG_LIGHT_YELLOW  = '\033[103m'
+    BG_LIGHT_BLUE    = '\033[104m'
+    BG_LIGHT_MAGENTA = '\033[105m'
+    BG_LIGHT_CYAN    = '\033[106m'
+    BG_LIGHT_WHITE   = '\033[107m'
+
+    # Style modifiers
+    BOLD      = '\033[1m'
+    DIM       = '\033[2m'
+    ITALIC    = '\033[3m'
+    UNDERLINE = '\033[4m'
+    BLINK     = '\033[5m'
+    INVERT    = '\033[7m'
+
 
 
 def _obs_from_payload_dict(d):
@@ -575,6 +1157,7 @@ class SimpleDirectZmqEnv(gym.Env):
             # dump_frames("ROUTER SEND reset-response", [identity, b'', json.dumps(action_response).encode()])
 
             obs_request = json.loads(obs_msg)
+            action_mask = obs_request.get("action_mask")
             
             # Parse and store
             obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
@@ -585,7 +1168,8 @@ class SimpleDirectZmqEnv(gym.Env):
             self.last_obs_for_done = flat_obs.copy()
             
             print("✅ Received initial observation from Rust")
-            return flat_obs, {"obs_meta": meta}
+            info = {"obs_meta": meta, "action_mask": action_mask}
+            return flat_obs, info
             
         except zmq.ZMQError as e:
             print(f"❌ Error during reset: {e}")
@@ -634,6 +1218,7 @@ class SimpleDirectZmqEnv(gym.Env):
             raise
 
         action_latency_ms = (time.time() - t0) * 1000.0
+        next_action_mask = None
 
         t2 = time.time()
         try:
@@ -658,9 +1243,7 @@ class SimpleDirectZmqEnv(gym.Env):
 
         # Now, handle logic based on `done`
         if done:
-            # --- EPISODE IS DONE ---
-            # The Rust sim has exited (or will soon).
-            # Do *not* wait for a new observation.
+
             print("✅ Received final transition (done=True)")
             next_obs = self.last_obs_for_done # Return last valid obs
             next_meta = current_meta
@@ -686,6 +1269,7 @@ class SimpleDirectZmqEnv(gym.Env):
                     raise RuntimeError(f"Unexpected multipart frame count: {len(parts)} frames: {parts}")
         
                 obs_request = json.loads(obs_msg)
+                next_action_mask = obs_request.get("action_mask")
                 
             except zmq.ZMQError as e:
                 print(f"❌ Error receiving next observation: {e}")
@@ -743,7 +1327,7 @@ class SimpleDirectZmqEnv(gym.Env):
             self.ep_return = 0.0
             self.ep_len = 0
 
-        info = {"obs_meta": next_meta}
+        info = {"obs_meta": next_meta, "action_mask": next_action_mask}
         return next_obs, reward, done, truncated, info
 
     def close(self):
@@ -752,34 +1336,8 @@ class SimpleDirectZmqEnv(gym.Env):
         self.ctx.term()
 
 
-# def dump_frames(label, frames):
-#     parts_info = ", ".join(f"{len(f)}B" for f in frames)
-#     preview = [f[:100] for f in frames]
-#     print(f"[ZMQ-DUMP] {label}: {len(frames)} frames ({parts_info})")
-#     for i, f in enumerate(preview):
-#         try:
-#             print(f"  frame[{i}]: {f.decode('utf-8', errors='replace')[:120]}")
-#         except Exception:
-#             print(f"  frame[{i}]: {f!r}")
 
-import threading
 
-def start_zmq_server_thread(env_vars):
-
-    ACTION_ENDPOINT  = env_vars.get("ZMQ_ACTION_EP",  "ipc:///tmp/xr_default_action")
-    STEP_ENDPOINT    = env_vars.get("ZMQ_STEP_EP",    "ipc:///tmp/xr_default_step")
-    TRAINER_ENDPOINT = env_vars.get("ZMQ_TRAINER_EP", "ipc:///tmp/xr_default_trainer")
-
-    print(f"📡 Binding server to:")
-    print(f"  ACTION_ENDPOINT  = {ACTION_ENDPOINT}")
-    print(f"  STEP_ENDPOINT    = {STEP_ENDPOINT}")
-    print(f"  TRAINER_ENDPOINT = {TRAINER_ENDPOINT}")
-
-    server = ZmqServer(ACTION_ENDPOINT, STEP_ENDPOINT, TRAINER_ENDPOINT)
-    t = threading.Thread(target=server.run_forever, daemon=True)
-    t.start()
-
-    return server, t
 
 class LastRowExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: spaces.Box, feat_dim: int = FEAT_DIM):
@@ -803,7 +1361,7 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     # trainer_ep = f"ipc:///tmp/xr_{RUN_ID}_trainer"
 
     trainer_process = mp.Process(
-        target=train_agent_single, 
+        target=train_maskable_ppo, 
         args=(action_ep, step_ep),
         daemon=True # Make it a daemon so it exits when the main script exits
     )
@@ -814,15 +1372,6 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     # fut_rl = pool.submit(train_sac_single, action_ep, step_ep)
 
     time.sleep(15.0) ## TODO: WAIT UNTIL TRAINER IS READY (TempFile)
-
-    # ---- Start the shared ZMQ server ----
-    env_server = {
-        "ZMQ_ACTION_EP":  action_ep,
-        "ZMQ_STEP_EP":    step_ep,
-        # "ZMQ_TRAINER_EP": trainer_ep,
-    }
-    # server, thread = start_zmq_server_thread(env_server)
-
 
     # ---- Start RL thread (same endpoints for all episodes) ----
     print(f"RL loop started on:\n\t{action_ep},\n\t{step_ep}")
@@ -955,6 +1504,8 @@ def periodic_clear(dir_path: Path, interval_s: int = 60):
         time.sleep(interval_s)
         clear_results_directory(dir_path)
 
+
+import threading
 
 def main():
 

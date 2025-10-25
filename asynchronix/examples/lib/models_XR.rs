@@ -1224,6 +1224,9 @@ pub enum BitrateMode {
             last_decision_instant: Arc<Mutex<TaiTime<0>>>,
             pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
             action_space: ActionSpace, 
+            nest_vr_max_mbps: f32,
+            nest_vr_min_mbps: f32,
+            nest_vr_config: ProfileConfig, 
             
         }, 
         GCCPort{
@@ -1377,7 +1380,7 @@ pub struct RLTransition {
     // pub done: bool, 
 // }
 pub trait RLConnector {
-    fn select_action(&mut self, obs: &RLObservation) -> RLAction;
+    fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction;
     fn post_transition(&mut self, transition: &RLTransition);
     fn reset_window(&mut self);
 }
@@ -1435,6 +1438,7 @@ pub struct RLRequestRNN {
     pub seq_len: u8,        // how many real steps (<= window_len)
     pub feat_dim: u8,       // = FEAT_DIM
     pub window_len: u8,     // fixed capacity N
+    pub action_mask: Option<Vec<u8>>, // enable masking actions 
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1544,8 +1548,7 @@ impl RLConnector for ZmqConnector {
      * 1. Send the observation to the Python ROUTER.
      * 2. Block and wait for the ROUTER to reply with an action.
      */
-   fn select_action(&mut self, obs: &RLObservation) -> RLAction {
-        // 1. Build the observation payload
+    fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction {        // 1. Build the observation payload
         let prev_flat = self.window.as_flat_padded();
         let feat_dim = obs.to_vec().len();
         
@@ -1555,6 +1558,7 @@ impl RLConnector for ZmqConnector {
             seq_len: self.window.seq_len() as u8,
             feat_dim: feat_dim as u8,
             window_len: self.window.cap as u8,
+            action_mask: action_mask.cloned(),
         };
         let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
 
@@ -1993,6 +1997,7 @@ pub struct BitrateManager {
     obs_config: ObservationConfig, 
     obs_normalizer: ObservationNormalizer, 
     reward_stat: RunningStat, 
+    pub reward_mode: usize, 
 
 }
 
@@ -2000,7 +2005,8 @@ pub struct BitrateManager {
 
 impl BitrateManager {
     
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, fps: f32, obs_config: ObservationConfig , t_update_abr: f32, ) -> Self {
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, 
+                fps: f32, obs_config: ObservationConfig , t_update_abr: f32, reward_mode: usize, ) -> Self {
         
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -2010,10 +2016,12 @@ impl BitrateManager {
         };         
         
         let mut bitrate_ladder_std_bps = Vec::new(); 
-        let bitrate_step_count = 9; 
+        let bitrate_step_count: usize = 20; 
+
+        // let bitrate_ladder_mbps: Vec<u32> = (5..=100).step_by(5).collect();
 
         let max_mbps = MAX_MBPS_LADDER; 
-        let min_mbps = 10.0; 
+        let min_mbps = 5.0; 
 
         let (min_bps, max_bps) = ( min_mbps * 1e6, max_mbps * 1e6); 
         // let initial_bitrate_mbps = 50.0; 
@@ -2081,7 +2089,7 @@ impl BitrateManager {
                     BitrateMode::EVeREst { bitrate_ladder_mbps }
                 }
             3 => { // RL 
-                let ladder_mbps = (10..=MAX_MBPS_LADDER as usize).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
+                let ladder_mbps = (5..=MAX_MBPS_LADDER as usize).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
                 // print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
 
@@ -2100,6 +2108,24 @@ impl BitrateManager {
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
                     action_space, 
+                    nest_vr_max_mbps: max_mbps,
+                    nest_vr_min_mbps: min_mbps, 
+                    nest_vr_config:  ProfileConfig {
+                                            update_interval_nestvr_s: t_update_abr as f32, 
+                                            max_bitrate_mbps: max_mbps,
+                                            min_bitrate_mbps: min_mbps,
+                                            initial_bitrate_mbps: initial_bitrate_mbps,
+
+                                            bitrate_step_count, 
+                                            bitrate_inc_steps: 1, 
+                                            bitrate_dec_steps: decrement, 
+
+                                            rtt_adj_prob: 1.0,
+                                            bitrate_inc_prob: 0.25, 
+                                            nfr_thresh: 0.99,
+                                            rtt_thresh_ms: 22.0, 
+                                            capacity_scaling_factor: 0.9,
+                                        },            
                 } 
             }
 
@@ -2174,6 +2200,7 @@ impl BitrateManager {
             obs_config,
             obs_normalizer: ObservationNormalizer::default(),
             reward_stat: RunningStat::default(), 
+            reward_mode, 
 
         }
     }
@@ -2560,13 +2587,29 @@ impl BitrateManager {
                     last_decision_instant,
                     pending_obs,
                     action_space,
+
+                    nest_vr_max_mbps,
+                    nest_vr_min_mbps,
+                    nest_vr_config, 
                 } => {
+
+                    let bitrate_ladder_mbps = &bitrate_ladder_mbps.clone();
+                    let connector = connector.clone();
+                    let last_action_idx = last_action_idx.clone();
+                    let pending_obs = pending_obs.clone();
+                    let action_space = action_space.clone();
+                    let profile_config = nest_vr_config.clone();
+                    
+                    // f32 is `Copy`, so dereferencing (`*`) creates a copy.
+                    let nest_vr_max_mbps = *nest_vr_max_mbps;
+                    let nest_vr_min_mbps = *nest_vr_min_mbps;
+                    let last_decision_instant = last_decision_instant.clone();
+
+
                     // Respect step interval
                     // if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
                     //     return self.last_target_bitrate_bps;
                     // }
-
-                    // Build current obs (already computed above as `obs`)
                     let current_obs = obs.clone();
 
                     // Take history out, or create new
@@ -2580,12 +2623,88 @@ impl BitrateManager {
 
                     // Ask the agent
 
-                    
+                    let everest_bps = {
+                        let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
+                        let new_mbps = match self.everest_last_order {
+                            EverestCommand::Continue => bitrate_ladder_mbps.iter().find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON).copied().unwrap_or(current_mbps),
+                            EverestCommand::SpeedUp => bitrate_ladder_mbps.iter().find(|&&x| x > current_mbps).copied().unwrap_or(*bitrate_ladder_mbps.last().unwrap()),
+                            EverestCommand::SlowDown => bitrate_ladder_mbps.iter().rfind(|&&x| x < current_mbps).copied().unwrap_or(bitrate_ladder_mbps[0]),
+                        };
+                        let mut bps = new_mbps * 1e6; 
+                        let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma ).ceil() as usize ; 
+                        let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);  
+                        bps = f32::min(capacity_margin_bps, bps); 
+                        if let Some(ladder) = &self.bitrate_ladder_bps{
+                            bps = upper_bound_bitrate(bps, ladder);   
+                        }
+                        bps
+                    };
+                    let everest_mbps = everest_bps / 1e6;
 
-                    let action = connector.lock().unwrap().select_action(&current_obs);
+                    // (B) Calculate Nest-VR Action (logic copied from NestVr arm)
+                    // This uses the config fields passed into this enum variant.
+                    let nest_vr_bps = {
+                        let (max_bps, min_bps) = (nest_vr_max_mbps * 1e6, nest_vr_min_mbps * 1e6); 
+                        let mut rng = rand::thread_rng();
+                        let uniform_dist = Uniform::new(0.0, 1.0);
+                        let r_rtt = rng.sample(uniform_dist);
+                        let r_inc = rng.sample(uniform_dist);
+                        let frame_interval_s = f32::max(self.frame_interval_average.get_average(), 1e-9);
+                        let fps_tx_avg = if frame_interval_s != 0.0 { 1.0 / frame_interval_s } else { 0.0 };
+                        let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 { 1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average()) } else { 0.0 };
+                        let nfr_avg = fps_rx_avg / fps_tx_avg;
+                        let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
+                        let estimated_capacity_bps = f32::max(self.peak_throughput_average.get_average(), 1e-9);
+                        let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
+                        
+                        if nfr_avg < profile_config.nfr_thresh {
+                            bitrate_bps -= profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps_nest;
+                        } else {
+                            if rtt_avg_ms > profile_config.rtt_thresh_ms {
+                                if r_rtt <= profile_config.rtt_adj_prob {
+                                    bitrate_bps -= profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps_nest;
+                                }
+                            } else {
+                                if r_inc <= profile_config.bitrate_inc_prob {
+                                    bitrate_bps += profile_config.bitrate_inc_steps as f32 * self.bitrate_step_size_bps_nest;
+                                }
+                            }
+                        }
+                        let capacity_upper_limit = profile_config.capacity_scaling_factor * estimated_capacity_bps;
+                        bitrate_bps = f32::min(bitrate_bps, capacity_upper_limit);
+                        bitrate_bps = minmax_bitrate(bitrate_bps, max_bps, min_bps);
+                        // Use the main bitrate ladder for final snapping
+                        bitrate_bps = upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap()); 
+                        bitrate_bps
+                    };
+                    let nest_vr_mbps = nest_vr_bps / 1e6;
+
+
+                    // (C) Find nearest indices in the RL ladder
+                    // (Assuming `nearest_idx` function is available in scope)
+                    let everest_idx = nearest_idx(bitrate_ladder_mbps, everest_mbps);
+                    let nest_vr_idx = nearest_idx(bitrate_ladder_mbps, nest_vr_mbps);
+
+                    // (D) Create the mask (allow only these two actions)
+                    let mut mask = vec![0u8; bitrate_ladder_mbps.len()];
+                    mask[everest_idx] = 1;
+                    mask[nest_vr_idx] = 1; // Overwrites if indices are same (which is fine)
+                    
+                    let action_mask = Some(&mask);
+                    
+                    // println!("[RL Mask] Everest -> {:.2} Mbps (idx {}), NestVR -> {:.2} Mbps (idx {}).\n Mask: {:?}", 
+                        // everest_mbps, everest_idx, nest_vr_mbps, nest_vr_idx, mask);
+
+                    let action = connector.lock().unwrap().select_action(&current_obs, action_mask);
 
                     // Reward/Done
-                    let reward = self.rl_naive_reward_function(&current_obs);
+                    // let reward = self.rl_naive_reward_function(&current_obs);
+
+                     let reward = match self.reward_mode {
+                        0 => self.rl_naive_reward_function(&current_obs), 
+                        1 => self.normalized_reward_fn(&current_obs), 
+                        _ => self.rl_naive_reward_function(&current_obs), 
+                    }; 
                     let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
                     let prev_idx_logged = *last_action_idx.lock().unwrap();
 
@@ -2596,27 +2715,27 @@ impl BitrateManager {
                     // Map action -> (final_mbps, snapped_idx)
                     let (final_mbps, snapped_idx, cont_raw_opt) = match (action_space, action) {
                         (ActionSpace::Discrete, RLAction::Discrete(i)) => {
-                            let (idx, mbps) = idx_to_mbps(bitrate_ladder_mbps, i);
+                            let (idx, mbps) = idx_to_mbps(&bitrate_ladder_mbps.clone(), i);
                             (mbps, idx, None)
                         }
                         (ActionSpace::Discrete, RLAction::ContinuousMbps(v)) => {
                             // Defensive: if Python sends continuous while env expects discrete,
                             // snap to nearest rung.
-                            let (idx, mbps) = snap_to_ladder(bitrate_ladder_mbps, v);
+                            let (idx, mbps) = snap_to_ladder(&bitrate_ladder_mbps.clone(), v);
                             (mbps, idx, Some(v))
                         }
                         (ActionSpace::Continuous { min_mbps, max_mbps }, RLAction::Discrete(i)) => {
                             // Map ladder index to evenly-spaced value over [min,max]
                             let n = bitrate_ladder_mbps.len().max(2);
                             let alpha = (i as f32) / ((n - 1) as f32);
-                            let raw = (min_mbps + alpha * (max_mbps - min_mbps)).clamp(*min_mbps, *max_mbps);
-                            let idx = nearest_idx(bitrate_ladder_mbps, raw);
+                            let raw = (min_mbps + alpha * (max_mbps - min_mbps)).clamp(min_mbps, max_mbps);
+                            let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
                             (raw, idx, Some(raw))
                         }
                         (ActionSpace::Continuous { min_mbps, max_mbps }, RLAction::ContinuousMbps(v)) => {
-                            let raw = v.clamp(*min_mbps, *max_mbps);
+                            let raw = v.clamp(min_mbps, max_mbps);
                             
-                                let idx = nearest_idx(bitrate_ladder_mbps, raw);
+                                let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
                                 (raw, idx, Some(raw))
                             
                         }
@@ -2640,24 +2759,27 @@ impl BitrateManager {
                     } else {
                         *pending_obs.lock().unwrap() = Some(history);
                     }
+
+
+
                     *last_action_idx.lock().unwrap() = snapped_idx;
                     *last_decision_instant.lock().unwrap() = now;
 
                     // Apply bitrate
                     self.last_target_bitrate_bps = final_mbps * 1e6;
 
-                    match cont_raw_opt {
-                        Some(raw) => {print_blue!(
-                            "[{} RL {}] Action: raw={:.2} Mbps -> final={:.2} Mbps (idx={})",
-                            format_elapsed!(now), ip_server, raw, final_mbps, snapped_idx
-                            );
-                        },
-                        None => {print_blue!(
-                            "[{} RL {}] Action: idx={} -> final={:.2} Mbps",
-                            format_elapsed!(now), ip_server, snapped_idx, final_mbps
-                            );
-                        },
-                    }
+                    // match cont_raw_opt {
+                    //     Some(raw) => {print_blue!(
+                    //         "[{} RL {}] Action: raw={:.2} Mbps -> final={:.2} Mbps (idx={})",
+                    //         format_elapsed!(now), ip_server, raw, final_mbps, snapped_idx
+                    //         );
+                    //     },
+                    //     None => {print_blue!(
+                    //         "[{} RL {}] Action: idx={} -> final={:.2} Mbps",
+                    //         format_elapsed!(now), ip_server, snapped_idx, final_mbps
+                    //         );
+                    //     },
+                    // }
 
                     self.last_target_bitrate_bps
                 }
@@ -3186,6 +3308,7 @@ impl XRServer {
                 frame_rate, 
                 obs_config,
                 t_update_abr,  
+                reward_mode, 
             ),
 
             video_app_sender: None,
@@ -4596,7 +4719,8 @@ impl XRClient {
             None
         }; 
 
-        let everest_enabled = abr_mode == 2; 
+        // let everest_enabled = abr_mode == 2; 
+        let everest_enabled = true; // to enable info on heuristics for RL mode 
         
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
