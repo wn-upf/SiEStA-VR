@@ -12,6 +12,9 @@ from sb3_contrib import RecurrentPPO
 # from sb3_contrib import RecurrentSAC
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.noise import NormalActionNoise  # <-- ADD THIS
+from stable_baselines3.common.type_aliases import Schedule
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
+
 from pathlib import Path
 from itertools import product
 from datetime import datetime
@@ -36,16 +39,19 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 from absl import logging as absl_logging
 import os
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import torch
+import torch.nn as nn
 import torch as th
 from gymnasium import spaces
 
-import torch.nn as nn
 
 from stable_baselines3.common.callbacks import CallbackList
 
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
-
+from stable_baselines3.common.callbacks import BaseCallback
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from stable_baselines3.common.policies import ActorCriticPolicy
 
 import subprocess
 import signal
@@ -112,23 +118,53 @@ GoP_sizes = [90]
 everest_tests = 1
 
 ###############################3
-from stable_baselines3.common.callbacks import BaseCallback
-from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
-
-
-from torch import nn
 
 class DropoutActorCriticPolicy(MaskableActorCriticPolicy):
+    """
+    A MaskableActorCriticPolicy that adds Dropout layers to the
+    policy and value networks.
+    """
+    def __init__(
+        self,
+        observation_space: gym.spaces.Space,
+        action_space: gym.spaces.Space,
+        lr_schedule: Schedule,
+        *args,
+        **kwargs,
+    ):
+        # --- Solution Step 1: Pop the custom argument ---
+        # Pop 'dropout_p' from kwargs before passing them to the parent.
+        # Provide a default value (e.g., 0.0) if it's not passed.
+        self.dropout_p = kwargs.pop("dropout_p", 0.0)
+        
+        # --- Solution Step 2: Call the parent constructor ---
+        # Now kwargs no longer contains 'dropout_p', so this call is safe.
+        super().__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            *args,
+            **kwargs,
+        )
+
     def _build_mlp_extractor(self) -> None:
+        """
+        Builds the MLP extractor and adds dropout layers.
+        This method is called by the parent's __init__ method.
+        """
+        # Build the standard MLP extractor first
         super()._build_mlp_extractor()
-        # Apply dropout to both policy and value nets
-        dropout_p = getattr(self, "dropout_p", 0.2)
-        self.mlp_extractor.policy_net = nn.Sequential(
-            *(list(self.mlp_extractor.policy_net.children()) + [nn.Dropout(p=dropout_p)])
-        )
-        self.mlp_extractor.value_net = nn.Sequential(
-            *(list(self.mlp_extractor.value_net.children()) + [nn.Dropout(p=dropout_p)])
-        )
+        
+        # --- Solution Step 3: Use the stored dropout value ---
+        if self.dropout_p > 0.0:
+            # Add dropout to the policy network
+            self.mlp_extractor.policy_net = nn.Sequential(
+                *(list(self.mlp_extractor.policy_net.children()) + [nn.Dropout(p=self.dropout_p)])
+            )
+            # Add dropout to the value network
+            self.mlp_extractor.value_net = nn.Sequential(
+                *(list(self.mlp_extractor.value_net.children()) + [nn.Dropout(p=self.dropout_p)])
+            )
 
 class MaskableDiscreteZmqEnv(gym.Env):
     """
@@ -566,10 +602,10 @@ def train_maskable_ppo(action_ep: str, step_ep: str):
             vf=list(wandb.config.net_arch),   # Critic network
         ), 
         optimizer_class=torch.optim.RMSprop,
-        optimizer_kwargs=dict(alpha=0.99, eps=1e-5, weight_decay=0.0)
+        optimizer_kwargs=dict(alpha=0.99, eps=1e-5, weight_decay=0.0), 
         
     )
-    policy_kwargs["dropout_p"] = wandb.config.get("dropout_p", 0.2)
+    policy_kwargs["dropout_p"] = 0.2
     # If using windowed observations with feature extractor:
     if wandb.config.get("use_vectorized_obs", True):
         policy_kwargs['features_extractor_class'] = LastRowExtractor

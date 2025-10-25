@@ -23,7 +23,7 @@ parameters:
   # --- PPO Specific Hyperparameters ---
   n_steps:
     values: [256, 512, 1024, 2048]
-  batch_size_ppo: # Use a unique name to avoid conflicts
+  batch_size: # Use a unique name to avoid conflicts
     values: [64, 128, 256, 512]
   n_epochs:
     values: [4, 10, 20, 40]
