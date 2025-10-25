@@ -45,7 +45,7 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use crate::lib::models_XR::{NestVrProfile, STA_extended, XRClient, XRServer, BITRATE_UPDATE_INTERVAL};
+use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer};
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 1;
@@ -102,6 +102,9 @@ impl VRPair {
         test_distances_everest_bool: bool, 
         t_end_simu: f64, 
         simu_unique_str: &str, 
+        obs_config: ObservationConfig, 
+        reward_mode: usize, 
+        t_update_abr: f32, 
 
     ) -> Self {
 
@@ -175,9 +178,12 @@ impl VRPair {
             nest_vr_profile, 
             t_end_simu, 
             simu_unique_str, // for identifying each simulation on the RLConnector
+            obs_config, 
+            reward_mode, 
+            t_update_abr, 
         );
 
-        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, abr_choice, simu_unique_str, bm_string);
+        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, abr_choice, simu_unique_str, bm_string, t_update_abr);
 
         let mut sta_server = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -340,10 +346,13 @@ pub struct SimParams {
     pub nest_vr_choice: usize,  // 0 Speedy | 1 Balanced | 2 Anxious
     pub test_distances_everest: usize, // 0/1
     pub sim_id: usize,
+    pub observation_type: usize, 
+    pub reward_mode: usize,     // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
+    pub t_update_abr: f32, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
-    assert!(args.len() == 23, "unexpected number of args");
+    assert!(args.len() == 26, "unexpected number of args");
     SimParams {
         stoptime:               args[1].parse().unwrap(),
         mean_length_bg:         args[2].parse().unwrap(),
@@ -367,6 +376,11 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         nest_vr_choice:         args[20].parse().unwrap(),
         test_distances_everest: args[21].parse().unwrap(),
         sim_id:                 args[22].parse().unwrap(),
+        observation_type:       args[23].parse().unwrap(), 
+        reward_mode:            args[24].parse().unwrap(), 
+        t_update_abr:           args[25].parse().unwrap(), 
+
+
     }
 }
 
@@ -402,6 +416,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         nest_vr_choice,
         test_distances_everest,
         sim_id,
+        observation_type, 
+        reward_mode, 
+        t_update_abr, 
     } = params;
 
     // 2) Handy deriveds (exactly like your main)
@@ -443,8 +460,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, 
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, 
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -501,6 +518,14 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
+    let obs_config = match observation_type{
+        0 => ObservationConfig::Raw, 
+        1 => ObservationConfig::ManualScaledV1,
+        2 => ObservationConfig::RunningAvg, 
+
+        _ => ObservationConfig::ManualScaledV1, 
+    }; 
+
 
 
     for i in 0..n_close{ // to set up variable distance scenarios across users
@@ -525,6 +550,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             test_distances_everest_bool, 
             stoptime, 
             &sim_unique_string, 
+            obs_config, 
+            reward_mode, 
+            t_update_abr, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -559,7 +587,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             test_distances_everest_bool, 
             stoptime, 
             &sim_unique_string, 
-
+            obs_config, 
+            reward_mode, 
+            t_update_abr, 
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);

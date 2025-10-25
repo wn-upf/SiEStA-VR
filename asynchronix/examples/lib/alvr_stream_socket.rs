@@ -61,7 +61,6 @@ pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 80.0;
-pub const CHUNK_DURATION_F64_S: f64 = 0.03; // aprox 3 frames
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -921,6 +920,7 @@ pub struct StreamSocket {
     highest_rx_frame_index: i32,
 
     pub lost_shards_deadline_map: HashMap<u32, usize>, // key: frame_id, val: shard loss
+    pub video_chunk_duration: f32, 
 }
 #[allow(unused)]
 impl StreamSocket {
@@ -947,6 +947,7 @@ impl StreamSocket {
 
             last_lo : Cell::new(0), 
             last_hi: Cell::new(1), 
+            video_chunk_duration: self.video_chunk_duration,  
             // col_cache: HashMap::new(),
         }
     }
@@ -1518,7 +1519,7 @@ pub enum StreamSocketBuilder {
 
 #[allow(unused)]
 impl StreamSocketBuilder {
-    pub fn build(self, max_packet_size: usize) -> StreamSocket {
+    pub fn build(self, max_packet_size: usize, video_chunk_duration: f32, ) -> StreamSocket {
         match self {
             StreamSocketBuilder::Channel(sender, receiver) => {
                 StreamSocket {
@@ -1543,6 +1544,7 @@ impl StreamSocketBuilder {
                     highest_rx_shard_index: -1,
                     highest_rx_frame_index: -1,
                     lost_shards_deadline_map: HashMap::new(),
+                    video_chunk_duration, 
                 }
             }
         }
@@ -1583,6 +1585,7 @@ impl StreamSocketBuilder {
         port: u16,
         max_packet_size: usize,
         timeout: Duration,
+        video_chunk_duration: f32, 
     ) -> ConResult<StreamSocket> {
         let protocol: SocketProtocol;
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
@@ -1635,6 +1638,7 @@ impl StreamSocketBuilder {
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
             lost_shards_deadline_map: HashMap::new(),
+            video_chunk_duration, 
         })
     }
 
@@ -1648,6 +1652,7 @@ impl StreamSocketBuilder {
         send_buffer_bytes: SocketBufferSize,
         recv_buffer_bytes: SocketBufferSize,
         max_packet_size: usize,
+        video_chunk_duration: f32, 
     ) -> ConResult<StreamSocket> {
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
             match protocol {
@@ -1705,6 +1710,7 @@ impl StreamSocketBuilder {
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
             lost_shards_deadline_map: HashMap::new(),
+            video_chunk_duration,  
         })
     }
 
@@ -1717,16 +1723,18 @@ impl StreamSocketBuilder {
         send_buffer: SocketBufferSize,
         recv_buffer: SocketBufferSize,
         packet_size: usize,
+        video_chunk_duration: f32, 
     ) -> Result<StreamSocket> {
         let (sender, receiver) = buffered_channel();
 
-        Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
+        Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size, video_chunk_duration))
     }
 
     pub fn accept_from_server_mod(
         server_ip: IpAddr,
         port: u16,
         packet_size: usize,
+        video_chunk_duration: f32, 
     ) -> Result<StreamSocket> {
         // let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) = match self {
         //     StreamSocketBuilder::Channel(sender, receiver) => {
@@ -1737,7 +1745,7 @@ impl StreamSocketBuilder {
 
         let (sender, receiver) = buffered_channel();
 
-        Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size))
+        Ok(StreamSocketBuilder::Channel(sender, receiver).build(packet_size, video_chunk_duration))
     }
 }
 
@@ -1889,6 +1897,8 @@ pub struct StreamSender<H> {
     // col_cache: HashMap<u32, usize>, 
     last_lo: Cell<usize>,
     last_hi: Cell<usize>,
+
+    pub video_chunk_duration: f32, 
 }
 
 
@@ -2096,7 +2106,7 @@ impl<H: Serialize> StreamSender<H> {
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
                     &bitrate_cmd,
-                    CHUNK_DURATION_F64_S, // Chunk duration in seconds
+                    self.video_chunk_duration as f64, // Chunk duration in seconds
                     format!("[ENCODER {}]", ip),
                     random_offset,
                     framerate, 

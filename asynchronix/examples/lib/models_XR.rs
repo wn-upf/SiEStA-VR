@@ -60,7 +60,7 @@ use crate::lib::alvr_control_socket::ProtoControlSocket;
 use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket, EverestCommand, NadaStats, };
 use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
-    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader, CHUNK_DURATION_F64_S,
+    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
 };
 use crate::lib::alvr_stream_socket::{
     AUDIO, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO, FOVOPTIX_BW_PROBE, 
@@ -156,7 +156,7 @@ pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 pub const DECODER_BUFFERING_FRAMES: usize = 3;
-pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
+// pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
 
 #[allow(unused)]                                                                                    
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment, 
@@ -1224,6 +1224,7 @@ pub enum BitrateMode {
             last_decision_instant: Arc<Mutex<TaiTime<0>>>,
             pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
             action_space: ActionSpace, 
+            
         }, 
         GCCPort{
             gcc_estimator: GccBandwidthEstimator, 
@@ -1266,13 +1267,13 @@ pub struct RLObservation {
     pub frame_interarrival_std_ms: f32, 
 
     pub flr_avg_s: f32, 
-    pub pl_sum_period: usize, 
+    pub pl_sum_period: f32, 
     pub frame_size_avg_bytes: f32, 
 
     pub ow_delay_period_ewma: f32, 
     pub f_ow_delay_period_ewma: f32, 
     // pub buffer_level_avg_s: f32, 
-    pub rebuffer_event_sum: u8, 
+    pub rebuffer_event_sum: f32, 
 
 }
 
@@ -1830,7 +1831,111 @@ impl TimedVecBuffer{
 
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationConfig {
+    /// Return raw, unnormalized observation values.
+    Raw,
+    /// Return values manually scaled based on observed ranges from plots.
+    ManualScaledV1,
+    RunningAvg, 
+}
 
+
+// --- ADD THIS HELPER STRUCT (tracks stats for one feature) ---
+#[derive(Debug, Clone, Copy, Default)]
+struct RunningStat {
+    n: u64,
+    mu: f32,
+    m2: f32,
+}
+
+impl RunningStat {
+    /// Welford's online algorithm
+    fn update(&mut self, x: f32) {
+        self.n += 1;
+        let delta = x - self.mu;
+        self.mu += delta / self.n as f32;
+        let delta2 = x - self.mu; // Use new mean
+        self.m2 += delta * delta2;
+    }
+
+    fn get_mean(&self) -> f32 {
+        self.mu
+    }
+
+    fn get_var(&self) -> f32 {
+        if self.n < 2 {
+            0.0
+        } else {
+            self.m2 / self.n as f32
+        }
+    }
+
+    fn get_std(&self) -> f32 {
+        self.get_var().sqrt()
+    }
+}
+
+// --- ADD THIS HELPER STRUCT (manages all feature stats) ---
+#[derive(Debug, Default)]
+struct ObservationNormalizer {
+    t_elapsed_s: RunningStat,
+    last_target_bitrate_mbps: RunningStat,
+    rtt_ms_avg_s: RunningStat,
+    rtt_ms_std_s: RunningStat,
+    bandwidth_mbps_avg_s: RunningStat,
+    bandwidth_mbps_std_s: RunningStat,
+    frame_interarrival_avg_ms: RunningStat,
+    frame_interarrival_std_ms: RunningStat,
+    flr_avg_s: RunningStat,
+    pl_sum_period: RunningStat,
+    frame_size_avg_bytes: RunningStat,
+    ow_delay_period_ewma: RunningStat,
+    f_ow_delay_period_ewma: RunningStat,
+    rebuffer_event_sum: RunningStat,
+}
+
+impl ObservationNormalizer {
+    const EPSILON: f32 = 1e-8;
+    const CLIP_RANGE: f32 = 5.0; // Clip to [-5.0, 5.0]
+
+    /// Updates stats with the pre-processed observation,
+    /// then returns the normalized & clipped observation.
+    fn update_and_normalize(&mut self, obs: RLObservation) -> RLObservation {
+        // This macro reduces boilerplate
+        macro_rules! update_norm_clip {
+            ($field:ident) => {
+                {
+                    // 1. Update stats
+                    self.$field.update(obs.$field as f32);
+                    // 2. Normalize
+                    let mean = self.$field.get_mean();
+                    let std = self.$field.get_std();
+                    let norm: f32 = (obs.$field as f32- mean) / (std + Self::EPSILON);
+                    // 3. Clip
+                    norm.clamp(-Self::CLIP_RANGE, Self::CLIP_RANGE)
+                }
+            };
+        }
+
+        RLObservation {
+            t_elapsed_s: update_norm_clip!(t_elapsed_s ),
+            last_target_bitrate_mbps: update_norm_clip!(last_target_bitrate_mbps ),
+            rtt_ms_avg_s: update_norm_clip!(rtt_ms_avg_s ),
+            rtt_ms_std_s: update_norm_clip!(rtt_ms_std_s ),
+            bandwidth_mbps_avg_s: update_norm_clip!(bandwidth_mbps_avg_s ),
+            bandwidth_mbps_std_s: update_norm_clip!(bandwidth_mbps_std_s ),
+            frame_interarrival_avg_ms: update_norm_clip!(frame_interarrival_avg_ms ),
+            frame_interarrival_std_ms: update_norm_clip!(frame_interarrival_std_ms ),
+            flr_avg_s: update_norm_clip!(flr_avg_s ),
+            pl_sum_period: update_norm_clip!(pl_sum_period),
+            frame_size_avg_bytes: update_norm_clip!(frame_size_avg_bytes ),
+            ow_delay_period_ewma: update_norm_clip!(ow_delay_period_ewma ),
+            f_ow_delay_period_ewma: update_norm_clip!(f_ow_delay_period_ewma ),
+            rebuffer_event_sum: update_norm_clip!(rebuffer_event_sum),
+        }
+    }
+}
 
 #[allow(unused)]
 // #[derive(Clone)]
@@ -1884,13 +1989,18 @@ pub struct BitrateManager {
     ewma_fowd: f32, 
     ewma_owd:  f32, 
     bytes_size_avg: SlidingWindowAverage<f32>, 
+
+    obs_config: ObservationConfig, 
+    obs_normalizer: ObservationNormalizer, 
+    reward_stat: RunningStat, 
+
 }
 
 
 
 impl BitrateManager {
     
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, fps: f32, ) -> Self {
+     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, fps: f32, obs_config: ObservationConfig , t_update_abr: f32, ) -> Self {
         
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => {10}, 
@@ -1939,12 +2049,12 @@ impl BitrateManager {
                     }
                 BitrateMode::NestVr { 
                     //     NestVr{
-                        averaging_strategy: AveragingStrategy::SimpleWindowAverage { window_type: WindowType::BySeconds { sliding_window_secs: Some(BITRATE_UPDATE_INTERVAL as f32) } },            
+                        averaging_strategy: AveragingStrategy::SimpleWindowAverage { window_type: WindowType::BySeconds { sliding_window_secs: Some(t_update_abr) } },            
                         max_bitrate_mbps: max_mbps,
                         min_bitrate_mbps: min_mbps,
                         initial_bitrate_mbps,
                         nest_vr_profile: ProfileConfig {
-                                            update_interval_nestvr_s: BITRATE_UPDATE_INTERVAL as f32, 
+                                            update_interval_nestvr_s: t_update_abr as f32, 
                                             max_bitrate_mbps: max_mbps,
                                             min_bitrate_mbps: min_mbps,
                                             initial_bitrate_mbps: initial_bitrate_mbps,
@@ -1984,7 +2094,7 @@ impl BitrateManager {
 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
-                    step_interval: Duration::from_secs_f32(BITRATE_UPDATE_INTERVAL as f32),
+                    step_interval: Duration::from_secs_f32(t_update_abr as f32),
                     connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(&action_ep, &reward_ep,  &ctx, sim_unique_string , RL_WINDOW_OBSERVATION_SIZE)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
@@ -2012,7 +2122,7 @@ impl BitrateManager {
         print_green!("Server {} has BitrateMode => {:?}", ip_server, bitrate_mode.variant_name());
 
         let flr_vec: TimedVecFLR = TimedVecFLR::new( 1.0 as f32); // let's take FLR 1 sec sliding window. TODO: input arg 
-        let buflevel_vec =  TimedVecBuffer::new( BITRATE_UPDATE_INTERVAL as f32); 
+        let buflevel_vec =  TimedVecBuffer::new( t_update_abr as f32); 
 
         Self {
             last_frame_instant: TaiTime::EPOCH,
@@ -2025,7 +2135,7 @@ impl BitrateManager {
 
             bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
             // last_target_bitrate_mbps: initial_bitrate_mbps,
-            update_interval_s: Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL),
+            update_interval_s: Duration::from_secs_f32(t_update_abr),
 
             rtt_average: SlidingWindowAverage::new(Duration::from_millis(5).as_secs_f32(), max_history_size),
             peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
@@ -2060,7 +2170,11 @@ impl BitrateManager {
             ewma_fowd: 0.0, 
             ewma_owd: 0.0, 
             bytes_size_avg: SlidingWindowAverage::new(initial_bitrate_mbps / initial_framerate * 1e6,
-                        max_history_size )
+                        max_history_size ),
+            obs_config,
+            obs_normalizer: ObservationNormalizer::default(),
+            reward_stat: RunningStat::default(), 
+
         }
     }
 
@@ -2245,7 +2359,7 @@ impl BitrateManager {
             bitrate_bps 
         }
         else{
-            // println!("One pass ABR"); 
+            println!("{:.3} One pass ABR", taitime_to_f64!(now)); 
 
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 
@@ -2599,69 +2713,192 @@ impl BitrateManager {
             bitrate_bps
         }
     }
+    
 
-
-    pub fn build_rl_observation (&mut self, now: TaiTime<0>) -> RLObservation{
-        match self.bitrate_mode{
+    pub fn build_rl_observation(&mut self, now: TaiTime<0>) -> RLObservation {
+        match self.bitrate_mode {
             BitrateMode::ReinforcementLearner { .. } => {} //do nothing
-            _ => { return RLObservation::default();}       // return early. 
-        }; 
-        let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
-        let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6; 
-        let rtt_ms_avg_s = self.rtt_average.get_average() * 1000.0; 
-        let rtt_ms_std_s = self.rtt_average.get_std() * 1000.0; 
+            _ => {
+                return RLObservation::default();
+            } // return early.
+        };
 
-        let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average() * 1e-6; 
-        let bandwidth_mbps_std_s =      self.peak_throughput_average.get_std() * 1e-6; 
-        let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0; 
-        let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0; 
+        // --- 1. Calculate all raw values first ---
+        let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32();
+        let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6;
+        let rtt_ms_avg_s = self.rtt_average.get_average() * 1000.0;
+        let rtt_ms_std_s = self.rtt_average.get_std() * 1000.0;
 
-        // let flr_avg_s = (self.flr_shardloss_count.sum_flr(now.duration_since(TaiTime::EPOCH).as_secs_f32() ) as f32 / 
-        //         (1.0 / self.framerate )) ; // percentage according to encoded frames window average, 
-        //  
-        let window_s = self.flr_shardloss_count.period; // the window period (e.g., 1 s)
+        let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average() * 1e-6;
+        let bandwidth_mbps_std_s = self.peak_throughput_average.get_std() * 1e-6;
+        let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0;
+        let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0;
+
+        let window_s = self.flr_shardloss_count.period;
         let frames_sent_expectation = self.framerate * window_s;
-        let t_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        let t_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32();
         let frames_lost = self.flr_shardloss_count.sum_flr(t_elapsed) as f32;
-        let pl_lost_period    = self.flr_shardloss_count.sum_shard_loss(t_elapsed); 
+        let pl_lost_period = self.flr_shardloss_count.sum_shard_loss(t_elapsed);
 
         // normalize to a ratio [0.0, 1.5]
-        let flr_avg_s = (frames_lost / frames_sent_expectation ).min(1.5); // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
+        let flr_avg_s = (frames_lost / frames_sent_expectation.max(1.0)).min(1.5); // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
+        
+        let rebuffer_event_sum = self.last_rebuffer_avg_sum;
+        let frame_size_avg_bytes = self.bytes_size_avg.get_average();
+        let ow_delay_period_ewma = self.ewma_owd;
+        let f_ow_delay_period_ewma = self.ewma_fowd;
 
-        // let buffer_level_avg_s = self.jitbuf_avg_count.avg_buffer_level_period(); 
-        let rebuffer_event_sum = self.last_rebuffer_avg_sum; 
 
-        RLObservation{
+
+        // Create the raw observation struct. Note casting u64 -> f32
+        let raw_obs = RLObservation {
             t_elapsed_s,
             last_target_bitrate_mbps,
             rtt_ms_avg_s,
-            rtt_ms_std_s, 
+            rtt_ms_std_s,
             bandwidth_mbps_avg_s,
             bandwidth_mbps_std_s,
             frame_interarrival_avg_ms,
-            frame_interarrival_std_ms,  
+            frame_interarrival_std_ms,
             flr_avg_s,
-            pl_sum_period: pl_lost_period, 
-            frame_size_avg_bytes: self.bytes_size_avg.get_average(), 
-            ow_delay_period_ewma: self.ewma_owd, 
-            f_ow_delay_period_ewma: self.ewma_fowd, 
-            // buffer_level_avg_s, 
-            rebuffer_event_sum, 
-        }
+            pl_sum_period: pl_lost_period as f32, // Cast to f32
+            frame_size_avg_bytes,
+            ow_delay_period_ewma,
+            f_ow_delay_period_ewma,
+            rebuffer_event_sum: rebuffer_event_sum as f32, // Cast to f32
+        };
 
+        // --- 2. Match on config and return appropriate struct ---
+        match self.obs_config {
+            ObservationConfig::Raw => {
+                // Return the raw, unnormalized values
+                raw_obs
+            }
+            ObservationConfig::ManualScaledV1 => {
+                // Scaling constants based on plots from image_969aa9.jpg
+                
+                // Unipolar (scale to [0.0, 1.0])
+                const MAX_T_ELAPSED: f32 = 60.0; // obs_last/t_elapsed_s
+                const MAX_TARGET_BITRATE: f32 = 100.0; // obs_last/target_bitrate_mbps
+                const MAX_RTT_AVG: f32 = 300.0; // obs_last/rtt_ms_avg_s
+                const MAX_RTT_STD: f32 = 250.0; // obs_last/rtt_ms_std_s
+                const MAX_BANDWIDTH_AVG: f32 = 1000.0; // obs_last/bandwidth_mbps_avg_s
+                const MAX_BANDWIDTH_STD: f32 = 1000.0; // obs_last/bandwidth_mbps_std_s
+                const MAX_FRAME_INTERARRIVAL_AVG: f32 = 250.0; // obs_last/frame_interarrival_avg_ms
+                const MAX_FRAME_INTERARRIVAL_STD: f32 = 250.0; // obs_last/frame_interarrival_std_ms
+                const MAX_FLR_AVG: f32 = 1.5; // From your code comment
+                const MAX_PL_SUM: f32 = 1400.0; // obs_last/pl_sum_period
+                const MAX_FRAME_SIZE_AVG: f32 = 200_000.0; // obs_last/frame_size_avg_bytes
+                const MAX_REBUFFER_SUM: f32 = 6.0; // obs_last/rebuffer_event_sum
+
+                // Bipolar (scale to [-1.0, 1.0])
+                const MAX_ABS_OW_DELAY: f32 = 0.02; // obs_last/ow_delay_period_ewma
+                const MAX_ABS_F_OW_DELAY: f32 = 0.01; // obs_last/f_ow_delay_period_ewma
+
+                // Apply scaling and clamp to the target range
+                RLObservation {
+                    // Unipolar [0.0, 1.0]
+                    t_elapsed_s: (t_elapsed_s / MAX_T_ELAPSED).clamp(0.0, 1.0),
+                    last_target_bitrate_mbps: (last_target_bitrate_mbps / MAX_TARGET_BITRATE).clamp(0.0, 1.0),
+                    rtt_ms_avg_s: (rtt_ms_avg_s / MAX_RTT_AVG).clamp(0.0, 1.0),
+                    rtt_ms_std_s: (rtt_ms_std_s / MAX_RTT_STD).clamp(0.0, 1.0),
+                    bandwidth_mbps_avg_s: (bandwidth_mbps_avg_s / MAX_BANDWIDTH_AVG).clamp(0.0, 1.0),
+                    bandwidth_mbps_std_s: (bandwidth_mbps_std_s / MAX_BANDWIDTH_STD).clamp(0.0, 1.0),
+                    frame_interarrival_avg_ms: (frame_interarrival_avg_ms / MAX_FRAME_INTERARRIVAL_AVG).clamp(0.0, 1.0),
+                    frame_interarrival_std_ms: (frame_interarrival_std_ms / MAX_FRAME_INTERARRIVAL_STD).clamp(0.0, 1.0),
+                    flr_avg_s: (flr_avg_s / MAX_FLR_AVG).clamp(0.0, 1.0),
+                    pl_sum_period: pl_lost_period as f32 / MAX_PL_SUM, // Keep as u64, or normalize: (pl_lost_period as f32 / MAX_PL_SUM).clamp(0.0, 1.0)
+                    frame_size_avg_bytes: (frame_size_avg_bytes / MAX_FRAME_SIZE_AVG).clamp(0.0, 1.0),
+                    // Bipolar [-1.0, 1.0]
+                    ow_delay_period_ewma: (ow_delay_period_ewma / MAX_ABS_OW_DELAY).clamp(-1.0, 1.0),
+                    f_ow_delay_period_ewma: (f_ow_delay_period_ewma / MAX_ABS_F_OW_DELAY).clamp(-1.0, 1.0),
+                    // Unipolar [0.0, 1.0]
+                    rebuffer_event_sum: rebuffer_event_sum as f32, // Keep as u64, or normalize: (rebuffer_event_sum as f32 / MAX_REBUFFER_SUM).clamp(0.0, 1.0)
+                }
+            }, 
+            ObservationConfig::RunningAvg => {
+                // 1. Pre-process: Apply log transform to skewed, non-negative features
+                let pre_processed_obs = RLObservation {
+                    // No log transform (linear, user-scaled, or can be negative)
+                    t_elapsed_s: raw_obs.t_elapsed_s,
+                    last_target_bitrate_mbps: raw_obs.last_target_bitrate_mbps,
+                    flr_avg_s: raw_obs.flr_avg_s,
+                    ow_delay_period_ewma: raw_obs.ow_delay_period_ewma,
+                    f_ow_delay_period_ewma: raw_obs.f_ow_delay_period_ewma,
+
+                    // Log transform (skewed, non-negative)
+                    rtt_ms_avg_s: (raw_obs.rtt_ms_avg_s + 1.0).ln(),
+                    rtt_ms_std_s: (raw_obs.rtt_ms_std_s + 1.0).ln(),
+                    bandwidth_mbps_avg_s: (raw_obs.bandwidth_mbps_avg_s + 1.0).ln(),
+                    bandwidth_mbps_std_s: (raw_obs.bandwidth_mbps_std_s + 1.0).ln(),
+                    frame_interarrival_avg_ms: (raw_obs.frame_interarrival_avg_ms + 1.0).ln(),
+                    frame_interarrival_std_ms: (raw_obs.frame_interarrival_std_ms + 1.0).ln(),
+                    pl_sum_period: (raw_obs.pl_sum_period + 1.0).ln(),
+                    frame_size_avg_bytes: (raw_obs.frame_size_avg_bytes + 1.0).ln(),
+                    rebuffer_event_sum: (raw_obs.rebuffer_event_sum + 1.0).ln(),
+                };
+
+                // 2. Update stats and return normalized, clipped observation
+                self.obs_normalizer.update_and_normalize(pre_processed_obs)
+            }
+
+        }
     }
+
+
 
     pub fn vmaf_manual_function( &self, bitrate_mbps: f32 ) -> f32{ // values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
                              // Snow sample, intra-refresh against 100 Mbps (median fit)
         100.0 - 89.40 * (-0.0615 * bitrate_mbps).exp()
     }
 
+    pub fn normalized_reward_fn(&mut self, obs: &RLObservation) -> f32 {
+        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
+        let beta = 1.0;   // flr 0 to 1
+        let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
+        let gamma; 
+
+        if obs.rtt_ms_avg_s >= 50.0 {
+            gamma = -0.02;       // rtt greater than 50 ms -> 0 to -inf based on distance
+        }
+        else{
+            gamma = 0.0; 
+        }
+
+        let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
+        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards. 
+        let rtt_term = gamma * obs.rtt_ms_avg_s;
+        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
+
+        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
+        reward = f32::max(reward, -1.0); // clip rewards to 0 
+        
+        // 2. Update the running reward stats
+        self.reward_stat.update(reward);
+
+        // 3. Normalize the reward
+        let mean = self.reward_stat.get_mean();
+        let std = self.reward_stat.get_std();
+        let normalized_reward = (reward - mean) / (std + 1e-8);
+        
+        reward
+
+
+    }
+
     pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 { // only first term is positive, others are penalties. 
 
         let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
         let beta = 1.0;   // flr 0 to 1
-        let gamma = - 0.04;       // rtt ~2 to 50 ms -> 0 to - 2
         let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
+        let gamma; 
+
+        if obs.rtt_ms_avg_s >= 50.0 {
+            gamma = -0.02;       // rtt greater than 50 ms -> 0 to -inf based on distance
+        }
+        else{
+            gamma = 0.0; 
+        }
 
         let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
         let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards. 
@@ -2853,6 +3090,9 @@ pub struct XRServer {
 
     pub fov_optix_manager : Option<Arc<Mutex<FovOptixStruct>>> , 
 
+    pub reward_mode: usize, // 0 -> naive, 1->normalized, 2-> ?? For future reward shape. 
+    pub t_update_abr: f32, 
+
 }
 #[allow(unused)]
 impl XRServer {
@@ -2871,6 +3111,9 @@ impl XRServer {
         nest_vr_profile: &NestVrProfile, 
         t_end_simu: f64, 
         sim_unique_string: &str, 
+        obs_config: ObservationConfig, 
+        reward_mode: usize ,
+        t_update_abr: f32, 
 
     ) -> Self {
 
@@ -2895,7 +3138,7 @@ impl XRServer {
         }
 
         let num = crate::lib::get_4_octet(ip_self);
-        let history_interval = BITRATE_UPDATE_INTERVAL;
+        let history_interval = t_update_abr;
 
         let nada_sender = if abr_enabled == 5{
             Some(Arc::new(Mutex::new(NadaSender::new(t0_sim))))
@@ -2941,6 +3184,8 @@ impl XRServer {
                 ip_self, 
                 sim_unique_string, 
                 frame_rate, 
+                obs_config,
+                t_update_abr,  
             ),
 
             video_app_sender: None,
@@ -2982,6 +3227,9 @@ impl XRServer {
             sim_unique_string: sim_unique_string.to_string(), 
             nada_sender, 
             fov_optix_manager: fovoptix_struct, 
+            reward_mode, 
+            t_update_abr, 
+
             
         }
     }
@@ -2997,14 +3245,19 @@ impl XRServer {
         // Stop streaming
         self.is_streaming = false;
 
-        let obs = self.bitrate_manager.build_rl_observation(now); // only return something if RL mode activated
+        let current_obs = self.bitrate_manager.build_rl_observation(now); // only return something if RL mode activated
+
+        let reward = match self.reward_mode {
+                    0 => self.bitrate_manager.rl_naive_reward_function(&current_obs), 
+                    1 => self.bitrate_manager.normalized_reward_fn(&current_obs), 
+                    _ => self.bitrate_manager.rl_naive_reward_function(&current_obs), 
+                }; 
+
 
         match &self.bitrate_manager.bitrate_mode {
             BitrateMode::ReinforcementLearner { pending_obs, connector, last_action_idx, .. } => {
                 println!("SESSION ENDDD!");
                 let mut con = connector.lock().unwrap();  // lock ONCE
-
-                let current_obs = obs.clone();
 
                 // history
                 let mut history_opt = pending_obs.lock().unwrap().take();
@@ -3014,6 +3267,8 @@ impl XRServer {
                 // prev window BEFORE pushing current_obs
                 let prev_win_flat = history.as_flat_padded();
 
+
+                
                 let reward = self.bitrate_manager.rl_naive_reward_function(&current_obs);
                 let prev_action = *last_action_idx.lock().unwrap();
 
@@ -3604,7 +3859,7 @@ impl XRServer {
 
                 // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
                 
-                let duration_abr = Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL); 
+                let duration_abr = Duration::from_secs_f32(self.t_update_abr); 
 
                 // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32()); 
 
@@ -3773,6 +4028,7 @@ impl XRServer {
             server_send_buffer_bytes,
             server_recv_buffer_bytes,
             packet_size as _,
+            self.t_update_abr, 
         ) {
             println!("Connection established!");
             self.is_streaming = true;
@@ -4310,6 +4566,7 @@ pub struct XRClient {
     nada_receiver: Option<Arc<Mutex<NadaReceiver>>>,
 
     abr_mode: usize, 
+    t_update_abr: f32,
     // everest_capacity_vec: Vec<f32>, 
     // everest_throughput_vec: Vec<f32>, 
 }
@@ -4326,6 +4583,7 @@ impl XRClient {
         abr_mode: usize, 
         simu_id: &str, // for logging
         bm_str: &str,  // for logging 
+        t_update_abr: f32,
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
@@ -4426,13 +4684,13 @@ impl XRClient {
             bitrate_ladder_perfect_info_update: Vec::new(), 
             everest_enabled, 
 
-            rebuffer_event_counter: TimedRebufferCounter::new( BITRATE_UPDATE_INTERVAL as f32), 
+            rebuffer_event_counter: TimedRebufferCounter::new( t_update_abr), 
             sim_unique_string: simu_id.to_string(), //for logging                
             bm_string: bm_str.to_string(),          //for logging   
 
             nada_receiver,  
             abr_mode, 
-             
+            t_update_abr,              
         }
     }
 
@@ -4500,6 +4758,7 @@ impl XRClient {
             self.server_ip,
             stream_port,
             packet_size as _,
+            self.t_update_abr, 
         ) {
             println!("Connection established!");
             self.is_streaming = true;
