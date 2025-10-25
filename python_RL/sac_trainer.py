@@ -115,25 +115,20 @@ everest_tests = 1
 from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
-# =====================================================
-# 1. CHANGE ACTION SPACE TO DISCRETE
-# =====================================================
-MASKABLE_PPO_CONFIG_IMMEDIATE = {
-    "algo": "MaskablePPO",
-    "learning_rate": 3e-4,
-    "gamma": 0.99,
-    "gae_lambda": 0.95,
-    "n_steps": 2048,
-    "batch_size": 64,
-    "n_epochs": 10,
-    "clip_range": 0.2,
-    "ent_coef": 0.01,
-    "vf_coef": 0.5,
-    "max_grad_norm": 0.5,
-    "net_arch": [256, 256],
-    "use_vectorized_obs": True,
-    "mask_expansion_strategy": "immediate_neighbors",  # Expand to ±1 neighbor
-}
+
+from torch import nn
+
+class DropoutActorCriticPolicy(MaskableActorCriticPolicy):
+    def _build_mlp_extractor(self) -> None:
+        super()._build_mlp_extractor()
+        # Apply dropout to both policy and value nets
+        dropout_p = getattr(self, "dropout_p", 0.2)
+        self.mlp_extractor.policy_net = nn.Sequential(
+            *(list(self.mlp_extractor.policy_net.children()) + [nn.Dropout(p=dropout_p)])
+        )
+        self.mlp_extractor.value_net = nn.Sequential(
+            *(list(self.mlp_extractor.value_net.children()) + [nn.Dropout(p=dropout_p)])
+        )
 
 class MaskableDiscreteZmqEnv(gym.Env):
     """
@@ -568,18 +563,22 @@ def train_maskable_ppo(action_ep: str, step_ep: str):
     policy_kwargs = dict(
         net_arch=dict(
             pi=list(wandb.config.net_arch),  # Actor network
-            vf=list(wandb.config.net_arch)   # Critic network
-        ),
+            vf=list(wandb.config.net_arch),   # Critic network
+        ), 
+        optimizer_class=torch.optim.RMSprop,
+        optimizer_kwargs=dict(alpha=0.99, eps=1e-5, weight_decay=0.0)
+        
     )
-    
+    policy_kwargs["dropout_p"] = wandb.config.get("dropout_p", 0.2)
     # If using windowed observations with feature extractor:
     if wandb.config.get("use_vectorized_obs", True):
         policy_kwargs['features_extractor_class'] = LastRowExtractor
         policy_kwargs['features_extractor_kwargs'] = dict(feat_dim=FEAT_DIM)
     
+
     # Create MaskablePPO model
     model = MaskablePPO(
-        policy=MaskableActorCriticPolicy,
+        policy=DropoutActorCriticPolicy,
         env=env,
         learning_rate=wandb.config.learning_rate,
         n_steps=wandb.config.get("n_steps", 2048),
@@ -594,6 +593,7 @@ def train_maskable_ppo(action_ep: str, step_ep: str):
         policy_kwargs=policy_kwargs,
         verbose=1,
         tensorboard_log=f"runs/{run.id}",
+
     )
     
     print(f"{Colors.GREEN}MaskablePPO model created{Colors.ENDC}")
@@ -630,21 +630,6 @@ def train_maskable_ppo(action_ep: str, step_ep: str):
 # 4. EXAMPLE WANDB CONFIG FOR MASKABLE PPO
 # =====================================================
 
-MASKABLE_PPO_CONFIG = {
-    "algo": "MaskablePPO",
-    "learning_rate": 3e-4,
-    "gamma": 0.99,
-    "gae_lambda": 0.95,
-    "n_steps": 2048,  # Steps per environment per update
-    "batch_size": 64,
-    "n_epochs": 10,   # Number of epochs per update
-    "clip_range": 0.2,
-    "ent_coef": 0.01,  # Entropy coefficient
-    "vf_coef": 0.5,    # Value function coefficient
-    "max_grad_norm": 0.5,
-    "net_arch": [256, 256],
-    "use_vectorized_obs": True,
-}
 
 
 
