@@ -89,7 +89,7 @@ policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 
 #### RL INPUT ARGS (RUST)
-observation_type = [2] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
+observation_type = [1] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
 reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
 T_ABR = 0.3 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
 #################################################
@@ -411,12 +411,12 @@ class MaskableDiscreteZmqEnv(gym.Env):
         
         # Logging
         log_dict = {
-            "train/reward": reward,
-            "train/return_cumsum": self.run_return_cumsum,
-            "train/action_idx": action_idx,
-            "train/action_bitrate_mbps": bitrate_mbps,
-            "train/done": int(done),
-            "train/valid_actions": self.current_action_mask.sum(),
+            "train_env/reward": reward,
+            "train_env/return_cumsum": self.run_return_cumsum,
+            "train_env/action_idx": action_idx,
+            "train_env/action_bitrate_mbps": bitrate_mbps,
+            "train_env/done": int(done),
+            "train_env/valid_actions": self.current_action_mask.sum(),
         }
         
         if wandb.run is not None:
@@ -570,10 +570,13 @@ def mask_fn(env: gym.Env) -> np.ndarray:
 def train_maskable_ppo(action_ep: str, step_ep: str):
     """Train using Maskable PPO with discrete actions."""
     
+
+    rand_value = random.randrange(0, 4096)
     run = wandb.init(
         project=os.environ.get("WANDB_PROJECT", "xr-abr-maskable"),
         entity=os.environ.get("WANDB_ENTITY"),
         save_code=True,
+        name=f'MaskPPO_T{T_ABR}_obs{observation_type}_{rand_value}'
     )
     
     # Choose expansion strategy from config
@@ -773,40 +776,49 @@ class HeuristicActionWrapper(gym.Wrapper):
 
         # Return the final action in the correct gym shape
         return np.array([final_action], dtype=np.float32)
-
 class MetricsLoggerCallback(BaseCallback):
+    """
+    Comprehensive callback that logs ALL SB3 training metrics to WandB.
+    Works with PPO, SAC, TD3, and MaskablePPO.
+    """
     def __init__(self, verbose=0):
         super().__init__(verbose)
+        self.last_logged_step = 0
     
     def _on_step(self) -> bool:
-        # Only log periodically (every 1000 steps)
-        if self.n_calls % 1000 == 0:
-            logs = {}
-
-            # --- Entropy loss & KL divergence ---
-            if hasattr(self.model, "entropy_loss"):
-                logs["train/entropy_loss"] = float(self.model.entropy_loss)
-            if hasattr(self.model, "kl_divergence"):
-                logs["train/kl_divergence"] = float(self.model.kl_divergence)
-
-            # --- Policy loss, value loss, etc. (SAC/TD3 specific) ---
-            if hasattr(self.model, "logger"):
-                kv = self.model.logger.name_to_value
-                for key in ["train/value_loss", "train/policy_loss", "train/entropy_loss"]:
-                    if key in kv:
-                        logs[key] = kv[key]
-
-            # --- Explained variance ---
-            try:
-                ev = self.model.logger.name_to_value.get("train/explained_variance", None)
-                if ev is not None:
-                    logs["train/explained_variance"] = ev
-            except Exception:
-                pass
-
-            if len(logs) > 0:
-                wandb.log(logs, step=self.num_timesteps)
-        return True
+        return True  # Don't log every single step
+    
+    def _on_rollout_end(self) -> None:
+        """Called after each rollout collection phase - perfect for PPO metrics."""
+        if not hasattr(self.model, 'logger') or self.model.logger is None:
+            return
+        
+        logs = {}
+        
+        # Extract ALL metrics from SB3's internal logger
+        for key, value in self.model.logger.name_to_value.items():
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                # Map SB3 keys to WandB keys (keep the structure)
+                wandb_key = key.replace("/", "_")  # e.g., "train/loss" -> "train_loss"
+                logs[key] = float(value)  # Keep original format for compatibility
+        
+        # Add rollout-specific metrics
+        if hasattr(self.locals, 'rollout_buffer') and self.locals['rollout_buffer'] is not None:
+            buffer = self.locals['rollout_buffer']
+            if hasattr(buffer, 'returns'):
+                logs['rollout/mean_return'] = float(np.mean(buffer.returns))
+            if hasattr(buffer, 'advantages'):
+                logs['rollout/mean_advantage'] = float(np.mean(buffer.advantages))
+        
+        if len(logs) > 0:
+            # Don't specify step - let WandB auto-increment
+            wandb.log(logs)
+            if self.verbose > 0:
+                print(f"📊 Logged {len(logs)} metrics to WandB")
+    
+    def _on_training_end(self) -> None:
+        """Log final metrics when training completes."""
+        self._on_rollout_end()  # Flush any remaining metrics
 
 
 def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
@@ -1321,12 +1333,12 @@ class SimpleDirectZmqEnv(gym.Env):
 
         # Logging (common to both paths)
         log_dict = {
-            "train/reward": reward,
-            "train/return_cumsum": self.run_return_cumsum,
-            "train/action": action_val,
-            "train/done": int(done),
-            "timing/action_latency_ms": action_latency_ms,
-            "timing/transition_latency_ms": transition_latency_ms,
+            "train_env/reward": reward,
+            "train_env/return_cumsum": self.run_return_cumsum,
+            "train_env/action": action_val,
+            "train_env/done": int(done),
+            # "timing/action_latency_ms": action_latency_ms,
+            # "timing/transition_latency_ms": transition_latency_ms,
         }
 
         self._log_last_row(log_dict, next_obs)
