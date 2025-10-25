@@ -2359,7 +2359,7 @@ impl BitrateManager {
             bitrate_bps 
         }
         else{
-            println!("{:.3} One pass ABR", taitime_to_f64!(now)); 
+            // println!("{:.3} One pass ABR", taitime_to_f64!(now)); 
 
             let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
 

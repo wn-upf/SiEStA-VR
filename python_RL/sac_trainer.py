@@ -78,9 +78,9 @@ policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 
 #### RL INPUT ARGS (RUST)
-observation_type = [1] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
-reward_mode = 1 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
-T_ABR = 0.3 ## update every 0.3 seconds. With lower value, more frequent steps in simulation but noisier updates. 
+observation_type = [2] ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
+reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
+T_ABR = 1.0 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
 #################################################
 ### SIMULATION PARAMS
 
@@ -333,7 +333,7 @@ def train_agent_single(action_ep: str, step_ep: str):  # Renamed for clarity
     
     print("TRAINER THREAD: 2. Model created.")
 
-     wandb.config.update({
+    wandb.config.update({
         "reward_mode": reward_mode,        # e.g. 0 naive, 1 normalized, 2 shaping
         "T_ABR": T_ABR,                    # e.g. 0.3
         "observation_type": observation_type,  # 0,1,2 etc.
@@ -781,8 +781,6 @@ def start_zmq_server_thread(env_vars):
 
     return server, t
 
-
-c
 class LastRowExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: spaces.Box, feat_dim: int = FEAT_DIM):
         super().__init__(observation_space, features_dim=feat_dim)
