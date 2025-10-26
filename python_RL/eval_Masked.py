@@ -1,9 +1,29 @@
-import sys, numpy as np
-print(np.__version__)
 # Create compatibility shim: map old numpy.core -> numpy._core
-if 'numpy.core' not in sys.modules:
-    sys.modules['numpy.core'] = np._core
-    sys.modules['numpy.core.numeric'] = np._core.numeric
+import sys, numpy as np
+
+
+############################################################
+# RL CONFIG: 
+N_STEPS_RL= 10_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
+FEAT_DIM = 14
+WINDOW_LEN = 5
+OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
+
+ACTION_DIM = 20
+ACT_MIN_MBPS = 5.0
+ACT_MAX_MBPS = 100.0
+BITRATE_LADDER_MBPS = list(range(5, 101, 5))
+
+
+TIMEOUT_ZMQSERVER=2000
+policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
+
+#### RL INPUT ARGS (RUST)
+#################################################
+
+observation_type = 1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
+reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
+T_ABR = 0.3 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
 
 
 from stable_baselines3 import SAC, TD3
@@ -66,8 +86,7 @@ import signal
 import atexit
 import os
 import shutil
-
-# Keep global list of Rust child processes
+    # Keep global list of Rust child processes
 RUST_PROCS = []
 
 #CONSTS
@@ -91,54 +110,6 @@ DETERMINISTIC = True  # Use deterministic policy (no exploration)
 color_model = "red"
 LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_{color_model}.zip")
 ################################################
-# RL PARAMS
-
-N_STEPS_RL= 10_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
-FEAT_DIM = 14
-WINDOW_LEN = 5
-OBSERVATION_SHAPE = (WINDOW_LEN * FEAT_DIM, )
-
-ACTION_DIM = 20
-ACT_MIN_MBPS = 5.0
-ACT_MAX_MBPS = 100.0
-BITRATE_LADDER_MBPS = list(range(5, 101, 5))
-
-
-TIMEOUT_ZMQSERVER=2000
-policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
-
-
-#### RL INPUT ARGS (RUST)
-#################################################
-
-observation_type = 1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
-reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
-T_ABR = 0.3 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
-
-#################################################
-### SIMULATION PARAMS
-
-simTime = [80.0]
-TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
-k_queue = 10000
-mean_length_BG = 12000.0
-rate_bps_src_BG = [10e6]
-distance_list = [1.5]
-distance_close_users = [1.5]
-num_close_users = [0]
-N_XR = [1, 2, 3]
-PL = [0.0001, 0.01, 0.1, 0.15]
-fps_list = [60.0, 90.0, 120.0 ]
-initial_bitrate_mbps = [10.0, 20.0, 40.0]
-ABR_ENABLED = [3]
-nest_profiles = [1]
-RANDOM_SEEDS = list(range(1, 10))
-video_samples = ["snow"]
-N_BGs = [0]
-IS_UL_BG = [0]
-intrarefresh_choice = [1]
-GoP_sizes = [90]
-everest_tests = 1  ## For random 24x12 grid STA placements, with velocity 5m/s in a circle. 
 
 ###############################3
 
@@ -726,8 +697,8 @@ def load_model_from_wandb(entity: str, project: str, artifact_name: str) -> Mask
 # EVALUATION LOOP
 # =====================================================
 def load_model_local(model_path: Path) -> MaskablePPO:
-    import sys, numpy as np
-    from stable_baselines3 import MaskablePPO
+    # import sys, numpy as np
+    # from stable_baselines3 import MaskablePPO
 
     # Compatibility fix for NumPy 2.x
     if 'numpy.core' not in sys.modules and hasattr(np, '_core'):
@@ -744,12 +715,12 @@ def load_model_local(model_path: Path) -> MaskablePPO:
 # EVALUATION LOOP
 # =====================================================
 
-def evaluate_model(model: MaskablePPO, action_ep: str, step_ep: str, 
+def evaluate_model(action_ep: str, step_ep: str, 
                    n_episodes: int, deterministic: bool = True):
     """Run evaluation episodes with the loaded model."""
-    
+    # model = ### LOAD MODEL USING LIBRARY. 
     # Create environment
-    base_env = EvalMaskableDiscreteZmqEnv(
+    base_env = MaskableDiscreteZmqEnv(
         action_ep=action_ep,
         step_ep=step_ep,
         bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
@@ -839,49 +810,48 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
         RUST_PROCS.append(proc)
         for line in proc.stdout:
             f.write(line)
-            # print(line, end="")  # Suppress sim output during eval
+            print(line, end="")  # Suppress sim output during eval
         return proc.wait()
 
 # =====================================================
 # MAIN
 # =====================================================
 
+
 def main():
+
+    #################################################
+    ### SIMULATION PARAMS
+
+    simTime = [80.0]
+    TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+    k_queue = 10000
+    mean_length_BG = 12000.0
+    rate_bps_src_BG = [10e6, ]
+    distance_list = [1.5]
+    distance_close_users = [1.5]
+    num_close_users = [0]
+    N_XR = [1, 2, 3, 4, 5]
+    PL = [0.1]
+    fps_list = [90.0 ]
+    initial_bitrate_mbps = [10.0]
+    ABR_ENABLED = [3]
+    nest_profiles = [1]
+    RANDOM_SEEDS = list(range(1, 10))
+    video_samples = ["snow"]
+    N_BGs = [0]
+    IS_UL_BG = [0]
+    intrarefresh_choice = [1]
+    GoP_sizes = [90]
+    everest_tests = 1  ## For random 24x12 grid STA placements, with velocity 5m/s in a circle. 
+
+    
     print(f"{Colors.BOLD}{Colors.MAGENTA}")
     print("="*60)
     print("  MASKABLE PPO EVALUATION")
     print("="*60)
     print(f"{Colors.ENDC}")
     
-    # Configure W&B mode
-    if not USE_WANDB or WANDB_MODE == "disabled":
-        os.environ["WANDB_MODE"] = "disabled"
-        print(f"{Colors.YELLOW}W&B logging disabled{Colors.ENDC}")
-        run = None
-    else:
-        os.environ["WANDB_MODE"] = WANDB_MODE
-        print(f"{Colors.YELLOW}W&B mode: {WANDB_MODE}{Colors.ENDC}")
-        
-        # Initialize W&B for eval logging
-        try:
-            run = wandb.init(
-                project=f"{WANDB_PROJECT}-eval",
-                entity=WANDB_ENTITY,
-                name=f"eval_{MODEL_ARTIFACT.replace(':', '_')}",
-                config={
-                    "model_artifact": MODEL_ARTIFACT,
-                    "n_eval_episodes": N_EVAL_EPISODES,
-                    "deterministic": DETERMINISTIC,
-                    "T_ABR": T_ABR,
-                    "observation_type": observation_type,
-                    "reward_mode": reward_mode,
-                }
-            )
-        except Exception as e:
-            print(f"{Colors.RED}W&B initialization failed: {e}{Colors.ENDC}")
-            print(f"{Colors.YELLOW}Continuing without W&B logging...{Colors.ENDC}")
-            os.environ["WANDB_MODE"] = "disabled"
-            run = None
     
     # Load trained model
     try:
@@ -890,6 +860,7 @@ def main():
             model = load_model_local(LOCAL_MODEL_PATH)
         else:
             model = load_model_from_wandb(WANDB_ENTITY, WANDB_PROJECT, MODEL_ARTIFACT)
+    
     except Exception as e:
         print(f"{Colors.RED}Failed to load model: {e}{Colors.ENDC}")
         print(f"\n{Colors.YELLOW}Options to fix this:{Colors.ENDC}")
@@ -919,51 +890,138 @@ def main():
         distance_list, GoP_sizes, intrarefresh_choice,
         ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
     ))
+
     random.shuffle(combos)
     combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
     
+
     print(f"\n{Colors.YELLOW}Will evaluate on {len(combos)} scenarios{Colors.ENDC}")
-    
+    print(f"{Colors.CYAN}Creating evaluation environment...{Colors.ENDC}")
+
     # Run evaluation episodes
     all_results = []
     
-    for ep_idx, combo in enumerate(combos, 1):
-        print(f"\n{Colors.BOLD}{Colors.BLUE}Starting Episode {ep_idx}/{len(combos)}{Colors.ENDC}")
+    try:
+        # This is the main evaluation loop
+        for ep_idx, combo in enumerate(combos, 1):
+            print(f"\n{Colors.BOLD}{Colors.BLUE}Starting Episode {ep_idx}/{len(combos)}{Colors.ENDC}")
+            
+            (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
+             close_users, close_distance, seed, distance, gop,
+             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
+            
+            # Build Rust arguments
+            argv = [
+                f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
+                f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
+                f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
+                f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
+                "1", f"{ep_idx}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}",
+            ]
+            
+            env_sim = os.environ.copy()
+            env_sim["ZMQ_ACTION_EP"] = action_ep
+            env_sim["ZMQ_STEP_EP"] = step_ep
+            
+            log_path = Path("EvalResults") / f"eval_ep_{ep_idx}" / "sim.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 1. Launch Rust in background (non-blocking)
+            print(f"{Colors.CYAN}Launching Rust simulator (episode {ep_idx})...{Colors.ENDC}")
+            proc = subprocess.Popen(
+                [str(exe), *argv],
+                stdout=open(log_path, "w", buffering=1),
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env_sim
+            )
+            RUST_PROCS.append(proc)
+            
+            # 2. NOW create the environment. It will connect to the Rust proc.
+            print(f"{Colors.CYAN}Connecting to simulator...{Colors.ENDC}")
+            base_env = MaskableDiscreteZmqEnv(
+                action_ep=action_ep,
+                step_ep=step_ep,
+                bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
+                expansion_strategy='immediate_neighbors', # or from config
+                expansion_param=None
+            )
+            env = ActionMasker(base_env, mask_fn)
+            print(f"{Colors.GREEN}✓ Environment connected{Colors.ENDC}")
+
+            # 3. Run the episode (this is the logic from evaluate_model)
+            print(f"{Colors.GREEN}Running evaluation episode {ep_idx}...{Colors.ENDC}")
+            
+            obs, info = env.reset()  # This triggers Rust to start
+            done = False
+            ep_return = 0.0
+            ep_len = 0
+            
+            while not done:
+                # Get action from the model (loaded in main)
+                # print(f"{Colors.CYAN}[Python] Calling model.predict()...{Colors.ENDC}")
+                action, _states = model.predict(obs, deterministic=DETERMINISTIC)
+                # print(f"{Colors.CYAN}[Python] Calling env.step() (waiting for Rust)...{Colors.ENDC}")
+                obs, reward, done, truncated, info = env.step(action)
+                print(f"{Colors.GREEN}[Python] env.step() returned! (r={reward}, d={done}){Colors.ENDC}")
+                
+                ep_return += reward
+                ep_len += 1
+            
+            # 4. Wait for Rust to finish and close the env
+            ret = proc.wait(timeout=120)
+            env.close() # Close the env for this episode
+
+            print(f"{Colors.GREEN}Episode {ep_idx} completed (exit code: {ret}){Colors.ENDC}")
+            print(f"  Return: {ep_return:.2f}")
+            print(f"  Length: {ep_len}")
+            
+            all_results.append({
+                "episode": ep_idx,
+                "return": ep_return,
+                "length": ep_len,
+                "exit_code": ret
+            })
+            
+            if USE_WANDB and wandb.run is not None:
+                wandb.log({
+                    "eval/episode_return": ep_return,
+                    "eval/episode_length": ep_len,
+                    "eval/episode": ep_idx
+                })
+            
+            if proc in RUST_PROCS:
+                RUST_PROCS.remove(proc)
+    
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Evaluation interrupted by user{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.RED}Error during evaluation: {e}{Colors.ENDC}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Note: We don't need env.close() here anymore
+        # because it's closed inside the loop after each episode.
+        print(f"{Colors.CYAN}Cleaning up...{Colors.ENDC}")
+
+    
+    # Print summary (this part is fine)
+    if all_results:
+        returns = [r["return"] for r in all_results]
+        lengths = [r["length"] for r in all_results]
         
-        (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
-         close_users, close_distance, seed, distance, gop,
-         intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
-        
-        # Build Rust arguments
-        argv = [
-            f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
-            f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
-            f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
-            f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
-            "1", f"{ep_idx}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}",
-        ]
-        
-        env_sim = os.environ.copy()
-        env_sim["ZMQ_ACTION_EP"] = action_ep
-        env_sim["ZMQ_STEP_EP"] = step_ep
-        
-        log_path = Path("EvalResults") / f"eval_ep_{ep_idx}" / "sim.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Run simulation with evaluation
-        print(f"{Colors.CYAN}Launching Rust simulator...{Colors.ENDC}")
-        ret = run_sim(exe, argv, env_sim, log_path)
-        print(f"{Colors.GREEN}Episode {ep_idx} completed (exit code: {ret}){Colors.ENDC}")
+        print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.GREEN}Evaluation Complete{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
+        print(f"Episodes: {len(all_results)}")
+        print(f"Mean Return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
+        # ... etc ...
     
     # Finish W&B run
-    if USE_WANDB and run is not None:
+    if USE_WANDB and wandb.run is not None:
         wandb.finish()
     
     print(f"\n{Colors.BOLD}{Colors.GREEN}Evaluation complete!{Colors.ENDC}")
-    if USE_WANDB:
-        print(f"Results logged to W&B project: {WANDB_PROJECT}-eval")
-    else:
-        print(f"Results saved to: EvalResults/")
 
 if __name__ == "__main__":
     atexit.register(cleanup_rust_processes)
