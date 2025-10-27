@@ -1,7 +1,8 @@
 # Create compatibility shim: map old numpy.core -> numpy._core
 import sys, numpy as np
+from pathlib import Path
 
-
+from multiprocessing import Pool, cpu_count
 ############################################################
 # RL CONFIG: 
 N_STEPS_RL= 10_000_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
@@ -14,8 +15,6 @@ ACT_MIN_MBPS = 5.0
 ACT_MAX_MBPS = 100.0
 BITRATE_LADDER_MBPS = list(range(5, 101, 5))
 
-
-TIMEOUT_ZMQSERVER=2000
 policy_ppo_a2c = "MlpPolicy"  # shared by PPO and A2C
 
 #### RL INPUT ARGS (RUST)
@@ -102,13 +101,7 @@ ACTION_ENDPOINT = os.environ.get("ZMQ_ACTION_EP", "ipc:///tmp/xr_eval_action")
 STEP_ENDPOINT = os.environ.get("ZMQ_STEP_EP", "ipc:///tmp/xr_eval_step")
 
 
-# Evaluation Parameters
-N_EVAL_EPISODES = 10  # Number of episodes to evaluate
-DETERMINISTIC = True  # Use deterministic policy (no exploration)
 
-
-color_model = "red"
-LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_{color_model}.zip")
 ################################################
 
 ###############################3
@@ -439,6 +432,125 @@ class MaskableDiscreteZmqEnv(gym.Env):
             print(f"❌ Error during reset: {e}")
             raise
 
+    # def step(self, action):
+    #     """
+    #     Step with discrete action (index into bitrate ladder).
+        
+    #     Args:
+    #         action: int, index in range [0, n_actions)
+    #     """
+    #     # Convert discrete action to bitrate value
+    #     action_idx = int(action)
+    #     bitrate_mbps = self.bitrate_ladder[action_idx]
+        
+    #     # Send action
+    #     if self.pending_obs_info is None:
+    #         raise RuntimeError("step() called before reset()")
+        
+    #     identity, current_obs, current_meta = self.pending_obs_info
+    #     self.pending_obs_info = None
+        
+    #     action_response = {"bitrate_mbps": float(bitrate_mbps)}
+        
+    #     try:
+    #         msg = [identity, b'', json.dumps(action_response).encode('utf-8')]
+    #         self.action_socket.send_multipart(msg)
+    #     except zmq.ZMQError as e:
+    #         print(f"❌ Error sending action: {e}")
+    #         raise
+        
+    #     # Receive transition
+    #     try:
+    #         transition = self.transition_socket.recv_json()
+    #     except zmq.ZMQError as e:
+    #         print(f"❌ Error receiving transition: {e}")
+    #         raise
+        
+    #     reward = float(transition["reward"])
+    #     done = bool(transition["done"])
+    #     truncated = False
+        
+    #     # Update stats
+    #     self.ep_return += reward
+    #     self.ep_len += 1
+    #     self.global_step += 1
+    #     self.run_return_cumsum += reward
+    #     self.step_count += 1
+        
+    #     try:
+    #         parts = self.action_socket.recv_multipart()
+    #         if len(parts) == 2:
+    #             identity, obs_msg = parts
+    #         elif len(parts) == 3 and parts[1] == b'':
+    #             identity, _, obs_msg = parts
+    #         else:
+    #             raise RuntimeError(f"Unexpected frame count: {len(parts)}")
+            
+    #         obs_request = json.loads(obs_msg)
+
+    #     except Exception as e:
+    #         if done:
+    #             # This is OK. Rust sent done=True and exited before sending
+    #             # a final (dummy) observation. We can proceed.
+    #             print(f"{Colors.YELLOW}[Env] Final step, no dummy obs received. This is OK.{Colors.ENDC}")
+    #             next_obs = self.last_obs_for_done.copy() # Use last valid obs
+    #             next_meta = current_meta
+    #             self.current_action_mask = np.ones(self.n_actions, dtype=bool)
+    #             self.pending_obs_info = None
+    #         else:
+    #             # This is a real error.
+    #             print(f"❌ Error receiving next obs (and not done): {e}")
+    #             raise
+    #     else:
+    #         # We successfully received an observation.
+    #         # Parse it regardless of whether it's a dummy or real.
+    #         rust_mask = obs_request.get("action_mask")
+    #         self.current_action_mask = self._convert_rust_mask_to_action_mask(rust_mask)
+            
+    #         obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
+    #         parsed_obs, parsed_meta = self._parse_obs_payload(obs_payload)
+
+    #         if done:
+    #             # We are done, so this was a dummy obs.
+    #             # Return the LAST VALID observation from the *previous* step.
+    #             next_obs = self.last_obs_for_done.copy()
+    #             next_meta = current_meta # Use meta from previous step
+    #             self.pending_obs_info = None # Don't store dummy obs
+    #         else:
+    #             # We are not done, so this is a real observation.
+    #             # Store it and return it.
+    #             next_obs = parsed_obs
+    #             next_meta = parsed_meta
+    #             self.pending_obs_info = (identity, next_obs, next_meta)
+    #             self.last_obs_for_done = next_obs.copy() # Update last valid obs
+
+    #     # Logging
+    #     log_dict = {
+    #         "train_env/reward": reward,
+    #         "train_env/return_cumsum": self.run_return_cumsum,
+    #         "train_env/action_idx": action_idx,
+    #         "train_env/action_bitrate_mbps": bitrate_mbps,
+    #         "train_env/done": int(done),
+    #         "train_env/valid_actions": self.current_action_mask.sum(),
+    #     }
+    #     self._log_last_row(log_dict, next_obs)
+
+        
+    #     if wandb.run is not None:
+    #         wandb.log(log_dict)
+        
+    #     if done:
+    #         if wandb.run is not None:
+    #             wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
+    #         self.ep_return = 0.0
+    #         self.ep_len = 0
+        
+    #     # IMPORTANT: Return action_mask in info
+    #     info = {
+    #         "obs_meta": next_meta,
+    #         "action_mask": self.current_action_mask  # Required by MaskablePPO
+    #     }
+    #     return next_obs, reward, done, truncated, info
     def step(self, action):
         """
         Step with discrete action (index into bitrate ladder).
@@ -462,20 +574,31 @@ class MaskableDiscreteZmqEnv(gym.Env):
         try:
             msg = [identity, b'', json.dumps(action_response).encode('utf-8')]
             self.action_socket.send_multipart(msg)
+            print(f"{Colors.CYAN}[Env] Sent action: {bitrate_mbps} Mbps{Colors.ENDC}")
         except zmq.ZMQError as e:
             print(f"❌ Error sending action: {e}")
             raise
         
-        # Receive transition
+        # Receive transition with timeout
         try:
-            transition = self.transition_socket.recv_json()
+            # Set a timeout so we don't hang forever
+            if self.transition_socket.poll(5000):  # 5 second timeout
+                transition = self.transition_socket.recv_json(flags=zmq.NOBLOCK)
+                print(f"{Colors.GREEN}[Env] Received transition: reward={transition.get('reward')}, done={transition.get('done')}{Colors.ENDC}")
+            else:
+                print(f"{Colors.RED}[Env] Timeout waiting for transition! Assuming episode ended.{Colors.ENDC}")
+                # Rust probably crashed/exited - treat as done
+                transition = {"reward": 0.0, "done": True}
         except zmq.ZMQError as e:
             print(f"❌ Error receiving transition: {e}")
-            raise
+            # Treat as episode end
+            transition = {"reward": 0.0, "done": True}
         
-        reward = float(transition["reward"])
-        done = bool(transition["done"])
+        reward = float(transition.get("reward", 0.0))
+        done = bool(transition.get("done", True))
         truncated = False
+        
+        print(f"{Colors.YELLOW}[Env] Step result: reward={reward:.4f}, done={done}{Colors.ENDC}")
         
         # Update stats
         self.ep_return += reward
@@ -484,32 +607,56 @@ class MaskableDiscreteZmqEnv(gym.Env):
         self.run_return_cumsum += reward
         self.step_count += 1
         
+        # === Check done BEFORE trying to receive next obs ===
         if done:
-            next_obs = self.last_obs_for_done
+            # Episode finished - Rust has exited or will exit soon
+            print(f"{Colors.GREEN}[Env] Episode finished (done=True). Using last valid obs.{Colors.ENDC}")
+            next_obs = self.last_obs_for_done.copy()
             next_meta = current_meta
             self.current_action_mask = np.ones(self.n_actions, dtype=bool)
             self.pending_obs_info = None
+            
         else:
-            # Receive next observation
-            parts = self.action_socket.recv_multipart()
-            if len(parts) == 2:
-                identity, obs_msg = parts
-            elif len(parts) == 3 and parts[1] == b'':
-                identity, _, obs_msg = parts
-            else:
-                raise RuntimeError(f"Unexpected frame count: {len(parts)}")
-            
-            obs_request = json.loads(obs_msg)
-            
-            # Extract and convert next action mask
-            rust_mask = obs_request.get("action_mask")
-            self.current_action_mask = self._convert_rust_mask_to_action_mask(rust_mask)
-            
-            obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
-            next_obs, next_meta = self._parse_obs_payload(obs_payload)
-            
-            self.pending_obs_info = (identity, next_obs, next_meta)
-            self.last_obs_for_done = next_obs.copy()
+            # Episode continues - wait for next observation
+            print(f"{Colors.CYAN}[Env] Episode continuing, waiting for next obs...{Colors.ENDC}")
+            try:
+                # Also add timeout here
+                if self.action_socket.poll(5000):  # 5 second timeout
+                    parts = self.action_socket.recv_multipart(flags=zmq.NOBLOCK)
+                    print(f"{Colors.GREEN}[Env] Received next observation ({len(parts)} frames){Colors.ENDC}")
+                    
+                    if len(parts) == 2:
+                        identity, obs_msg = parts
+                    elif len(parts) == 3 and parts[1] == b'':
+                        identity, _, obs_msg = parts
+                    else:
+                        raise RuntimeError(f"Unexpected frame count: {len(parts)}")
+                    
+                    obs_request = json.loads(obs_msg)
+                    rust_mask = obs_request.get("action_mask")
+                    self.current_action_mask = self._convert_rust_mask_to_action_mask(rust_mask)
+                    
+                    obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
+                    next_obs, next_meta = self._parse_obs_payload(obs_payload)
+                    
+                    # Store for next step
+                    self.pending_obs_info = (identity, next_obs, next_meta)
+                    self.last_obs_for_done = next_obs.copy()
+                else:
+                    # Timeout - Rust probably exited unexpectedly
+                    print(f"{Colors.RED}[Env] Timeout waiting for next obs! Treating as episode end.{Colors.ENDC}")
+                    next_obs = self.last_obs_for_done.copy()
+                    next_meta = current_meta
+                    done = True  # Force episode to end
+                    self.pending_obs_info = None
+                    
+            except zmq.ZMQError as e:
+                print(f"❌ Error receiving next obs: {e}")
+                # Use last valid observation and end episode
+                next_obs = self.last_obs_for_done.copy()
+                next_meta = current_meta
+                done = True
+                self.pending_obs_info = None
         
         # Logging
         log_dict = {
@@ -521,7 +668,6 @@ class MaskableDiscreteZmqEnv(gym.Env):
             "train_env/valid_actions": self.current_action_mask.sum(),
         }
         self._log_last_row(log_dict, next_obs)
-
         
         if wandb.run is not None:
             wandb.log(log_dict)
@@ -529,20 +675,21 @@ class MaskableDiscreteZmqEnv(gym.Env):
         if done:
             if wandb.run is not None:
                 wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
+            print(f"{Colors.BOLD}{Colors.GREEN}[Env] Episode complete: return={self.ep_return:.2f}, length={self.ep_len}{Colors.ENDC}")
             self.ep_return = 0.0
             self.ep_len = 0
         
-        # IMPORTANT: Return action_mask in info
+        # Return action_mask in info
         info = {
             "obs_meta": next_meta,
-            "action_mask": self.current_action_mask  # Required by MaskablePPO
+            "action_mask": self.current_action_mask
         }
         return next_obs, reward, done, truncated, info
-
-    def close(self):
-        self.action_socket.close()
-        self.transition_socket.close()
-        self.ctx.term()
+    
+        def close(self):
+            self.action_socket.close()
+            self.transition_socket.close()
+            self.ctx.term()
 
     # Include _parse_obs_payload and other helper methods from your original code
     @staticmethod
@@ -707,77 +854,9 @@ def load_model_local(model_path: Path) -> MaskablePPO:
 
     print(f"{Colors.CYAN}Loading model from: {model_path}{Colors.ENDC}")
     model = MaskablePPO.load(str(model_path))
-    print(f"{Colors.GREEN}✓ Model loaded successfully{Colors.ENDC}")
+    print(f"{Colors.GREEN}✓ Model {model_path} loaded successfully{Colors.ENDC}")
     return model
 
-
-# =====================================================
-# EVALUATION LOOP
-# =====================================================
-
-def evaluate_model(action_ep: str, step_ep: str, 
-                   n_episodes: int, deterministic: bool = True):
-    """Run evaluation episodes with the loaded model."""
-    # model = ### LOAD MODEL USING LIBRARY. 
-    # Create environment
-    base_env = MaskableDiscreteZmqEnv(
-        action_ep=action_ep,
-        step_ep=step_ep,
-        bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
-        expansion_strategy='immediate_neighbors',
-        expansion_param=None
-    )
-    env = ActionMasker(base_env, mask_fn)
-    
-    print(f"{Colors.BOLD}{Colors.GREEN}Starting evaluation: {n_episodes} episodes{Colors.ENDC}")
-    
-    episode_returns = []
-    episode_lengths = []
-    
-    for ep in range(n_episodes):
-        print(f"\n{Colors.CYAN}{'='*60}{Colors.ENDC}")
-        print(f"{Colors.CYAN}Evaluation Episode {ep+1}/{n_episodes}{Colors.ENDC}")
-        print(f"{Colors.CYAN}{'='*60}{Colors.ENDC}")
-        
-        obs, info = env.reset()
-        done = False
-        ep_return = 0.0
-        ep_len = 0
-        
-        while not done:
-            # Get action from model (deterministic or stochastic)
-            action, _states = model.predict(obs, deterministic=deterministic)
-            obs, reward, done, truncated, info = env.step(action)
-            
-            ep_return += reward
-            ep_len += 1
-        
-        episode_returns.append(ep_return)
-        episode_lengths.append(ep_len)
-        
-        print(f"{Colors.GREEN}Episode {ep+1} Summary:{Colors.ENDC}")
-        print(f"  Return: {ep_return:.2f}")
-        print(f"  Length: {ep_len}")
-    
-    env.close()
-    
-    # Print final statistics
-    print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
-    print(f"{Colors.BOLD}{Colors.GREEN}Evaluation Complete{Colors.ENDC}")
-    print(f"{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
-    print(f"Episodes: {n_episodes}")
-    print(f"Mean Return: {np.mean(episode_returns):.2f} ± {np.std(episode_returns):.2f}")
-    print(f"Mean Length: {np.mean(episode_lengths):.1f} ± {np.std(episode_lengths):.1f}")
-    print(f"Min Return: {np.min(episode_returns):.2f}")
-    print(f"Max Return: {np.max(episode_returns):.2f}")
-    
-    return {
-        "mean_return": np.mean(episode_returns),
-        "std_return": np.std(episode_returns),
-        "mean_length": np.mean(episode_lengths),
-        "episode_returns": episode_returns,
-        "episode_lengths": episode_lengths,
-    }
 
 # =====================================================
 # RUST SIMULATION HELPERS
@@ -810,7 +889,7 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
         RUST_PROCS.append(proc)
         for line in proc.stdout:
             f.write(line)
-            print(line, end="")  # Suppress sim output during eval
+            print(line, end="", flush=True)  # ensure printing during rust sim 
         return proc.wait()
 
 # =====================================================
@@ -818,7 +897,264 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
 # =====================================================
 
 
-def main():
+def run_single_evaluation(color_model: str, deterministic: bool ): 
+    # Load trained model
+    
+    DETERMINISTIC = deterministic  
+    
+    # Update local model path and evaluation string
+    LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_{color_model}.zip")
+    eval_string = f"{color_model}D{DETERMINISTIC}"
+
+    try:
+        if LOCAL_MODEL_PATH:
+            print(f"{Colors.CYAN}Using local model path: {LOCAL_MODEL_PATH}{Colors.ENDC}")
+            model = load_model_local(LOCAL_MODEL_PATH)
+        else:
+            model = load_model_from_wandb(WANDB_ENTITY, WANDB_PROJECT, MODEL_ARTIFACT)
+    
+    except Exception as e:
+        print(f"{Colors.RED}Failed to load model: {e}{Colors.ENDC}")
+        print(f"\n{Colors.YELLOW}Options to fix this:{Colors.ENDC}")
+        print(f"  1. Set LOCAL_MODEL_PATH=/path/to/model.zip")
+        print(f"  2. Fix W&B authentication with: wandb login --relogin")
+        print(f"  3. Download model manually from W&B and use LOCAL_MODEL_PATH")
+        sys.exit(1)
+    
+    # Setup endpoints
+    base_id = os.environ.get("SLURM_JOB_ID") or os.getpid()
+    action_ep = f"ipc:///tmp/xr_{base_id}_eval_action"
+    step_ep = f"ipc:///tmp/xr_{base_id}_eval_step"
+    
+    print(f"\n{Colors.YELLOW}ZMQ Endpoints:{Colors.ENDC}")
+    print(f"  Action: {action_ep}")
+    print(f"  Step:   {step_ep}")
+    
+    # Find Rust executable
+    exe = find_exe(release=True)
+    print(f"\n{Colors.YELLOW}Rust executable: {exe}{Colors.ENDC}")
+    
+    # Generate evaluation scenarios (subset of training combos)
+    combos = list(product(
+        simTime, TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
+        video_samples, fps_list, num_close_users, distance_close_users,
+        RANDOM_SEEDS[:5],  # Use first 5 seeds only for eval
+        distance_list, GoP_sizes, intrarefresh_choice,
+        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
+    ))
+    print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} EVAL EP: {N_EVAL_EPISODES} {Colors.ENDC}")
+
+    random.shuffle(combos)
+    combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
+    
+
+    print(f"\n{Colors.YELLOW}Will evaluate on {len(combos)} scenarios{Colors.ENDC}")
+    print(f"{Colors.CYAN}Creating evaluation environment...{Colors.ENDC}")
+
+    # Run evaluation episodes
+    all_results = []
+    
+    try:
+        for ep_idx, combo in enumerate(combos, 1):
+            print(f"\n{Colors.BOLD}{Colors.BLUE}Starting Episode {ep_idx}/{len(combos)}{Colors.ENDC}")
+            
+            (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
+            close_users, close_distance, seed, distance, gop,
+            intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
+            
+            # Build Rust arguments
+            argv = [
+                f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
+                f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
+                f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
+                f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
+                "1", f"{ep_idx}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}", f"{eval_string}", 
+            ]
+            
+            # Debug: Print the exact command
+            print(f"{Colors.YELLOW}[DEBUG] Rust command:{Colors.ENDC}")
+            print(f"  {exe} {' '.join(argv)}")
+            
+            env_sim = os.environ.copy()
+            env_sim["ZMQ_ACTION_EP"] = action_ep
+            env_sim["ZMQ_STEP_EP"] = step_ep
+            
+            log_path = Path("EvalResults") / f"eval_ep_{ep_idx}" / "sim.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # ===== TEMPORARY DEBUG: Show Rust output live =====
+            print(f"{Colors.CYAN}Launching Rust simulator (episode {ep_idx})...{Colors.ENDC}")
+            print(f"{Colors.YELLOW}[DEBUG] Watching Rust output for 10 seconds...{Colors.ENDC}")
+            
+            # Launch WITHOUT redirecting stdout (so we can see errors)
+            proc = subprocess.Popen(
+                [str(exe), *argv],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env_sim,
+                bufsize=1  # Line buffered
+            )
+            RUST_PROCS.append(proc)
+            
+            # Monitor Rust output for a few seconds to see if it starts properly
+            import select
+            import time
+            
+            print(f"{Colors.MAGENTA}--- Rust Output (first 10 seconds) ---{Colors.ENDC}")
+            start_time = time.time()
+            rust_started = False
+            
+            while time.time() - start_time < 10:
+                # Check if process crashed
+                if proc.poll() is not None:
+                    print(f"{Colors.RED}[ERROR] Rust process exited early with code: {proc.poll()}{Colors.ENDC}")
+                    # Read any remaining output
+                    remaining = proc.stdout.read()
+                    if remaining:
+                        print(remaining)
+                    break
+                
+                # Try to read output (non-blocking on Unix)
+                try:
+                    import fcntl
+                    import os as os_module
+                    fd = proc.stdout.fileno()
+                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os_module.O_NONBLOCK)
+                    
+                    line = proc.stdout.readline()
+                    if line:
+                        print(f"  [Rust] {line.rstrip()}")
+                        # Look for signs that Rust is ready
+                        if "waiting for" in line.lower() or "ready" in line.lower() or "connected" in line.lower():
+                            rust_started = True
+                            print(f"{Colors.GREEN}[DEBUG] Rust appears to be ready!{Colors.ENDC}")
+                            break
+                except (BlockingIOError, IOError):
+                    pass
+                
+                time.sleep(0.1)
+            
+            print(f"{Colors.MAGENTA}--- End Rust Output ---{Colors.ENDC}")
+            
+            if not rust_started and proc.poll() is None:
+                print(f"{Colors.YELLOW}[WARNING] Rust is running but hasn't printed expected startup messages.{Colors.ENDC}")
+                print(f"{Colors.YELLOW}           Proceeding anyway...{Colors.ENDC}")
+            
+            # Now try to connect Python env
+            print(f"{Colors.CYAN}Connecting to simulator...{Colors.ENDC}")
+            
+            try:
+                base_env = MaskableDiscreteZmqEnv(
+                    action_ep=action_ep,
+                    step_ep=step_ep,
+                    bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
+                    expansion_strategy='immediate_neighbors',
+                    expansion_param=None
+                )
+                env = ActionMasker(base_env, mask_fn)
+                print(f"{Colors.GREEN}✓ Environment connected{Colors.ENDC}")
+                
+                # Run episode
+                print(f"{Colors.GREEN}Running evaluation episode {ep_idx}...{Colors.ENDC}")
+                
+                # Add timeout to reset() too
+                import signal as signal_module
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("reset() timed out")
+                
+                signal_module.signal(signal_module.SIGALRM, timeout_handler)
+                signal_module.alarm(15)  # 15 second timeout
+                
+                try:
+                    obs, info = env.reset()
+                    signal_module.alarm(0)  # Cancel alarm
+                except TimeoutError:
+                    print(f"{Colors.RED}[ERROR] env.reset() timed out! Rust is not responding.{Colors.ENDC}")
+                    print(f"{Colors.RED}        Check if Rust is waiting for initial observation or crashed.{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}        Log file: {log_path}{Colors.ENDC}")
+                    proc.kill()
+                    continue
+                
+                done = False
+                ep_return = 0.0
+                ep_len = 0
+                
+                while not done:
+                    proc_status = proc.poll()
+                    if proc_status is not None:
+                        print(f"{Colors.RED}[Python] Rust simulator exited with code: {proc_status}{Colors.ENDC}")
+                        done = True
+                        break
+                    
+                    action, _states = model.predict(obs, deterministic=DETERMINISTIC)
+                    
+                    try:
+                        obs, reward, done, truncated, info = env.step(action)
+                        ep_return += reward
+                        ep_len += 1
+                    except zmq.ZMQError as e:
+                        print(f"{Colors.RED}[Python] ZMQ Error: {e}{Colors.ENDC}")
+                        done = True
+                        break
+                
+                ret = proc.poll()
+                if ret is None:
+                    ret = proc.wait(timeout=10)
+                
+                env.close()
+                
+                print(f"{Colors.GREEN}Episode {ep_idx} completed (exit code: {ret}){Colors.ENDC}")
+                print(f"  Return: {ep_return:.2f}, Length: {ep_len}")
+                
+                all_results.append({
+                    "episode": ep_idx,
+                    "return": ep_return,
+                    "length": ep_len,
+                    "exit_code": ret
+                })
+                
+                if proc in RUST_PROCS:
+                    RUST_PROCS.remove(proc)
+                    
+            except Exception as e:
+                print(f"{Colors.RED}[ERROR] Exception during episode: {e}{Colors.ENDC}")
+                import traceback
+                traceback.print_exc()
+                if proc.poll() is None:
+                    proc.kill()
+                continue        
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Evaluation interrupted by user{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.RED}Error during evaluation: {e}{Colors.ENDC}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Note: We don't need env.close() here anymore
+        # because it's closed inside the loop after each episode.
+        print(f"{Colors.CYAN}Cleaning up...{Colors.ENDC}")
+
+    
+    # Print summary (this part is fine)
+    if all_results:
+        returns = [r["return"] for r in all_results]
+        lengths = [r["length"] for r in all_results]
+        
+        print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.GREEN}Evaluation Complete{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
+        print(f"Episodes: {len(all_results)}")
+        print(f"Mean Return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
+    
+    # Finish W&B run
+    if USE_WANDB and wandb.run is not None:
+        wandb.finish()
+
+
+def main_single_c():
 
     #################################################
     ### SIMULATION PARAMS
@@ -833,7 +1169,7 @@ def main():
     num_close_users = [0]
     N_XR = [1, 2, 3, 4, 5]
     PL = [0.1]
-    fps_list = [90.0 ]
+    fps_list = [90.0]
     initial_bitrate_mbps = [10.0]
     ABR_ENABLED = [3]
     nest_profiles = [1]
@@ -890,6 +1226,7 @@ def main():
         distance_list, GoP_sizes, intrarefresh_choice,
         ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
     ))
+    print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} EVAL EP: {N_EVAL_EPISODES} {Colors.ENDC}")
 
     random.shuffle(combos)
     combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
@@ -902,13 +1239,12 @@ def main():
     all_results = []
     
     try:
-        # This is the main evaluation loop
         for ep_idx, combo in enumerate(combos, 1):
             print(f"\n{Colors.BOLD}{Colors.BLUE}Starting Episode {ep_idx}/{len(combos)}{Colors.ENDC}")
             
             (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
-             close_users, close_distance, seed, distance, gop,
-             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
+            close_users, close_distance, seed, distance, gop,
+            intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
             
             # Build Rust arguments
             argv = [
@@ -916,8 +1252,12 @@ def main():
                 f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
                 f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
                 f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
-                "1", f"{ep_idx}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}",
+                "1", f"{ep_idx}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}", f"{eval_string}", 
             ]
+            
+            # Debug: Print the exact command
+            print(f"{Colors.YELLOW}[DEBUG] Rust command:{Colors.ENDC}")
+            print(f"  {exe} {' '.join(argv)}")
             
             env_sim = os.environ.copy()
             env_sim["ZMQ_ACTION_EP"] = action_ep
@@ -926,73 +1266,150 @@ def main():
             log_path = Path("EvalResults") / f"eval_ep_{ep_idx}" / "sim.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # 1. Launch Rust in background (non-blocking)
+            # ===== TEMPORARY DEBUG: Show Rust output live =====
             print(f"{Colors.CYAN}Launching Rust simulator (episode {ep_idx})...{Colors.ENDC}")
+            print(f"{Colors.YELLOW}[DEBUG] Watching Rust output for 10 seconds...{Colors.ENDC}")
+            
+            # Launch WITHOUT redirecting stdout (so we can see errors)
             proc = subprocess.Popen(
                 [str(exe), *argv],
-                stdout=open(log_path, "w", buffering=1),
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env=env_sim
+                env=env_sim,
+                bufsize=1  # Line buffered
             )
             RUST_PROCS.append(proc)
             
-            # 2. NOW create the environment. It will connect to the Rust proc.
-            print(f"{Colors.CYAN}Connecting to simulator...{Colors.ENDC}")
-            base_env = MaskableDiscreteZmqEnv(
-                action_ep=action_ep,
-                step_ep=step_ep,
-                bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
-                expansion_strategy='immediate_neighbors', # or from config
-                expansion_param=None
-            )
-            env = ActionMasker(base_env, mask_fn)
-            print(f"{Colors.GREEN}✓ Environment connected{Colors.ENDC}")
-
-            # 3. Run the episode (this is the logic from evaluate_model)
-            print(f"{Colors.GREEN}Running evaluation episode {ep_idx}...{Colors.ENDC}")
+            # Monitor Rust output for a few seconds to see if it starts properly
+            import select
+            import time
             
-            obs, info = env.reset()  # This triggers Rust to start
-            done = False
-            ep_return = 0.0
-            ep_len = 0
+            print(f"{Colors.MAGENTA}--- Rust Output (first 10 seconds) ---{Colors.ENDC}")
+            start_time = time.time()
+            rust_started = False
             
-            while not done:
-                # Get action from the model (loaded in main)
-                # print(f"{Colors.CYAN}[Python] Calling model.predict()...{Colors.ENDC}")
-                action, _states = model.predict(obs, deterministic=DETERMINISTIC)
-                # print(f"{Colors.CYAN}[Python] Calling env.step() (waiting for Rust)...{Colors.ENDC}")
-                obs, reward, done, truncated, info = env.step(action)
-                print(f"{Colors.GREEN}[Python] env.step() returned! (r={reward}, d={done}){Colors.ENDC}")
+            while time.time() - start_time < 10:
+                # Check if process crashed
+                if proc.poll() is not None:
+                    print(f"{Colors.RED}[ERROR] Rust process exited early with code: {proc.poll()}{Colors.ENDC}")
+                    # Read any remaining output
+                    remaining = proc.stdout.read()
+                    if remaining:
+                        print(remaining)
+                    break
                 
-                ep_return += reward
-                ep_len += 1
+                # Try to read output (non-blocking on Unix)
+                try:
+                    import fcntl
+                    import os as os_module
+                    fd = proc.stdout.fileno()
+                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os_module.O_NONBLOCK)
+                    
+                    line = proc.stdout.readline()
+                    if line:
+                        print(f"  [Rust] {line.rstrip()}")
+                        # Look for signs that Rust is ready
+                        if "waiting for" in line.lower() or "ready" in line.lower() or "connected" in line.lower():
+                            rust_started = True
+                            print(f"{Colors.GREEN}[DEBUG] Rust appears to be ready!{Colors.ENDC}")
+                            break
+                except (BlockingIOError, IOError):
+                    pass
+                
+                time.sleep(0.1)
             
-            # 4. Wait for Rust to finish and close the env
-            ret = proc.wait(timeout=120)
-            env.close() # Close the env for this episode
-
-            print(f"{Colors.GREEN}Episode {ep_idx} completed (exit code: {ret}){Colors.ENDC}")
-            print(f"  Return: {ep_return:.2f}")
-            print(f"  Length: {ep_len}")
+            print(f"{Colors.MAGENTA}--- End Rust Output ---{Colors.ENDC}")
             
-            all_results.append({
-                "episode": ep_idx,
-                "return": ep_return,
-                "length": ep_len,
-                "exit_code": ret
-            })
+            if not rust_started and proc.poll() is None:
+                print(f"{Colors.YELLOW}[WARNING] Rust is running but hasn't printed expected startup messages.{Colors.ENDC}")
+                print(f"{Colors.YELLOW}           Proceeding anyway...{Colors.ENDC}")
             
-            if USE_WANDB and wandb.run is not None:
-                wandb.log({
-                    "eval/episode_return": ep_return,
-                    "eval/episode_length": ep_len,
-                    "eval/episode": ep_idx
+            # Now try to connect Python env
+            print(f"{Colors.CYAN}Connecting to simulator...{Colors.ENDC}")
+            
+            try:
+                base_env = MaskableDiscreteZmqEnv(
+                    action_ep=action_ep,
+                    step_ep=step_ep,
+                    bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
+                    expansion_strategy='immediate_neighbors',
+                    expansion_param=None
+                )
+                env = ActionMasker(base_env, mask_fn)
+                print(f"{Colors.GREEN}✓ Environment connected{Colors.ENDC}")
+                
+                # Run episode
+                print(f"{Colors.GREEN}Running evaluation episode {ep_idx}...{Colors.ENDC}")
+                
+                # Add timeout to reset() too
+                import signal as signal_module
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("reset() timed out")
+                
+                signal_module.signal(signal_module.SIGALRM, timeout_handler)
+                signal_module.alarm(15)  # 15 second timeout
+                
+                try:
+                    obs, info = env.reset()
+                    signal_module.alarm(0)  # Cancel alarm
+                except TimeoutError:
+                    print(f"{Colors.RED}[ERROR] env.reset() timed out! Rust is not responding.{Colors.ENDC}")
+                    print(f"{Colors.RED}        Check if Rust is waiting for initial observation or crashed.{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}        Log file: {log_path}{Colors.ENDC}")
+                    proc.kill()
+                    continue
+                
+                done = False
+                ep_return = 0.0
+                ep_len = 0
+                
+                while not done:
+                    proc_status = proc.poll()
+                    if proc_status is not None:
+                        print(f"{Colors.RED}[Python] Rust simulator exited with code: {proc_status}{Colors.ENDC}")
+                        done = True
+                        break
+                    
+                    action, _states = model.predict(obs, deterministic=DETERMINISTIC)
+                    
+                    try:
+                        obs, reward, done, truncated, info = env.step(action)
+                        ep_return += reward
+                        ep_len += 1
+                    except zmq.ZMQError as e:
+                        print(f"{Colors.RED}[Python] ZMQ Error: {e}{Colors.ENDC}")
+                        done = True
+                        break
+                
+                ret = proc.poll()
+                if ret is None:
+                    ret = proc.wait(timeout=10)
+                
+                env.close()
+                
+                print(f"{Colors.GREEN}Episode {ep_idx} completed (exit code: {ret}){Colors.ENDC}")
+                print(f"  Return: {ep_return:.2f}, Length: {ep_len}")
+                
+                all_results.append({
+                    "episode": ep_idx,
+                    "return": ep_return,
+                    "length": ep_len,
+                    "exit_code": ret
                 })
-            
-            if proc in RUST_PROCS:
-                RUST_PROCS.remove(proc)
-    
+                
+                if proc in RUST_PROCS:
+                    RUST_PROCS.remove(proc)
+                    
+            except Exception as e:
+                print(f"{Colors.RED}[ERROR] Exception during episode: {e}{Colors.ENDC}")
+                import traceback
+                traceback.print_exc()
+                if proc.poll() is None:
+                    proc.kill()
+                continue        
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Evaluation interrupted by user{Colors.ENDC}")
     except Exception as e:
@@ -1015,7 +1432,6 @@ def main():
         print(f"{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
         print(f"Episodes: {len(all_results)}")
         print(f"Mean Return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
-        # ... etc ...
     
     # Finish W&B run
     if USE_WANDB and wandb.run is not None:
@@ -1028,4 +1444,79 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))
     
-    main()
+    simTime = [80.0]
+    TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+    k_queue = 10000
+    mean_length_BG = 12000.0
+    rate_bps_src_BG = [10e6, ]
+    distance_list = [1.5]
+    distance_close_users = [1.5]
+    num_close_users = [0]
+    N_XR = [1, 2, 3, 4, 5]
+    PL = [0.1]
+    fps_list = [90.0]
+    initial_bitrate_mbps = [10.0]
+    ABR_ENABLED = [3]
+    nest_profiles = [1]
+    RANDOM_SEEDS = list(range(1, 10))
+    video_samples = ["snow"]
+    N_BGs = [0]
+    IS_UL_BG = [0]
+    intrarefresh_choice = [1]
+    GoP_sizes = [90]
+    everest_tests = 1  ## For random 24x12 grid STA placements, with velocity 5m/s in a circle. 
+
+    
+    print(f"{Colors.BOLD}{Colors.MAGENTA}")
+    print("="*60)
+    print("  MASKABLE PPO EVALUATION")
+    print("="*60)
+    print(f"{Colors.ENDC}")
+
+
+    # Define the constants for the grid
+    color_list = ["red", "brown", "green", "cinnamon", "purple"]
+    deterministic_choices = [True, False]
+
+
+    # Evaluation Parameters
+    N_EVAL_EPISODES = 2000  # Number of episodes to evaluate
+    DETERMINISTIC = False  # Use deterministic policy (no exploration)
+
+
+    param_grid = list(product(color_list, deterministic_choices))
+
+    # color_list = ["red", "brown", "green", "cinnamon", "purple"]
+    # deterministic_choices = [True, False]
+    # param_grid = list(product(color_list, deterministic_choices))
+
+    # Determine the number of processes to use.
+    # Max of (grid size, CPU count) to avoid oversubscribing.
+    num_processes = 5
+    
+    print(f"\n{Colors.BOLD}{Colors.MAGENTA}")
+    print("="*60)
+    print(f"  STARTING PARALLEL EVALUATION ({len(param_grid)} jobs on {num_processes} cores)")
+    print("="*60)
+    print(f"{Colors.ENDC}")
+
+    # Use a Pool to manage the parallel execution
+    # 'initializer' is important to handle resources like ZMQ sockets/Rust processes
+    # correctly in each child process.
+    with Pool(processes=num_processes) as pool:
+        # pool.starmap applies the function to each tuple in the param_grid
+        # The result is a list of results returned by run_single_evaluation
+        all_parallel_results = pool.starmap(run_single_evaluation, param_grid)
+
+    # -----------------------------------------------------------------
+    # FINAL SUMMARY
+    # -----------------------------------------------------------------
+    print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.GREEN}OVERALL PARALLEL EVALUATION COMPLETE{Colors.ENDC}")
+    print(f"{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
+    
+    # Print a clean summary table
+    print(f"{'Color':<10} | {'Deterministic':<15} | {'Mean Return':<15} | {'Std Dev':<10} | {'Episodes':<10}")
+    print("-" * 65)
+
+

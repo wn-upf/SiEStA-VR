@@ -349,10 +349,11 @@ pub struct SimParams {
     pub observation_type: usize, 
     pub reward_mode: usize,     // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
     pub t_update_abr: f32, 
+    pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel. 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
-    assert!(args.len() == 26, "unexpected number of args");
+    assert!(args.len() == 27, "unexpected number of args");
     SimParams {
         stoptime:               args[1].parse().unwrap(),
         mean_length_bg:         args[2].parse().unwrap(),
@@ -379,8 +380,7 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         observation_type:       args[23].parse().unwrap(), 
         reward_mode:            args[24].parse().unwrap(), 
         t_update_abr:           args[25].parse().unwrap(), 
-
-
+        eval_string:            args[26].parse().unwrap(), 
     }
 }
 
@@ -389,8 +389,6 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
 pub fn run_sim(params: SimParams) -> Result<()> {
 
     env::set_var("RUST_BACKTRACE", "1");
-
-    // println!("CUDA_VISIBLE_DEVICES={:?}", std::env::var("CUDA_VISIBLE_DEVICES"));
 
     // 1) Unpack everything (keeps names identical to your CLI version)
     let SimParams {
@@ -419,16 +417,11 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         observation_type, 
         reward_mode, 
         t_update_abr, 
+        eval_string, 
     } = params;
 
-    // 2) Handy deriveds (exactly like your main)
-    let sim_unique_string = format!("Simu_{}", sim_id);
-    let test_distances_everest_bool = test_distances_everest != 0;
 
-
-
-    let sim_unique_string = format!("Simu_{}", sim_id);  
-    
+    let sim_unique_string = format!("Simu_{}", sim_id);      
     let test_distances_everest_bool = test_distances_everest != 0; 
 
     // Set test constants based on test_type parameter
@@ -460,7 +453,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}",
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}",
         stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, 
     );
 

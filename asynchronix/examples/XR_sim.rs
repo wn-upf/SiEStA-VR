@@ -75,11 +75,12 @@ fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
-    if args.len() != 26 {
+    if args.len() != 27 {
         eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue> \
                 <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> \
                 <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> \
-                <Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id> <observation_config> <reward_mode> <T_ABR>", args[0]);
+                <Intra-refresh enabled> <ABR enabled> <nest-vr_profile> <Coords_everest_movement_test> <sim_id> <observation_config> 
+                <reward_mode> <T_ABR> <eval_string>", args[0]);
         std::process::exit(2);
     }
     let params = parse_cli_to_params(&args);
