@@ -5,30 +5,6 @@ import types
 
 import numpy as np, sys, types
 
-# # --- Create dummy submodules expected by old pickled models ---
-# --- Create dummy submodules expected by old pickled models ---
-core_mod = types.SimpleNamespace()
-multiarray_mod = types.SimpleNamespace()
-numeric_mod = types.SimpleNamespace()
-
-# Register them in sys.modules so unpickling finds them
-sys.modules.setdefault("numpy.core", core_mod)
-sys.modules.setdefault("numpy.core.multiarray", multiarray_mod)
-sys.modules.setdefault("numpy.core.numeric", numeric_mod)
-
-# --- Define old NumPy attributes expected by Stable-Baselines3 pickles ---
-if not hasattr(np, "inexact"):
-    np.inexact = np.floating
-if not hasattr(np, "complexfloating"):
-    np.complexfloating = np.complex64.__mro__[-2]
-if not hasattr(np, "bool8"):
-    np.bool8 = np.bool_
-
-# Mirror these attributes into the fake modules for legacy pickles
-for m in (core_mod, multiarray_mod, numeric_mod):
-    m.inexact = np.inexact
-    m.complexfloating = np.complexfloating
-    m.bool8 = np.bool8
     
 from pathlib import Path
 
