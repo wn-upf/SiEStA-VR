@@ -1,5 +1,35 @@
 # Create compatibility shim: map old numpy.core -> numpy._core
-import sys, numpy as np
+import numpy as np
+import sys
+import types
+
+import numpy as np, sys, types
+
+# # --- Create dummy submodules expected by old pickled models ---
+# --- Create dummy submodules expected by old pickled models ---
+core_mod = types.SimpleNamespace()
+multiarray_mod = types.SimpleNamespace()
+numeric_mod = types.SimpleNamespace()
+
+# Register them in sys.modules so unpickling finds them
+sys.modules.setdefault("numpy.core", core_mod)
+sys.modules.setdefault("numpy.core.multiarray", multiarray_mod)
+sys.modules.setdefault("numpy.core.numeric", numeric_mod)
+
+# --- Define old NumPy attributes expected by Stable-Baselines3 pickles ---
+if not hasattr(np, "inexact"):
+    np.inexact = np.floating
+if not hasattr(np, "complexfloating"):
+    np.complexfloating = np.complex64.__mro__[-2]
+if not hasattr(np, "bool8"):
+    np.bool8 = np.bool_
+
+# Mirror these attributes into the fake modules for legacy pickles
+for m in (core_mod, multiarray_mod, numeric_mod):
+    m.inexact = np.inexact
+    m.complexfloating = np.complexfloating
+    m.bool8 = np.bool8
+    
 from pathlib import Path
 
 from multiprocessing import Pool, cpu_count
@@ -432,125 +462,6 @@ class MaskableDiscreteZmqEnv(gym.Env):
             print(f"❌ Error during reset: {e}")
             raise
 
-    # def step(self, action):
-    #     """
-    #     Step with discrete action (index into bitrate ladder).
-        
-    #     Args:
-    #         action: int, index in range [0, n_actions)
-    #     """
-    #     # Convert discrete action to bitrate value
-    #     action_idx = int(action)
-    #     bitrate_mbps = self.bitrate_ladder[action_idx]
-        
-    #     # Send action
-    #     if self.pending_obs_info is None:
-    #         raise RuntimeError("step() called before reset()")
-        
-    #     identity, current_obs, current_meta = self.pending_obs_info
-    #     self.pending_obs_info = None
-        
-    #     action_response = {"bitrate_mbps": float(bitrate_mbps)}
-        
-    #     try:
-    #         msg = [identity, b'', json.dumps(action_response).encode('utf-8')]
-    #         self.action_socket.send_multipart(msg)
-    #     except zmq.ZMQError as e:
-    #         print(f"❌ Error sending action: {e}")
-    #         raise
-        
-    #     # Receive transition
-    #     try:
-    #         transition = self.transition_socket.recv_json()
-    #     except zmq.ZMQError as e:
-    #         print(f"❌ Error receiving transition: {e}")
-    #         raise
-        
-    #     reward = float(transition["reward"])
-    #     done = bool(transition["done"])
-    #     truncated = False
-        
-    #     # Update stats
-    #     self.ep_return += reward
-    #     self.ep_len += 1
-    #     self.global_step += 1
-    #     self.run_return_cumsum += reward
-    #     self.step_count += 1
-        
-    #     try:
-    #         parts = self.action_socket.recv_multipart()
-    #         if len(parts) == 2:
-    #             identity, obs_msg = parts
-    #         elif len(parts) == 3 and parts[1] == b'':
-    #             identity, _, obs_msg = parts
-    #         else:
-    #             raise RuntimeError(f"Unexpected frame count: {len(parts)}")
-            
-    #         obs_request = json.loads(obs_msg)
-
-    #     except Exception as e:
-    #         if done:
-    #             # This is OK. Rust sent done=True and exited before sending
-    #             # a final (dummy) observation. We can proceed.
-    #             print(f"{Colors.YELLOW}[Env] Final step, no dummy obs received. This is OK.{Colors.ENDC}")
-    #             next_obs = self.last_obs_for_done.copy() # Use last valid obs
-    #             next_meta = current_meta
-    #             self.current_action_mask = np.ones(self.n_actions, dtype=bool)
-    #             self.pending_obs_info = None
-    #         else:
-    #             # This is a real error.
-    #             print(f"❌ Error receiving next obs (and not done): {e}")
-    #             raise
-    #     else:
-    #         # We successfully received an observation.
-    #         # Parse it regardless of whether it's a dummy or real.
-    #         rust_mask = obs_request.get("action_mask")
-    #         self.current_action_mask = self._convert_rust_mask_to_action_mask(rust_mask)
-            
-    #         obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
-    #         parsed_obs, parsed_meta = self._parse_obs_payload(obs_payload)
-
-    #         if done:
-    #             # We are done, so this was a dummy obs.
-    #             # Return the LAST VALID observation from the *previous* step.
-    #             next_obs = self.last_obs_for_done.copy()
-    #             next_meta = current_meta # Use meta from previous step
-    #             self.pending_obs_info = None # Don't store dummy obs
-    #         else:
-    #             # We are not done, so this is a real observation.
-    #             # Store it and return it.
-    #             next_obs = parsed_obs
-    #             next_meta = parsed_meta
-    #             self.pending_obs_info = (identity, next_obs, next_meta)
-    #             self.last_obs_for_done = next_obs.copy() # Update last valid obs
-
-    #     # Logging
-    #     log_dict = {
-    #         "train_env/reward": reward,
-    #         "train_env/return_cumsum": self.run_return_cumsum,
-    #         "train_env/action_idx": action_idx,
-    #         "train_env/action_bitrate_mbps": bitrate_mbps,
-    #         "train_env/done": int(done),
-    #         "train_env/valid_actions": self.current_action_mask.sum(),
-    #     }
-    #     self._log_last_row(log_dict, next_obs)
-
-        
-    #     if wandb.run is not None:
-    #         wandb.log(log_dict)
-        
-    #     if done:
-    #         if wandb.run is not None:
-    #             wandb.log({"episode/return": self.ep_return, "episode/len": self.ep_len})
-    #         self.ep_return = 0.0
-    #         self.ep_len = 0
-        
-    #     # IMPORTANT: Return action_mask in info
-    #     info = {
-    #         "obs_meta": next_meta,
-    #         "action_mask": self.current_action_mask  # Required by MaskablePPO
-    #     }
-    #     return next_obs, reward, done, truncated, info
     def step(self, action):
         """
         Step with discrete action (index into bitrate ladder).
@@ -814,32 +725,10 @@ def mask_fn(env: gym.Env) -> np.ndarray:
     # Fallback: all actions valid
     return np.ones(env.action_space.n, dtype=bool)
 
-def load_model_from_wandb(entity: str, project: str, artifact_name: str) -> MaskablePPO:
-    """Download and load trained model from W&B."""
-    print(f"{Colors.CYAN}Downloading model from W&B...{Colors.ENDC}")
-    print(f"  Entity: {entity}")
-    print(f"  Project: {project}")
-    print(f"  Artifact: {artifact_name}")
-    
-    # Initialize W&B in offline mode to download artifact
-    api = wandb.Api()
-    artifact = api.artifact(f"{entity}/{project}/{artifact_name}")
-    artifact_dir = artifact.download()
-    
-    # Find the model file
-    model_path = Path(artifact_dir) / "final_model.zip"
-    if not model_path.exists():
-        # Try alternative paths
-        model_files = list(Path(artifact_dir).glob("**/*.zip"))
-        if not model_files:
-            raise FileNotFoundError(f"No .zip model found in {artifact_dir}")
-        model_path = model_files[0]
-    
-    print(f"{Colors.GREEN}Loading model from: {model_path}{Colors.ENDC}")
-    model = MaskablePPO.load(str(model_path))
-    
-    return model
 
+# =====================================================
+# EVALUATION LOOP
+# =====================================================
 # =====================================================
 # EVALUATION LOOP
 # =====================================================
@@ -852,11 +741,41 @@ def load_model_local(model_path: Path) -> MaskablePPO:
         sys.modules['numpy.core'] = np._core
         sys.modules['numpy.core.numeric'] = np._core.numeric
 
-    print(f"{Colors.CYAN}Loading model from: {model_path}{Colors.ENDC}")
     model = MaskablePPO.load(str(model_path))
     print(f"{Colors.GREEN}✓ Model {model_path} loaded successfully{Colors.ENDC}")
-    return model
 
+    return model 
+
+def load_model_local_new(model_path: Path, env: ActionMasker) -> MaskablePPO:
+    """
+    Loads a model, handling potential NumPy version conflicts and
+    custom policy classes by using the custom_objects dictionary.
+    """
+    
+    # (!!) DELETE THE SYS.MODULES HACK THAT WAS HERE (!!)
+
+    print(f"{Colors.CYAN}Loading model from: {model_path}{Colors.ENDC}")
+
+    # This dictionary tells SB3 how to handle custom classes
+    # or objects that can't be unpickled (like old NumPy 1.x data).
+    custom_objects = {
+        "policy_class": DropoutActorCriticPolicy, 
+        # Fix for NumPy 1.x models
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "_last_obs": None,
+        "_last_episode_starts": None,
+        
+        # --- THIS IS THE FIX ---
+    }
+
+    model = MaskablePPO.load(
+        str(model_path),  # Use str() to be safe
+        env=env, 
+        custom_objects=custom_objects
+    )  
+    print(f"{Colors.GREEN}✓ Model {model_path} loaded successfully{Colors.ENDC}")
+    return model
 
 # =====================================================
 # RUST SIMULATION HELPERS
@@ -897,11 +816,25 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
 # =====================================================
 
 
-def run_single_evaluation(color_model: str, deterministic: bool ): 
+def run_single_evaluation(color_model: str, deterministic: bool, combos: list, ): 
     # Load trained model
+    base_id = os.environ.get("SLURM_JOB_ID") or os.getpid()
+    action_ep = f"ipc:///tmp/xr_{base_id}_eval_action"
+    step_ep = f"ipc:///tmp/xr_{base_id}_eval_step"
+    
+    print(f"\n{Colors.YELLOW}ZMQ Endpoints:{Colors.ENDC}")
+    print(f"  Action: {action_ep}")
+    print(f"  Step:   {step_ep}")
     
     DETERMINISTIC = deterministic  
-    
+    base_env = MaskableDiscreteZmqEnv(
+                    action_ep=action_ep,
+                    step_ep=step_ep,
+                    bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
+                    expansion_strategy='immediate_neighbors',
+                    expansion_param=None
+                )
+    env = ActionMasker(base_env, mask_fn)
     # Update local model path and evaluation string
     LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_{color_model}.zip")
     eval_string = f"{color_model}D{DETERMINISTIC}"
@@ -909,7 +842,7 @@ def run_single_evaluation(color_model: str, deterministic: bool ):
     try:
         if LOCAL_MODEL_PATH:
             print(f"{Colors.CYAN}Using local model path: {LOCAL_MODEL_PATH}{Colors.ENDC}")
-            model = load_model_local(LOCAL_MODEL_PATH)
+            model = load_model_local(LOCAL_MODEL_PATH, env)
         else:
             model = load_model_from_wandb(WANDB_ENTITY, WANDB_PROJECT, MODEL_ARTIFACT)
     
@@ -922,31 +855,13 @@ def run_single_evaluation(color_model: str, deterministic: bool ):
         sys.exit(1)
     
     # Setup endpoints
-    base_id = os.environ.get("SLURM_JOB_ID") or os.getpid()
-    action_ep = f"ipc:///tmp/xr_{base_id}_eval_action"
-    step_ep = f"ipc:///tmp/xr_{base_id}_eval_step"
-    
-    print(f"\n{Colors.YELLOW}ZMQ Endpoints:{Colors.ENDC}")
-    print(f"  Action: {action_ep}")
-    print(f"  Step:   {step_ep}")
-    
+   
     # Find Rust executable
     exe = find_exe(release=True)
     print(f"\n{Colors.YELLOW}Rust executable: {exe}{Colors.ENDC}")
     
     # Generate evaluation scenarios (subset of training combos)
-    combos = list(product(
-        simTime, TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
-        video_samples, fps_list, num_close_users, distance_close_users,
-        RANDOM_SEEDS[:5],  # Use first 5 seeds only for eval
-        distance_list, GoP_sizes, intrarefresh_choice,
-        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
-    ))
-    print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} EVAL EP: {N_EVAL_EPISODES} {Colors.ENDC}")
-
-    random.shuffle(combos)
-    combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
-    
+   
 
     print(f"\n{Colors.YELLOW}Will evaluate on {len(combos)} scenarios{Colors.ENDC}")
     print(f"{Colors.CYAN}Creating evaluation environment...{Colors.ENDC}")
@@ -1046,14 +961,7 @@ def run_single_evaluation(color_model: str, deterministic: bool ):
             print(f"{Colors.CYAN}Connecting to simulator...{Colors.ENDC}")
             
             try:
-                base_env = MaskableDiscreteZmqEnv(
-                    action_ep=action_ep,
-                    step_ep=step_ep,
-                    bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
-                    expansion_strategy='immediate_neighbors',
-                    expansion_param=None
-                )
-                env = ActionMasker(base_env, mask_fn)
+                
                 print(f"{Colors.GREEN}✓ Environment connected{Colors.ENDC}")
                 
                 # Run episode
@@ -1158,7 +1066,7 @@ def main_single_c():
 
     #################################################
     ### SIMULATION PARAMS
-
+    LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_red.zip")
     simTime = [80.0]
     TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
     k_queue = 10000
@@ -1466,47 +1374,69 @@ if __name__ == "__main__":
     GoP_sizes = [90]
     everest_tests = 1  ## For random 24x12 grid STA placements, with velocity 5m/s in a circle. 
 
-    
-    print(f"{Colors.BOLD}{Colors.MAGENTA}")
-    print("="*60)
-    print("  MASKABLE PPO EVALUATION")
-    print("="*60)
-    print(f"{Colors.ENDC}")
-
-
     # Define the constants for the grid
-    color_list = ["red", "brown", "green", "cinnamon", "purple"]
-    deterministic_choices = [True, False]
+    # color_list = ["red", "brown", "green", "cinnamon", "purple"]
 
+    color_list = [  "purple"]
+    deterministic_choices = [ False]
 
     # Evaluation Parameters
     N_EVAL_EPISODES = 2000  # Number of episodes to evaluate
-    DETERMINISTIC = False  # Use deterministic policy (no exploration)
 
+    for color in color_list:
+        for choice in deterministic_choices: 
+            eval_string = f"{color}D{choice}"
+            print(f"Eval on {eval_string}")
 
-    param_grid = list(product(color_list, deterministic_choices))
-
-    # color_list = ["red", "brown", "green", "cinnamon", "purple"]
-    # deterministic_choices = [True, False]
+            DETERMINISTIC = choice
+            main_single_c()    
     # param_grid = list(product(color_list, deterministic_choices))
 
-    # Determine the number of processes to use.
-    # Max of (grid size, CPU count) to avoid oversubscribing.
-    num_processes = 5
-    
-    print(f"\n{Colors.BOLD}{Colors.MAGENTA}")
-    print("="*60)
-    print(f"  STARTING PARALLEL EVALUATION ({len(param_grid)} jobs on {num_processes} cores)")
-    print("="*60)
-    print(f"{Colors.ENDC}")
+    # combos = list(product(
+    #     simTime, TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
+    #     video_samples, fps_list, num_close_users, distance_close_users,
+    #     RANDOM_SEEDS[:5],  # Use first 5 seeds only for eval
+    #     distance_list, GoP_sizes, intrarefresh_choice,
+    #     ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
+    # ))
+    # print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} {Colors.ENDC}")
 
+    # random.shuffle(combos)
+    # # combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
+    
+
+
+    # print(f"{Colors.BOLD}{Colors.MAGENTA}")
+    # print("="*60)
+    # print("  MASKABLE PPO EVALUATION")
+    # print("="*60)
+    # print(f"{Colors.ENDC}")
+
+
+    # # color_list = ["red", "brown", "green", "cinnamon", "purple"]
+    # # deterministic_choices = [True, False]
+    # # param_grid = list(product(color_list, deterministic_choices))
+
+    # # Determine the number of processes to use.
+    # # Max of (grid size, CPU count) to avoid oversubscribing.
+    # num_processes = 5
+    
+    # print(f"\n{Colors.BOLD}{Colors.MAGENTA}")
+    # print("="*60)
+    # print(f"  STARTING PARALLEL EVALUATION ({len(param_grid)} jobs on {num_processes} cores)")
+    # print("="*60)
+    # print(f"{Colors.ENDC}")
+
+    # for color_model in color_list: 
+    #     for deterministic in deterministic_choices: 
+    #         run_single_evaluation(color_model, deterministic, combos)
     # Use a Pool to manage the parallel execution
     # 'initializer' is important to handle resources like ZMQ sockets/Rust processes
     # correctly in each child process.
-    with Pool(processes=num_processes) as pool:
-        # pool.starmap applies the function to each tuple in the param_grid
-        # The result is a list of results returned by run_single_evaluation
-        all_parallel_results = pool.starmap(run_single_evaluation, param_grid)
+    # with Pool(processes=num_processes) as pool:
+    #     # pool.starmap applies the function to each tuple in the param_grid
+    #     # The result is a list of results returned by run_single_evaluation
+    #     all_parallel_results = pool.starmap(run_single_evaluation, param_grid, combos)
 
     # -----------------------------------------------------------------
     # FINAL SUMMARY
