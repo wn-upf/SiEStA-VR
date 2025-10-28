@@ -2015,9 +2015,9 @@ impl<H: Serialize> StreamSender<H> {
         //     "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{file_with_fps}.mp4"
         // );
         // Check existence
-        if !std::path::Path::new(&input_path).exists() {
-            return Err(anyhow::anyhow!("Input file does not exist: {}", input_path));
-        }
+        // if !std::path::Path::new(&input_path).exists() {
+        //     return Err(anyhow::anyhow!("Input file does not exist: {}", input_path));
+        // }
         // println!("[DBG FILENAME] IS {}", file_with_fps); 
 
         let mut buffer: Vec<u8> = Vec::new();

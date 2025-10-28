@@ -7,7 +7,8 @@ import numpy as np, sys, types
 
     
 from pathlib import Path
-
+import concurrent.futures
+import time
 from multiprocessing import Pool, cpu_count
 ############################################################
 # RL CONFIG: 
@@ -791,280 +792,45 @@ def run_sim(exe: Path, argv: list[str], env: dict[str, str], log_path: Path):
 # MAIN
 # =====================================================
 
-
-def run_single_evaluation(color_model: str, deterministic: bool, combos: list, ): 
-    # Load trained model
-    base_id = os.environ.get("SLURM_JOB_ID") or os.getpid()
-    action_ep = f"ipc:///tmp/xr_{base_id}_eval_action"
-    step_ep = f"ipc:///tmp/xr_{base_id}_eval_step"
-    
-    print(f"\n{Colors.YELLOW}ZMQ Endpoints:{Colors.ENDC}")
-    print(f"  Action: {action_ep}")
-    print(f"  Step:   {step_ep}")
-    
-    DETERMINISTIC = deterministic  
-    base_env = MaskableDiscreteZmqEnv(
-                    action_ep=action_ep,
-                    step_ep=step_ep,
-                    bitrate_ladder_mbps=BITRATE_LADDER_MBPS,
-                    expansion_strategy='immediate_neighbors',
-                    expansion_param=None
-                )
-    env = ActionMasker(base_env, mask_fn)
-    # Update local model path and evaluation string
-    LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_{color_model}.zip")
-    eval_string = f"{color_model}D{DETERMINISTIC}"
-
+# --- NEW FUNCTION FOR PARALLEL EXECUTION ---
+def run_evaluation(color, choice, combos):
+    """
+    Sets up the environment variables and calls the main_single_c function.
+    This function will be run by a worker process.
+    """
     try:
-        if LOCAL_MODEL_PATH:
-            print(f"{Colors.CYAN}Using local model path: {LOCAL_MODEL_PATH}{Colors.ENDC}")
-            model = load_model_local(LOCAL_MODEL_PATH, env)
-        else:
-            model = load_model_from_wandb(WANDB_ENTITY, WANDB_PROJECT, MODEL_ARTIFACT)
-    
-    except Exception as e:
-        print(f"{Colors.RED}Failed to load model: {e}{Colors.ENDC}")
-        print(f"\n{Colors.YELLOW}Options to fix this:{Colors.ENDC}")
-        print(f"  1. Set LOCAL_MODEL_PATH=/path/to/model.zip")
-        print(f"  2. Fix W&B authentication with: wandb login --relogin")
-        print(f"  3. Download model manually from W&B and use LOCAL_MODEL_PATH")
-        sys.exit(1)
-    
-    # Setup endpoints
-   
-    # Find Rust executable
-    exe = find_exe(release=True)
-    print(f"\n{Colors.YELLOW}Rust executable: {exe}{Colors.ENDC}")
-    
-    # Generate evaluation scenarios (subset of training combos)
-   
-
-    print(f"\n{Colors.YELLOW}Will evaluate on {len(combos)} scenarios{Colors.ENDC}")
-    print(f"{Colors.CYAN}Creating evaluation environment...{Colors.ENDC}")
-
-    # Run evaluation episodes
-    all_results = []
-    
-    try:
-        for ep_idx, combo in enumerate(combos, 1):
-            print(f"\n{Colors.BOLD}{Colors.BLUE}Starting Episode {ep_idx}/{len(combos)}{Colors.ENDC}")
-            
-            (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
-            close_users, close_distance, seed, distance, gop,
-            intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
-            
-            # Build Rust arguments
-            argv = [
-                f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
-                f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
-                f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
-                f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
-                "1", f"{ep_idx}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}", f"{eval_string}", 
-            ]
-            
-            # Debug: Print the exact command
-            print(f"{Colors.YELLOW}[DEBUG] Rust command:{Colors.ENDC}")
-            print(f"  {exe} {' '.join(argv)}")
-            
-            env_sim = os.environ.copy()
-            env_sim["ZMQ_ACTION_EP"] = action_ep
-            env_sim["ZMQ_STEP_EP"] = step_ep
-            
-            log_path = Path("EvalResults") / f"eval_ep_{ep_idx}" / "sim.log"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # ===== TEMPORARY DEBUG: Show Rust output live =====
-            print(f"{Colors.CYAN}Launching Rust simulator (episode {ep_idx})...{Colors.ENDC}")
-            print(f"{Colors.YELLOW}[DEBUG] Watching Rust output for 10 seconds...{Colors.ENDC}")
-            
-            # Launch WITHOUT redirecting stdout (so we can see errors)
-            proc = subprocess.Popen(
-                [str(exe), *argv],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env=env_sim,
-                bufsize=1  # Line buffered
-            )
-            RUST_PROCS.append(proc)
-            
-            # Monitor Rust output for a few seconds to see if it starts properly
-            import select
-            import time
-            
-            print(f"{Colors.MAGENTA}--- Rust Output (first 10 seconds) ---{Colors.ENDC}")
-            start_time = time.time()
-            rust_started = False
-            
-            while time.time() - start_time < 10:
-                # Check if process crashed
-                if proc.poll() is not None:
-                    print(f"{Colors.RED}[ERROR] Rust process exited early with code: {proc.poll()}{Colors.ENDC}")
-                    # Read any remaining output
-                    remaining = proc.stdout.read()
-                    if remaining:
-                        print(remaining)
-                    break
-                
-                # Try to read output (non-blocking on Unix)
-                try:
-                    import fcntl
-                    import os as os_module
-                    fd = proc.stdout.fileno()
-                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os_module.O_NONBLOCK)
-                    
-                    line = proc.stdout.readline()
-                    if line:
-                        print(f"  [Rust] {line.rstrip()}")
-                        # Look for signs that Rust is ready
-                        if "waiting for" in line.lower() or "ready" in line.lower() or "connected" in line.lower():
-                            rust_started = True
-                            print(f"{Colors.GREEN}[DEBUG] Rust appears to be ready!{Colors.ENDC}")
-                            break
-                except (BlockingIOError, IOError):
-                    pass
-                
-                time.sleep(0.1)
-            
-            print(f"{Colors.MAGENTA}--- End Rust Output ---{Colors.ENDC}")
-            
-            if not rust_started and proc.poll() is None:
-                print(f"{Colors.YELLOW}[WARNING] Rust is running but hasn't printed expected startup messages.{Colors.ENDC}")
-                print(f"{Colors.YELLOW}           Proceeding anyway...{Colors.ENDC}")
-            
-            # Now try to connect Python env
-            print(f"{Colors.CYAN}Connecting to simulator...{Colors.ENDC}")
-            
-            try:
-                
-                print(f"{Colors.GREEN}✓ Environment connected{Colors.ENDC}")
-                
-                # Run episode
-                print(f"{Colors.GREEN}Running evaluation episode {ep_idx}...{Colors.ENDC}")
-                
-                # Add timeout to reset() too
-                import signal as signal_module
-                
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("reset() timed out")
-                
-                signal_module.signal(signal_module.SIGALRM, timeout_handler)
-                signal_module.alarm(15)  # 15 second timeout
-                
-                try:
-                    obs, info = env.reset()
-                    signal_module.alarm(0)  # Cancel alarm
-                except TimeoutError:
-                    print(f"{Colors.RED}[ERROR] env.reset() timed out! Rust is not responding.{Colors.ENDC}")
-                    print(f"{Colors.RED}        Check if Rust is waiting for initial observation or crashed.{Colors.ENDC}")
-                    print(f"{Colors.YELLOW}        Log file: {log_path}{Colors.ENDC}")
-                    proc.kill()
-                    continue
-                
-                done = False
-                ep_return = 0.0
-                ep_len = 0
-                
-                while not done:
-                    proc_status = proc.poll()
-                    if proc_status is not None:
-                        print(f"{Colors.RED}[Python] Rust simulator exited with code: {proc_status}{Colors.ENDC}")
-                        done = True
-                        break
-                    
-                    action, _states = model.predict(obs, deterministic=DETERMINISTIC)
-                    
-                    try:
-                        obs, reward, done, truncated, info = env.step(action)
-                        ep_return += reward
-                        ep_len += 1
-                    except zmq.ZMQError as e:
-                        print(f"{Colors.RED}[Python] ZMQ Error: {e}{Colors.ENDC}")
-                        done = True
-                        break
-                
-                ret = proc.poll()
-                if ret is None:
-                    ret = proc.wait(timeout=10)
-                
-                env.close()
-                
-                print(f"{Colors.GREEN}Episode {ep_idx} completed (exit code: {ret}){Colors.ENDC}")
-                print(f"  Return: {ep_return:.2f}, Length: {ep_len}")
-                
-                all_results.append({
-                    "episode": ep_idx,
-                    "return": ep_return,
-                    "length": ep_len,
-                    "exit_code": ret
-                })
-                
-                if proc in RUST_PROCS:
-                    RUST_PROCS.remove(proc)
-                    
-            except Exception as e:
-                print(f"{Colors.RED}[ERROR] Exception during episode: {e}{Colors.ENDC}")
-                import traceback
-                traceback.print_exc()
-                if proc.poll() is None:
-                    proc.kill()
-                continue        
-    except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Evaluation interrupted by user{Colors.ENDC}")
-    except Exception as e:
-        print(f"{Colors.RED}Error during evaluation: {e}{Colors.ENDC}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # Note: We don't need env.close() here anymore
-        # because it's closed inside the loop after each episode.
-        print(f"{Colors.CYAN}Cleaning up...{Colors.ENDC}")
-
-    
-    # Print summary (this part is fine)
-    if all_results:
-        returns = [r["return"] for r in all_results]
-        lengths = [r["length"] for r in all_results]
+        # Use a unique ID for ZMQ endpoints for THIS process
+        # This is CRITICAL for parallel execution with ZMQ
+        base_id = f"{os.getpid()}_{color}" 
+        os.environ["ZMQ_ACTION_EP"] = f"ipc:///tmp/xr_{base_id}_eval_action"
+        os.environ["ZMQ_STEP_EP"] = f"ipc:///tmp/xr_{base_id}_eval_step"
         
-        print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
-        print(f"{Colors.BOLD}{Colors.GREEN}Evaluation Complete{Colors.ENDC}")
-        print(f"{Colors.BOLD}{Colors.GREEN}{'='*60}{Colors.ENDC}")
-        print(f"Episodes: {len(all_results)}")
-        print(f"Mean Return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
-    
-    # Finish W&B run
-    if USE_WANDB and wandb.run is not None:
-        wandb.finish()
+        # Set the process-specific global variables
+        global DETERMINISTIC, LOCAL_MODEL_PATH, eval_string, N_EVAL_EPISODES
+        
+        eval_string = f"{color}D{choice}"
+        print(f"Eval on {eval_string} in process {os.getpid()}")
 
+        DETERMINISTIC = choice
+        LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_{color}.zip")
+        # N_EVAL_EPISODES = 2000 # Assuming this is a global constant defined earlier
+        
+        # Call the original evaluation function
+        # Since LOCAL_MODEL_PATH is now set, main_single_c() will use it.
+        main_single_c(combos)
+        
+        return f"Process for {eval_string} completed successfully."
+        
+    except Exception as e:
+        import traceback
+        return f"Process for {eval_string} failed: {e}\n{traceback.format_exc()}"
 
-def main_single_c():
+def main_single_c(combos: list):
 
     #################################################
     ### SIMULATION PARAMS
-    LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_red.zip")
-    simTime = [80.0]
-    TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
-    k_queue = 10000
-    mean_length_BG = 12000.0
-    rate_bps_src_BG = [10e6, ]
-    distance_list = [1.5]
-    distance_close_users = [1.5]
-    num_close_users = [0]
-    N_XR = [1, 2, 3, 4, 5]
-    PL = [0.1]
-    fps_list = [90.0]
-    initial_bitrate_mbps = [10.0]
-    ABR_ENABLED = [3]
-    nest_profiles = [1]
-    RANDOM_SEEDS = list(range(1, 10))
-    video_samples = ["snow"]
-    N_BGs = [0]
-    IS_UL_BG = [0]
-    intrarefresh_choice = [1]
-    GoP_sizes = [90]
-    everest_tests = 1  ## For random 24x12 grid STA placements, with velocity 5m/s in a circle. 
-
+    # LOCAL_MODEL_PATH = Path(f"MaskedPPO_Models/model_red.zip")
+    
     
     print(f"{Colors.BOLD}{Colors.MAGENTA}")
     print("="*60)
@@ -1102,19 +868,7 @@ def main_single_c():
     exe = find_exe(release=True)
     print(f"\n{Colors.YELLOW}Rust executable: {exe}{Colors.ENDC}")
     
-    # Generate evaluation scenarios (subset of training combos)
-    combos = list(product(
-        simTime, TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
-        video_samples, fps_list, num_close_users, distance_close_users,
-        RANDOM_SEEDS[:5],  # Use first 5 seeds only for eval
-        distance_list, GoP_sizes, intrarefresh_choice,
-        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
-    ))
-    print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} EVAL EP: {N_EVAL_EPISODES} {Colors.ENDC}")
 
-    random.shuffle(combos)
-    combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
-    
 
     print(f"\n{Colors.YELLOW}Will evaluate on {len(combos)} scenarios{Colors.ENDC}")
     print(f"{Colors.CYAN}Creating evaluation environment...{Colors.ENDC}")
@@ -1329,14 +1083,14 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))
     
     simTime = [80.0]
-    TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+    TEST_TYPE = [ "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
     k_queue = 10000
     mean_length_BG = 12000.0
     rate_bps_src_BG = [10e6, ]
     distance_list = [1.5]
     distance_close_users = [1.5]
     num_close_users = [0]
-    N_XR = [1, 2, 3, 4, 5]
+    N_XR = [1]
     PL = [0.1]
     fps_list = [90.0]
     initial_bitrate_mbps = [10.0]
@@ -1351,69 +1105,61 @@ if __name__ == "__main__":
     everest_tests = 1  ## For random 24x12 grid STA placements, with velocity 5m/s in a circle. 
 
     # Define the constants for the grid
-    # color_list = ["red", "brown", "green", "cinnamon", "purple"]
 
-    color_list = [  "purple"]
-    deterministic_choices = [ False]
+    # color_list = [  "brown", "purple", W]
+    deterministic_choices = [ False, True]
+    color_list = ["red", "brown", "green", "cinnamon", "purple"]
+
 
     # Evaluation Parameters
     N_EVAL_EPISODES = 2000  # Number of episodes to evaluate
+        # Generate evaluation scenarios (subset of training combos)
+    combos = list(product(
+        simTime, TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
+        video_samples, fps_list, num_close_users, distance_close_users,
+        RANDOM_SEEDS[:5],  # Use first 5 seeds only for eval
+        distance_list, GoP_sizes, intrarefresh_choice,
+        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
+    ))
+    print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} EVAL EP: {N_EVAL_EPISODES} {Colors.ENDC}")
 
-    for color in color_list:
-        for choice in deterministic_choices: 
-            eval_string = f"{color}D{choice}"
-            print(f"Eval on {eval_string}")
-
-            DETERMINISTIC = choice
-            main_single_c()    
-    # param_grid = list(product(color_list, deterministic_choices))
-
-    # combos = list(product(
-    #     simTime, TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
-    #     video_samples, fps_list, num_close_users, distance_close_users,
-    #     RANDOM_SEEDS[:5],  # Use first 5 seeds only for eval
-    #     distance_list, GoP_sizes, intrarefresh_choice,
-    #     ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL,
-    # ))
-    # print(f"{Colors.MAGENTA} NUMBER OF COMBOS: {len(combos)} {Colors.ENDC}")
-
-    # random.shuffle(combos)
-    # # combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
+    random.shuffle(combos)
+    combos = combos[:N_EVAL_EPISODES]  # Limit to N_EVAL_EPISODES
     
-
-
-    # print(f"{Colors.BOLD}{Colors.MAGENTA}")
-    # print("="*60)
-    # print("  MASKABLE PPO EVALUATION")
-    # print("="*60)
-    # print(f"{Colors.ENDC}")
-
-
-    # # color_list = ["red", "brown", "green", "cinnamon", "purple"]
-    # # deterministic_choices = [True, False]
-    # # param_grid = list(product(color_list, deterministic_choices))
-
-    # # Determine the number of processes to use.
-    # # Max of (grid size, CPU count) to avoid oversubscribing.
-    # num_processes = 5
+    MAX_WORKERS = 4
+ 
+    tasks = list(product(color_list, deterministic_choices))
+    print(tasks)
     
-    # print(f"\n{Colors.BOLD}{Colors.MAGENTA}")
-    # print("="*60)
-    # print(f"  STARTING PARALLEL EVALUATION ({len(param_grid)} jobs on {num_processes} cores)")
-    # print("="*60)
-    # print(f"{Colors.ENDC}")
-
-    # for color_model in color_list: 
-    #     for deterministic in deterministic_choices: 
-    #         run_single_evaluation(color_model, deterministic, combos)
-    # Use a Pool to manage the parallel execution
-    # 'initializer' is important to handle resources like ZMQ sockets/Rust processes
-    # correctly in each child process.
-    # with Pool(processes=num_processes) as pool:
-    #     # pool.starmap applies the function to each tuple in the param_grid
-    #     # The result is a list of results returned by run_single_evaluation
-    #     all_parallel_results = pool.starmap(run_single_evaluation, param_grid, combos)
-
+    # Check if we have exactly 4 tasks
+    if len(tasks) < MAX_WORKERS:
+        print("WARNING: Less than 4 tasks defined. Running all defined tasks.")
+    
+    # Use ProcessPoolExecutor to run tasks in parallel
+    # max_workers=4 will ensure only 4 processes run at once.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        print(f"Launching {len(tasks)} evaluations in parallel...")
+        
+        # Submit tasks to the pool
+        # executor.map is simpler if you don't need results as they complete
+        # executor.submit is better if you need to manage them individually
+        future_to_task = {
+            executor.submit(run_evaluation, color, choice, combos): (color, choice)
+            for color, choice in tasks
+        }
+        
+        # Wait for all tasks to complete and print results as they finish
+        for future in concurrent.futures.as_completed(future_to_task):
+            color, choice = future_to_task[future]
+            try:
+                result = future.result()
+                print(f"\n--- Result for {color}D{choice} ---")
+                print(result)
+                print("------------------------------")
+            except Exception as exc:
+                print(f"\n--- Exception for {color}D{choice} ---")
+                print(f'{color}D{choice} generated an exception: {exc}')
+                print("------------------------------")
     # -----------------------------------------------------------------
     # FINAL SUMMARY
     # -----------------------------------------------------------------

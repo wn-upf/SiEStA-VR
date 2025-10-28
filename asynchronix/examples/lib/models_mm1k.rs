@@ -103,7 +103,7 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
-
+pub const CSV_PER_PACKET: bool = false; 
 
 pub const STEP1_TBEGIN: f64 = 10.0;
 pub const STEP1_TEND: f64 =   20.0;
@@ -2318,11 +2318,14 @@ impl QueueModule {
                     qstats.update_cumstats(u.T_s, u.T_q, u.blocked_packet_counter, u.arrived_packet_counter, u.queue_length_when_out);
                 }
             }
-            for u in drained { // CSV write outside the lock
-                self.csv_metrics.update_stats(
-                    u.now, u.packet_id as usize, u.queue_length_when_out, u.T_s, u.T_q,
-                    u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision, u.collision_backoff
-                );
+
+            if CSV_PER_PACKET{
+                for u in drained { // CSV write outside the lock
+                    self.csv_metrics.update_stats(
+                        u.now, u.packet_id as usize, u.queue_length_when_out, u.T_s, u.T_q,
+                        u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision, u.collision_backoff
+                    );
+                }
             }
         }
 

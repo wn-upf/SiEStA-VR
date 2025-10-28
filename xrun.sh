@@ -20,8 +20,8 @@ module load x264
 
 export PATH=$HOME/.local/bin:$PATH
 
-NUMBER_OF_JOBS=2
-SERIAL_EXECUTION=1
+NUMBER_OF_JOBS=4
+SERIAL_EXECUTION=0
 #############################################################################
 # RL params: 
 observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
@@ -31,9 +31,9 @@ T_ABR=0.3
 
 # initial_bitrate_mbps=( 100.0 )
 
-TEST_TYPE=("RANDOM" "BW") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
+TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=100.0
+simTime=80.0
 k_queue=10000
 mean_length_BG=12000.0     ## BG traffic length 
 rate_bps_src_BG=50E6;   ## BG traffic arrival rate
@@ -41,15 +41,15 @@ rate_bps_src_BG=50E6;   ## BG traffic arrival rate
 distance_list=( 1.5 )
 distance_close_users=( 1.5 )  ## to have heterogeneous distances
 num_close_users=( 0 )     ## number of users with alternate distance
-N_XR=(1) 
+N_XR=(1 2 3 4 5) 
 PL=0.1
 
-fps_list=(90.0 )
-initial_bitrate_mbps=( 100.0 ) 
+fps_list=( 90.0 )
+initial_bitrate_mbps=( 10.0 20.0 40.0 ) 
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach, 4=> GCC, 5 => NADA (TODO) 6 => FovOptix (TODO)
 
-ABR_ENABLED=( 0 1 2 4 5 6 )
+ABR_ENABLED=( 0 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
 RANDOM_SEEDS=({1..10})
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
@@ -190,10 +190,11 @@ cargo build --release --example XR_sim
                                                     for intrarefresh in "${intrarefresh_choice[@]}"; do 
                                                         for ABR in "${ABR_ENABLED[@]}"; do 
                                                             for nest_profile in "${nest_profiles[@]}"; do 
+                                                                NAME_ABR="ABR_$($ABR)"
 
                                                                 # Create the folder for results saving
-                                                                name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.1f_NXR%.0f_NBG%.0f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f_obs%.0f_Tabr%.3f" \
-                                                                            "$simTime" "$distance" "$bitrate" "$PL" "$nxr" "$nbg" "$is_ul" "$test" "$video_sample" "$FPS" "$close_users" "$close_distance" "$seed" "$gop" "$intrarefresh" "$ABR" "$nest_profile" "$observation_type" "$T_ABR")
+                                                                name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.1f_NXR%.0f_NBG%.0f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f_obs%.0f_Tabr%.3f_%s" \
+                                                                            "$simTime" "$distance" "$bitrate" "$PL" "$nxr" "$nbg" "$is_ul" "$test" "$video_sample" "$FPS" "$close_users" "$close_distance" "$seed" "$gop" "$intrarefresh" "$ABR" "$nest_profile" "$observation_type" "$T_ABR" "$NAME_ABR")
                                                         
                                                                 (( SIM_COUNT++ ))  # ← increment
                                                                 # mkdir -p "Results/$name_folder"
@@ -204,7 +205,7 @@ cargo build --release --example XR_sim
                                                                     # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
                                                                     # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
                                                                 # else                                    ## Serial execution
-                                                                        script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR" "out_log.ans"
+                                                                        script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR" "out_log.ans"
                                                                         sleep 5
                                                                 #         rm out_log.ans
                                                                 
