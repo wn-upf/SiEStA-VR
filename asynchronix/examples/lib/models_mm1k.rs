@@ -1878,9 +1878,9 @@ impl Medium {
 #[allow(unused)]
 #[derive(Clone)]
 pub struct QueueModule {
-    pub output_port_sta1: Output<AmpduPacket>,
-    pub output_port_sta2: Output<AmpduPacket>,
+    // pub output_port_sta1: Output<AmpduPacket>,
 
+    pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
     pub queue: VecDeque<MpduPacket>,
     pub queue_maxsize: usize,
     pub service_timer: Duration,
@@ -1912,7 +1912,7 @@ pub struct QueueModule {
 
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
-    pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
+    // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
     
     pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization 
 
@@ -1924,10 +1924,17 @@ pub struct QueueModule {
 
     pub ampdu_id: u32, 
 
-    pub shared_medium: Medium, 
+    // pub shared_medium: Medium, 
+    pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
+    pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
+    pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
 
 }
-
+#[derive(Clone, Debug)]
+pub struct StaCapabilities {
+    pub is_str_capable: bool,
+    pub links: Vec<u8>,
+}
 
 #[allow(unused)]
 impl QueueModule {
@@ -1976,7 +1983,6 @@ impl QueueModule {
             queue: VecDeque::with_capacity(queue_size),
             queue_maxsize: queue_size,
             output_port_sta1: Default::default(),
-            output_port_sta2: Default::default(),
             service_timer: Duration::ZERO,
             aux_ampdu_serviced: AmpduPacket::new(),
             packet_being_served: false,

@@ -1700,7 +1700,7 @@ impl MpduPacket {
     }
 }
 
-type MacKey = (i32, EdcaAc);      // e.g. (AP_ID, AC_VO) or (sta_id, AC_BE)
+type MacKey = (i32, EdcaAc, u8);      // e.g. (AP_ID, AC_VO) or (sta_id, AC_BE); last u8 for MLO link ID
 
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {

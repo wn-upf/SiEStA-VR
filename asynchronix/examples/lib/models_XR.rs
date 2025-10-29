@@ -6825,6 +6825,313 @@ impl STA_extended {
 
 impl Model for STA_extended {}
 
+
+
+pub struct STA_extended_MLO { // for MLO, two output ports. 
+    // extended class to PoissonGen
+    pub link_output_network_ports: HashMap<u8, Output<MpduPacket>>,
+    pub outport_coords_xrclient: Output<Coords>, // only used so the XRClient can know its coordinates in real time, will be input in Tracking packets! 
+    pub to_app_socket: Output<TimedFrame>,
+    // pub to_app_socket_end_ampdu: Output<bool>,
+    pub sta_id: i32,
+    pub destination_id: i32,
+
+    pub arrival_rate_BG: f64,
+    pub mean_length_packets_BG: f64,
+    pub num_packets_sent: usize,
+    pub received_packet_counter: usize,
+
+    pub sta_coordinates: Coords,
+    pub orig_sta_coordinates: Coords, 
+    pub does_sta_tx: bool,
+
+    pub is_bg_sta: bool,
+
+    // [MLO] Capability flags and link management
+    pub is_mlo_capable: bool,
+    pub is_str_capable: bool,
+    pub link_ids: Vec<u8>,
+    link_rr_idx: usize, // For simple round-robin link selection
+                        // todo: more complex scheduling. 
+
+    pub t_0: TaiTime<0>,
+}
+
+
+impl STA_extended_MLO{
+    pub fn new(
+        // arrival_rate_bps: f64,
+        mean_length_BG: f64,
+        src: i32,
+        dest: i32,
+        coordinates: Coords,
+        does_sta_transmit: bool,
+        t0_sim: TaiTime<0>,
+        is_bg_sta: bool,
+        arrival_rate_BG: f64,
+        links: Vec<u8>,
+        is_str_capable: bool,
+    ) -> Self {
+        let arrival_rate_BG_packets = arrival_rate_BG / mean_length_BG;
+
+        println!("\n*************************************************");
+        println!("[DEBUG MLD-STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3}, RATE_BG: {:.3} Mbps, is_BG_STA {}",
+                            src, coordinates, dest, mean_length_BG,   arrival_rate_BG, is_bg_sta);
+        // [MLO] Print MLO info
+        println!("\tMLO capable: YES | Links: {:?} | STR capable: {}", links, is_str_capable);
+        let mut outputs = HashMap::new();
+        for link_id in &links {
+            outputs.insert(*link_id, Default::default());
+        }
+
+
+
+        Self {
+            link_output_network_ports: outputs, 
+            outport_coords_xrclient: Default::default(),  
+            to_app_socket: Default::default(),
+            // to_app_socket_end_ampdu: Default::default(),
+            sta_id: src,
+            destination_id: dest,
+            arrival_rate_BG: arrival_rate_BG_packets,
+            mean_length_packets_BG: mean_length_BG,
+            num_packets_sent: 0,
+            sta_coordinates: coordinates,
+            orig_sta_coordinates: coordinates, 
+            received_packet_counter: 0,
+            does_sta_tx: does_sta_transmit,
+            t_0: t0_sim,
+            is_bg_sta,
+
+            is_mlo_capable: true, // true if links.len() > 1, but we'll assume it is
+            is_str_capable,
+            link_ids: links,
+            link_rr_idx: 0,
+        }
+    }
+
+    // [MLO] Helper function for simple link selection  TODO: Opportunistic scheduling. 
+
+    fn get_next_tx_link(&mut self) -> u8 {
+        if self.link_ids.is_empty() {
+            panic!("MLD STA{} has no links configured!", self.sta_id);
+        }
+        let link_id = self.link_ids[self.link_rr_idx];
+        self.link_rr_idx = (self.link_rr_idx + 1) % self.link_ids.len();
+        link_id
+    }
+    // To simulate the channel changes, simulate the HMD moving at a
+    // constant speed of 5 m/s according to a random direction model within 1m² around
+    // initial position. In this way, we approximate the channel changes caused
+    // by a VR gamer standing still but rapidly moving around. src: How to model cloud VR, khorov et al. 
+    pub fn move_coordinates_everest<'a>(&'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move{
+
+            const LIMIT_MOVEMENT_RADIUS :f64 = 1.0; // circle of 1m radius. 
+            let delta_t = 0.01; //  is reasonable? 
+
+            // Step length = speed * delta_t
+            let step = 5.0 * delta_t;
+
+            {              
+                let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth. 
+
+                // Pick a random direction in 2D plane (azimuth only)
+                let theta = rng.gen_range(0.0..2.0 * PI);
+                let dx = step * theta.cos();
+                let dy = step * theta.sin();
+
+                // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
+
+                // New candidate position
+                let new_x = self.sta_coordinates.x + dx;
+                let new_y = self.sta_coordinates.y + dy;
+
+                // Boundaries: within ±0.5 m around initial position
+                let min_x = self.orig_sta_coordinates.x - LIMIT_MOVEMENT_RADIUS;
+                let max_x = self.orig_sta_coordinates.x + LIMIT_MOVEMENT_RADIUS;
+                let min_y = self.orig_sta_coordinates.y - LIMIT_MOVEMENT_RADIUS;
+                let max_y = self.orig_sta_coordinates.y + LIMIT_MOVEMENT_RADIUS;
+
+                // Reflect if out of bounds
+                self.sta_coordinates.x = if new_x < min_x {
+                    min_x + (min_x - new_x) // reflect back
+                } else if new_x > max_x {
+                    max_x - (new_x - max_x)
+                } else {
+                    new_x
+                };
+
+                self.sta_coordinates.y = if new_y < min_y {
+                    min_y + (min_y - new_y)
+                } else if new_y > max_y {
+                    max_y - (new_y - max_y)
+                } else {
+                    new_y
+                };
+            }
+            // z stays constant (HMD height)
+            // println!("Coordinates After dt: {:?}", self.sta_coordinates);
+            
+            self.outport_coords_xrclient.send( self.sta_coordinates.clone()).await; 
+
+            context
+                .scheduler
+                .schedule_event(Duration::from_secs_f64(delta_t), Self::move_coordinates_everest, () , )
+                .unwrap();
+        }
+    }
+
+
+    pub fn move_coordinates(&mut self, distance_to_move: f64) {
+        // brownian movement for STA
+        let mut rng = rand::thread_rng();
+
+        // Generate a random angle in spherical coordinates to determine the direction of movement
+        let theta = rng.gen_range(0.0..2.0 * PI); // azimuthal angle for x and y
+        let phi = rng.gen_range(0.0..PI); // polar angle for z-axis
+
+        // Decompose the distance into x, y, and z components
+        let dx = distance_to_move * theta.cos() * phi.sin();
+        let dy = distance_to_move * theta.sin() * phi.sin();
+        let dz = distance_to_move * phi.cos();
+
+        println!("[MOVE STA COORDS] Before: {:?}", self.sta_coordinates);
+
+        // Update the coordinates
+        self.sta_coordinates.x += dx;
+        self.sta_coordinates.y += dy;
+        self.sta_coordinates.z += dz;
+        println!("                  After: {:?}", self.sta_coordinates);
+    }
+
+    pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
+        packet.length_packet = (packet.header_alvr.packet_length + 100) as usize;
+        packet.packet_id = self.num_packets_sent;
+        packet.sta_src_id = self.sta_id;
+        packet.sta_dest_id = self.destination_id;
+        packet.sta_src_coords = self.sta_coordinates;
+
+        // [MLO] Select a link for this packet
+        let link_id_to_use = self.get_next_tx_link();
+        
+        // [MLO] Schedule the send on the specific link
+        // Note: The scheduled function's input must be a tuple
+        context
+            .scheduler
+            .schedule_event(
+                Duration::from_nanos(10), 
+                Self::send_packet_wireless, 
+                (packet, link_id_to_use) // [MLO] Pass packet AND link_id
+            )
+            .unwrap();
+
+        self.num_packets_sent += 1;
+    }
+    pub async fn send_packet_wireless(&mut self, (packet, link_id): (MpduPacket, u8)) {
+        // [MLO] Find the correct output port and send
+        if let Some(output_port) = self.link_output_network_ports.get_mut(&link_id) {
+            output_port.send(packet).await;
+        } else {
+            // Handle error: trying to send on a non-existent link
+            println!("[WARN] STA{} tried to send on non-existent link {}", self.sta_id, link_id);
+        }
+    }
+    
+    pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
+        let mut packet_batch = Vec::new(); // Create a batch to hold packets
+        let now: TaiTime<0> = context.scheduler.time();
+        // println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
+        if ampdu_packet.sta_dest_id == self.sta_id {
+            // make sure we ignore packets not corresponding to STA
+            for packet in ampdu_packet.mpdu_packets {
+
+                self.received_packet_counter += 1;
+                packet_batch.push(packet);
+            }
+        }
+        if !packet_batch.is_empty() {
+            let frame = TimedFrame {
+                vec: packet_batch,
+                timestamp: now,
+            };
+            context
+                .scheduler
+                .schedule_event(Duration::from_nanos(10), Self::to_app_socket_send, frame)
+                .unwrap();
+            // Send the batch to the app socket in one go
+            // self.to_app_socket.send(packet_batch).await;
+        }
+        yield_now();
+    }
+    pub async fn to_app_socket_send(&mut self, frame: TimedFrame) {
+        self.to_app_socket.send(frame).await;
+    }
+
+    pub fn send_packet_BG<'a>(
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let mut rng = StdRng::seed_from_u64(42);
+
+            if self.does_sta_tx && self.is_bg_sta {
+                // if STA is "TX type"         (and not "RX only")
+
+                let mut packet = MpduPacket::new();
+
+
+                let mut time_interarrival =
+                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate_BG, &mut rng));
+
+                time_interarrival = max(time_interarrival, Duration::from_nanos(1));
+
+                // let len_random = exponential(self.mean_length_packets_BG as f64) as usize;
+                let len_random = self.mean_length_packets_BG as usize;
+
+                packet.length_packet = cmp::max(1, len_random);
+                packet.packet_id = self.num_packets_sent;
+
+                packet.sta_src_id = self.sta_id;
+                packet.sta_dest_id = self.destination_id;
+
+                packet.sta_src_coords = self.sta_coordinates;
+
+                debug_print!(
+                    DebugColor::Blue,
+                    "{} [TGAPP{}] Packet {} generated, destination STA {}, self.coords = {:?}",
+                    format_elapsed!(context.scheduler.time()),
+                    self.sta_id,
+                    packet.packet_id,
+                    packet.sta_dest_id,
+                    self.sta_coordinates,
+                );
+
+                // self.output_network_port.send(packet).await;
+                context
+                    .scheduler
+                    .schedule_event(Duration::from_nanos(10), Self::send_packet_wireless, packet)
+                    .unwrap();
+
+                self.num_packets_sent += 1;
+
+                context // reschedule this function
+                    .scheduler
+                    .schedule_event(time_interarrival, Self::send_packet_BG, ())
+                    .unwrap();
+            }
+        }
+    }
+}
+
+impl Model for STA_extended_MLO {} 
+
+
+
 pub fn extract_br_value(input: &str) -> Option<f32> {
     let re = Regex::new(r"Br(\d+\.\d+)").unwrap(); // Regex to match "Br" followed by a float.
 
