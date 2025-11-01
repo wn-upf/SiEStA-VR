@@ -2039,11 +2039,11 @@ pub fn create_mlo_config() -> Vec<LinkConfig> {
             frequency_ghz: 5.0,
             bandwidth_mhz: 80,
         },
-        LinkConfig {
-            link_id: 1,
-            frequency_ghz: 6.0,
-            bandwidth_mhz: 320,
-        },
+        // LinkConfig {
+        //     link_id: 1,
+        //     frequency_ghz: 6.0,
+        //     bandwidth_mhz: 320,
+        // },
     ]; 
     println!("Creating MLO Config!\n{:#?}", a); 
     a
