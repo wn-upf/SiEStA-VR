@@ -192,7 +192,6 @@ impl CsvSink {
             let mut batch = 0;
             while let Ok(row) = rx.recv() {
 
-                println!("Serializing row: {:?}", row); 
                 if wtr.serialize(row).is_err() { break; }
                 batch += 1;
                 if batch >= BATCH_SIZE_CSV {
@@ -209,7 +208,7 @@ impl CsvSink {
     #[inline]
     fn write(&self, row: StatsRow) {
 
-        println!("SENDING ROW: {:?}", row); 
+        // println!("SENDING ROW: {:?}", row); 
         // Fast, lock-free path; drops on full queue if you prefer lossy:
         let _ = self.tx.send(row);
     }
@@ -384,7 +383,8 @@ impl StatisticsManager {
         );
     }
 
-      pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
+    pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
+        println!("[{}] Report fl : {} sl: {} ", self.id_XR, fl, sl);
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
@@ -396,7 +396,7 @@ impl StatisticsManager {
         now: TaiTime<0>,
         current_bitrate_target_mbps: f32, 
     ) -> (f32, f32) {
-        println!("--- DEBUG: report_network_statistics CALLED! ---");
+        // println!("--- DEBUG: report_network_statistics CALLED! ---");
         self.packets_skipped_total += network_stats.frames_skipped as usize;
         self.packets_skipped_partial_sum += network_stats.frames_skipped as usize;
 
@@ -535,7 +535,7 @@ impl StatisticsManager {
 
 
 
-        print_magenta!("\t{:#?}", self.last_stats);
+        // print_magenta!("\t{:#?}", self.last_stats);
 
         self.frame_counter += 1;
 

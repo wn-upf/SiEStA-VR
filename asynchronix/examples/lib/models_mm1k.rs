@@ -2098,8 +2098,7 @@ impl QueueModule {
         for link_config in &link_configs {
             link_mediums.insert(link_config.link_id, Medium::default());
             link_channel_widths.insert(link_config.link_id, link_config.bandwidth_mhz as usize); 
-           
-            // link_outputs will be set later when connecting ports
+            link_outputs.insert(link_config.link_id, Output::default()); 
         }
 
         Self {

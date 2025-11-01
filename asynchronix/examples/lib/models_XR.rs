@@ -1730,70 +1730,62 @@ impl Default for ProfileConfig {
 
 
 #[derive(Clone)]
-pub struct TimedVecFLR{
-    vec_flr: VecDeque<(f32,usize)>,
-    vec_shard_loss: VecDeque<(f32, usize)>, 
-    period: f32, // how long to keep values 
+struct DataPoint {
+    fl_report: usize,
+    sl_report: usize,
 }
-
-impl TimedVecFLR{
+#[derive(Clone)]
+pub struct TimedVecFLR {
+    // 2. Use one VecDeque holding tuples of (time, DataPoint)
+    vec_data: VecDeque<(f32, DataPoint)>,
+    period: f32,
+}
+impl TimedVecFLR {
     pub fn new(period: f32) -> Self {
         Self {
-            vec_flr: VecDeque::new(),
-            vec_shard_loss: VecDeque::new(),
+            vec_data: VecDeque::new(),
             period,
         }
     }
+
     pub fn push_new(&mut self, fl_report: usize, sl_report: usize, time_f32: f32) {
         // Insert new values
-        self.vec_flr.push_back((time_f32, fl_report));
-        self.vec_shard_loss.push_back((time_f32, sl_report));
+        let data = DataPoint { fl_report, sl_report };
+        self.vec_data.push_back((time_f32, data));
 
         // Prune old values outside the time window
         let cutoff = time_f32 - self.period;
-
         self.prune_old(cutoff);
     }
 
-
-      fn prune_old(&mut self, cutoff: f32) {
-        while let Some(&(t, _)) = self.vec_flr.front() {
+    // 3. Prune function is now simpler (only one loop)
+    fn prune_old(&mut self, cutoff: f32) {
+        while let Some(&(t, _)) = self.vec_data.front() {
             if t < cutoff {
-                self.vec_flr.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        while let Some(&(t, _)) = self.vec_shard_loss.front() {
-            if t < cutoff {
-                self.vec_shard_loss.pop_front();
+                self.vec_data.pop_front();
             } else {
                 break;
             }
         }
     }
 
+    // 4. Sum functions iterate over the single VecDeque and pick the field
     pub fn sum_flr(&mut self, time_f32: f32) -> usize {
         let cutoff = time_f32 - self.period;
-
-        // Remove outdated entries
         self.prune_old(cutoff);
-
-        // Sum *and remove* all currently stored FLR values (only once)
-        let sum: usize = self.vec_flr.drain(..).map(|(_, v)| v).sum();
-        sum
+        
+        // Sum the fl_report field from each DataPoint
+        self.vec_data.iter().map(|(_, data)| data.fl_report).sum()
     }
-
 
     pub fn sum_shard_loss(&mut self, time_f32: f32) -> usize {
         let cutoff: f32 = time_f32 - self.period;
         self.prune_old(cutoff);
-        self.vec_shard_loss.drain(..).map(|(_, v)| v).sum()
+
+        // Sum the sl_report field from each DataPoint
+        self.vec_data.iter().map(|(_, data)| data.sl_report).sum()
     }
-
 }
-
 
 
 #[derive(Clone)]
@@ -3447,12 +3439,10 @@ impl XRServer {
 
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>) {
         
-        println!("control packet rcv"); 
         
         if let Some(mut protorecv) = self.control_socket_receiver.clone() {
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap();
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
-            println!("protorecv"); 
 
             match packet {
                 ClientControlPacket::NetworkStatistics(network_stats) => {
@@ -3463,7 +3453,6 @@ impl XRServer {
                     let rtt: Duration;
                     // if let send_instant = map_clone.get(&frame_id).unwrap()
 
-                    println!("Reaching here 1"); 
 
                     if let Some((_, send_instant)) = map_clone.remove(&frame_id) {  
                         if let Some(foman) = self.fov_optix_manager.clone(){ // equivalent to matching for FovOptix
@@ -3477,8 +3466,6 @@ impl XRServer {
                         
                         rtt = now.duration_since(send_instant);
                         debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
-
-                        println!("Reaching here 2"); 
                         let netstats= network_stats.clone(); 
 
                         let (peak_network_throughput_bps, frame_interarrival_s) =
@@ -3488,7 +3475,6 @@ impl XRServer {
                                 now,
                                 self.bitrate_manager.last_target_bitrate_bps,
                             );
-                        println!("Reaching here 3"); 
 
                         // BITRATE_MANAGER.lock().report_network_statistics
                         self.bitrate_manager.report_network_statistics_abr(
@@ -3530,9 +3516,8 @@ impl XRServer {
                     let shards_lost = inner.shards_lost;
 
                     for (frame, shard) in frames_lost.iter().zip(shards_lost.iter()) {
-                        print_pretty!(
-                            DebugColor::Red,
-                            "[DBG_DEAD_RX server {}] Frame {} lost {} shards",
+                        print_red!(
+                            "[Deadline Server {}] Frame {} lost {} shards",
                             self.ip_self,
                             frame,
                             shard
@@ -3558,7 +3543,7 @@ impl XRServer {
         Ok(track)
     }
     pub async fn in_from_network(&mut self, frame: TimedFrame) {
-        println!("In from network!"); 
+        // println!("In from network!"); 
         let packet_vec: Vec<MpduPacket> = frame.vec;
         let now = frame.timestamp;
 
@@ -3685,7 +3670,6 @@ impl XRServer {
 
                 CONTROL_STREAM => {
                     if let Some(mut sock) = self.control_socket_sender.as_mut() {
-                        println!("Received control stream!!");
                         // Deserialize into ClientControlPacket directly, not a reference
 
                         // println!("Size of buffer: {}", packet.data_inner.len() );
@@ -6217,7 +6201,6 @@ impl XRClient {
     }
 
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
-        println!("CLient in from network"); 
         let packet_vec = frame.vec;
         let now = frame.timestamp;
 
