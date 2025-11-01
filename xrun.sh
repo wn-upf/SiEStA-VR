@@ -3,12 +3,10 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
-####### SBATCH --gres=gpu:1
-####### SBATCH --constraint=nvenc
-######  SBATCH --exclusive
+
 #SBATCH --mem=64G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
-#SBATCH --cpus-per-task=32        # example
+#SBATCH --cpus-per-task=48        # example
 #SBATCH -o logs_hpc/%x_%j.out
 #SBATCH -e logs_hpc/%x_%j.err
 
@@ -25,10 +23,9 @@ SERIAL_EXECUTION=0
 #############################################################################
 # RL params: 
 observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
-reward_mode=1
+reward_mode=0
 T_ABR=0.3
 #############################################################################
-
 # initial_bitrate_mbps=( 100.0 )
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
