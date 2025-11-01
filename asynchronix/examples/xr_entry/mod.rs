@@ -10,7 +10,7 @@ use asynchronix::time::MonotonicTime;
 use tai_time::TaiTime;
 // use xkbcommon::xkb::Table;
 // use crate::lib::models_XR::BitrateMode;
-
+use crate::lib::models_mm1k::StaCapabilities; 
 use rand::seq::SliceRandom;
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
@@ -24,7 +24,7 @@ use rand::Rng;
 
 // mod lib; // for calling m own local library
 
-use crate::lib::models_mm1k::{EmulatedLink, QueueModule, MAX_EMULATED_QUEUE_PACKETS, NetworkPattern};
+use crate::lib::models_mm1k::{EmulatedLink, LinkConfig, MAX_EMULATED_QUEUE_PACKETS, NetworkPattern, QueueModule};
 use crate::lib::{
     exponential,
     PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, PREFIX_ID_BG, 
@@ -486,6 +486,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
 
 
+    let link_configs = crate::lib::models_mm1k::create_mlo_config(); 
+
     // Create and configure queue
     let mut queue = QueueModule::new(
         all_sta_ids.len(),
@@ -495,7 +497,34 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         name_folder.clone(),
         UPLINK_QUEUE_SIZE,
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
+        link_configs, 
     );
+
+    for sta_id in &all_sta_ids {
+        let capabilities = if *sta_id >= PREFIX_ID_UPLINK && *sta_id < PREFIX_ID_DOWNLINK {
+            // Uplink STAs (clients) - MLO capable with both links
+            StaCapabilities {
+                is_str_capable: true,  // or false based on your requirements
+                links: vec![0, 1],     // Both links available
+            }
+        } else if *sta_id >= PREFIX_ID_DOWNLINK {
+            // Downlink STAs (servers) - MLO capable with both links
+            StaCapabilities {
+                is_str_capable: true,
+                links: vec![0, 1],
+            }
+        } else {
+            // Background traffic - single link (legacy)
+            StaCapabilities {
+                is_str_capable: false,
+                links: vec![0],  // Only link 0
+            }
+        };
+    
+    queue.sta_capabilities.insert(*sta_id, capabilities);
+}
+
+
     let mbox_queue = Mailbox::new();
     let _queue_address = mbox_queue.address();
 
@@ -651,12 +680,12 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
         vr.sta_client.outport_coords_xrclient.connect(XRClient::input_coordinates_STA, &vr.mbox_xr_client.address()); 
         
-        queue
-            .output_port_sta1
-            .connect(STA_extended::input_wireless, &vr.mbox_sta_server);
-        queue
-            .output_port_sta1
-            .connect(STA_extended::input_wireless, &vr.mbox_sta_client);
+        for (link_id, output) in queue.link_outputs.iter_mut(){
+            
+            println!("connecting link id {} to corresponding sta", link_id); 
+            output.connect(STA_extended::input_wireless, &vr.mbox_sta_server);
+            output.connect(STA_extended::input_wireless, &vr.mbox_sta_client);
+        }
     }
 
     // Connect background STAs to queue

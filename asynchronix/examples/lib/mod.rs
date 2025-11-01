@@ -1635,7 +1635,8 @@ pub struct MpduPacket {
     pub original_index: usize, 
     pub edca_ac: EdcaAc,          
 
-    pub mac_key_cached: Option<(i32, EdcaAc)>,
+    pub mac_key_cached: Option<MacKey>,
+    pub assigned_link_id: Option<u8>, 
     // pub is_alvr_control_packet: bool,
 }
 #[repr(u8)]
@@ -1670,6 +1671,7 @@ impl MpduPacket {
             original_index: 0, 
             edca_ac: EdcaAc::BestEffort , 
             mac_key_cached: None, 
+            assigned_link_id: None, 
             // is_alvr_control_packet: false,
         }
     }
@@ -1711,6 +1713,7 @@ pub struct AmpduPacket {
     pub size: i32,
     pub coordinates: Coords,
     pub mac_key: MacKey, 
+    pub link_id: u8, // MLO field for intended link . 
 }
 
 impl AmpduPacket {
@@ -1727,7 +1730,8 @@ impl AmpduPacket {
                 y: 0.0,
                 z: 0.0,
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
-            mac_key: MacKey::default(), 
+            mac_key: MacKey::default(),
+            link_id: 0, 
         }
     }
     // Method to print AMPDU_packet values
@@ -1736,6 +1740,8 @@ impl AmpduPacket {
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
+         println!("AMPDU on LINK-{}: {} packets, {} bytes", 
+            self.link_id, self.mpdu_packets.len(), self.total_length);
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms",
@@ -1962,6 +1968,10 @@ pub fn collision_delay() -> f32 {
 //         data_service_delay: T_DATA,
 //     }
 // }
+
+
+
+
 #[inline]
 pub fn airtime_ampdu(
     total_bits_transmitted: f64,
@@ -1969,6 +1979,7 @@ pub fn airtime_ampdu(
     coords_src: Coords,
     coords_dest: Coords,
     p_tx: f64,
+    channel_width: usize, 
 ) -> f64 {
     let mut effPt = p_tx;
 
@@ -1978,13 +1989,13 @@ pub fn airtime_ampdu(
         effPt = effPt - 3.0 * SU_spatial_streams
     };
 
-    let channel_width: usize = CHANNEL_WIDTH;
+    // let channel_width: usize = CHANNEL_WIDTH;
 
     // Effective Pt
-
     if channel_width > 20 {
         effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
     }
+
     let distance = calculate_distance(
         coords_src.x,
         coords_src.y,
@@ -2021,14 +2032,20 @@ pub fn airtime_ampdu(
     // println!("P_rx = {}", Pr); 
 
     let Subcarriers = match channel_width {
-        // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
-        80 => 980,
+        320 => 3920, // 320 MHz: data subcarriers (EHT / Wi-Fi7)
+        160 => 1960, // 160 MHz: data subcarriers (HE/Wi-Fi6)
+        
+        80 => 980,   // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
         40 => 468,
         20 => 234,
         _ => 0, // Default case,  fallback
     };
 
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+
+
+    print_dblue!("[AMDPU airtime] Channel Width {:?}, Orate: {:?}, eff_Pt={}, Pr: {}, ", channel_width, ORate, effPt, )
+
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
 

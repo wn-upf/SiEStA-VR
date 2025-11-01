@@ -7111,10 +7111,14 @@ impl STA_extended_MLO{
                     self.sta_coordinates,
                 );
 
+                let link_id_bg = 1; // Using always 1 link for BG traffic, unused for now, need TODO more flexible API.  
+                // println!("") 
+
+
                 // self.output_network_port.send(packet).await;
                 context
                     .scheduler
-                    .schedule_event(Duration::from_nanos(10), Self::send_packet_wireless, packet)
+                    .schedule_event(Duration::from_nanos(10), Self::send_packet_wireless, (packet, link_id_bg))
                     .unwrap();
 
                 self.num_packets_sent += 1;

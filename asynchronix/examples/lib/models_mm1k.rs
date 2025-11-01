@@ -1,4 +1,4 @@
-use crate::{debug_bgprint, debug_debug, print_blue, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
+use crate::{debug_bgprint, debug_debug, print_blue, print_dblue, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -20,6 +20,7 @@ use rand::rngs::StdRng;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 use serde::{Serialize, Deserialize};
+use std::collections::HashSet;
 
 // use crate::db_debug_bgprint;
 
@@ -28,7 +29,7 @@ use crate::lib::{
     CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS,
     P_TX,
 };
-use std::collections::HashSet;
+// use std::collections::HashSet;
 use crate::{debug_print, format_elapsed, taitime_to_f64};
 
 use rand::{SeedableRng};
@@ -47,7 +48,7 @@ use rand::{SeedableRng};
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
-const DEBUG_EDCA: bool = false; 
+const DEBUG_EDCA: bool = true; 
 
 #[macro_export]
 macro_rules! debug_edca {
@@ -71,6 +72,66 @@ macro_rules! debug_schedule {
     };
 }
 
+macro_rules! log_mlo {
+    ($now:expr, $($arg:tt)*) => {
+        if DEBUG_MLO {
+            print!("\x1b[38;5;141m{} [MLO] ", format_elapsed!($now));
+            println!($($arg)*);
+            print!("\x1b[0m");
+        }
+    };
+}
+
+macro_rules! log_link_selection {
+    ($now:expr, $($arg:tt)*) => {
+        if DEBUG_MLO {
+            print!("\x1b[38;5;87m{} [LINK-SEL] ", format_elapsed!($now));
+            println!($($arg)*);
+            print!("\x1b[0m");
+        }
+    };
+}
+
+macro_rules! log_mlo_contention {
+    ($now:expr, $link_id:expr, $($arg:tt)*) => {
+        if DEBUG_MLO {
+            print!("\x1b[38;5;214m{} [LINK-{}] ", format_elapsed!($now), $link_id);
+            println!($($arg)*);
+            print!("\x1b[0m");
+        }
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinkSelectionStrategy {
+
+    // Choose the channel that is free using backoffs 
+    Opportunistic, 
+    /// Always prefer primary link (link 0)
+    PrimaryFirst,
+    /// Choose link with lowest current load
+    LoadBalanced,
+    /// Choose link with best channel conditions
+    QualityBased,
+    /// Round-robin between available links
+    RoundRobin,
+    /// Use link that has shortest expected transmission time
+    LowestLatency,
+}
+
+#[derive(Clone, Debug)]
+pub struct LinkMetrics {
+    pub link_id: u8,
+    pub current_queue_depth: usize,  // Packets assigned to this link
+    pub avg_airtime_ms: f64,         // Average airtime per packet
+    pub idle_since: TaiTime<0>,      // When link became idle
+    pub collision_count: usize,      // Recent collisions
+    pub throughput_mbps: f64,        // Estimated throughput
+}
+
+pub const DEBUG_MLO: bool = true;
+pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
+
 // pub const DEBUG_SCHEDULING: bool = false;
 
 pub const SOFTMAX_POLICY: bool = false;
@@ -78,7 +139,7 @@ pub const LYAPUNOV_POLICY: bool = false;
 pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
 #[derive(Clone, Debug)]
-struct StaRateInfo {
+pub struct StaRateInfo {
     total_transmission_delay_single: f64,
     total_transmission_delay_fullampdu: f64,
     fullampdu_max_size: usize,
@@ -87,6 +148,7 @@ struct StaRateInfo {
     weighted_rate_fullampdu: f64,
     per_packet_channel_access_efficiency: f64,
     expected_queue_delivery_ms: f64,
+
 }
 
 pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
@@ -128,6 +190,7 @@ pub struct PoissonSource {
 
     pub rng_seed: StdRng
 }
+
 
 #[allow(dead_code)]
 impl PoissonSource {
@@ -1696,6 +1759,7 @@ pub struct StatsUpdate {
 
     pub is_collision: bool, 
     pub collision_backoff: f64, 
+    pub link_id: u8, 
 
 }
 #[derive(Clone, Copy, Debug, Hash)]
@@ -1805,9 +1869,15 @@ fn log_edca(key: &MacKey, msg: &str) {
 }
 
 #[inline]
-fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
-    matches!(p.mac_key_cached, Some((pid, pac)) if pid == *id && pac == *ac)
+fn maps_to(key: &MacKey, p: &MpduPacket) -> bool {
+    let (sta_id, ac, link_id) = *key;
+    let is_ul = p.sta_src_id > p.sta_dest_id;
+    let p_sta = if is_ul { p.sta_src_id } else { -1 };
+    let p_link = p.assigned_link_id.unwrap_or(0);
+    
+    p_sta == sta_id && p.edca_ac == ac && p_link == link_id
 }
+
 
 
 // fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
@@ -1816,21 +1886,37 @@ fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
 //     (mac_id, p.edca_ac) == (*id, *ac)
 // }
 
-
 fn ac_needs_tick(
-    key:  &MacKey,
-    st:   &DcfStats,
-    q:    &VecDeque<MpduPacket>,
-    now:  TaiTime<0>,
+    key: &MacKey,
+    st: &DcfStats,
+    q: &VecDeque<MpduPacket>,
+    now: TaiTime<0>,
+    sta_capabilities: &HashMap<i32, StaCapabilities>,
 ) -> bool {
-    // Does the queue hold a packet that maps to this virtual MAC?
-    let has_pkts = q.iter().any(|p| maps_to(key, p));
+    let (sta_id, _, link_id) = *key;
+    
+    // Check if STA can use this link
+    if sta_id != -1 {
+        if let Some(cap) = sta_capabilities.get(&sta_id) {
+            if !cap.links.contains(&link_id) {
+                return false;
+            }
+        }
+    }
+    
+    // Does the queue hold a packet for this STA?
+    let has_pkts = q.iter().any(|p| {
+        let p_sta = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
+        p_sta == sta_id
+    });
+    
     if !has_pkts { return false; }
-
-    // Still inside AIFS window or back-off not yet zero?
+    
     let aifs_done = st.medium_free_since + aifs(st.param) <= now;
     !aifs_done || st.backoff_counter > 0
 }
+
+
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Medium {
@@ -1915,8 +2001,6 @@ pub struct QueueModule {
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
     
     pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization 
-
-
     pub PL_probability: f64,
 
     // pub queue_network_emulator: QueueMechanism,
@@ -1926,6 +2010,7 @@ pub struct QueueModule {
 
     // pub shared_medium: Medium, 
     pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
+    pub link_channel_widths: HashMap<u8, usize>,  // Store channel width per link
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
     pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
 
@@ -1935,54 +2020,89 @@ pub struct StaCapabilities {
     pub is_str_capable: bool,
     pub links: Vec<u8>,
 }
+#[derive(Clone, Debug)]
+pub struct LinkConfig {
+    pub link_id: u8,
+    pub frequency_ghz: f64,  // 5 or 6
+    pub bandwidth_mhz: u16,   // 80, 160, 320
+}
+
+// Helper function to initialize typical MLO setup
+pub fn create_mlo_config() -> Vec<LinkConfig> {
+
+    let a = vec![
+        LinkConfig {
+            link_id: 0,
+            frequency_ghz: 5.0,
+            bandwidth_mhz: 80,
+        },
+        LinkConfig {
+            link_id: 1,
+            frequency_ghz: 6.0,
+            bandwidth_mhz: 160,
+        },
+    ]; 
+    println!("Creating MLO Config!\n{:#?}", a); 
+    a
+}
 
 #[allow(unused)]
 impl QueueModule {
   
-    pub fn new(
+     pub fn new(
         num_stas: usize,
         queue_size: usize,
         PL_prob: f64,
         vec_ids: Vec<i32>,
         folder_dir: String,
         ul_size: usize,
-        emulated_tests: Option<(bool, bool, bool, bool)>, // BW, Jitter, PL
+        emulated_tests: Option<(bool, bool, bool, bool)>,
+        link_configs: Vec<LinkConfig>, // NEW: Configure available links
     ) -> Self {
-        // Create a vector of perStaLockStats with initialized sta_ids
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
-        let mut dcf_stats_vec = HashMap::new(); 
-
+        let mut dcf_stats_vec = HashMap::new();
         let (stats_tx, stats_rx) = unbounded();
 
+        // Initialize per-STA stats
         for i in 0..num_stas {
             let sta_stats = perStaLockStats::new();
-            // We need to lock the mutex to modify the sta_id
             if let Ok(mut stats) = sta_stats.data.clone().lock() {
                 stats.sta_id = vec_ids[i] as i32;
-                // println!("iter: {}, stats id : {:?}", i, stats.sta_id);
                 stats_vec.insert(stats.sta_id.clone() as usize, sta_stats.clone());
-        
-            }    
-        }
-
-        ///////////////////// CREATE BEB QUEUES /////////////////////
-   
-        // AP gets four virtual MACs (one per AC)
-        for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
-            dcf_stats_vec.insert((-1, ac), DcfStats::new(ac));
-        }
-
-        // Every uplink STA keeps **one** MAC – attach its “default” AC_BE
-        for sta_id in vec_ids {
-            for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
-                dcf_stats_vec.insert((sta_id, ac), DcfStats::new(ac));
             }
+        }
+
+        // Create BEB queues per link and AC
+        for link_id in link_configs.iter().map(|lc| lc.link_id) {
+            // AP gets four virtual MACs per link (one per AC)
+            for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
+                dcf_stats_vec.insert((-1, ac, link_id), DcfStats::new(ac));
+            }
+
+            // Every uplink STA keeps one MAC per link per AC
+            for sta_id in &vec_ids {
+                for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
+                    dcf_stats_vec.insert((*sta_id, ac, link_id), DcfStats::new(ac));
+                }
+            }
+        }
+
+        // Initialize link mediums
+        let mut link_mediums = HashMap::new();
+        let mut link_outputs = HashMap::new();
+        let mut link_channel_widths = HashMap::new();
+        
+        for link_config in &link_configs {
+            link_mediums.insert(link_config.link_id, Medium::default());
+            link_channel_widths.insert(link_config.link_id, link_config.bandwidth_mhz as usize); 
+           
+            // link_outputs will be set later when connecting ports
         }
 
         Self {
             queue: VecDeque::with_capacity(queue_size),
             queue_maxsize: queue_size,
-            output_port_sta1: Default::default(),
+            link_outputs,
             service_timer: Duration::ZERO,
             aux_ampdu_serviced: AmpduPacket::new(),
             packet_being_served: false,
@@ -1991,30 +2111,34 @@ impl QueueModule {
             queue_length_counter: 0,
             service_rate: 0.0,
             t0_time: Instant::now(),
-
             csv_metrics: CsvType::new(&folder_dir).expect("?? CSVTYPE"),
-
             coords_queue: Coords::new(),
             p_tx: P_TX,
             STA_coords_grid: Vec::new(),
             STA_coords_map: HashMap::new(),
-
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
-            array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),  
-            sta_stats_cache: HashMap::new(), 
-
+            array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),
+            sta_stats_cache: HashMap::new(),
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
-
             PL_probability: PL_prob,
-            // queue_network_emulator: queue_mechanism,
             ul_capacity_queue_device: ul_size,
-            ampdu_id: 0, 
-
-            shared_medium: Medium::default(), 
+            ampdu_id: 0,
+            link_mediums,
+            link_channel_widths, 
+            sta_capabilities: HashMap::new(),
         }
     }
+
+
+
+    fn get_channel_width(&self, link_id: u8) -> usize {
+        // Default to 80 MHz if link not found
+        80  // You'll populate this from LinkConfig
+    }
+
+
 
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
         self.cumulative_stats_queue.clone()
@@ -2022,91 +2146,64 @@ impl QueueModule {
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
+        
+    pub fn tick_backoff(&mut self, now: TaiTime<0>) -> HashMap<u8, Vec<MacKey>> {
+        // Clear idle links
+        for medium in self.link_mediums.values_mut() {
+            medium.clear_if_idle(now);
+        }
 
-   fn tick_backoff(&mut self, now: TaiTime<0>) -> Vec<MacKey> {
-        self.shared_medium.clear_if_idle(now);
-
-        // --- Precompute which MacKeys actually have packets in the queue (single O(n) pass) ---
-        use std::collections::HashSet;
-        let mut present_keys: HashSet<MacKey> = HashSet::new();
+        // Precompute which MacKeys have packets (per link)
+        let mut present_keys: HashSet<(i32, EdcaAc)> = HashSet::new();
         for p in self.queue.iter() {
-            // Same mapping logic as maps_to(), but done once per packet
             let is_ul = p.sta_src_id > p.sta_dest_id;
-            let key: MacKey = if is_ul { (p.sta_src_id, p.edca_ac) } else { (-1, p.edca_ac) };
+            let key = if is_ul { (p.sta_src_id, p.edca_ac) } else { (-1, p.edca_ac) };
             present_keys.insert(key);
         }
 
-        let mut ready = Vec::new();
-        let idle_slot = self.shared_medium.is_idle(now);
-
-        // --- Hold the lock once while we walk EDCA states ---
+        let mut ready_per_link: HashMap<u8, Vec<MacKey>> = HashMap::new();
+        
+        // ⭐ Lock ONCE and do all updates in a single pass
         let mut map = self.array_dcf_values.lock().unwrap();
-
-        debug_edca!(
-            "{} | [EDCA] medium_idle={} |  q_size={} | ac_states={}",
-            format_elapsed!(now),
-            idle_slot,
-            self.queue.len(),
-            map.len()
-        );
-
+    
         for (key, st) in map.iter_mut() {
-            // Skip ACs that have no packets waiting (avoids O(m*n) scans)
-            if !present_keys.contains(key) {
-                // log_edca(now, key, "no_pkts_for_AC -> skip");
+            let (sta_id, ac, link_id) = *key;
+            
+            // Skip if no packets for this STA/AC
+            if !present_keys.contains(&(sta_id, ac)) {
                 continue;
             }
 
+            // Get medium state for this link
+            let medium = self.link_mediums.get(&link_id).unwrap();
+            let idle_slot = medium.is_idle(now);
+
             // AIFS gating
             let aifs_until = st.medium_free_since + aifs(st.param);
-            if idle_slot && aifs_until <= now {
-                debug_edca!("\t[{} AIFS satisfied] -> unfreeze", key.0);
+            let aifs_satisfied = idle_slot && aifs_until <= now;
+
+            // Update backoff state directly (st is already mutable)
+            if aifs_satisfied {
                 st.backoff_frozen = false;
-            } else {
-                debug_edca!(
-                    "\t[{} WAIT AIFS] {} < {}",
-                    key.0,
-                    format_elapsed!(now),
-                    format_elapsed!(aifs_until)
-                );
             }
 
-            // Backoff countdown (one slot per call of deque_schedule_service)
+            // Backoff countdown
             if idle_slot && !st.backoff_frozen && st.backoff_counter > 0 {
-                let prev = st.backoff_counter;
                 st.backoff_counter -= 1;
-                if DEBUG_EDCA {
-                    log_edca(key, &format!(" countdown {} -> {}", prev, st.backoff_counter));
-                }
             }
 
+            // Check if ready
             if st.backoff_counter == 0 && !st.backoff_frozen {
-                if DEBUG_EDCA {
-                    print_green!(
-                        "{} [ {} -> AC {:?}] READY (backoff==0 & unfrozen)",
-                        format_elapsed!(now),
-                        key.0,
-                        key.1
-                    );
-                }
-                ready.push(*key);
+                ready_per_link.entry(link_id).or_insert_with(Vec::new).push(*key);
             }
-        }
-
-        ready
+            }
+    
+        ready_per_link
     }
-
 
     fn txop_cap_secs(&self, key: &MacKey) -> f64 {
         let p = self.array_dcf_values.lock().unwrap()[key].param;
         if p.txop_limit_us == 0 { f64::INFINITY } else { p.txop_limit_us as f64 * 1e-6 }
-    }
-
-    fn ac_needs_tick(key: &MacKey, st: &DcfStats, q: &VecDeque<MpduPacket>, now: TaiTime<0>) -> bool {
-        let has_pkts = q.iter().any(|p| maps_to(key, p));
-        if !has_pkts { return false; }
-        let aifs_done = st.medium_free_since + aifs(st.param) <= now;
-        !aifs_done || st.backoff_counter > 0
     }
 
     fn ac_prio(&mut self, ac: EdcaAc) -> u8 { match ac {
@@ -2131,17 +2228,207 @@ impl QueueModule {
         }
         winner.into_values().collect()
     }
-    pub async fn cache_input_packet(&mut self, packet: MpduPacket) {
+
+
+    /// Select the best link for a given packet based on strategy and STA capabilities
+    fn select_link_for_packet(&mut self, pkt: &MpduPacket, now: TaiTime<0>) -> Option<u8> {
+        let sta_id = if pkt.sta_src_id > pkt.sta_dest_id {
+            pkt.sta_src_id  // Uplink
+        } else {
+            pkt.sta_dest_id  // Downlink
+        };
+        
+        // Get STA capabilities
+        let cap = match self.sta_capabilities.get(&sta_id) {
+            Some(c) => c,
+            None => {
+                log_link_selection!(
+                    now,
+                    "⚠️  STA {} has no registered capabilities, using default (single link)",
+                    sta_id
+                );
+                // Assume legacy single-link device
+                return Some(0);
+            }
+        };
+        
+        if cap.links.is_empty() {
+            log_link_selection!(now, "⚠️  STA {} has no available links!", sta_id);
+            return None;
+        }
+        
+        // Single-link device - trivial case
+        if cap.links.len() == 1 {
+            let link_id = cap.links[0];
+            log_link_selection!(
+                now,
+                "STA {} is single-link (LINK-{})",
+                sta_id,
+                link_id
+            );
+            return Some(link_id);
+        }
+        
+        // Multi-link device - apply selection strategy
+        log_link_selection!(
+            now,
+            "STA {} is MLO-capable: links={:?}, STR={}",
+            sta_id,
+            cap.links,
+            cap.is_str_capable
+        );
+        
+        let selected = match MLO_LINK_SELECTION_STRATEGY {
+            LinkSelectionStrategy::PrimaryFirst => {
+                self.select_primary_first(&cap.links, now)
+            }
+            LinkSelectionStrategy::Opportunistic => {
+                self.select_opportunistic(&cap.links, now)
+            }
+            _ => {
+                self.select_opportunistic(&cap.links, now)
+            }
+        };
+        
+        if let Some(link_id) = selected {
+            log_link_selection!(
+                now,
+                "✓ Selected LINK-{} for STA {} (strat: {:?})",
+                link_id,
+                sta_id,
+                MLO_LINK_SELECTION_STRATEGY
+            );
+        }
+        
+        selected
+    }
+
+      fn get_link_queue_depth(&self, link_id: u8) -> usize {
+        self.queue
+            .iter()
+            .filter(|p| p.assigned_link_id == Some(link_id))
+            .count()
+    }
+
+    fn select_opportunistic(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+            // 1. Handle edge cases (no links or only one link)
+            if available_links.is_empty() {
+                return None;
+            }
+            if available_links.len() == 1 {
+                return Some(available_links[0]);
+            }
+
+            // 2. We are comparing the first two available links
+            let link_a_id = available_links[0];
+            let link_b_id = available_links[1];
+
+            // 3. Get the idle state for both, defaulting to `false` (busy) 
+            //    if the medium doesn't exist in the map.
+            let a_is_idle = self.link_mediums.get(&link_a_id)
+                .map_or(false, |m| m.is_idle(now));
+            
+            let b_is_idle = self.link_mediums.get(&link_b_id)
+                .map_or(false, |m| m.is_idle(now));
+
+            // 4. Implement the selection logic using a match statement
+            match (a_is_idle, b_is_idle) {
+                (true, true) => {
+                    // Both are idle: Choose one at random.
+                    let chosen_link = if rand::thread_rng().gen_bool(0.5) {
+                        link_a_id
+                    } else {
+                        link_b_id
+                    };
+                    
+                    // This log might be too noisy, but matches the style
+                    log_link_selection!(
+                        now,
+                        "Opportunistic: Both links idle, randomly chose LINK-{}",
+                        chosen_link
+                    );
+                    Some(chosen_link)
+                },
+                (true, false) => {
+                    // Only A is idle: Choose A.
+                    log_link_selection!(
+                        now,
+                        "Opportunistic: Link {} busy, selecting idle LINK-{}",
+                        link_b_id,
+                        link_a_id
+                    );
+                    Some(link_a_id)
+                },
+                (false, true) => {
+                    // Only B is idle: Choose B.
+                    log_link_selection!(
+                        now,
+                        "Opportunistic: Link {} busy, selecting idle LINK-{}",
+                        link_a_id,
+                        link_b_id
+                    );
+                    Some(link_b_id)
+                },
+                (false, false) => {
+                    // Both are busy: Choice doesn't matter. Fall back to A.
+                    log_link_selection!(
+                        now,
+                        "Opportunistic: Both links busy, defaulting to LINK-{}",
+                        link_a_id
+                    );
+                    Some(link_a_id)
+                }
+            }
+        }
+    fn select_primary_first(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+        let primary_link = available_links[0];
+        
+        // Check if primary is idle
+        if let Some(medium) = self.link_mediums.get(&primary_link) {
+            if medium.is_idle(now) {
+                return Some(primary_link);
+            }
+        }
+        
+        // Primary busy - check queue depth
+        let primary_depth = self.get_link_queue_depth(primary_link);
+        
+        if primary_depth < 10 {  // Threshold for "acceptable" load
+            return Some(primary_link);
+        }
+        
+        // Primary overloaded - try secondary links
+        for &link_id in &available_links[1..] {
+            if let Some(medium) = self.link_mediums.get(&link_id) {
+                if medium.is_idle(now) {
+                    log_link_selection!(
+                        now,
+                        "⚠️  Primary link {} overloaded ({} pkts), using backup LINK-{}",
+                        primary_link,
+                        primary_depth,
+                        link_id
+                    );
+                    return Some(link_id);
+                }
+            }
+        }
+        
+        Some(primary_link)  // Fall back to primary
+    }
+    
+
+    pub async fn cache_input_packet(&mut self, packet: MpduPacket, link_id: u8, ) {
         let key = (packet.sta_src_id, packet.sta_dest_id);
 
-        // --- PRE-CALCULATION ---
         // Do all immutable reading from `self` *before* the mutable borrow.
         let is_ul = packet.sta_src_id > packet.sta_dest_id;
         let mac_key_edca = if is_ul {
-            (packet.sta_src_id, packet.edca_ac)
+            (packet.sta_src_id, packet.edca_ac, link_id)
         } else {
-            (-1, packet.edca_ac)
+            (-1, packet.edca_ac, link_id)
         };
+
+        let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap(); 
 
         // All immutable borrows happen here and end immediately
         let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
@@ -2158,9 +2445,11 @@ impl QueueModule {
             let resultz = airtime_ampdu(
                 packet.length_packet as f64,
                 1,
-                coords_queue, // Use the variable
+                coords_queue, 
                 packet.sta_src_coords,
-                p_tx,         // Use the variable
+                p_tx,         
+                channel_width,
+
             );
 
             // Binary search
@@ -2170,9 +2459,10 @@ impl QueueModule {
             let mut resultz_full_ampdu = airtime_ampdu(
                 packet.length_packet as f64 * high as f64,
                 high,
-                coords_queue, // Use the variable
+                coords_queue,
                 packet.sta_src_coords,
-                p_tx,         // Use the variable
+                p_tx,         
+                channel_width,
             );
 
             while low <= high {
@@ -2180,9 +2470,11 @@ impl QueueModule {
                 let test_resultz = airtime_ampdu(
                     packet.length_packet as f64 * mid as f64,
                     mid,
-                    coords_queue, // Use the variable
+                    coords_queue, 
                     packet.sta_src_coords,
-                    p_tx,         // Use the variable
+                    p_tx,         
+                    channel_width,
+
                 );
 
                 // Use the pre-calculated cap_s_edca variable
@@ -2218,77 +2510,139 @@ impl QueueModule {
     }
 
 
-
-    pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
+     pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
         let now = ctx.scheduler.time();
         pkt.queue_in_instant = now;
         self.arrived_packet_counter += 1;
 
         let is_ul = pkt.sta_src_id > pkt.sta_dest_id;
-        pkt.mac_key_cached = Some(if is_ul { (pkt.sta_src_id, pkt.edca_ac) } else { (-1, pkt.edca_ac) });
         
+        // Select best link for this packet
+        let selected_link: Option<u8> = self.select_link_for_packet(&pkt, now);
         
-        if self.queue.len() < self.queue_maxsize {
-        
-            self.cache_input_packet(pkt.clone()); 
-
-            self.queue.push_back(pkt);
-            if !self.packet_being_served && self.shared_medium.is_idle(now) {
-                self.deque_schedule_service((), ctx).await;
+        match selected_link {
+            Some(link_id) => {
+                log_mlo!(
+                    now,
+                    "Packet {} (STA {} → {}) assigned to LINK-{}: Q_size={}",
+                    pkt.packet_id,
+                    pkt.sta_src_id,
+                    pkt.sta_dest_id,
+                    link_id, 
+                    self.queue.len(), 
+                );
+                
+                // Cache the selected link in packet metadata
+                pkt.assigned_link_id = Some(link_id);
+                
+                // Create MacKey with link_id
+                pkt.mac_key_cached = Some(if is_ul {
+                    (pkt.sta_src_id, pkt.edca_ac, link_id)
+                } else {
+                    (-1, pkt.edca_ac, link_id)
+                });
+                
+                if self.queue.len() < self.queue_maxsize {
+                    self.cache_input_packet(pkt.clone(), link_id).await;
+                    self.queue.push_back(pkt);
+                    
+                    // Trigger scheduling if medium is idle
+                    if !self.packet_being_served {
+                        if let Some(medium) = self.link_mediums.get(&link_id) {
+                            if medium.is_idle(now) {
+                                self.deque_schedule_service((), ctx).await;
+                            }
+                        }
+                    }
+                } else {
+                    self.blocked_packet_counter += 1;
+                    log_mlo!(now, "❌ QUEUE FULL - dropped packet {}", pkt.packet_id);
+                }
             }
-        } else {
-            self.blocked_packet_counter += 1;
-            debug_bgprint!(DebugColor::Green, "[QUEUE FULL] dropping packet {}", pkt.packet_id);
+            None => {
+                self.blocked_packet_counter += 1;
+                log_mlo!(
+                    now,
+                    "❌ No available link for STA {} (not MLO-capable or all links busy)",
+                    pkt.sta_src_id
+                );
+            }
         }
     }
 
+    /// Uplink input function (from STAs)
     pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
 
         let now = context.scheduler.time();
         let is_ul = packet.sta_src_id > packet.sta_dest_id;
-        packet.mac_key_cached = Some(if is_ul { (packet.sta_src_id, packet.edca_ac) } else { (-1, packet.edca_ac) });
         
+        // Select link for uplink packet
+        let selected_link = self.select_link_for_packet(&packet, now);
         
-        if self.queue.len() < self.queue_maxsize {
+        match selected_link {
+            Some(link_id) => {
+                packet.assigned_link_id = Some(link_id);
+                packet.mac_key_cached = Some(if is_ul {
+                    (packet.sta_src_id, packet.edca_ac, link_id)
+                } else {
+                    (-1, packet.edca_ac, link_id)
+                });
+                
+                if self.queue.len() < self.queue_maxsize {
+                    packet.queue_in_instant = now;
+                    self.cache_input_packet(packet.clone(), link_id).await;
+                    self.queue.push_back(packet.clone());
 
-            packet.queue_in_instant = now;
-            self.cache_input_packet(packet.clone()); 
+                    log_mlo!(
+                        now,
+                        "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
+                        packet.packet_id,
+                        packet.sta_src_id,
+                        packet.sta_dest_id,
+                        link_id,
+                        self.queue.len()
+                    );
 
-            self.queue.push_back(packet.clone());
-
-            debug_print!(
-                DebugColor::Green,
-                "{} [DBG QUEUE UL] -Packet {} arrives from STA{} destined to STA{}, Q_size = {}",
-                format_elapsed!(now),
-                packet.packet_id,
-                packet.sta_src_id,
-                packet.sta_dest_id,
-                self.queue.len()
-            );
-
-            if self.queue.len() == 1 && !self.packet_being_served && self.shared_medium.is_idle(now){
-                self.deque_schedule_service((), context).await;
+                    if self.queue.len() == 1 && !self.packet_being_served {
+                        if let Some(medium) = self.link_mediums.get(&link_id) {
+                            if medium.is_idle(now) {
+                                self.deque_schedule_service((), context).await;
+                            }
+                        }
+                    }
+                } else {
+                    self.blocked_packet_counter += 1;
+                    log_mlo!(
+                        now,
+                        "❌ UL Queue full - dropped packet {} from STA{}",
+                        packet.packet_id,
+                        packet.sta_src_id
+                    );
+                }
             }
-        } else {
-            self.blocked_packet_counter += 1;
-            // print_red!(
-            //     // DebugColor::Red,
-            //     "{} [DBG FULL QUEUE] Packet {} (S: {}, D: {})DROPPED from QUEUEMODULE!! , Q_size = {}",
-            //     format_elapsed!(now),
-            //     packet.packet_id,
-            //     packet.sta_src_id,
-            //     packet.sta_dest_id, 
-            //     self.queue.len()
-            // );
+            None => {
+                self.blocked_packet_counter += 1;
+                log_mlo!(
+                    now,
+                    "❌ No available link for UL packet from STA{}",
+                    packet.sta_src_id
+                );
+            }
         }
     }
 
+
+
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
-        self.shared_medium.release_txop(elapsed);
-
+        // self.shared_medium.release_txop(elapsed);
+        let link_id = AMPDU_sent.link_id;
+  
+        if let Some(medium) = self.link_mediums.get_mut(&link_id) {
+            medium.release_txop(elapsed);
+        }
         // crate::print_brown!("{} | [TXOP END] last_owner={:?}", format_elapsed!(elapsed), self.shared_medium.last_owner());
         debug_debug!(
             DebugColor::Red,
@@ -2305,8 +2659,12 @@ impl QueueModule {
 
         self.packet_being_served = false;
 
-        let mac_key = AMPDU_sent.mac_key; 
-        self.output_port_sta1.send(AMPDU_sent).await;
+        let mac_key = AMPDU_sent.mac_key;   
+        
+        // Send to appropriate output port
+        if let Some(output) = self.link_outputs.get_mut(&link_id) {
+            output.send(AMPDU_sent).await;
+        }
 
         if self.queue.len() > 0 {
             self.deque_schedule_service((), context).await;
@@ -2345,617 +2703,459 @@ impl QueueModule {
     }
 
 
-    fn select_next_sta_expensive(&self) -> HashMap<(i32, i32), StaRateInfo> {
-        let mut sta_packets: HashMap<(i32, i32), StaRateInfo> = HashMap::new();
-
-        // Iterate over packets in the queue to compute STA metrics
-        for packet in self.queue.iter() {
-            let key = (packet.sta_src_id, packet.sta_dest_id);
-            
-            let is_ul = packet.sta_src_id > packet.sta_dest_id; 
-            let mac_key_edca = if is_ul {
-                (packet.sta_src_id, packet.edca_ac)
-            } else {
-                (-1, packet.edca_ac)
-            };
-
-            // Calculate transmission delay for a single packet
-            let resultz = airtime_ampdu(
-                packet.length_packet as f64,
-                1,
-                self.coords_queue,
-                packet.sta_src_coords,
-                self.p_tx,
-            );
-            
-            let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
-
-            // Binary search to find the maximum number of packets that fit within T_MAX_AGG
-            let mut low = 1;
-            let mut high = MAX_AMPDU_SIZE;
-            let mut optimal_n_packets = 0;
-            let mut resultz_full_ampdu = airtime_ampdu(
-                packet.length_packet as f64 * high as f64,
-                high,
-                self.coords_queue,
-                packet.sta_src_coords,
-                self.p_tx,
-            );
-
-            while low <= high {
-                let mid = (low + high) / 2;
-                let test_resultz = airtime_ampdu(
-                    packet.length_packet as f64 * mid as f64,
-                    mid,
-                    self.coords_queue,
-                    packet.sta_src_coords,
-                    self.p_tx,
-                );
-
-                if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca {
-                    optimal_n_packets = mid;
-                    resultz_full_ampdu = test_resultz;
-                    low = mid + 1;
-                } else {
-                    high = mid - 1;
-                }
-            }
-
-            // Update STA rate information
-            let entry = sta_packets.entry(key).or_insert(StaRateInfo {
-                total_transmission_delay_single: 0.0,
-                total_transmission_delay_fullampdu: 0.0,
-                fullampdu_max_size: 0,
-                packet_count: 0,
-                weighted_rate_single: 0.0,
-                weighted_rate_fullampdu: 0.0,
-                per_packet_channel_access_efficiency: 0.0,
-                expected_queue_delivery_ms: 0.0,
-            });
-
-            entry.total_transmission_delay_single = resultz;
-            entry.total_transmission_delay_fullampdu = resultz_full_ampdu;
-            entry.fullampdu_max_size = optimal_n_packets as usize;
-            entry.packet_count += 1;
-            entry.weighted_rate_single =
-                0.2 * resultz + 0.8 * entry.weighted_rate_single;
-            entry.weighted_rate_fullampdu =
-                0.2 * resultz_full_ampdu+ 0.8 * entry.weighted_rate_fullampdu;
-            entry.per_packet_channel_access_efficiency =
-                entry.total_transmission_delay_fullampdu / entry.fullampdu_max_size as f64;
-            entry.expected_queue_delivery_ms =
-                entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
-        }
-        sta_packets
-    }
+    
 
     fn build_new_ampdu<'a>(
         &mut self,
         first_packet: &MpduPacket,
         now: TaiTime<0>,
-    ) -> (AmpduPacket, Duration)  {
+    ) -> (AmpduPacket, Duration) {
+        let mut success_indices: Vec<usize> = Vec::new();
+        let (sta_src_id, sta_dest_id) = (first_packet.sta_src_id, first_packet.sta_dest_id);
+        
+        // Get the link_id from the first packet
+        let link_id = first_packet.assigned_link_id
+            .expect("Packet must have assigned_link_id before building AMPDU");
 
-            let mut success_indices: Vec<usize> = Vec::new(); // Original indices of packets successfully transmitted.
+        let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap(); 
+        
+        self.aux_ampdu_serviced.reset();
+        self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
+        self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
+        self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
+        self.aux_ampdu_serviced.link_id = link_id;  // Tag AMPDU with link
 
-            let (sta_src_id, sta_dest_id ) = (first_packet.sta_src_id, first_packet.sta_dest_id) ; 
+        let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id;
+        
+        let mac_key: MacKey = if is_ul {
+            (first_packet.sta_src_id, first_packet.edca_ac, link_id)
+        } else {
+            (-1, first_packet.edca_ac, link_id)
+        };
+        self.aux_ampdu_serviced.mac_key = mac_key;
 
-            self.aux_ampdu_serviced.reset();
-            self.aux_ampdu_serviced.sta_dest_id = first_packet.sta_dest_id;
-            self.aux_ampdu_serviced.sta_src_id = first_packet.sta_src_id;
-            self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
+        let txop_us: f64 = self.array_dcf_values
+            .lock()
+            .unwrap()
+            .get(&mac_key)
+            .map(|st| st.param.txop_limit_us as f64)
+            .unwrap_or(0.0);
 
+        let mut last_service_duration = Duration::default();
+        let mut packet_index = 0;
+        let mut resultz = 0.0;
 
-            let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id; 
-            let mac_key: MacKey = if is_ul {
-                (first_packet.sta_src_id, first_packet.edca_ac)
-            } else {
-                (-1, first_packet.edca_ac)
-            };
-            self.aux_ampdu_serviced.mac_key = mac_key;
-            
-            // let key      = (first_packet.sta_src_id, first_packet.edca_ac);
-            if DEBUG_EDCA{print_red!("Building AMPDU for key = {:?}", mac_key);} 
+        log_mlo!(
+            now,
+            "🔨 Building AMPDU on LINK-{} ({} Mhz) for STA {} → {} (AC: {:?})",
+            link_id,
+            channel_width, 
+            sta_src_id,
+            sta_dest_id,
+            first_packet.edca_ac
+        );
 
-            let txop_us: f64 = self.array_dcf_values
-                .lock().unwrap()
-                .get(&mac_key)
-                .map(|st| st.param.txop_limit_us as f64)
-                .unwrap_or(0.0);
+        // ========== Aggregate packets for this flow on this link ==========
+        while packet_index < self.queue.len() {
+            if let Some(current_packet) = self.queue.get(packet_index) {
+                //  Only aggregate packets that:
+                // 1. Match the same flow (src/dest)
+                // 2. Are assigned to the SAME link
+                if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
+                    || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
+                    || current_packet.assigned_link_id != Some(link_id)  
+                {
+                    packet_index += 1;
+                    continue;
+                }
 
-            let mut last_service_duration = Duration::default();
-            let mut packet_index = 0;
-            let mut resultz = 0.0;
+                let new_total_length =
+                    self.aux_ampdu_serviced.total_length + current_packet.length_packet;
+                let new_size = self.aux_ampdu_serviced.size + 1;
 
-            // ********** Modification: Duplicate packets instead of removing them **********
-            while packet_index < self.queue.len() {
-                if let Some(current_packet) = self.queue.get(packet_index) {
-                    if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
-                        || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                    {
-                        packet_index += 1;
-                        continue;
-                    }
-                    let new_total_length =
-                        self.aux_ampdu_serviced.total_length + current_packet.length_packet;
-                    let new_size = self.aux_ampdu_serviced.size + 1;
-                    let is_ul = current_packet.sta_src_id > current_packet.sta_dest_id; // 
-                    
-                    if is_ul{
-                        resultz = airtime_ampdu(
+                // Calculate airtime for the new AMPDU size
+                if is_ul {
+                    resultz = airtime_ampdu(
                         new_total_length as f64,
                         new_size,
                         self.coords_queue,
                         current_packet.sta_src_coords.clone(),
                         P_TX,
-                        );
-                    }
-                    else{
-                        let dest_coords = self
-                            .STA_coords_map
-                            .get(&(current_packet.sta_dest_id as usize))
-                            .unwrap_or_else(|| panic!(
-                                "no coordinates for STA {}",
-                                current_packet.sta_dest_id
-                            ))
-                            .clone();
-
-                        // println!("DOWNLINK so coords are {:?}", dest_coords.x); 
-                        resultz = airtime_ampdu(
-                            new_total_length as f64,
-                            new_size,
-                            self.coords_queue,
-                            dest_coords,
-                            P_TX,
-                        );
-                    }
-                    let cap_s_edca = self.txop_cap_secs(&mac_key);
-
-                    if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s_edca {
-                        // print_red!(
-                        //     // DebugColor::DarkRed,
-                        //     "AMPDU full ({} / {}) or delay too high: {:.3} out of {:.3} ms (EDCA_AC: {:?} )",
-                        //     new_size,
-                        //     MAX_AMPDU_SIZE,
-                        //     resultz * 1000.0,
-                        //     f64::min(DEFAULT_TMAX_AGG * 1000.0, cap_s_edca * 1000.0), 
-                        //     mac_key.1, 
-                        // );
-                        break;
-                    }
-
-                    // Instead of removing the packet, clone it and update clone metadata.
-                    let mut cloned_packet = current_packet.clone();
-                    cloned_packet.original_index = packet_index; // record original index
-                    cloned_packet.queue_length_when_out = self.queue.len();
-                    cloned_packet.queue_out_instant = now;
-                    cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
-                    
-                    // Update stats before moving packet
-                    if let Some(stats_tx) = &self.stats_tx {
-                        let stats_update = StatsUpdate {
-                            T_s: resultz,
-                            T_q: now
-                                .duration_since(cloned_packet.queue_in_instant)
-                                .as_secs_f64(),
-                            blocked_packet_counter: self.blocked_packet_counter,
-                            arrived_packet_counter: self.arrived_packet_counter,
-                            queue_length_when_out: cloned_packet.queue_length_when_out,
-                            sta_src_id: cloned_packet.sta_src_id as usize,
-                            sta_dest_id: cloned_packet.sta_dest_id as usize,
-                            packet_id: cloned_packet.packet_id as i32,
-                            now,
-                            length_packet: cloned_packet.length_packet,
-                            ampdu_id: self.ampdu_id, 
-
-                            is_collision: false,
-                            collision_backoff: 0.0, 
-                        };
-
-                        
-                        stats_tx
-                            .send(stats_update)
-                            .expect("Failed to send stats update");
-                    }
-
-                    // Add the cloned packet to the AMPDU
-                    self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
-                    self.aux_ampdu_serviced.total_length = new_total_length;
-                    self.aux_ampdu_serviced.size = new_size;
-                    last_service_duration = Duration::from_secs_f64(resultz);
-                }
-                packet_index += 1;
-            }
-            // **********************************************************************************
-
-            // Process AMPDU packets: simulate transmission errors
-            let mut new_ampdu_packets: Vec<MpduPacket> = Vec::new();
-            let mut rng = rand::thread_rng();
-            for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
-
-                packet.T_s = Duration::from_secs_f64(resultz);   // Assign transmission delay of full AMPDU                       
-                let random_value: f64 = rng.gen();
-
-                if random_value <= self.PL_probability {
-
-                    debug_debug!( DebugColor::SaddleBrown, 
-                        "{:.6} [DBG QUEUE] - packet from {} to {} with errors in MAC layer: Packet_ID: {}| ALVR S: {}/{} F: {}| Index in Q: {}",
-                        format_elapsed!(now),
-                        packet.sta_src_id,
-                        packet.sta_dest_id,
-                        packet.packet_id,
-
-                        packet.header_alvr.shard_index,
-                        packet.header_alvr.shards_count,
-                        packet.header_alvr.next_packet_index, 
-                        packet.original_index
+                        channel_width, 
                     );
-                    self.blocked_packet_counter += 1;
-                    // Packet encountered an error, so we leave its original copy in the queue.
-                    // Optionally, we could log it or mark it.
                 } else {
-                    new_ampdu_packets.push(packet);
-                    
+                    let dest_coords = self
+                        .STA_coords_map
+                        .get(&(current_packet.sta_dest_id as usize))
+                        .unwrap_or_else(|| {
+                            panic!("no coordinates for STA {}", current_packet.sta_dest_id)
+                        })
+                        .clone();
+
+                    resultz = airtime_ampdu(
+                        new_total_length as f64,
+                        new_size,
+                        self.coords_queue,
+                        dest_coords,
+                        P_TX,
+                        channel_width, 
+                    );
                 }
-            }
-            self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
-                
-            // Now remove from the main queue the packets that were transmitted successfully.
-            // Gather all original indices from the AMPDU (successful ones).
-            for packet in &self.aux_ampdu_serviced.mpdu_packets {
-                success_indices.push(packet.original_index);
-            }
-            
-            // We need to tally how many packets we successfully remove per flow (key)
-            let mut packets_removed_by_key: HashMap<(i32, i32), usize> = HashMap::new();
+                let cap_s_edca = self.txop_cap_secs(&mac_key);
 
-            // Remove indices in descending order to avoid index shift.
-            success_indices.sort_unstable_by(|a, b| b.cmp(a));
-            
-            for idx in success_indices {
-                // Safety: ensure index is valid.
-                if idx < self.queue.len() {
-                    // Remove the packet
-                    if let Some(removed_packet) = self.queue.remove(idx) {
-                        // Get its flow key
-                        let key = (removed_packet.sta_src_id, removed_packet.sta_dest_id);
-                        // Tally the removal
-                        *packets_removed_by_key.entry(key).or_insert(0) += 1;
-                    }
+                // Check if adding this packet would exceed limits
+                if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s_edca {
+                    log_mlo!(
+                        now,
+                        "  AMPDU limit reached: size={}/{}, airtime={:.3}ms/{:.3}ms",
+                        new_size,
+                        MAX_AMPDU_SIZE,
+                        resultz * 1000.0,
+                        f64::min(DEFAULT_TMAX_AGG * 1000.0, cap_s_edca * 1000.0)
+                    );
+                    break;
                 }
-            }
-            
-            // Now, update the cache for all affected flows
-            for (key, count_removed) in packets_removed_by_key {
-                if let Some(entry) = self.sta_stats_cache.get_mut(&key) {
-                    // Decrement the packet count
-                    entry.packet_count = entry.packet_count.saturating_sub(count_removed);
 
-                    // Re-calculate expected delivery time
-                    // Using .max(1) to avoid division by zero if count hits zero and it's used elsewhere for rate calc
-                    entry.expected_queue_delivery_ms =
-                        entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
-                    
-                    // Optional: Consider removing the entry if entry.packet_count == 0 
-                    // to keep the cache clean.
+                // Clone the packet and add to AMPDU
+                let mut cloned_packet = current_packet.clone();
+                cloned_packet.original_index = packet_index;
+                cloned_packet.queue_length_when_out = self.queue.len();
+                cloned_packet.queue_out_instant = now;
+                cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
+
+                // Update stats before moving packet
+                if let Some(stats_tx) = &self.stats_tx {
+                    let stats_update = StatsUpdate {
+                        T_s: resultz,
+                        T_q: now
+                            .duration_since(cloned_packet.queue_in_instant)
+                            .as_secs_f64(),
+                        blocked_packet_counter: self.blocked_packet_counter,
+                        arrived_packet_counter: self.arrived_packet_counter,
+                        queue_length_when_out: cloned_packet.queue_length_when_out,
+                        sta_src_id: cloned_packet.sta_src_id as usize,
+                        sta_dest_id: cloned_packet.sta_dest_id as usize,
+                        packet_id: cloned_packet.packet_id as i32,
+                        now,
+                        length_packet: cloned_packet.length_packet,
+                        ampdu_id: self.ampdu_id,
+                        is_collision: false,
+                        collision_backoff: 0.0,
+                        link_id: link_id, 
+                    };
+
+                    stats_tx
+                        .send(stats_update)
+                        .expect("Failed to send stats update");
                 }
+
+                // Add the cloned packet to the AMPDU
+                self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
+                self.aux_ampdu_serviced.total_length = new_total_length;
+                self.aux_ampdu_serviced.size = new_size;
+                last_service_duration = Duration::from_secs_f64(resultz);
             }
-
-
-            if DEBUG_PRINT_ENABLED {
-                print_yellow!(
-                    "{} [DBG AMPDU] --Dequeueing AMPDU, serviced at {}",
-                    format_elapsed!(now),
-                    format_elapsed!(now + last_service_duration)
-                );
-                self.aux_ampdu_serviced.print();
-            }
-
-
-
-
-
-            self.packet_being_served = true;
-            let ampdu_to_send =
-                std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new()); // clean up self, retrieve obtained ampdu
-            (ampdu_to_send, last_service_duration) 
+            packet_index += 1;
         }
+
+        log_mlo!(
+            now,
+            "  Aggregated {} packets, total_length={}, airtime={:.3}ms",
+            self.aux_ampdu_serviced.mpdu_packets.len(),
+            self.aux_ampdu_serviced.total_length,
+            last_service_duration.as_secs_f64() * 1000.0
+        );
+
+        // ========== Simulate transmission errors (MAC-layer packet loss) ==========
+        let mut new_ampdu_packets: Vec<MpduPacket> = Vec::new();
+        let mut rng = rand::thread_rng();
+        let mut failed_count = 0;
+
+        for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {
+            packet.T_s = Duration::from_secs_f64(resultz);
+            let random_value: f64 = rng.gen();
+
+            if random_value <= self.PL_probability {
+                // Packet loss - leave original in queue for retransmission
+                failed_count += 1;
+                log_mlo!(
+                    now,
+                    "  ❌ Packet {} failed (PL={:.3}), will be retransmitted",
+                    packet.packet_id,
+                    self.PL_probability
+                );
+                self.blocked_packet_counter += 1;
+            } else {
+                // Successful transmission
+                new_ampdu_packets.push(packet);
+            }
+        }
+
+        if failed_count > 0 {
+            log_mlo!(
+                now,
+                "  ⚠️  {} packets failed transmission on LINK-{}",
+                failed_count,
+                link_id
+            );
+        }
+
+        self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
+
+        // ========== Remove successfully transmitted packets from queue ==========
+        for packet in &self.aux_ampdu_serviced.mpdu_packets {
+            success_indices.push(packet.original_index);
+        }
+
+        // Track removals per flow for cache update
+        let mut packets_removed_by_key: HashMap<(i32, i32), usize> = HashMap::new();
+
+        // Remove in descending order to avoid index shifts
+        success_indices.sort_unstable_by(|a, b| b.cmp(a));
+
+        for idx in success_indices {
+            if idx < self.queue.len() {
+                if let Some(removed_packet) = self.queue.remove(idx) {
+                    let key = (removed_packet.sta_src_id, removed_packet.sta_dest_id);
+                    *packets_removed_by_key.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // ========== Update cache for affected flows ==========
+        for (key, count_removed) in packets_removed_by_key {
+            if let Some(entry) = self.sta_stats_cache.get_mut(&key) {
+                entry.packet_count = entry.packet_count.saturating_sub(count_removed);
+                entry.expected_queue_delivery_ms =
+                    entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+
+                if count_removed != 0{
+                    log_mlo!(
+                    now,
+                    "  Updated cache for flow ({}, {}): {} packets remaining",
+                    key.0,
+                    key.1,
+                    entry.packet_count
+                );
+                }
+                
+            }
+        }
+
+        if DEBUG_PRINT_ENABLED {
+            print_yellow!(
+                "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
+                format_elapsed!(now),
+                link_id,
+                format_elapsed!(now + last_service_duration)
+            );
+            self.aux_ampdu_serviced.print();
+        }
+
+        self.packet_being_served = true;
+        let ampdu_to_send =
+            std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
+
+        log_mlo!(
+            now,
+            "✅ AMPDU built on LINK-{}: {} packets, {:.3}ms airtime",
+            link_id,
+            ampdu_to_send.mpdu_packets.len(),
+            last_service_duration.as_secs_f64() * 1000.0
+        );
+
+        (ampdu_to_send, last_service_duration)
+    }
 
 
     fn deque_schedule_service<'a>(
-        &'a mut self,
-        _: (),
-        context: &'a Context<Self>,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            let now = context.scheduler.time();
-            let mut lost_packets: Vec<(usize, MpduPacket)> = Vec::new(); // Unused now; kept for debug if needed.
-            // Idea: Given arbitrary random traffic patterns that might lead to queue bufferbloat on some STAs, 
-            // select first packet fairly to ensure channel access with reduced backlog for each user.
-            let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta().clone();    
-            let mut ul_stas = HashSet::new();
-            let mut is_dl : bool = false; 
+    &'a mut self,
+    _: (),
+    context: &'a Context<Self>,
+) -> impl Future<Output = ()> + Send + 'a {
+    async move {
+        let now = context.scheduler.time();
 
-        
-            for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-               
-                let is_ul = sta_src > sta_dest;
-                if is_ul {
-                    ul_stas.insert(*sta_src);        // count each UL-STA once
-                } else {
-                    is_dl = true; 
-                }
+        // UL capacity check (same as before)
+        let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta().clone();
+        for ((sta_src, sta_dest), packets) in sta_packets.iter() {
+            let is_ul = sta_src > sta_dest;
+            if is_ul && packets.packet_count > self.ul_capacity_queue_device {
+                // Drop excess packets (same logic as before)
+                let excess_count = packets.packet_count - self.ul_capacity_queue_device;
+                let mut packets_to_remove = excess_count;
+                let mut indices_to_remove = Vec::new();
                 
-                debug_debug!(
-                    DebugColor::Cyan, 
-                    "src: {}, dest: {} | UL_FLOW: {} |queue_packets: {} | N_max_ampdu={}, T_s_full = {:.3} ms, EWMA(T_s_full) = {:.3} ms ",
-                    sta_src, sta_dest, is_ul, packets.packet_count,
-                    packets.fullampdu_max_size,
-                    packets.total_transmission_delay_fullampdu * 1000.0,
-                    packets.weighted_rate_fullampdu * 1000.0
-                );
-    
-                if is_ul && packets.packet_count > self.ul_capacity_queue_device {
-                    print_red!(
-                        // DebugColor::Red,
-                        "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {})",
-                        format_elapsed!(now),
-                        sta_src,
-                        sta_dest,
-                        packets.packet_count,
-                        self.ul_capacity_queue_device
-                    );
-                    let excess_count = packets.packet_count - self.ul_capacity_queue_device;
-                    let mut packets_to_remove = excess_count;
-                    let mut indices_to_remove = Vec::new();
-                    // Scan from the back of the queue (newest packets first)
-                    for i in (0..self.queue.len()).rev() {
-                        if let Some(packet) = self.queue.get(i) {
-                            if packet.sta_src_id == *sta_src && packet.sta_dest_id == *sta_dest {
-                                indices_to_remove.push(i);
-                                packets_to_remove -= 1;
-                                if packets_to_remove == 0 {
-                                    break;
-                                }
+                for i in (0..self.queue.len()).rev() {
+                    if let Some(packet) = self.queue.get(i) {
+                        if packet.sta_src_id == *sta_src && packet.sta_dest_id == *sta_dest {
+                            indices_to_remove.push(i);
+                            packets_to_remove -= 1;
+                            if packets_to_remove == 0 {
+                                break;
                             }
                         }
                     }
-
-                    
-                    // Remove identified packets (from back to front to avoid index issues)
-                    for idx in indices_to_remove {
-                        if let Some(removed_packet) = self.queue.remove(idx) {
-                            print_red!(
-                                // DebugColor::Red,
-                                "{} [UL PACKET DROPPED] Packet_ID: {}, SRC: {}, DST: {}",
-                                format_elapsed!(now),
-                                removed_packet.packet_id,
-                                removed_packet.sta_src_id,
-                                removed_packet.sta_dest_id, 
-                            );
-                            self.blocked_packet_counter += 1;
-                        }
+                }
+                
+                for idx in indices_to_remove {
+                    if let Some(_) = self.queue.remove(idx) {
+                        self.blocked_packet_counter += 1;
                     }
                 }
             }
+        }
+        
+        // Get ready contenders per link
+        let ready_per_link: HashMap<u8, Vec<MacKey>> = self.tick_backoff(now);
+        
+        // Process each link independently
+        let mut transmissions_scheduled = false;
+        
+        for (link_id, mut pre_contenders) in ready_per_link {
+            if pre_contenders.is_empty() {
+                continue;
+            }
             
-            let mut pre_contenders: Vec<MacKey> = self.tick_backoff(now);
-
-            // First resolve virtual collisions (same STA different ACs)
+            // Resolve virtual collisions (same STA, different ACs)
             let contenders = self.resolve_virtual_collision(pre_contenders);
             
             if contenders.is_empty() {
-                // Only tick per-slot if the medium is idle (otherwise we already scheduled at busy end)
-                if self.shared_medium.is_idle(now) {
-                    let mut need_next_slot = false;
-                    if let Ok(map) = self.array_dcf_values.lock() {
-                        for (key, st) in map.iter() {
-                            if ac_needs_tick(key, st, &self.queue, now) { need_next_slot = true; break; }
-                        }
-                    }
-                    if need_next_slot {
-                        context.scheduler
-                            .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
-                            .unwrap();
-                    }
-                }
-                return;
+                continue;
             }
-
-
-            // Now handle physical collisions between different STAs
+            
+            // Check for physical collision (different STAs)
             let collision_now = contenders.len() > 1;
-                            
-            let mut selected_sta = None;
-            if LYAPUNOV_POLICY == true {
-                let mut min_priority = f64::MAX;
-                debug_schedule!(
-                    "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
-                    format_elapsed!(now)
-                );
-                for (key, info) in sta_packets.iter() {
-                    let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency;
-                    let rhs = info.expected_queue_delivery_ms;
-                    let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
-                        lhs - rhs
-                    } else {
-                        1E12 as f64
-                    };
-                    let is_ul = if key.0 > key.1 {1} else {0};
-                    debug_schedule!(
-                        "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | is_ul = {} (src: {} dest: {}) ",
-                        key.0,
-                        info.packet_count,
-                        key.0,
-                        priority,
-                        lhs,
-                        rhs,
-                        is_ul,
-                        key.0,
-                        key.1,
-                    );
-                    if priority < min_priority {
-                        min_priority = priority;
-                        selected_sta = Some(*key);
+            
+            if collision_now {
+                // Handle collision on this link
+                let T_col = collision_delay();
+                let T_col_dur = Duration::from_secs_f32(T_col);
+                
+
+                print_yellow!("Collision on channel {}! Delay : {}, ", link_id, T_col ); 
+                if let Some(medium) = self.link_mediums.get_mut(&link_id) {
+                    medium.occupy_collision(now + T_col_dur);
+                }
+                
+                // Apply backoff to all contenders on this link
+                for key in contenders {
+                    if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
+                        st.on_failure();
                     }
                 }
-            } else if SOFTMAX_POLICY == true {
-                debug_schedule!("SOFTMAX POLICY", );
-                let mut softmax_values: Vec<f64> = Vec::new();
-                let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
-                for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-                    let _is_ul = if sta_src > sta_dest {1} else {0};
-                    debug_schedule!(
-                        "IS_UL = {} | ( src: {}, dest: {} )",
-                        _is_ul,
-                        sta_src,
-                        sta_dest
-                    );
-                    softmax_values.push(packets.expected_queue_delivery_ms);
-                    softmax_keys.push((*sta_src, *sta_dest));
+                
+                // Freeze all MACs on this link
+                if let Ok(mut map) = self.array_dcf_values.lock() {
+                    for ((_, _, lid), st) in map.iter_mut() {
+                        if *lid == link_id {
+                            st.backoff_frozen = true;
+                            st.medium_free_since = now + T_col_dur;
+                        }
+                    }
                 }
-                pub const SOFTMAX_TEMP: f64 = 1000.0;
-                let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
-                let mut rng = rand::thread_rng();
-                let selected_index = softmax_probs
-                    .iter()
-                    .position(|&p| (1.0 - p) > rng.gen::<f64>())
-                    .unwrap_or(softmax_probs.len() - 1);
-                let selected_key = softmax_keys[selected_index];
-                selected_sta = Some(selected_key);
-            } else {
-                // NORMAL POLICY: FIFO
+                
+                // transmissions_scheduled = true;
+                continue;
+            }
+            
+            // Single winner on this link
+            let winner_key = contenders[0];
+            let (sta_id, ac, _) = winner_key;
+            
+            // Find first packet that matches this STA/AC
+            let first_ix = match self.queue.iter().position(|p| {
+                let is_ul = p.sta_src_id > p.sta_dest_id;
+                let p_sta = if is_ul { p.sta_src_id } else { -1 };
+                p_sta == sta_id && p.edca_ac == ac
+            }) {
+                Some(ix) => ix,
+                None => {
+                    // Reload backoff for next round
+                    if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key) {
+                        st.on_success(st.param.cw_min);
+                    }
+                    continue;
+                }
+            };
+            
+            let first_packet = self.queue.get(first_ix).cloned().unwrap();
+            
+            // Build AMPDU for this link
+            let (mut ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, now);
+            ampdu_to_send.link_id = link_id; // Tag AMPDU with link
+            
+            if ampdu_to_send.mpdu_packets.is_empty() || ampdu_airtime == Duration::ZERO {
+                log_mlo!(
+                    now,
+                    "⚠️  LINK-{}: Empty AMPDU or zero airtime, skipping transmission",
+                    link_id
+                );
+                
+                // Reset backoff for this MAC to try again
+                if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key) {
+                    st.on_failure(); // Increase CW and redraw backoff
+                }
+                
+                continue;
             }
 
-            if collision_now {
-                if let Some(key) = selected_sta {
-                    selected_sta = Some(key);
-                } else if !self.queue.is_empty() {
-                    let first = self.queue.front().unwrap();
-                    selected_sta = Some((first.sta_src_id, first.sta_dest_id));
-                }
-                if let Some(_sta_key) = selected_sta {
 
-                    // In collision, we do not remove or duplicate any packets.
-                    // Instead, we simply schedule a retransmission backoff.
-                    let T_col: f32 = collision_delay(); 
-                    let T_col_dur = Duration::from_secs_f32(T_col);
-
-                    self.shared_medium.occupy_collision(now + T_col_dur);
-                  
-                    // print_red!("{} | **************[COLLISION]**********\ncontenders={} -> busy_until={}, owner=None",
-                    //     format_elapsed!(now),
-                    //     contenders.len(),
-                    //     format_elapsed!(now + T_col_dur));
-                  
-                    for key in contenders {
-                       if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
-                           st.on_failure(); // increases CW and redraws backoff
-                       }
-                    }       
-
-                    if let Some(stats_tx) = &self.stats_tx {
-                            let stats_update = StatsUpdate {
-                                T_s: 0.0,
-                                T_q: 0.0,
-                                blocked_packet_counter: self.blocked_packet_counter,
-                                arrived_packet_counter: self.arrived_packet_counter,
-                                queue_length_when_out: 0,
-                                sta_src_id: _sta_key.0 as usize,
-                                sta_dest_id: _sta_key.1 as usize,
-                                packet_id: 0,
-                                now,
-                                length_packet: 0,
-                                ampdu_id: self.ampdu_id, 
-
-                                is_collision: true,
-                                collision_backoff: T_col as f64, 
-                            };
-
-                            stats_tx
-                                .send(stats_update)
-                                .expect("Failed to send stats update");                    
-                        }
-                    
-                    if let Ok(mut map) = self.array_dcf_values.lock() {
-                        for (_, st) in map.iter_mut() {
-                            st.backoff_frozen    = true;
-                            st.medium_free_since = now + T_col_dur;   // AIFS will start from here
-                        }
-                    }
-
-
-                    context
-                        .scheduler
-                        .schedule_event(T_col_dur, Self::deque_schedule_service, ())
-                        .unwrap();
-                    return; 
-                }
-            } else {
-
-                let winner_key = contenders[0];
-                let first_ix = match self.queue.iter().position(|p| maps_to(&winner_key, p)) {
-                    Some(ix) => ix,
-                    None => {
-                        // Defensive: redraw backoff and try next slot
-                        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key) {
-                            st.on_success(st.param.cw_min); // post-backoff reload
-                        }
-                        print_red!("Not supposed to happn!!!!!", ); 
-                        context.scheduler
-                            .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
-                            .unwrap();
-                        return;
-                    }
-                };
-                let first_packet = self.queue.get(first_ix).cloned().unwrap();
-                // Build AMPDU **only** from packets that map to the same MacKey
-                let (ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, now);
-
-                // Occupy the medium for the TXOP airtime
-                // self.shared_medium.occupy_until(now + ampdu_airtime);
-
-                self.shared_medium.start_txop( now + ampdu_airtime, winner_key);
-                // crate::print_green!("{} | [TXOP START] owner={:?} until={}", format_elapsed!(now), winner_key, format_elapsed!(now + ampdu_airtime));
-
-                // Freeze everyone while TXOP is in progress and record when medium will stop being busy
-                if let Ok(mut map) = self.array_dcf_values.lock() {
-                    for (_, st) in map.iter_mut() {
+            // Occupy medium on this link
+            if let Some(medium) = self.link_mediums.get_mut(&link_id) {
+                medium.start_txop(now + ampdu_airtime, winner_key);
+            }
+            
+            // Freeze all MACs on this link during TXOP
+            if let Ok(mut map) = self.array_dcf_values.lock() {
+                for ((_, _, lid), st) in map.iter_mut() {
+                    if *lid == link_id {
                         st.backoff_frozen = true;
                         st.medium_free_since = now + ampdu_airtime;
                     }
                 }
-
-                                // Schedule the TX completion and the next contention exactly at TX end
-                context.scheduler
-                    .schedule_event(ampdu_airtime, Self::send_ampdu, ampdu_to_send)
-                    .unwrap();
-
-                return; 
-
             }
+            
+            // Schedule TX completion
+            context.scheduler
+                .schedule_event(ampdu_airtime, Self::send_ampdu, ampdu_to_send)
+                .unwrap();
+            
+            transmissions_scheduled = true;
+        }
         
+        // Schedule next slot check if needed
+        if !transmissions_scheduled {
             let mut need_next_slot = false;
+            
             if let Ok(map) = self.array_dcf_values.lock() {
                 for (key, st) in map.iter() {
-                    if ac_needs_tick(key, st, &self.queue, now) {
+                    if ac_needs_tick(key, st, &self.queue, now, &self.sta_capabilities) {
                         need_next_slot = true;
                         break;
                     }
                 }
             }
+            if !self.queue.is_empty() {
+                // If there are *any* packets in the queue, we *must* schedule a 
+                // tick to eventually service them.
+                need_next_slot = true;
 
+            }
             if need_next_slot {
                 context.scheduler
-                    .schedule_event(Duration::from_secs_f64(SLOT),
-                                    Self::deque_schedule_service,
-                                    ())
+                    .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
                     .unwrap();
             }
-        
-        
         }
-    }   
+    }
+}   
+
+
 }
+
+
+
 impl Model for QueueModule {}
 
 

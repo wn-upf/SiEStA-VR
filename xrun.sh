@@ -21,7 +21,7 @@ module load x264
 export PATH=$HOME/.local/bin:$PATH
 
 NUMBER_OF_JOBS=4
-SERIAL_EXECUTION=0
+SERIAL_EXECUTION=1
 #############################################################################
 # RL params: 
 observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
