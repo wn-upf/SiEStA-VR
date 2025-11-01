@@ -3785,7 +3785,8 @@ impl XRServer {
                                         packet.edca_ac = EdcaAc::Video; 
                                     }
                                     else if stream_id == AUDIO {
-                                        packet.edca_ac = EdcaAc::Voice; 
+                                        packet.edca_ac = EdcaAc::Video; // justification: we want them to be synchronized/aggregated  
+                                                                         // together with video AMPDUs (for better efficiency).  
                                     }
                                     else if stream_id == FOVOPTIX_BW_PROBE{
                                         packet.edca_ac = EdcaAc::BestEffort; 

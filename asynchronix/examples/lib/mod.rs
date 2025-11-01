@@ -1978,23 +1978,34 @@ pub fn airtime_ampdu(
     n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
-    p_tx: f64,
+    p_tx_orig: f64,
     channel_width: usize, 
 ) -> f64 {
-    let mut effPt = p_tx;
+
+    let p_tx = match channel_width {
+        20 => 20.0, 
+        40 => 20.0, 
+        80 => 20.0, 
+        160 => 23.0, 
+        320 => 30.05, 
+        _ => 20.0, // default at 20 dBm 
+    }; 
+
+
+    let mut effPt: f64 = p_tx;
 
     let SU_spatial_streams = 2.0;
 
-    if SU_spatial_streams > 1.0 {
-        effPt = effPt - 3.0 * SU_spatial_streams
-    };
+    // if SU_spatial_streams > 1.0 {   // TODO: AMEND THE USE OF THESE 
+    //     effPt = effPt - 3.0 * SU_spatial_streams
+    // };
 
-    // let channel_width: usize = CHANNEL_WIDTH;
+    // // let channel_width: usize = CHANNEL_WIDTH;
 
-    // Effective Pt
-    if channel_width > 20 {
-        effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
-    }
+    // // Effective Pt
+    // if channel_width > 20 {
+    //     effPt = effPt - 3.0 * (channel_width as f64 / 20.0); // linear formula too restrictive, seems to be log? 
+    // }
 
     let distance = calculate_distance(
         coords_src.x,
@@ -2006,7 +2017,20 @@ pub fn airtime_ampdu(
     );
     // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance); 
     let PL = path_loss(distance);
-    let Pr = effPt - PL;
+    let mut Pr = effPt - PL;
+
+
+    // 3. Calculate the noise adjustment for wider channels.
+    let noise_adjustment_db = if channel_width > 20 {
+        // Use the correct logarithmic formula
+        10.0 * (channel_width as f64 / 20.0).log10()
+    } else {
+        0.0
+    };
+
+    // 4. Normalize the Pr to its 20 MHz equivalent.
+    // (i.e., subtract the extra noise)
+    Pr = Pr - noise_adjustment_db;
 
     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
 
@@ -2021,7 +2045,7 @@ pub fn airtime_ampdu(
         _ if Pr >= -65.0 && Pr < -64.0 => (6, 2.0 / 3.0),
         _ if Pr >= -64.0 && Pr < -59.0 => (6, 3.0 / 4.0),
         _ if Pr >= -59.0 && Pr < -57.0 => (8, 3.0 / 4.0),
-        _ if Pr >= -57.0 && Pr < -55.0 => (6, 5.0 / 6.0),
+        _ if Pr >= -57.0 && Pr < -55.0 => (8, 5.0 / 6.0),
         _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
         _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
         _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
@@ -2034,7 +2058,6 @@ pub fn airtime_ampdu(
     let Subcarriers = match channel_width {
         320 => 3920, // 320 MHz: data subcarriers (EHT / Wi-Fi7)
         160 => 1960, // 160 MHz: data subcarriers (HE/Wi-Fi6)
-        
         80 => 980,   // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
         40 => 468,
         20 => 234,
@@ -2043,8 +2066,6 @@ pub fn airtime_ampdu(
 
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
 
-
-    print_dblue!("[AMDPU airtime] Channel Width {:?}, Orate: {:?}, eff_Pt={}, Pr: {}, ", channel_width, ORate, effPt, )
 
 
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
@@ -2066,6 +2087,14 @@ pub fn airtime_ampdu(
     //                                                                   // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
     let phy_time =
         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK;   // ⬅  removed DIFS + SLOT + BO
+    
+    let rts_cts_overhead_time = T_RTS + SIFS + T_CTS + SIFS;
+    let rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;
+
+    print_dblue!("[AMDPU airtime = {:.3} ms] Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t|distance={:.3}, PathLoss = {:.3}, RTS/CTS Overhead: {:.1}|"
+            ,phy_time * 1000.0,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
+
+    
     phy_time
 }
 

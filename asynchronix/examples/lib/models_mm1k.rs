@@ -2039,7 +2039,7 @@ pub fn create_mlo_config() -> Vec<LinkConfig> {
         LinkConfig {
             link_id: 1,
             frequency_ghz: 6.0,
-            bandwidth_mhz: 160,
+            bandwidth_mhz: 320,
         },
     ]; 
     println!("Creating MLO Config!\n{:#?}", a); 
@@ -2942,7 +2942,7 @@ impl QueueModule {
             }
         }
 
-        if DEBUG_PRINT_ENABLED {
+        // if DEBUG_PRINT_ENABLED {
             print_yellow!(
                 "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
                 format_elapsed!(now),
@@ -2950,7 +2950,7 @@ impl QueueModule {
                 format_elapsed!(now + last_service_duration)
             );
             self.aux_ampdu_serviced.print();
-        }
+        // }
 
         self.packet_being_served = true;
         let ampdu_to_send =

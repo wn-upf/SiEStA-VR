@@ -77,8 +77,8 @@ pub const AP_Y: f64 = ROOM_H / 2.0;
 
 /// Draw a uniform random starting point inside the room.
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
-    let x = rng.gen_range(0.0..ROOM_W);
-    let y = rng.gen_range(0.0..ROOM_H);
+    let x = rng.gen_range(0.0..ROOM_W / 1.5 ); // adjust to make distances shorter by 1.5
+    let y = rng.gen_range(0.0..ROOM_H / 1.5 ); // adjust to make distances shorter by 1.5
     Coords::with_coords(x, y, 0.0)
 }
 
