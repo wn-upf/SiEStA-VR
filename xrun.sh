@@ -45,13 +45,13 @@ N_XR=(1 2 3 4 5)
 PL=0.1
 
 fps_list=( 90.0 )
-initial_bitrate_mbps=( 10.0 20.0 40.0 ) 
+initial_bitrate_mbps=( 100.0 20.0 40.0 ) 
 
 # ABR_ENABLED=( 0 1 2 )  ## 0 => CBR , 1 => Nest-VR, 2 => Everest,  3 => RL approach, 4=> GCC, 5 => NADA (TODO) 6 => FovOptix (TODO)
 
 ABR_ENABLED=( 0 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
-RANDOM_SEEDS=({1..10})
+RANDOM_SEEDS=({1..3})
 # RANDOM_SEEDS=( 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 )
 # video_samples=("garp4k" "snow" "assemble" "cut_video" "furbo" "randomVid")
 video_samples=("snow")
@@ -202,8 +202,8 @@ cargo build --release --example XR_sim
                                                                 # if [ "$SERIAL_EXECUTION" -eq 0 ]; then  ## Parallel execution
                                                                     # echo "RUNNING SIM: $name_folder"
 
-                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
-                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
+                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR > Results/$name_folder/sim.log 2>&1" >> "$temp_file"
+                                                                    # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR  2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
                                                                 # else                                    ## Serial execution
                                                                         script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_bps_src_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR" "out_log.ans"
                                                                         sleep 5

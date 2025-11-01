@@ -48,7 +48,19 @@ use rand::{SeedableRng};
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
-const DEBUG_EDCA: bool = true; 
+const DEBUG_EDCA: bool = false; 
+pub const DEBUG_MLO: bool = false;
+
+
+
+pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
+
+// pub const DEBUG_SCHEDULING: bool = false;
+
+pub const SOFTMAX_POLICY: bool = false;
+pub const LYAPUNOV_POLICY: bool = false;
+pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
+
 
 #[macro_export]
 macro_rules! debug_edca {
@@ -128,15 +140,6 @@ pub struct LinkMetrics {
     pub collision_count: usize,      // Recent collisions
     pub throughput_mbps: f64,        // Estimated throughput
 }
-
-pub const DEBUG_MLO: bool = true;
-pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
-
-// pub const DEBUG_SCHEDULING: bool = false;
-
-pub const SOFTMAX_POLICY: bool = false;
-pub const LYAPUNOV_POLICY: bool = false;
-pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
 #[derive(Clone, Debug)]
 pub struct StaRateInfo {
@@ -2942,7 +2945,7 @@ impl QueueModule {
             }
         }
 
-        // if DEBUG_PRINT_ENABLED {
+        if DEBUG_PRINT_ENABLED {
             print_yellow!(
                 "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
                 format_elapsed!(now),
@@ -2950,7 +2953,7 @@ impl QueueModule {
                 format_elapsed!(now + last_service_duration)
             );
             self.aux_ampdu_serviced.print();
-        // }
+        }
 
         self.packet_being_served = true;
         let ampdu_to_send =
@@ -3032,8 +3035,7 @@ impl QueueModule {
                 let T_col = collision_delay();
                 let T_col_dur = Duration::from_secs_f32(T_col);
                 
-
-                print_yellow!("Collision on channel {}! Delay : {}, ", link_id, T_col ); 
+                // print_yellow!("{:.5} [Channel {} collision!] T_col:{:.5}| contenders: {:?} ", taitime_to_f64!(now), link_id, T_col, contenders ); 
                 if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                     medium.occupy_collision(now + T_col_dur);
                 }

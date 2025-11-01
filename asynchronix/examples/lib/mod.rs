@@ -2091,8 +2091,8 @@ pub fn airtime_ampdu(
     let rts_cts_overhead_time = T_RTS + SIFS + T_CTS + SIFS;
     let rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;
 
-    print_dblue!("[AMDPU airtime = {:.3} ms] Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t|distance={:.3}, PathLoss = {:.3}, RTS/CTS Overhead: {:.1}|"
-            ,phy_time * 1000.0,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
+    // print_dblue!("[AMPDU airtime = {:.3} ms] Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t|distance={:.3}, PathLoss = {:.3}, RTS/CTS Overhead: {:.1}|"
+    //              ,phy_time * 1000.0,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
 
     
     phy_time
@@ -2217,7 +2217,7 @@ pub struct GraphNetworkStatisticsCsv {
 
     pub frame_size_bytes: usize,
 
-    pub client_fps: f32,
+    // pub client_fps: f32,
     pub server_fps: f32,
 
     pub frame_span_ms: f32,
@@ -2244,6 +2244,10 @@ pub struct GraphNetworkStatisticsCsv {
 
     pub interval_avg_plot_throughput: f32,
     pub decoder_jitterbuffer_level: u8, 
+    pub num_rebuffering_events: u8, 
+
+    pub flr_deadline:       usize, 
+    pub shardloss_deadline: usize, 
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

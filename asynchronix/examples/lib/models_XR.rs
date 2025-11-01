@@ -3215,6 +3215,8 @@ pub struct XRServer {
     pub reward_mode: usize, // 0 -> naive, 1->normalized, 2-> ?? For future reward shape. 
     pub t_update_abr: f32, 
 
+
+
 }
 #[allow(unused)]
 impl XRServer {
@@ -3336,6 +3338,7 @@ impl XRServer {
                 0.0,
                 name_folder,
                 ip_self,
+                frame_rate, 
             ),
 
             network_effects: effects.to_vec() ,  
@@ -3443,9 +3446,13 @@ impl XRServer {
     }
 
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>) {
+        
+        println!("control packet rcv"); 
+        
         if let Some(mut protorecv) = self.control_socket_receiver.clone() {
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap();
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
+            println!("protorecv"); 
 
             match packet {
                 ClientControlPacket::NetworkStatistics(network_stats) => {
@@ -3455,6 +3462,9 @@ impl XRServer {
                     let frame_id: u32 = network_stats.frame_index as u32;
                     let rtt: Duration;
                     // if let send_instant = map_clone.get(&frame_id).unwrap()
+
+                    println!("Reaching here 1"); 
+
                     if let Some((_, send_instant)) = map_clone.remove(&frame_id) {  
                         if let Some(foman) = self.fov_optix_manager.clone(){ // equivalent to matching for FovOptix
 
@@ -3468,7 +3478,7 @@ impl XRServer {
                         rtt = now.duration_since(send_instant);
                         debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
 
-
+                        println!("Reaching here 2"); 
                         let netstats= network_stats.clone(); 
 
                         let (peak_network_throughput_bps, frame_interarrival_s) =
@@ -3478,6 +3488,7 @@ impl XRServer {
                                 now,
                                 self.bitrate_manager.last_target_bitrate_bps,
                             );
+                        println!("Reaching here 3"); 
 
                         // BITRATE_MANAGER.lock().report_network_statistics
                         self.bitrate_manager.report_network_statistics_abr(
@@ -3527,7 +3538,7 @@ impl XRServer {
                             shard
                         );
                         let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
-
+                        self.STATISTICS_MANAGER.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // parallel to the one in bitrate manager. 
                         self.bitrate_manager.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // report one frame lost, and nº of video shards lost
                     }
                 }
@@ -3547,7 +3558,8 @@ impl XRServer {
         Ok(track)
     }
     pub async fn in_from_network(&mut self, frame: TimedFrame) {
-        let packet_vec = frame.vec;
+        println!("In from network!"); 
+        let packet_vec: Vec<MpduPacket> = frame.vec;
         let now = frame.timestamp;
 
         for packet in packet_vec {
@@ -3673,7 +3685,7 @@ impl XRServer {
 
                 CONTROL_STREAM => {
                     if let Some(mut sock) = self.control_socket_sender.as_mut() {
-                        // println!("Received control stream!!");
+                        println!("Received control stream!!");
                         // Deserialize into ClientControlPacket directly, not a reference
 
                         // println!("Size of buffer: {}", packet.data_inner.len() );
@@ -3710,7 +3722,7 @@ impl XRServer {
         async move {
             let mut stop = false;
 
-            let mut elapsed = now.duration_since(self.t_0);
+            let mut elapsed: Duration = now.duration_since(self.t_0);
 
             // debug_print!(
             //     DebugColor::DarkGreen,
@@ -6205,6 +6217,7 @@ impl XRClient {
     }
 
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
+        println!("CLient in from network"); 
         let packet_vec = frame.vec;
         let now = frame.timestamp;
 
