@@ -2013,7 +2013,7 @@ impl BitrateManager {
         // let bitrate_ladder_mbps: Vec<u32> = (5..=100).step_by(5).collect();
 
         let max_mbps = MAX_MBPS_LADDER; 
-        let min_mbps = 5.0; 
+        let min_mbps = 10.0; 
 
         let (min_bps, max_bps) = ( min_mbps * 1e6, max_mbps * 1e6); 
         // let initial_bitrate_mbps = 50.0; 
@@ -2027,13 +2027,15 @@ impl BitrateManager {
                     if max_bps != 0.0 && min_bps != 0.0 {
                         let mut vec_bitrates = Vec::new();
 
-                        let bitrate_step_size_bps = (max_bps - min_bps) / bitrate_step_count as f32;
+                        let nest_bitrate_step_count = 10; 
+
+                        let bitrate_step_size_bps = (max_bps - min_bps) / nest_bitrate_step_count as f32;
 
                         let mut last_value = min_bps;
 
                         vec_bitrates.push(min_bps); // first bitrate is min
                         
-                        for _ in 0..bitrate_step_count {
+                        for _ in 0..nest_bitrate_step_count {
                             last_value += bitrate_step_size_bps;
                             vec_bitrates.push(last_value);
                         }
