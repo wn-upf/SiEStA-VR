@@ -254,11 +254,24 @@ class DreamerZmqEnv(gym.Env):
         
         # Action/Observation space definitions
         self.action_space = spaces.Discrete(self.n_actions)
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, 
-            shape=OBSERVATION_SHAPE, # Use (14,)
-            dtype=np.float32
-        )
+        # self.observation_space = spaces.Box(
+        #     low=-np.inf, high=np.inf, 
+        #     shape=OBSERVATION_SHAPE, # Use (14,)
+        #     dtype=np.float32
+        # )
+        self.observation_space = spaces.Dict({
+            "vector": spaces.Box(
+                low=-np.inf, high=np.inf, 
+                shape=OBSERVATION_SHAPE, # (14,)
+                dtype=np.float32
+            ),
+            "image": spaces.Box(
+                low=0, high=255,
+                shape=(64, 64, 3), # Shape of your dummy_image
+                dtype=np.uint8
+            )
+        })
+
         
         self.ctx = zmq.Context()
         self.action_socket = self.ctx.socket(zmq.ROUTER)
@@ -393,6 +406,9 @@ class DreamerZmqEnv(gym.Env):
 
         meta = dict(feat_dim=FEAT_DIM)
         return unstacked_obs.astype(np.float32, copy=False), meta
+
+
+
 def make_custom_env_fn(config, mode='train', id=0):
     """
     This function will be called by the Dreamer trainer
@@ -440,13 +456,23 @@ def make_custom_env_fn(config, mode='train', id=0):
         )
         
         # Convert gymnasium spaces to gym spaces for compatibility
+        # 1. Convert action space (unchanged)
         env.action_space = gym.spaces.Discrete(env.action_space.n)
-        env.observation_space = gym.spaces.Box(
-            low=env.observation_space.low,
-            high=env.observation_space.high,
-            shape=env.observation_space.shape,
-            dtype=env.observation_space.dtype
-        )
+        
+        # 2. Convert the Gymnasium.Dict space to a Gym.Dict space
+        #    (This replaces your old gym.spaces.Box conversion)
+        gym_obs_spaces = {}
+        # env.observation_space is now the gymnasium.spaces.Dict
+        for key, gmn_space in env.observation_space.spaces.items():
+            # Create an old gym.spaces.Box for each key
+            gym_obs_spaces[key] = gym.spaces.Box(
+                low=gmn_space.low,
+                high=gmn_space.high,
+                shape=gmn_space.shape,
+                dtype=gmn_space.dtype
+            )
+        # Create the final old gym.spaces.Dict
+        env.observation_space = gym.spaces.Dict(gym_obs_spaces)
         
         # Apply time limit wrapper
         env = TimeLimit(env, config.time_limit)
@@ -489,7 +515,7 @@ def train_dreamer_main(action_ep, step_ep):
     
     # --- NEW: Import wandb in this new process ---
     import wandb
-
+    wandb.login()
     print(f"Changed CWD to: {DREAMER_REPO_PATH}")
 
     # --- 2. Monkey-patch make_env in the dreamer module ---
@@ -560,7 +586,7 @@ def train_dreamer_main(action_ep, step_ep):
         
         # This tells DreamerV3 to use the 'wandb' logger
         # SET THIS LAST after customizing the logger structure
-        final_config.logger = 'wandb'
+        # final_config.logger = 'wandb'
         # --- END WANDB CONFIGURATION ---
         
         
@@ -626,5 +652,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
     
-    wandb.login()
+    # wandb.login()
     main()
