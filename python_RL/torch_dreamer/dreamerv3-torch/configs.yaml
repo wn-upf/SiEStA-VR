@@ -17,7 +17,7 @@ defaults:
   compile: True
   precision: 32
   debug: False
-  video_pred_log: True
+  video_pred_log: False
 
   # Environment
   task: 'dmc_walker_walk'

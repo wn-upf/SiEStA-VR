@@ -242,6 +242,7 @@ class DreamerZmqEnv(gym.Env):
     A simplified ZMQ Env for DreamerV3.
     - Returns unstacked observations (shape (FEAT_DIM,)).
     - Removes all action masking logic.
+    - Includes dummy "image" key for Dreamer's video rendering.
     """
     metadata = {"render_modes": []}
 
@@ -282,27 +283,31 @@ class DreamerZmqEnv(gym.Env):
             
             obs_request = json.loads(obs_msg)
             
-            # --- FIX 1: Robustly get payload ---
-            # Try "obs_flat", then "obs", else pass the whole dict
+            # Robustly get payload
             obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
             
             flat_obs, meta = self._parse_obs_payload(obs_payload)
-            # We ignore obs_request.get("action_mask")
             
             self.pending_obs_info = (identity, flat_obs, meta)
             self.last_obs_for_done = flat_obs.copy()
             
-            info = {"obs_meta": meta} # No "action_mask"
-            return {"vector": flat_obs}            
+            info = {"obs_meta": meta}
+            
+            # FIX: Return both "vector" and "image" keys
+            # Create a dummy 64x64 RGB image for visualization
+            dummy_image = np.zeros((64, 64, 3), dtype=np.uint8)
+            
+            return {
+                "vector": flat_obs,
+                "image": dummy_image
+            }
+            
         except Exception as e:
             print(f"❌ Error during reset: {e}")
             raise
 
     def step(self, action):
-        # action_idx = int(action)
-
-        # print(f'[STEP] Action = {action}')
-        action_idx = int(np.argmax(action['action'])) # Use np.argmax to get the index
+        action_idx = int(np.argmax(action['action']))
         bitrate_mbps = self.bitrate_ladder[action_idx]
         
         if self.pending_obs_info is None:
@@ -342,17 +347,23 @@ class DreamerZmqEnv(gym.Env):
             identity, _, obs_msg = parts if len(parts) == 3 else (parts[0], b'', parts[1])
             obs_request = json.loads(obs_msg)
             
-            # --- FIX 2: Robustly get payload (must match reset) ---
+            # Robustly get payload
             obs_payload = obs_request.get("obs_flat") or obs_request.get("obs", obs_request)
             
             next_obs, next_meta = self._parse_obs_payload(obs_payload)
-            # We ignore obs_request.get("action_mask")
-
+            
             self.pending_obs_info = (identity, next_obs, next_meta)
             self.last_obs_for_done = next_obs.copy()
         
-        info = {"obs_meta": next_meta} # No "action_mask"
-        return {"vector": next_obs}, reward, done,  info
+        info = {"obs_meta": next_meta}
+        
+        # FIX: Return both "vector" and "image" keys
+        dummy_image = np.zeros((64, 64, 3), dtype=np.uint8)
+        
+        return {
+            "vector": next_obs,
+            "image": dummy_image
+        }, reward, done, info
 
     def close(self):
         self.action_socket.close()
@@ -362,9 +373,7 @@ class DreamerZmqEnv(gym.Env):
     @staticmethod
     def _parse_obs_payload(payload):
         """
-        --- FIX 3: Robust parser ---
-        Finds the observation array even if it's nested in a dict
-        that also contains an "action_mask".
+        Robust parser - finds the observation array even if nested
         """
         flat = None
         if isinstance(payload, (list, np.ndarray)):
@@ -374,7 +383,6 @@ class DreamerZmqEnv(gym.Env):
         elif "obs" in payload:
             flat = np.asarray(payload["obs"], dtype=np.float32).ravel()
         else:
-            # This will now print the keys (e.g., ['action_mask'])
             raise KeyError(f"Cannot parse obs payload: {payload.keys()}")
 
         # Get only the last FEAT_DIM features from the stacked vector
@@ -457,7 +465,6 @@ def make_custom_env_fn(config, mode='train', id=0):
     base_env = _ENV_CACHE[singleton_key]
     return IdWrapper(base_env, id)
 
-
 def train_dreamer_main(action_ep, step_ep):
     """
     This is the main "target" function for your multiprocessing.Process.
@@ -479,6 +486,9 @@ def train_dreamer_main(action_ep, step_ep):
     sys.path.insert(0, DREAMER_REPO_PATH)
     from dreamer import main as dreamer_train_main_fn
     import dreamer as dreamer_module
+    
+    # --- NEW: Import wandb in this new process ---
+    import wandb
 
     print(f"Changed CWD to: {DREAMER_REPO_PATH}")
 
@@ -488,24 +498,24 @@ def train_dreamer_main(action_ep, step_ep):
     dreamer_module.make_env = make_custom_env_fn
     
     try:
-        # --- 3. Load configs ---
+        # --- 3. Load configs (CORRECTED) ---
         print("Loading base config (configs.yaml)...")
-        config = OmegaConf.load("configs.yaml")
-        
-        if "defaults" in config:
-            base_config = config.defaults
-            print("✅ Loaded defaults section")
-        else:
-            raise ValueError("No 'defaults' section found in configs.yaml")
+        # OmegaConf.load() automatically merges the 'defaults' section
+        # So 'config' is the fully resolved base configuration.
+
+        # In train_dreamer_main:
+        config = OmegaConf.load("configs.yaml").defaults
+        print("✅ Loaded base config and resolved defaults.")
         
         print("Loading custom_env.yaml...")
         custom_config = OmegaConf.load("custom_env.yaml")
         
+        # Merge the custom env settings on top of the *entire* base config
         if "custom_env" in custom_config:
-            final_config = OmegaConf.merge(base_config, custom_config.custom_env)
+            final_config = OmegaConf.merge(config, custom_config.custom_env)
             print("✅ Merged custom_env configuration")
         else:
-            final_config = OmegaConf.merge(base_config, custom_config)
+            final_config = OmegaConf.merge(config, custom_config)
         
         # Set logdir if None
         if final_config.logdir is None:
@@ -513,10 +523,51 @@ def train_dreamer_main(action_ep, step_ep):
             final_config.logdir = f"~/dreamer_logs/xr_bitrate_{timestamp}"
             print(f"⚠️  logdir was None, set to: {final_config.logdir}")
         
+        
+        
+        final_config.log_video = False
+        final_config.video_pred_log = 0
+        # --- 4. START WANDB CONFIGURATION (CORRECTED PATHS) ---
+        print("Configuring W&B Logger...")
+
+        # --- NEW: Check if 'logger' key exists, and if not, create the structure ---
+        if 'logger' not in final_config:
+            # Create the necessary dictionary structure for wandb settings
+            final_config.logger = OmegaConf.create({'wandb': {}})
+            print("⚠️ Created missing 'logger' and 'wandb' structure.")
+        elif 'wandb' not in final_config.logger:
+            # Create the necessary dictionary structure for wandb settings
+            final_config.logger.wandb = OmegaConf.create({})
+            print("⚠️ Created missing 'wandb' structure under 'logger'.")
+        
+        
+        # --- Set your W&B project details FIRST ---
+        # These lines will now work because the structure is guaranteed to exist.
+        
+        # The project to log to
+        final_config.logger.wandb.project = 'dreamerv3_xr_abr'
+        
+        # A group name for this entire run (all combos)
+        final_config.logger.wandb.group = f'run_{os.getpid()}' 
+        
+        # A unique name for this specific learner process
+        final_config.logger.wandb.name = f'dreamer_learner_{os.getpid()}'
+        
+        # (Optional) Add tags
+        final_config.logger.wandb.tags = ['dreamerv3', 'xr_abr', 'zmq_env']
+
+        print(f"Logging to W&B project: {final_config.logger.wandb.project}")
+        
+        # This tells DreamerV3 to use the 'wandb' logger
+        # SET THIS LAST after customizing the logger structure
+        final_config.logger = 'wandb'
+        # --- END WANDB CONFIGURATION ---
+        
+        
         print(f"Final config - Task: {final_config.task}, Steps: {final_config.steps}, Seed: {final_config.seed}")
         print(f"Logs will be saved to: {final_config.logdir}")
         
-        # --- 4. Start training ---
+        # --- 5. Start training ---
         print("Starting DreamerV3 training loop...")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
@@ -575,5 +626,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
     
-    # wandb.login()
+    wandb.login()
     main()

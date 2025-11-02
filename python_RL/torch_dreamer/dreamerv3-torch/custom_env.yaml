@@ -3,6 +3,7 @@ custom_env:
   logdir: '~/dreamer_logs/xr_bitrate'
   traindir: null  # Auto-generated from logdir
   evaldir: null   # Auto-generated from logdir
+  # video_pred_log: false  #
   
   # Task identification
   task: 'xr_bitrate_abr'
@@ -15,6 +16,7 @@ custom_env:
   action_repeat: 1
   prefill: 3000
   time_limit: 1000
+  seed: 42
   
   # Use MLP encoder/decoder (no images)
   encoder: 
