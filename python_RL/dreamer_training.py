@@ -243,6 +243,7 @@ class DreamerZmqEnv(gym.Env):
     - Returns unstacked observations (shape (FEAT_DIM,)).
     - Removes all action masking logic.
     - Includes dummy "image" key for Dreamer's video rendering.
+    - Includes "is_first" and "is_terminal" keys required by DreamerV3.
     """
     metadata = {"render_modes": []}
 
@@ -254,11 +255,8 @@ class DreamerZmqEnv(gym.Env):
         
         # Action/Observation space definitions
         self.action_space = spaces.Discrete(self.n_actions)
-        # self.observation_space = spaces.Box(
-        #     low=-np.inf, high=np.inf, 
-        #     shape=OBSERVATION_SHAPE, # Use (14,)
-        #     dtype=np.float32
-        # )
+        
+        # Add "is_first" and "is_terminal" to observation space
         self.observation_space = spaces.Dict({
             "vector": spaces.Box(
                 low=-np.inf, high=np.inf, 
@@ -267,8 +265,18 @@ class DreamerZmqEnv(gym.Env):
             ),
             "image": spaces.Box(
                 low=0, high=255,
-                shape=(64, 64, 3), # Shape of your dummy_image
+                shape=(64, 64, 3),
                 dtype=np.uint8
+            ),
+            "is_first": spaces.Box(
+                low=0, high=1,
+                shape=(),  # Scalar
+                dtype=np.bool_
+            ),
+            "is_terminal": spaces.Box(
+                low=0, high=1,
+                shape=(),  # Scalar
+                dtype=np.bool_
             )
         })
 
@@ -283,12 +291,16 @@ class DreamerZmqEnv(gym.Env):
         self.ep_len = 0
         self.pending_obs_info = None
         self.last_obs_for_done = np.zeros(OBSERVATION_SHAPE, dtype=np.float32)
+        self._is_first = True  # Track if this is the first step
+        self._is_terminal = False  # Track if this is a terminal state
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.ep_return = 0.0
         self.ep_len = 0
         self.pending_obs_info = None
+        self._is_first = True  # Mark as first step
+        self._is_terminal = False  # Reset is never terminal
         
         try:
             parts = self.action_socket.recv_multipart()
@@ -306,13 +318,14 @@ class DreamerZmqEnv(gym.Env):
             
             info = {"obs_meta": meta}
             
-            # FIX: Return both "vector" and "image" keys
             # Create a dummy 64x64 RGB image for visualization
             dummy_image = np.zeros((64, 64, 3), dtype=np.uint8)
             
             return {
                 "vector": flat_obs,
-                "image": dummy_image
+                "image": dummy_image,
+                "is_first": np.bool_(True),  # First observation of episode
+                "is_terminal": np.bool_(False)  # Reset observation is never terminal
             }
             
         except Exception as e:
@@ -351,6 +364,11 @@ class DreamerZmqEnv(gym.Env):
         self.ep_return += reward
         self.ep_len += 1
         
+        # After first step, no longer first
+        self._is_first = False
+        # Update terminal status based on done flag
+        self._is_terminal = done
+        
         if done:
             next_obs = self.last_obs_for_done
             next_meta = current_meta
@@ -370,12 +388,14 @@ class DreamerZmqEnv(gym.Env):
         
         info = {"obs_meta": next_meta}
         
-        # FIX: Return both "vector" and "image" keys
+        # Create dummy image
         dummy_image = np.zeros((64, 64, 3), dtype=np.uint8)
         
         return {
             "vector": next_obs,
-            "image": dummy_image
+            "image": dummy_image,
+            "is_first": np.bool_(False),  # Not first step anymore
+            "is_terminal": np.bool_(done)  # Terminal if episode is done
         }, reward, done, info
 
     def close(self):
@@ -406,7 +426,6 @@ class DreamerZmqEnv(gym.Env):
 
         meta = dict(feat_dim=FEAT_DIM)
         return unstacked_obs.astype(np.float32, copy=False), meta
-
 
 
 def make_custom_env_fn(config, mode='train', id=0):
@@ -465,12 +484,20 @@ def make_custom_env_fn(config, mode='train', id=0):
         # env.observation_space is now the gymnasium.spaces.Dict
         for key, gmn_space in env.observation_space.spaces.items():
             # Create an old gym.spaces.Box for each key
-            gym_obs_spaces[key] = gym.spaces.Box(
-                low=gmn_space.low,
-                high=gmn_space.high,
-                shape=gmn_space.shape,
-                dtype=gmn_space.dtype
-            )
+            if key in ["is_first", "is_terminal"]:
+                # Special handling for boolean scalars
+                gym_obs_spaces[key] = gym.spaces.Box(
+                    low=0, high=1,
+                    shape=(),
+                    dtype=np.bool_
+                )
+            else:
+                gym_obs_spaces[key] = gym.spaces.Box(
+                    low=gmn_space.low,
+                    high=gmn_space.high,
+                    shape=gmn_space.shape,
+                    dtype=gmn_space.dtype
+                )
         # Create the final old gym.spaces.Dict
         env.observation_space = gym.spaces.Dict(gym_obs_spaces)
         
@@ -490,6 +517,7 @@ def make_custom_env_fn(config, mode='train', id=0):
     print(f"🔧 Wrapping singleton ZMQ env for (mode={mode}, id={id})")
     base_env = _ENV_CACHE[singleton_key]
     return IdWrapper(base_env, id)
+
 
 def train_dreamer_main(action_ep, step_ep):
     """
@@ -515,7 +543,7 @@ def train_dreamer_main(action_ep, step_ep):
     
     # --- NEW: Import wandb in this new process ---
     import wandb
-    wandb.login()
+    # wandb.login()
     print(f"Changed CWD to: {DREAMER_REPO_PATH}")
 
     # --- 2. Monkey-patch make_env in the dreamer module ---
@@ -652,5 +680,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
     
-    # wandb.login()
+    wandb.login()
     main()
