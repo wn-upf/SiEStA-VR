@@ -1,0 +1,43 @@
+custom_env:
+  # Logging directories (REQUIRED - can't be null)
+  logdir: '~/dreamer_logs/xr_bitrate'
+  traindir: null  # Auto-generated from logdir
+  evaldir: null   # Auto-generated from logdir
+  
+  # Task identification
+  task: 'xr_bitrate_abr'
+  
+  # Training duration
+  steps: 1e7
+  
+  # Environment settings
+  envs: 1
+  action_repeat: 1
+  prefill: 3000
+  time_limit: 1000
+  
+  # Use MLP encoder/decoder (no images)
+  encoder: 
+    mlp_keys: '.*'
+    cnn_keys: '$^'
+    mlp_layers: 3
+    mlp_units: 256
+  
+  decoder:
+    mlp_keys: '.*'
+    cnn_keys: '$^'
+    mlp_layers: 3
+    mlp_units: 256
+  
+  # Discrete actions for bitrate selection
+  actor:
+    dist: 'onehot'
+    std: 'none'
+  
+  # Logging
+  log_every: 1e3
+  eval_every: 5e3
+  video_pred_log: false
+  
+  # Use REINFORCE for discrete actions
+  imag_gradient: 'reinforce'

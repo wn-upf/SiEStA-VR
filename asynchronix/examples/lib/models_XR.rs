@@ -1549,9 +1549,15 @@ impl RLConnector for ZmqConnector {
      * 2. Block and wait for the ROUTER to reply with an action.
      */
     fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction {        // 1. Build the observation payload
-        let prev_flat = self.window.as_flat_padded();
-        let feat_dim = obs.to_vec().len();
         
+        let feat_dim = obs.to_vec().len();
+        let mut prev_flat = self.window.as_flat_padded();
+
+        if prev_flat.is_empty() {
+            let total_flat_size = self.window.cap * feat_dim;
+            prev_flat = vec![0.0; total_flat_size];
+            // Note: self.window.seq_len() will correctly be 0 here.
+        }
         let req = RLRequestRNN {
             sim_id: self.sim_id.clone(),
             obs_flat: prev_flat, // Send the *previous* window state
