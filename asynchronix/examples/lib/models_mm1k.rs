@@ -48,8 +48,8 @@ use rand::{SeedableRng};
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
-const DEBUG_EDCA: bool = false; 
-pub const DEBUG_MLO: bool = false;
+const DEBUG_EDCA: bool = true; 
+pub const DEBUG_MLO: bool = true;
 
 
 
@@ -1865,11 +1865,7 @@ fn fmt_key(key: &MacKey) -> String {
     format!("STA={:>2} AC={}", sta, ac)
 }
 
-#[inline]
-fn log_edca(key: &MacKey, msg: &str) {
-    // Keep it short and grep-friendly
-    print_blue!("\t\t-----contenders: {} | {}", fmt_key(key), msg);
-}
+
 
 #[inline]
 fn maps_to(key: &MacKey, p: &MpduPacket) -> bool {
@@ -1883,16 +1879,10 @@ fn maps_to(key: &MacKey, p: &MpduPacket) -> bool {
 
 
 
-// fn maps_to((id, ac): &MacKey, p: &MpduPacket) -> bool {
-//     // AP (downlink) contends with id = -1; UL STA contends with its own id
-//     let mac_id = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
-//     (mac_id, p.edca_ac) == (*id, *ac)
-// }
-
 fn ac_needs_tick(
     key: &MacKey,
     st: &DcfStats,
-    q: &VecDeque<MpduPacket>,
+    q: &Vec<MpduPacket>,
     now: TaiTime<0>,
     sta_capabilities: &HashMap<i32, StaCapabilities>,
 ) -> bool {
@@ -1970,7 +1960,9 @@ pub struct QueueModule {
     // pub output_port_sta1: Output<AmpduPacket>,
 
     pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
-    pub queue: VecDeque<MpduPacket>,
+    // pub queue: VecDeque<MpduPacket>,
+    pub queue: Vec<MpduPacket>, 
+
     pub queue_maxsize: usize,
     pub service_timer: Duration,
     // pub aux_packet_serviced: MpduPacket,
@@ -2015,7 +2007,10 @@ pub struct QueueModule {
     pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
     pub link_channel_widths: HashMap<u8, usize>,  // Store channel width per link
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
+    pub link_queue_depths: HashMap<u8, usize>, // Required for optimization to stop iterating O(n) over queue
     pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
+
+
 
 }
 #[derive(Clone, Debug)]
@@ -2039,11 +2034,11 @@ pub fn create_mlo_config() -> Vec<LinkConfig> {
             frequency_ghz: 5.0,
             bandwidth_mhz: 80,
         },
-        // LinkConfig {
-        //     link_id: 1,
-        //     frequency_ghz: 6.0,
-        //     bandwidth_mhz: 320,
-        // },
+        LinkConfig {
+            link_id: 1,
+            frequency_ghz: 6.0,
+            bandwidth_mhz: 320,
+        },
     ]; 
     println!("Creating MLO Config!\n{:#?}", a); 
     a
@@ -2094,6 +2089,8 @@ impl QueueModule {
         let mut link_mediums = HashMap::new();
         let mut link_outputs = HashMap::new();
         let mut link_channel_widths = HashMap::new();
+        let mut link_queue_depths = HashMap::new(); // <-- ADD THIS
+        
         
         for link_config in &link_configs {
             link_mediums.insert(link_config.link_id, Medium::default());
@@ -2102,7 +2099,8 @@ impl QueueModule {
         }
 
         Self {
-            queue: VecDeque::with_capacity(queue_size),
+            // queue: VecDeque::with_capacity(queue_size),
+            queue: Vec::with_capacity(queue_size),
             queue_maxsize: queue_size,
             link_outputs,
             service_timer: Duration::ZERO,
@@ -2129,26 +2127,20 @@ impl QueueModule {
             ampdu_id: 0,
             link_mediums,
             link_channel_widths, 
+            link_queue_depths, 
             sta_capabilities: HashMap::new(),
         }
     }
 
-
-
-    fn get_channel_width(&self, link_id: u8) -> usize {
-        // Default to 80 MHz if link not found
-        80  // You'll populate this from LinkConfig
-    }
-
-
-
+    #[inline]
     pub fn get_queue_stats_handle(&self) -> Arc<Mutex<QueueStats>> {
         self.cumulative_stats_queue.clone()
     }
+    #[inline]
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
-        
+    #[inline]
     pub fn tick_backoff(&mut self, now: TaiTime<0>) -> HashMap<u8, Vec<MacKey>> {
         // Clear idle links
         for medium in self.link_mediums.values_mut() {
@@ -2163,16 +2155,28 @@ impl QueueModule {
             present_keys.insert(key);
         }
 
+
         let mut ready_per_link: HashMap<u8, Vec<MacKey>> = HashMap::new();
         
-        // ⭐ Lock ONCE and do all updates in a single pass
+        // Lock ONCE and do all updates in a single pass
         let mut map = self.array_dcf_values.lock().unwrap();
-    
         for (key, st) in map.iter_mut() {
             let (sta_id, ac, link_id) = *key;
             
+            // debug_edca!(
+            //     "{} [TICK] Checking KEY ({}, {:?}, L-{}): state=({} slots, frozen={})",
+            //     format_elapsed!(now),
+            //     sta_id,
+            //     ac,
+            //     link_id,
+            //     st.backoff_counter,
+            //     st.backoff_frozen
+            // );
+
+
             // Skip if no packets for this STA/AC
             if !present_keys.contains(&(sta_id, ac)) {
+    
                 continue;
             }
 
@@ -2183,6 +2187,14 @@ impl QueueModule {
             // AIFS gating
             let aifs_until = st.medium_free_since + aifs(st.param);
             let aifs_satisfied = idle_slot && aifs_until <= now;
+            
+            if st.backoff_frozen && aifs_satisfied {
+                let aifs_duration_us = aifs(st.param).as_micros();
+                debug_edca!(
+                    "{} \t[EDCA] L-{} ({}, {:?}): AIFS satisfied ({}µs). UNFREEZING.",
+                    format_elapsed!(now), link_id, sta_id, ac, aifs_duration_us
+                );
+            }
 
             // Update backoff state directly (st is already mutable)
             if aifs_satisfied {
@@ -2191,6 +2203,11 @@ impl QueueModule {
 
             // Backoff countdown
             if idle_slot && !st.backoff_frozen && st.backoff_counter > 0 {
+                debug_edca!(
+                   "{} [EDCA] L-{} ({}, {:?}): COUNTDOWN {} -> {}",
+                   format_elapsed!(now), link_id, sta_id, ac,
+                   st.backoff_counter, st.backoff_counter - 1 
+               );
                 st.backoff_counter -= 1;
             }
 
@@ -2199,19 +2216,37 @@ impl QueueModule {
                 ready_per_link.entry(link_id).or_insert_with(Vec::new).push(*key);
             }
             }
-    
+        if !ready_per_link.is_empty() {
+            // Build a short summary string
+            let mut summary = String::new();
+            for (link_id, contenders) in &ready_per_link {
+                // You can customize the detail level here.
+                // For just counts:
+                summary.push_str(&format!("L-{}: {} | ", link_id, contenders.len()));
+                
+                // For full key details (might be verbose again, but informative):
+                // summary.push_str(&format!("L-{}: {:?} | ", link_id, contenders));
+            }
+            
+            debug_edca!(
+                "{} [TICK] Ready contenders: {}",
+                format_elapsed!(now),
+                summary
+            );
+        }
+
         ready_per_link
     }
-
+    #[inline]
     fn txop_cap_secs(&self, key: &MacKey) -> f64 {
         let p = self.array_dcf_values.lock().unwrap()[key].param;
         if p.txop_limit_us == 0 { f64::INFINITY } else { p.txop_limit_us as f64 * 1e-6 }
     }
-
+    #[inline]
     fn ac_prio(&mut self, ac: EdcaAc) -> u8 { match ac {
         EdcaAc::Voice => 0, EdcaAc::Video => 1, EdcaAc::BestEffort => 2, EdcaAc::Background => 3
     }}
-
+    #[inline]
     fn resolve_virtual_collision(&mut self, mut ready: Vec<MacKey>) -> Vec<MacKey> {  // Collisions when same STA has several ACs winning backoff  
 
         let mut winner = HashMap::<i32, MacKey>::new();  // sta_id → winning AC
@@ -2233,6 +2268,7 @@ impl QueueModule {
 
 
     /// Select the best link for a given packet based on strategy and STA capabilities
+    #[inline]
     fn select_link_for_packet(&mut self, pkt: &MpduPacket, now: TaiTime<0>) -> Option<u8> {
         let sta_id = if pkt.sta_src_id > pkt.sta_dest_id {
             pkt.sta_src_id  // Uplink
@@ -2305,13 +2341,12 @@ impl QueueModule {
         selected
     }
 
-      fn get_link_queue_depth(&self, link_id: u8) -> usize {
-        self.queue
-            .iter()
-            .filter(|p| p.assigned_link_id == Some(link_id))
-            .count()
-    }
 
+    fn get_link_queue_depth(&self, link_id: u8) -> usize {
+    // Now an O(1) lookup
+        self.link_queue_depths.get(&link_id).copied().unwrap_or(0)
+    }
+    #[inline]
     fn select_opportunistic(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
             // 1. Handle edge cases (no links or only one link)
             if available_links.is_empty() {
@@ -2418,7 +2453,7 @@ impl QueueModule {
         Some(primary_link)  // Fall back to primary
     }
     
-
+    #[inline]
     pub async fn cache_input_packet(&mut self, packet: MpduPacket, link_id: u8, ) {
         let key = (packet.sta_src_id, packet.sta_dest_id);
 
@@ -2511,7 +2546,7 @@ impl QueueModule {
             entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
     }
 
-
+    #[inline]
      pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
         let now = ctx.scheduler.time();
         pkt.queue_in_instant = now;
@@ -2546,16 +2581,32 @@ impl QueueModule {
                 
                 if self.queue.len() < self.queue_maxsize {
                     self.cache_input_packet(pkt.clone(), link_id).await;
-                    self.queue.push_back(pkt);
+                    self.queue.push(pkt);
+
+                    self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1); // add to lookup hashmap, per link 
                     
                     // Trigger scheduling if medium is idle
-                    if !self.packet_being_served {
-                        if let Some(medium) = self.link_mediums.get(&link_id) {
-                            if medium.is_idle(now) {
-                                self.deque_schedule_service((), ctx).await;
-                            }
-                        }
+                    
+                    if self.queue.len() == 1 && !self.packet_being_served {
+                        // We schedule it one slot time in the future.
+                        // This prevents the immediate call bug and starts the
+                        // 9µs timer loop correctly.
+                        ctx.scheduler
+                            .schedule_event(
+                                Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                Self::deque_schedule_service, 
+                                ()
+                            )
+                            .unwrap();
                     }
+                    
+                    // if !self.packet_being_served {
+                    //     if let Some(medium) = self.link_mediums.get(&link_id) {
+                    //         if medium.is_idle(now) {
+                    //             self.deque_schedule_service((), ctx).await;
+                    //         }
+                    //     }
+                    // }
                 } else {
                     self.blocked_packet_counter += 1;
                     log_mlo!(now, "❌ QUEUE FULL - dropped packet {}", pkt.packet_id);
@@ -2573,6 +2624,7 @@ impl QueueModule {
     }
 
     /// Uplink input function (from STAs)
+    #[inline]
     pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
         self.queue_length_counter += self.queue.len();
@@ -2592,10 +2644,13 @@ impl QueueModule {
                     (-1, packet.edca_ac, link_id)
                 });
                 
+
+
                 if self.queue.len() < self.queue_maxsize {
                     packet.queue_in_instant = now;
                     self.cache_input_packet(packet.clone(), link_id).await;
-                    self.queue.push_back(packet.clone());
+                    self.queue.push(packet.clone());
+                    self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1);
 
                     log_mlo!(
                         now,
@@ -2607,13 +2662,24 @@ impl QueueModule {
                         self.queue.len()
                     );
 
+
                     if self.queue.len() == 1 && !self.packet_being_served {
-                        if let Some(medium) = self.link_mediums.get(&link_id) {
-                            if medium.is_idle(now) {
-                                self.deque_schedule_service((), context).await;
-                            }
-                        }
+                        context.scheduler
+                            .schedule_event(
+                                Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                Self::deque_schedule_service, 
+                                ()
+                            )
+                            .unwrap();
                     }
+
+                    // if self.queue.len() == 1 && !self.packet_being_served {
+                    //     if let Some(medium) = self.link_mediums.get(&link_id) {
+                    //         if medium.is_idle(now) {
+                    //             self.deque_schedule_service((), context).await;
+                    //         }
+                    //     }
+                    // }
                 } else {
                     self.blocked_packet_counter += 1;
                     log_mlo!(
@@ -2635,8 +2701,13 @@ impl QueueModule {
         }
     }
 
+    #[inline]
+    fn select_next_sta(&self) -> &HashMap<(i32, i32), StaRateInfo> {    // The entire slow loop is gone, O(1) lookup. 
 
-
+        &self.sta_stats_cache
+    }
+    
+    #[inline]
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
         let elapsed = context.scheduler.time();
         // self.shared_medium.release_txop(elapsed);
@@ -2696,17 +2767,7 @@ impl QueueModule {
         }
 
     }
-
-
-
-    fn select_next_sta(&self) -> &HashMap<(i32, i32), StaRateInfo> {    // The entire slow loop is gone, O(1) lookup. 
-
-        &self.sta_stats_cache
-    }
-
-
-    
-
+    #[inline]
     fn build_new_ampdu<'a>(
         &mut self,
         first_packet: &MpduPacket,
@@ -2915,14 +2976,33 @@ impl QueueModule {
         // Remove in descending order to avoid index shifts
         success_indices.sort_unstable_by(|a, b| b.cmp(a));
 
-        for idx in success_indices {
-            if idx < self.queue.len() {
-                if let Some(removed_packet) = self.queue.remove(idx) {
-                    let key = (removed_packet.sta_src_id, removed_packet.sta_dest_id);
-                    *packets_removed_by_key.entry(key).or_insert(0) += 1;
-                }
+        let success_indices_set: std::collections::HashSet<usize> = success_indices.into_iter().collect();
+
+        // 2. Use retain to remove all successful packets in a single O(N) pass.
+        // We must also count removals and update link depths *during* this pass.
+        let mut i = 0;
+        self.queue.retain(|packet| {
+            let current_idx = i;
+            i += 1; // Increment index for the next packet
+
+            if success_indices_set.contains(&current_idx) {
+                // This packet was successful, so remove it (return false)
+                
+                // --- Update Tally/Cache Logic ---
+                let key = (packet.sta_src_id, packet.sta_dest_id);
+                *packets_removed_by_key.entry(key).or_insert(0) += 1;
+
+                // --- Decrement Per-Link Queue Depth ---
+                if let Some(link_id) = packet.assigned_link_id {
+                    // Check if link_id is in the map before modifying
+                    if let Some(count) = self.link_queue_depths.get_mut(&link_id) {
+                        *count = count.saturating_sub(1);
+                    }
+                }   
+                return false; // Remove from queue
             }
-        }
+            true // Keep in queue
+        });
 
         // ========== Update cache for affected flows ==========
         for (key, count_removed) in packets_removed_by_key {
@@ -2960,16 +3040,18 @@ impl QueueModule {
 
         log_mlo!(
             now,
-            "✅ AMPDU built on LINK-{}: {} packets, {:.3}ms airtime",
+            "✅ AMPDU built on LINK-{}: {} packets, {:.3}ms airtime | Txend = {:.8}",
             link_id,
             ampdu_to_send.mpdu_packets.len(),
-            last_service_duration.as_secs_f64() * 1000.0
+            last_service_duration.as_secs_f64() * 1000.0, 
+            taitime_to_f64!(now + last_service_duration ),  
+
         );
 
         (ampdu_to_send, last_service_duration)
     }
 
-
+    #[inline]
     fn deque_schedule_service<'a>(
     &'a mut self,
     _: (),
@@ -2980,34 +3062,80 @@ impl QueueModule {
 
         // UL capacity check (same as before)
         let sta_packets: HashMap<(i32, i32), StaRateInfo> = self.select_next_sta().clone();
+      // 1. Find all overflowing UL flows and how many packets to drop
+        let mut overflowing_flows = HashMap::new(); // Key: (src, dest), Val: excess_count
         for ((sta_src, sta_dest), packets) in sta_packets.iter() {
             let is_ul = sta_src > sta_dest;
             if is_ul && packets.packet_count > self.ul_capacity_queue_device {
-                // Drop excess packets (same logic as before)
                 let excess_count = packets.packet_count - self.ul_capacity_queue_device;
-                let mut packets_to_remove = excess_count;
-                let mut indices_to_remove = Vec::new();
+                overflowing_flows.insert((*sta_src, *sta_dest), excess_count);
                 
-                for i in (0..self.queue.len()).rev() {
-                    if let Some(packet) = self.queue.get(i) {
-                        if packet.sta_src_id == *sta_src && packet.sta_dest_id == *sta_dest {
-                            indices_to_remove.push(i);
-                            packets_to_remove -= 1;
-                            if packets_to_remove == 0 {
-                                break;
-                            }
-                        }
-                    }
+                print_red!(
+                    "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {}), dropping {}",
+                    format_elapsed!(now),
+                    sta_src,
+                    sta_dest,
+                    packets.packet_count,
+                    self.ul_capacity_queue_device,
+                    excess_count
+                );
+            }
+        }
+        let mut global_indices_to_drop = std::collections::HashSet::new();
+        
+        if !overflowing_flows.is_empty() {
+            // 2. Find all indices for *these specific* overflowing flows
+            // We build a map: (src, dest) -> [idx1, idx8, idx22]
+            let mut flow_indices_map: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+            for (i, packet) in self.queue.iter().enumerate() {
+                let key = (packet.sta_src_id, packet.sta_dest_id);
+                if overflowing_flows.contains_key(&key) {
+                    flow_indices_map.entry(key).or_default().push(i);
                 }
-                
-                for idx in indices_to_remove {
-                    if let Some(_) = self.queue.remove(idx) {
-                        self.blocked_packet_counter += 1;
+            }
+
+            // 3. For each overflowing flow, get the newest (last) indices to drop
+            for (key, excess_count) in overflowing_flows {
+                if let Some(indices) = flow_indices_map.get_mut(&key) {
+                    // `indices` is already sorted (from iter().enumerate()). We want the last `excess_count`.
+                    let start_index = indices.len().saturating_sub(excess_count);
+                    for i in start_index..indices.len() {
+                        global_indices_to_drop.insert(indices[i]);
                     }
                 }
             }
+            // 4. Run retain ONCE to remove all marked packets
+            let mut i = 0;
+            self.queue.retain(|packet| {
+                let current_idx = i;
+                i += 1; // Increment index for the next packet
+
+                if global_indices_to_drop.contains(&current_idx) {
+                    // This is a packet to drop
+                    self.blocked_packet_counter += 1;
+                    
+                    // --- CRITICAL: Decrement per-link queue depth ---
+                    if let Some(link_id) = packet.assigned_link_id {
+                        if let Some(count) = self.link_queue_depths.get_mut(&link_id) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
+                    
+                    print_red!(
+                        "{} [UL PACKET DROPPED] Packet_ID: {}, SRC: {}, DST: {}",
+                        format_elapsed!(now),
+                        packet.packet_id,
+                        packet.sta_src_id,
+                        packet.sta_dest_id
+                    );
+
+                    return false; // Drop from queue
+                }
+                return true; // Keep in queue
+            });
         }
-        
+
+
         // Get ready contenders per link
         let ready_per_link: HashMap<u8, Vec<MacKey>> = self.tick_backoff(now);
         
@@ -3062,13 +3190,15 @@ impl QueueModule {
             
             // Single winner on this link
             let winner_key = contenders[0];
-            let (sta_id, ac, _) = winner_key;
+            let (sta_id, ac, winner_link_id) = winner_key;
             
             // Find first packet that matches this STA/AC
             let first_ix = match self.queue.iter().position(|p| {
                 let is_ul = p.sta_src_id > p.sta_dest_id;
                 let p_sta = if is_ul { p.sta_src_id } else { -1 };
-                p_sta == sta_id && p.edca_ac == ac
+                p_sta == sta_id
+                 && p.edca_ac == ac
+                 && p.assigned_link_id == Some(winner_link_id)
             }) {
                 Some(ix) => ix,
                 None => {
@@ -3100,7 +3230,6 @@ impl QueueModule {
                 
                 continue;
             }
-
 
             // Occupy medium on this link
             if let Some(medium) = self.link_mediums.get_mut(&link_id) {

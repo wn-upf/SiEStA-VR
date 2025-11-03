@@ -1999,9 +1999,6 @@ pub fn airtime_ampdu(
     // if SU_spatial_streams > 1.0 {   // TODO: AMEND THE USE OF THESE 
     //     effPt = effPt - 3.0 * SU_spatial_streams
     // };
-
-    // // let channel_width: usize = CHANNEL_WIDTH;
-
     // // Effective Pt
     // if channel_width > 20 {
     //     effPt = effPt - 3.0 * (channel_width as f64 / 20.0); // linear formula too restrictive, seems to be log? 
@@ -2021,11 +2018,12 @@ pub fn airtime_ampdu(
 
 
     // 3. Calculate the noise adjustment for wider channels.
-    let noise_adjustment_db = if channel_width > 20 {
-        // Use the correct logarithmic formula
-        10.0 * (channel_width as f64 / 20.0).log10()
-    } else {
-        0.0
+    let noise_adjustment_db = match channel_width {
+        40 => 3.01,
+        80 => 6.02,
+        160 => 9.03,
+        320 => 12.04,
+    _ => 0.0, // For 20 MHz or any other default
     };
 
     // 4. Normalize the Pr to its 20 MHz equivalent.

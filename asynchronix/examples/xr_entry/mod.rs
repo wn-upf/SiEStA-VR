@@ -110,7 +110,8 @@ impl VRPair {
 
         let mut initial_bitrate= initial_bitrate_orig; 
 
-        let mut abr_choice; 
+        let abr_choice; 
+        println!("[VR session {}] with abr_choice: {}", pair_index, abr_enabled);
     
         // UNCOMMENT (when not evaluating RL in same scenario) . 
         // if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
@@ -135,6 +136,7 @@ impl VRPair {
         // else{
             // abr_choice = abr_enabled; //makes all sessions have same ABR choice
         // }
+        println!("[VR session {}] Final: {}", pair_index, abr_choice);
 
         let bm_string = match abr_choice
             {

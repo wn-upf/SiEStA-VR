@@ -45,21 +45,21 @@ reward_mode = 0 ## normalized reward.  // 0-> naive , 1-> normalized, 2-> ??? to
 T_ABR = 0.3 ## update every T seconds. With lower value, more frequent steps in simulation but noisier updates. 
 ##################################################################################################  
 ### SIMULATION PARAMS
-simTime = [80.0]
-TEST_TYPE = [ "STD", "BW", "RANDOM"]                     # "BW", "JI", "PL", "RANDOM", "STD"
+simTime = [40.0]
+TEST_TYPE = [ "STD"]                     # "BW", "JI", "PL", "RANDOM", "STD"
 k_queue = 10000
 mean_length_BG = 12000.0
 rate_bps_src_BG = [10e6, 20e6, 40e6]
 distance_list = [1.5]
 distance_close_users = [1.5]
 num_close_users = [0]
-N_XR = [1, 2, 3]
-PL = [0.0001, 0.01, 0.1, 0.15]
+N_XR = [1, 2, ]
+PL = [0.0001, 0.01, 0.1]
 fps_list = [60.0, 90.0, 120.0 ]
 initial_bitrate_mbps = [10.0, 20.0, 40.0]
 ABR_ENABLED = [3]
 nest_profiles = [1]
-RANDOM_SEEDS = list(range(1, 80))
+RANDOM_SEEDS = list(range(1, 10))
 video_samples = ["snow"]
 N_BGs = [0]
 IS_UL_BG = [0]
@@ -108,7 +108,7 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
     # fut_rl = pool.submit(train_agent_single, action_ep, step_ep)
     # fut_rl = pool.submit(train_sac_single, action_ep, step_ep)
 
-    time.sleep(15.0) ## TODO: WAIT UNTIL TRAINER IS READY (TempFile)
+    time.sleep(10.0) ## TODO: WAIT UNTIL TRAINER IS READY (TempFile)
 
     # ---- Start RL thread (same endpoints for all episodes) ----
     print(f"RL loop started on:\n\t{action_ep},\n\t{step_ep}")
@@ -334,8 +334,11 @@ class DreamerZmqEnv(gym.Env):
 
     def step(self, action):
         action_idx = int(np.argmax(action['action']))
+
         bitrate_mbps = self.bitrate_ladder[action_idx]
-        
+        print(f'[DBG env] action_idx: {action_idx}, Br: {bitrate_mbps}')
+
+
         if self.pending_obs_info is None:
             raise RuntimeError("step() called before reset()")
         
@@ -343,7 +346,8 @@ class DreamerZmqEnv(gym.Env):
         self.pending_obs_info = None
         
         action_response = {"bitrate_mbps": float(bitrate_mbps)}
-        
+        print(f'[DBG env] action_response: {action_response}')
+
         try:
             msg = [identity, b'', json.dumps(action_response).encode('utf-8')]
             self.action_socket.send_multipart(msg)
@@ -518,7 +522,6 @@ def make_custom_env_fn(config, mode='train', id=0):
     base_env = _ENV_CACHE[singleton_key]
     return IdWrapper(base_env, id)
 
-
 def train_dreamer_main(action_ep, step_ep):
     """
     This is the main "target" function for your multiprocessing.Process.
@@ -532,8 +535,23 @@ def train_dreamer_main(action_ep, step_ep):
     print(f"\tAction EP: {action_ep}")
     print(f"\tStep EP:   {step_ep}")
 
-    # --- 1. Change CWD to the dreamer repo ---
+    # --- 1. Get paths BEFORE changing directory ---
     original_cwd = os.getcwd()
+    
+    # Assume custom_env.yaml is in the directory you ran the script from
+    custom_config_path = os.path.join(original_cwd, "torch_dreamer/dreamerv3-torch/custom_env.yaml")
+    
+    if not os.path.exists(custom_config_path):
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"!! ❌ ERROR: Cannot find custom_env.yaml at:       !!")
+        print(f"!! {custom_config_path}")
+        print(f"!! Learner process is exiting.                    !!")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        return  # Exit the process
+
+    print(f"Found custom config at: {custom_config_path}")
+    # --- END FIX ---
+
     os.chdir(DREAMER_REPO_PATH)
     
     # Import AFTER changing directory
@@ -541,9 +559,7 @@ def train_dreamer_main(action_ep, step_ep):
     from dreamer import main as dreamer_train_main_fn
     import dreamer as dreamer_module
     
-    # --- NEW: Import wandb in this new process ---
-    import wandb
-    # wandb.login()
+    
     print(f"Changed CWD to: {DREAMER_REPO_PATH}")
 
     # --- 2. Monkey-patch make_env in the dreamer module ---
@@ -554,79 +570,42 @@ def train_dreamer_main(action_ep, step_ep):
     try:
         # --- 3. Load configs (CORRECTED) ---
         print("Loading base config (configs.yaml)...")
-        # OmegaConf.load() automatically merges the 'defaults' section
-        # So 'config' is the fully resolved base configuration.
-
-        # In train_dreamer_main:
-        config = OmegaConf.load("configs.yaml").defaults
-        print("✅ Loaded base config and resolved defaults.")
         
-        print("Loading custom_env.yaml...")
-        custom_config = OmegaConf.load("custom_env.yaml")
+        config = OmegaConf.load("configs.yaml").defaults # Loads from new CWD
+        print("✅ Loaded and resolved base config.")
         
-        # Merge the custom env settings on top of the *entire* base config
+        print(f"Loading custom config from: {custom_config_path}")
+        custom_config = OmegaConf.load(custom_config_path) 
+        
+        # Merge the custom env settings on top of the base config
         if "custom_env" in custom_config:
             final_config = OmegaConf.merge(config, custom_config.custom_env)
-            print("✅ Merged custom_env configuration")
+            print("✅ Merged 'custom_env' section from custom_env.yaml")
         else:
             final_config = OmegaConf.merge(config, custom_config)
+            print("✅ Merged entire custom_env.yaml as overrides")
         
-        # Set logdir if None
-        if final_config.logdir is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            final_config.logdir = f"~/dreamer_logs/xr_bitrate_{timestamp}"
-            print(f"⚠️  logdir was None, set to: {final_config.logdir}")
-        
-        
+
         
         final_config.log_video = False
         final_config.video_pred_log = 0
-        # --- 4. START WANDB CONFIGURATION (CORRECTED PATHS) ---
-        print("Configuring W&B Logger...")
+        final_config.deterministic_run = False
+        final_config.logger = 'tensorboard'
+        final_config.metrics_all = True
 
-        # --- NEW: Check if 'logger' key exists, and if not, create the structure ---
-        if 'logger' not in final_config:
-            # Create the necessary dictionary structure for wandb settings
-            final_config.logger = OmegaConf.create({'wandb': {}})
-            print("⚠️ Created missing 'logger' and 'wandb' structure.")
-        elif 'wandb' not in final_config.logger:
-            # Create the necessary dictionary structure for wandb settings
-            final_config.logger.wandb = OmegaConf.create({})
-            print("⚠️ Created missing 'wandb' structure under 'logger'.")
+        print("✅ Forcing online training mode by setting offline_traindir = None")
+        final_config.offline_traindir = None
         
         
-        # --- Set your W&B project details FIRST ---
-        # These lines will now work because the structure is guaranteed to exist.
-        
-        # The project to log to
-        final_config.logger.wandb.project = 'dreamerv3_xr_abr'
-        
-        # A group name for this entire run (all combos)
-        final_config.logger.wandb.group = f'run_{os.getpid()}' 
-        
-        # A unique name for this specific learner process
-        final_config.logger.wandb.name = f'dreamer_learner_{os.getpid()}'
-        
-        # (Optional) Add tags
-        final_config.logger.wandb.tags = ['dreamerv3', 'xr_abr', 'zmq_env']
-
-        print(f"Logging to W&B project: {final_config.logger.wandb.project}")
-        
-        # This tells DreamerV3 to use the 'wandb' logger
-        # SET THIS LAST after customizing the logger structure
-        # final_config.logger = 'wandb'
-        # --- END WANDB CONFIGURATION ---
-        
-        
-        print(f"Final config - Task: {final_config.task}, Steps: {final_config.steps}, Seed: {final_config.seed}")
+        print(f"Final config - Logger: {final_config.logger}, Project: {final_config.wandb.project}")
         print(f"Logs will be saved to: {final_config.logdir}")
         
         # --- 5. Start training ---
         print("Starting DreamerV3 training loop...")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
-            dreamer_train_main_fn(final_config)  # Note: renamed to avoid name collision
-    
+            dreamer_train_main_fn(final_config)
+            
     except Exception as e:
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         print("!!!!!!!!!!! ERROR IN DREAMER LEARNER PROCESS !!!!!!!!!!!")
@@ -680,5 +659,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: (print("\n[CTRL-C] stopping…"), cleanup_rust_processes(), exit(0)))
     signal.signal(signal.SIGTERM, lambda sig, frame: (print("\n[SIGTERM] stopping…"), cleanup_rust_processes(), exit(0)))    
     
-    wandb.login()
+    # wandb.login()
     main()

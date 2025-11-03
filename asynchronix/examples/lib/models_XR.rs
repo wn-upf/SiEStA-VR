@@ -1740,56 +1740,65 @@ struct DataPoint {
     fl_report: usize,
     sl_report: usize,
 }
+
 #[derive(Clone)]
 pub struct TimedVecFLR {
-    // 2. Use one VecDeque holding tuples of (time, DataPoint)
     vec_data: VecDeque<(f32, DataPoint)>,
     period: f32,
+    // Add these two fields for the cached sum
+    current_flr_sum: usize,
+    current_sl_sum: usize,
 }
+
 impl TimedVecFLR {
     pub fn new(period: f32) -> Self {
         Self {
             vec_data: VecDeque::new(),
             period,
+            // Initialize sums to zero
+            current_flr_sum: 0,
+            current_sl_sum: 0,
         }
     }
 
     pub fn push_new(&mut self, fl_report: usize, sl_report: usize, time_f32: f32) {
-        // Insert new values
         let data = DataPoint { fl_report, sl_report };
         self.vec_data.push_back((time_f32, data));
 
-        // Prune old values outside the time window
+        // Increment the running totals
+        self.current_flr_sum += fl_report;
+        self.current_sl_sum += sl_report;
+
         let cutoff = time_f32 - self.period;
         self.prune_old(cutoff);
     }
 
-    // 3. Prune function is now simpler (only one loop)
     fn prune_old(&mut self, cutoff: f32) {
-        while let Some(&(t, _)) = self.vec_data.front() {
+        // While items are being removed, decrement the running totals
+        while let Some(&(t, ref data)) = self.vec_data.front() {
             if t < cutoff {
-                self.vec_data.pop_front();
+                // We need to pop and get the value to subtract it
+                if let Some((_, popped_data)) = self.vec_data.pop_front() {
+                    self.current_flr_sum -= popped_data.fl_report;
+                    self.current_sl_sum -= popped_data.sl_report;
+                }
             } else {
                 break;
             }
         }
     }
 
-    // 4. Sum functions iterate over the single VecDeque and pick the field
+    // The sum functions are now O(1) reads (after the amortized prune)
     pub fn sum_flr(&mut self, time_f32: f32) -> usize {
         let cutoff = time_f32 - self.period;
         self.prune_old(cutoff);
-        
-        // Sum the fl_report field from each DataPoint
-        self.vec_data.iter().map(|(_, data)| data.fl_report).sum()
+        self.current_flr_sum // Just return the cached value
     }
 
     pub fn sum_shard_loss(&mut self, time_f32: f32) -> usize {
         let cutoff: f32 = time_f32 - self.period;
         self.prune_old(cutoff);
-
-        // Sum the sl_report field from each DataPoint
-        self.vec_data.iter().map(|(_, data)| data.sl_report).sum()
+        self.current_sl_sum // Just return the cached value
     }
 }
 
@@ -2019,13 +2028,15 @@ impl BitrateManager {
         // let bitrate_ladder_mbps: Vec<u32> = (5..=100).step_by(5).collect();
 
         let max_mbps = MAX_MBPS_LADDER; 
-        let min_mbps = 10.0; 
+        let min_mbps = 5.0; 
 
         let (min_bps, max_bps) = ( min_mbps * 1e6, max_mbps * 1e6); 
         // let initial_bitrate_mbps = 50.0; 
 
         let bitrate_step_size_bps_nest = (max_bps - min_bps) / bitrate_step_count as f32;
 
+
+        // println!("BITRATE MODE IS: {}", abr_enabled); 
 
         let bitrate_mode = match abr_enabled{
             1 =>  {  // NeSt-VR
@@ -2096,10 +2107,13 @@ impl BitrateManager {
                 let action_ep  = std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
                 let reward_ep  = std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
 
-                let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) }; 
-                
+                // let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) }; 
+                let action_space = ActionSpace::Discrete;  
+
                 println!("[RUST] CONFIGURING RL on sockets | A: {action_ep}, R: {reward_ep}"); 
 
+
+                println!("Debug ladder: {:?}", ladder_mbps); 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     step_interval: Duration::from_secs_f32(t_update_abr as f32),
@@ -2705,6 +2719,9 @@ impl BitrateManager {
                         1 => self.normalized_reward_fn(&current_obs), 
                         _ => self.rl_naive_reward_function(&current_obs), 
                     }; 
+
+
+
                     let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
                     let prev_idx_logged = *last_action_idx.lock().unwrap();
 
