@@ -48,8 +48,8 @@ use rand::{SeedableRng};
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
-const DEBUG_EDCA: bool = true; 
-pub const DEBUG_MLO: bool = true;
+const DEBUG_EDCA: bool =    false; 
+pub const DEBUG_MLO: bool = false;
 
 
 
@@ -168,7 +168,7 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
-pub const CSV_PER_PACKET: bool = false; 
+pub const CSV_PER_PACKET: bool = true; // To collect Queueing times, Service, queue state, collisions per-packet in QUEUE_STATS.csv
 
 pub const STEP1_TBEGIN: f64 = 10.0;
 pub const STEP1_TEND: f64 =   20.0;
@@ -2026,20 +2026,74 @@ pub struct LinkConfig {
 }
 
 // Helper function to initialize typical MLO setup
-pub fn create_mlo_config() -> Vec<LinkConfig> {
+pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
 
-    let a = vec![
-        LinkConfig {
-            link_id: 0,
-            frequency_ghz: 5.0,
-            bandwidth_mhz: 80,
+    let a = match config{
+        "MLO0" => {             // SLO 
+            vec![
+                LinkConfig {
+                    link_id: 0,
+                    frequency_ghz: 5.0,
+                    bandwidth_mhz: 80,
+                },
+            ]
+        }
+        "MLO1" => {           // MLO 80_80 MHz channels 
+             vec![
+            LinkConfig {
+                link_id: 0,
+                frequency_ghz: 5.0,
+                bandwidth_mhz: 80,
+            },
+            LinkConfig {
+                link_id: 1,
+                frequency_ghz: 6.0,
+                bandwidth_mhz: 80,
+            },
+            ]
         },
-        LinkConfig {
-            link_id: 1,
-            frequency_ghz: 6.0,
-            bandwidth_mhz: 320,
+        "MLO2" => {           // MLO 80_160 MHz channels 
+             vec![
+            LinkConfig {
+                link_id: 0,
+                frequency_ghz: 5.0,
+                bandwidth_mhz: 80,
+            },
+            LinkConfig {
+                link_id: 1,
+                frequency_ghz: 6.0,
+                bandwidth_mhz: 160,
+            },
+            ]
         },
-    ]; 
+        "MLO3" => {           // MLO 80_320 MHz channels 
+             vec![
+            LinkConfig {
+                link_id: 0,
+                frequency_ghz: 5.0,
+                bandwidth_mhz: 80,
+            },
+            LinkConfig {
+                link_id: 1,
+                frequency_ghz: 6.0,
+                bandwidth_mhz: 320,
+            },
+            ]
+        },
+
+        _ => {
+
+            print_red!("WARNING WRONG MLO STRING ({config}) || DEFAULTING TO SLO!!",  ); 
+            vec![
+                LinkConfig {
+                    link_id: 0,
+                    frequency_ghz: 5.0,
+                    bandwidth_mhz: 80,
+                },
+            ]
+
+        }
+    }; 
     println!("Creating MLO Config!\n{:#?}", a); 
     a
 }
@@ -3070,15 +3124,15 @@ impl QueueModule {
                 let excess_count = packets.packet_count - self.ul_capacity_queue_device;
                 overflowing_flows.insert((*sta_src, *sta_dest), excess_count);
                 
-                print_red!(
-                    "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {}), dropping {}",
-                    format_elapsed!(now),
-                    sta_src,
-                    sta_dest,
-                    packets.packet_count,
-                    self.ul_capacity_queue_device,
-                    excess_count
-                );
+                // print_red!(
+                //     "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {}), dropping {}",
+                //     format_elapsed!(now),
+                //     sta_src,
+                //     sta_dest,
+                //     packets.packet_count,
+                //     self.ul_capacity_queue_device,
+                //     excess_count
+                // );
             }
         }
         let mut global_indices_to_drop = std::collections::HashSet::new();
@@ -3121,13 +3175,13 @@ impl QueueModule {
                         }
                     }
                     
-                    print_red!(
-                        "{} [UL PACKET DROPPED] Packet_ID: {}, SRC: {}, DST: {}",
-                        format_elapsed!(now),
-                        packet.packet_id,
-                        packet.sta_src_id,
-                        packet.sta_dest_id
-                    );
+                    // print_red!(
+                    //     "{} [UL PACKET DROPPED] Packet_ID: {}, SRC: {}, DST: {}",
+                    //     format_elapsed!(now),
+                    //     packet.packet_id,
+                    //     packet.sta_src_id,
+                    //     packet.sta_dest_id
+                    // );
 
                     return false; // Drop from queue
                 }

@@ -197,6 +197,7 @@ impl VRPair {
             t0,
             false,
             0.0,
+            0, 
         );
         let mut sta_client = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -208,6 +209,8 @@ impl VRPair {
             t0,
             false,
             0.0,
+            0, 
+
         );
 
         let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests, server_ip); 
@@ -351,11 +354,12 @@ pub struct SimParams {
     pub observation_type: usize, 
     pub reward_mode: usize,     // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
     pub t_update_abr: f32, 
-    pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel. 
+    pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel.
+    pub MLO_config: String,  
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
-    assert!(args.len() == 27, "unexpected number of args");
+    assert!(args.len() == 28, "unexpected number of args");
     SimParams {
         stoptime:               args[1].parse().unwrap(),
         mean_length_bg:         args[2].parse().unwrap(),
@@ -383,6 +387,7 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         reward_mode:            args[24].parse().unwrap(), 
         t_update_abr:           args[25].parse().unwrap(), 
         eval_string:            args[26].parse().unwrap(), 
+        MLO_config:             args[27].parse().unwrap(), 
     }
 }
 
@@ -420,6 +425,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         reward_mode, 
         t_update_abr, 
         eval_string, 
+        MLO_config, 
     } = params;
 
 
@@ -434,8 +440,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         "RANDOM" => (false,false, false, true), 
         _ => (false, false, false, false), // Default/STD case
     };
-
-
 
     // Use the test type from parameter as suffix directly
     let suffix = if ["BW", "JI", "PL", "STD", "RANDOM"].contains(&test_type.as_str()) {
@@ -452,11 +456,11 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         2 => {NestVrProfile::Anxious},
         _ => {NestVrProfile::Balanced}, //default to balanced 
     }; 
-
+                                  
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, 
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}__BGThr{:.2}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{MLO_config}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, 
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -482,13 +486,13 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         all_sta_ids.push( PREFIX_ID_DOWNLINK + j as i32);
         all_sta_ids.push( PREFIX_ID_UPLINK + j as i32);
     }
-        // 2) Gather all of the BG STA IDs
+    // 2) Gather all of the BG STA IDs
     for i in 0..n_bg {
         all_sta_ids.push( PREFIX_ID_BG + i as i32);
     }
 
 
-    let link_configs = crate::lib::models_mm1k::create_mlo_config(); 
+    let link_configs = crate::lib::models_mm1k::create_mlo_config(&MLO_config); 
 
     // Create and configure queue
     let mut queue = QueueModule::new(
@@ -518,14 +522,13 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         } else {
             // Background traffic - single link (legacy)
             StaCapabilities {
-                is_str_capable: false,
-                links: vec![0],  // Only link 0
+                is_str_capable: true,
+                links: vec![0, 1],  // BGs MLO capable. 
             }
         };
     
-    queue.sta_capabilities.insert(*sta_id, capabilities);
-}
-
+        queue.sta_capabilities.insert(*sta_id, capabilities);
+    }
 
     let mbox_queue = Mailbox::new();
     let _queue_address = mbox_queue.address();
@@ -546,16 +549,12 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         0 => ObservationConfig::Raw, 
         1 => ObservationConfig::ManualScaledV1,
         2 => ObservationConfig::RunningAvg, 
-
         _ => ObservationConfig::ManualScaledV1, 
     }; 
 
 
-
     for i in 0..n_close{ // to set up variable distance scenarios across users
-
         let first_vr_pair_distance: VRPair= VRPair::new(
-            
             i,
             t0,
             // mean_length_BG,
@@ -588,7 +587,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }    
 
  
-    // Create extra XR pairs
     for i in n_close..n_xr {
         // let emu_effects: &[lib::models_mm1k::NetworkPattern] = vr_pairs[0].emu_link.get_network_patterns(); 
 
@@ -640,12 +638,13 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             // rate_bps_in,
             mean_length_bg,
             sta_id,
-            2, // Default destination (AP)
+            -1, // Default destination (AP)
             coords,
             true,
             t0,
             true,
             rate_bps_bg_in, // Background traffic rate
+            is_ul_bg_traffic, 
         );
 
         let mbox_bg_sta = Mailbox::new();
@@ -687,21 +686,52 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             println!("connecting link id {} to corresponding sta", link_id); 
             output.connect(STA_extended::input_wireless, &vr.mbox_sta_server);
             output.connect(STA_extended::input_wireless, &vr.mbox_sta_client);
+        
+            for mbox_bg_sta in &bg_sta_mailboxes {
+                output.connect(STA_extended::input_wireless, mbox_bg_sta);
+                // println!("Connecting queue output of L_id to BG STA",  )
+            }
         }
     }
 
     // Connect background STAs to queue
-    for bg_sta in bg_sta_models.iter_mut() {
-        bg_sta
-            .output_network_port
-            .connect(QueueModule::input, &mbox_queue);
+    
+    
+    println!("Connecting background STAs...");
+    for (i, bg_sta) in bg_sta_models.iter_mut().enumerate() {
+        
+        if bg_sta.is_ul_bg == 1 {
+            // Connect to UL port
+            println!("  [BG STA {}] Connecting to QueueModule::input_UL (Uplink)", bg_sta.sta_id);
+            bg_sta
+                .output_network_port
+                .connect(QueueModule::input_UL, &mbox_queue);
 
+        } 
+        else if bg_sta.is_ul_bg == 0{
+            // Connect to DL port
+            println!("  [BG STA {}] Connecting to QueueModule::input (Downlink)", bg_sta.sta_id);
+            bg_sta
+                .output_network_port
+                .connect(QueueModule::input, &mbox_queue);
+        }
+        else if bg_sta.is_ul_bg == 2{
+            
+            println!("  [BG STA {}] Connecting to QueueModule::input (Downlink AND Uplink)", bg_sta.sta_id);
+            bg_sta.output_network_port.connect(QueueModule::input, &mbox_queue); 
+            bg_sta.output_network_port.connect(QueueModule::input_UL, &mbox_queue); 
+        }
+        else{
+            crate::print_red!("WRONG OPTION!! BG STA{} is UL: {}", i, bg_sta.is_ul_bg , ); 
+            continue
+        }
         queue.STA_coords_map.insert(
             bg_sta.sta_id as usize,
             bg_sta.sta_coordinates.clone(),
         );
+    }  
 
-    }
+
 
     // Build simulation
     let mut sim_builder = SimInit::new().add_model(queue, mbox_queue, "Queue");
@@ -777,8 +807,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 addr_client,
             ).unwrap();
 
-            // print_red!("Scheduling VSYNC at {}", start);
-
             if !has_scheduled_vsync{
                 scheduler.schedule_event(  // ALREADY SCHEDULED BY session_reboot at start/end, do not schedule twice!! 
                     Duration::from_secs_f64(start),
@@ -789,7 +817,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 has_scheduled_vsync = true; // SCHEDULE VSYNC ONCE AND ONLY ONCE PER CLIENT.
             }
          
-
             // ---- Look ahead to compute the reboot pause AFTER this session ----
             let pause_after = if let Some((next_start, _next_end)) = sessions.get(idx + 1) {
                 let gap = next_start - end;
@@ -858,29 +885,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
     // Run simulation
     simu.step_by(Duration::from_secs_f64(stoptime));
-
-    // let step_interval = Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL); 
-    // let mut t = Duration::ZERO; 
-    // while t < Duration::from_secs_f64(stoptime)
-    // {
-        
-
-    //     simu.step_by(step_interval);
-        
-    //     for pair in vr_pairs{
-    //         if let BitrateMode::ReinforcementLearner { connector, ..} = pair.xr_server.bitrate_manager.bitrate_mode{
-    //             let obs = pair.xr_server.bitrate_manager.build_rl_observation(simu.time()); 
-    //             let reward = pair.xr_server.bitrate_manager.rl_reward_function(&obs);
-
-    //             let done = t >= Duration::from_secs_f64(stoptime); 
-
-    //             connector.lock().unwrap().select_action(&obs); 
-    //         }
-    //     }
-        
-        
-    //     t += step_interval; 
-    // }
 
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();

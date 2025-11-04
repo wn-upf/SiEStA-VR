@@ -1740,8 +1740,8 @@ impl AmpduPacket {
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
             self.size, self.sta_src_id, self.sta_dest_id, self.total_length
         );
-         println!("AMPDU on LINK-{}: {} packets, {} bytes", 
-            self.link_id, self.mpdu_packets.len(), self.total_length);
+        //  println!("AMPDU on LINK-{}: {} packets, {} bytes", 
+        //     self.link_id, self.mpdu_packets.len(), self.total_length);
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms",

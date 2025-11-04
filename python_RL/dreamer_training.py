@@ -66,6 +66,7 @@ IS_UL_BG = [0]
 intrarefresh_choice = [1]
 GoP_sizes = [90]
 everest_tests = 1
+MLO_CONFIG = ["MLO0"]
 ##################################################################################################
 
 # Import your env and constants
@@ -123,14 +124,14 @@ def train_over_all_combos_iter(exe: Path, combos, num_passes: int = 10):
         for sim_count, combo in enumerate(combos, 1):
             (simtime, test, nbg, nxr, is_ul, bitrate, video_sample, FPS,
              close_users, close_distance, seed, distance, gop,
-             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob) = combo
+             intrarefresh, ABR, nest_profile, rate_bps_src_BG, pl_prob, MLOconfig) = combo
 
             argv = [
                 f"{simtime}", "12000.0", "10000", f"{distance}", f"{bitrate}",
                 f"{pl_prob}", f"{nxr}", f"{nbg}", f"{rate_bps_src_BG}", f"{is_ul}",
                 f"{test}", f"{video_sample}", f"{FPS}", f"{close_users}", f"{close_distance}",
                 f"{seed}", f"{gop}", f"{intrarefresh}", f"{ABR}", f"{nest_profile}",
-                "1", f"{sim_count}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}", f"dreamer", 
+                "1", f"{sim_count}", f"{observation_type}", f"{reward_mode}", f"{T_ABR}", f"dreamer", f"{MLOconfig}", 
             ]
 
             env_sim = os.environ.copy()
@@ -634,9 +635,8 @@ def main():
         simTime,TEST_TYPE, N_BGs, N_XR, IS_UL_BG, initial_bitrate_mbps,
         video_samples, fps_list, num_close_users, distance_close_users,
         RANDOM_SEEDS, distance_list, GoP_sizes, intrarefresh_choice,
-        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL, 
+        ABR_ENABLED, nest_profiles, rate_bps_src_BG, PL, MLO_CONFIG, 
     ))
-
     random.shuffle(combos)
     print(f"***********************************\n************NUMBER OF COMBOS: {len(combos)}   ***********")
     
