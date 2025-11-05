@@ -638,7 +638,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             // rate_bps_in,
             mean_length_bg,
             sta_id,
-            -1, // Default destination (AP)
+            1, // Default destination (AP)
             coords,
             true,
             t0,

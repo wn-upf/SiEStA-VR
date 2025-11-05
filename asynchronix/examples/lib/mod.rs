@@ -1115,6 +1115,7 @@ pub struct CsvData {
 
     v_collision: Vec<usize>, 
     v_T_collision: Vec<f64>, 
+    v_link_id: Vec<usize>, 
 }
 
 impl CsvData {
@@ -1132,6 +1133,7 @@ impl CsvData {
             v_ampdu_id: Vec::new(),  
             v_collision: Vec::new(), 
             v_T_collision: Vec::new(), 
+            v_link_id: Vec::new(), 
 
         }
     }
@@ -1156,7 +1158,7 @@ impl CsvType {
         let mut buf = BufWriter::new(file);
         // Write header if file is empty
         if buf.get_ref().metadata()?.len() == 0 {
-            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision")?;
+            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision,link_id")?;
             buf.flush()?;
         }
         Ok(Self {
@@ -1180,6 +1182,7 @@ impl CsvType {
         ampdu_id: u32,
         is_collision: bool,
         T_collision: f64, 
+        link_id: usize, 
     ) {
         let ts_str = format_timestamp!(now);
         {
@@ -1193,10 +1196,9 @@ impl CsvType {
             data.v_id_src.push(id_src);
             data.v_id_dest.push(id_dest);
             data.v_ampdu_id.push(ampdu_id);
-
-
             data.v_collision.push(is_collision as usize); 
             data.v_T_collision.push(T_collision); 
+            data.v_link_id.push(link_id); 
         }
 
         // Check if batch limit reached
@@ -1220,7 +1222,7 @@ impl CsvType {
         for i in 0..data.v_timestamp.len() {
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{}",
                 data.v_timestamp[i],
                 data.v_packet_id[i],
                 data.v_queue_size[i],
@@ -1231,7 +1233,8 @@ impl CsvType {
                 data.v_id_dest[i],
                 data.v_ampdu_id[i],
                 data.v_collision[i], 
-                data.v_T_collision[i]
+                data.v_T_collision[i], 
+                data.v_link_id[i],
             )?;
         }
         writer.flush()?;
@@ -1247,6 +1250,8 @@ impl CsvType {
         data.v_ampdu_id.clear();
         data.v_collision.clear();
         data.v_T_collision.clear();
+        data.v_link_id.clear();
+
         Ok(())
     }
 }
@@ -1676,6 +1681,11 @@ impl MpduPacket {
         }
     }
 
+    pub fn assign_link(&mut self, link_id: u8) {
+        assert!(self.assigned_link_id.is_none(), "Link already assigned");
+        self.assigned_link_id = Some(link_id);
+    }
+    
     pub fn print(&self, color: DebugColor) -> String {
         print_prettyyy!(
             color,

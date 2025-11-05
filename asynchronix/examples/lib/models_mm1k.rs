@@ -48,8 +48,8 @@ use rand::{SeedableRng};
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
-const DEBUG_EDCA: bool =    false; 
-pub const DEBUG_MLO: bool = false;
+const DEBUG_EDCA: bool =    true; 
+pub const DEBUG_MLO: bool = true;
 
 
 
@@ -1968,7 +1968,8 @@ pub struct QueueModule {
     // pub aux_packet_serviced: MpduPacket,
     pub aux_ampdu_serviced: AmpduPacket,
 
-    pub packet_being_served: bool,
+    // pub packet_being_served: bool,
+    pub link_is_transmitting: HashMap<u8, bool>, 
 
     pub blocked_packet_counter: usize,
     pub arrived_packet_counter: usize,
@@ -1994,13 +1995,11 @@ pub struct QueueModule {
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
-    
     pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization 
     pub PL_probability: f64,
 
     // pub queue_network_emulator: QueueMechanism,
     pub ul_capacity_queue_device: usize,
-
     pub ampdu_id: u32, 
 
     // pub shared_medium: Medium, 
@@ -2009,8 +2008,6 @@ pub struct QueueModule {
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
     pub link_queue_depths: HashMap<u8, usize>, // Required for optimization to stop iterating O(n) over queue
     pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
-
-
 
 }
 #[derive(Clone, Debug)]
@@ -2145,11 +2142,14 @@ impl QueueModule {
         let mut link_channel_widths = HashMap::new();
         let mut link_queue_depths = HashMap::new(); // <-- ADD THIS
         
+        let mut being_served = HashMap::new(); 
         
+
         for link_config in &link_configs {
             link_mediums.insert(link_config.link_id, Medium::default());
             link_channel_widths.insert(link_config.link_id, link_config.bandwidth_mhz as usize); 
             link_outputs.insert(link_config.link_id, Output::default()); 
+            being_served.insert(link_config.link_id, false); 
         }
 
         Self {
@@ -2159,7 +2159,7 @@ impl QueueModule {
             link_outputs,
             service_timer: Duration::ZERO,
             aux_ampdu_serviced: AmpduPacket::new(),
-            packet_being_served: false,
+            link_is_transmitting: being_served,
             blocked_packet_counter: 0,
             arrived_packet_counter: 0,
             queue_length_counter: 0,
@@ -2194,6 +2194,7 @@ impl QueueModule {
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
+
     #[inline]
     pub fn tick_backoff(&mut self, now: TaiTime<0>) -> HashMap<u8, Vec<MacKey>> {
         // Clear idle links
@@ -2352,23 +2353,23 @@ impl QueueModule {
         // Single-link device - trivial case
         if cap.links.len() == 1 {
             let link_id = cap.links[0];
-            log_link_selection!(
-                now,
-                "STA {} is single-link (LINK-{})",
-                sta_id,
-                link_id
-            );
+            // log_link_selection!(
+            //     now,
+            //     "STA {} is single-link (LINK-{})",
+            //     sta_id,
+            //     link_id
+            // );
             return Some(link_id);
         }
         
         // Multi-link device - apply selection strategy
-        log_link_selection!(
-            now,
-            "STA {} is MLO-capable: links={:?}, STR={}",
-            sta_id,
-            cap.links,
-            cap.is_str_capable
-        );
+        // log_link_selection!(
+        //     now,
+        //     "STA {} is MLO-capable: links={:?}, STR={}",
+        //     sta_id,
+        //     cap.links,
+        //     cap.is_str_capable
+        // );
         
         let selected = match MLO_LINK_SELECTION_STRATEGY {
             LinkSelectionStrategy::PrimaryFirst => {
@@ -2388,8 +2389,10 @@ impl QueueModule {
                 "✓ Selected LINK-{} for STA {} (strat: {:?})",
                 link_id,
                 sta_id,
-                MLO_LINK_SELECTION_STRATEGY
+                MLO_LINK_SELECTION_STRATEGY,
             );
+        pkt.print(DebugColor::Blue); 
+
         }
         
         selected
@@ -2432,41 +2435,41 @@ impl QueueModule {
                         link_b_id
                     };
                     
-                    // This log might be too noisy, but matches the style
-                    log_link_selection!(
-                        now,
-                        "Opportunistic: Both links idle, randomly chose LINK-{}",
-                        chosen_link
-                    );
+                    // // This log might be too noisy, but matches the style
+                    // log_link_selection!(
+                    //     now,
+                    //     "Opportunistic: Both links idle, randomly chose LINK-{}",
+                    //     chosen_link
+                    // );
                     Some(chosen_link)
                 },
                 (true, false) => {
                     // Only A is idle: Choose A.
-                    log_link_selection!(
-                        now,
-                        "Opportunistic: Link {} busy, selecting idle LINK-{}",
-                        link_b_id,
-                        link_a_id
-                    );
+                    // log_link_selection!(
+                    //     now,
+                    //     "Opportunistic: Link {} busy, selecting idle LINK-{}",
+                    //     link_b_id,
+                    //     link_a_id
+                    // );
                     Some(link_a_id)
                 },
                 (false, true) => {
                     // Only B is idle: Choose B.
-                    log_link_selection!(
-                        now,
-                        "Opportunistic: Link {} busy, selecting idle LINK-{}",
-                        link_a_id,
-                        link_b_id
-                    );
+                    // log_link_selection!(
+                    //     now,
+                    //     "Opportunistic: Link {} busy, selecting idle LINK-{}",
+                    //     link_a_id,
+                    //     link_b_id
+                    // );
                     Some(link_b_id)
                 },
                 (false, false) => {
                     // Both are busy: Choice doesn't matter. Fall back to A.
-                    log_link_selection!(
-                        now,
-                        "Opportunistic: Both links busy, defaulting to LINK-{}",
-                        link_a_id
-                    );
+                    // log_link_selection!(
+                    //     now,
+                    //     "Opportunistic: Both links busy, defaulting to LINK-{}",
+                    //     link_a_id
+                    // );
                     Some(link_a_id)
                 }
             }
@@ -2624,7 +2627,7 @@ impl QueueModule {
                 );
                 
                 // Cache the selected link in packet metadata
-                pkt.assigned_link_id = Some(link_id);
+                pkt.assign_link(link_id);
                 
                 // Create MacKey with link_id
                 pkt.mac_key_cached = Some(if is_ul {
@@ -2641,7 +2644,7 @@ impl QueueModule {
                     
                     // Trigger scheduling if medium is idle
                     
-                    if self.queue.len() == 1 && !self.packet_being_served {
+                    if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {
                         // We schedule it one slot time in the future.
                         // This prevents the immediate call bug and starts the
                         // 9µs timer loop correctly.
@@ -2691,7 +2694,7 @@ impl QueueModule {
         
         match selected_link {
             Some(link_id) => {
-                packet.assigned_link_id = Some(link_id);
+                packet.assign_link(link_id);
                 packet.mac_key_cached = Some(if is_ul {
                     (packet.sta_src_id, packet.edca_ac, link_id)
                 } else {
@@ -2716,8 +2719,7 @@ impl QueueModule {
                         self.queue.len()
                     );
 
-
-                    if self.queue.len() == 1 && !self.packet_being_served {
+                    if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {                        
                         context.scheduler
                             .schedule_event(
                                 Duration::from_secs_f64(SLOT), // SLOT = 9e-6
@@ -2784,7 +2786,7 @@ impl QueueModule {
         // AMPDU_sent.print();
         self.ampdu_id += 1; // increment the AMPDU counter for logging. 
 
-        self.packet_being_served = false;
+        self.link_is_transmitting.insert(link_id, false);
 
         let mac_key = AMPDU_sent.mac_key;   
         
@@ -2814,7 +2816,8 @@ impl QueueModule {
                 for u in drained { // CSV write outside the lock
                     self.csv_metrics.update_stats(
                         u.now, u.packet_id as usize, u.queue_length_when_out, u.T_s, u.T_q,
-                        u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision, u.collision_backoff
+                        u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision,
+                         u.collision_backoff, u.link_id as usize,  
                     );
                 }
             }
@@ -3088,7 +3091,7 @@ impl QueueModule {
             self.aux_ampdu_serviced.print();
         }
 
-        self.packet_being_served = true;
+        self.link_is_transmitting.insert(link_id, true);
         let ampdu_to_send =
             std::mem::replace(&mut self.aux_ampdu_serviced, AmpduPacket::new());
 
@@ -3220,25 +3223,41 @@ impl QueueModule {
                 if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                     medium.occupy_collision(now + T_col_dur);
                 }
-                
-                // Apply backoff to all contenders on this link
-                for key in contenders {
-                    if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
-                        st.on_failure();
-                    }
-                }
-                
-                // Freeze all MACs on this link
                 if let Ok(mut map) = self.array_dcf_values.lock() {
-                    for ((_, _, lid), st) in map.iter_mut() {
-                        if *lid == link_id {
-                            st.backoff_frozen = true;
-                            st.medium_free_since = now + T_col_dur;
+                        // Apply backoff to all contenders on this link
+                    for key in contenders {
+                        if let Some(st) = map.get_mut(&key) {
+                            let old_cw = st.cw;
+                            st.on_failure();
+                            debug_edca!(
+                                "  ↳ ({}, {:?}, L-{}): CW {} → {}, backoff={}",
+                                key.0, key.1, key.2,
+                                old_cw,
+                                st.cw,
+                                st.backoff_counter
+                            );
                         }
                     }
+                    
+                    // Freeze all MACs on this link
+                        for ((_, _, lid), st) in map.iter_mut() {
+                            if *lid == link_id {
+                                st.backoff_frozen = true;
+                                st.medium_free_since = now + T_col_dur;
+                            }
+                        }
                 }
                 
                 // transmissions_scheduled = true;
+
+                // CRITICAL FIX: Schedule wake-up after collision resolves
+                context.scheduler
+                    .schedule_event(T_col_dur, Self::deque_schedule_service, ())
+                    .unwrap();
+                
+                // Mark that we scheduled something
+                transmissions_scheduled = true;
+
                 continue;
             }
             
@@ -3312,27 +3331,56 @@ impl QueueModule {
         if !transmissions_scheduled {
             let mut need_next_slot = false;
             
+            // Check if ANY MAC has work to do (including frozen MACs)
             if let Ok(map) = self.array_dcf_values.lock() {
                 for (key, st) in map.iter() {
-                    if ac_needs_tick(key, st, &self.queue, now, &self.sta_capabilities) {
+                    // Has packets for this flow?
+                    let (sta_id, ac, link_id) = *key;
+                    let has_packets = self.queue.iter().any(|p| {
+                        let p_sta = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
+                        p_sta == sta_id && p.edca_ac == ac && p.assigned_link_id == Some(link_id)
+                    });
+                    
+                    if !has_packets {
+                        continue;
+                    }
+                    
+                    // Frozen MAC will unfreeze in the future
+                    if st.backoff_frozen {
+                        need_next_slot = true;
+                        break;
+                    }
+                    
+                    // MAC has non-zero backoff
+                    if st.backoff_counter > 0 {
                         need_next_slot = true;
                         break;
                     }
                 }
             }
-            if !self.queue.is_empty() {
-                // If there are *any* packets in the queue, we *must* schedule a 
-                // tick to eventually service them.
-                need_next_slot = true;
-
-            }
+            
             if need_next_slot {
                 context.scheduler
                     .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
                     .unwrap();
             }
         }
+
+        if self.queue.is_empty() {
+            debug_edca!("{} [SCHEDULER] Queue empty, stopping", format_elapsed!(now));
+        } else if !transmissions_scheduled {
+            debug_edca!(
+                "{} [SCHEDULER] ⚠️ Exiting without scheduling next tick | Q_size={}",
+                format_elapsed!(now),
+                self.queue.len()
+            );
+        }
+
+
     }
+
+  
+
 }   
 
 
