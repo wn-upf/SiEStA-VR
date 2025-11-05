@@ -153,9 +153,9 @@ impl VRPair {
         let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
         let client_id = PREFIX_ID_UPLINK + pair_index as i32;
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
-        let client_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
+        let client_ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let server_coords = Coords::with_coords(AP_X, AP_Y, 0.0);
+        let server_coords: Coords = Coords::with_coords(AP_X, AP_Y, 0.0);
         let mut client_coords = Coords::with_coords(distance, 0.0, 0.0);
         if !test_distances_everest_bool{
         }
@@ -477,7 +477,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let mut emu_addresses = Vec::new();     
 
     let mut all_sta_ids = Vec::new();
-   
+    
+
+    assert!( n_close <= 49 && n_xr <= 49 && n_bg <=49, "CAN'T USE MORE THAN 50 STAs PER CATEGORY (or things break)" ); 
     for i in 0..n_close {
         all_sta_ids.push( PREFIX_ID_DOWNLINK + i as i32);
         all_sta_ids.push( PREFIX_ID_UPLINK + i as i32);
@@ -488,7 +490,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
     // 2) Gather all of the BG STA IDs
     for i in 0..n_bg {
-        all_sta_ids.push( PREFIX_ID_BG + i as i32);
+        all_sta_ids.push( PREFIX_ID_DOWNLINK + 50 + i as i32); // assume maximum of 50 BG STAs, hard limit of simulator. 
+        all_sta_ids.push( PREFIX_ID_UPLINK   + 50 + i as i32); // assume maximum of 50 BG STAs, hard limit of simulator.  
     }
 
 
@@ -626,13 +629,17 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
 
     // Create background STAs   TODO: SEPARATE UL/DL TRAFFIC for BG STAs!!!!
-    for i in 0..n_bg {
-        let sta_id = 300 + i as i32;
+    for i in 0..n_bg {        
+
         let coords = Coords {
             x: distance,
             y: 0.0,
             z: 0.0,
         };
+        // let sta_id_dl = PREFIX_ID_DOWNLINK + 50 + i as i32;
+        // let sta_id_ul = PREFIX_ID_UPLINK + 50 + i as i32; 
+
+        let sta_id = 300 + i as i32;
 
         let bg_sta = STA_extended::new(
             // rate_bps_in,
@@ -650,7 +657,19 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         let mbox_bg_sta = Mailbox::new();
         bg_sta_addresses.push(mbox_bg_sta.address());
         bg_sta_mailboxes.push(mbox_bg_sta);
-        bg_sta_models.push(bg_sta);
+        
+        // TODO: REVISIT
+        // let ap_coords: Coords = Coords::with_coords(AP_X, AP_Y, 0.0);
+        // queue.STA_coords_map.insert(
+        //     sta_id_dl as usize,
+        //     ap_coords,
+        // );
+        // queue.STA_coords_map.insert(
+        //     sta_id_ul as usize,
+        //     bg_sta.sta_coordinates.clone(),
+        // );
+
+        // bg_sta_models.push(bg_sta);
         // all_sta_ids.push(sta_id);
     }
     

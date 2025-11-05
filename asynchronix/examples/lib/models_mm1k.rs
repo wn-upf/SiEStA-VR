@@ -48,7 +48,7 @@ use rand::{SeedableRng};
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
-const DEBUG_EDCA: bool =    true; 
+const DEBUG_EDCA: bool =    false; 
 pub const DEBUG_MLO: bool = true;
 
 
@@ -68,6 +68,16 @@ macro_rules! debug_edca {
         if DEBUG_EDCA {
             let msg = format!($fmt, $($arg)*);
              println!("{}", DebugColor::Blue.to_background_fn()(msg));
+        }
+
+    };
+}
+#[macro_export]
+macro_rules! debug_edca_r {
+    ($fmt:expr, $($arg:tt)*) => {
+        if DEBUG_EDCA {
+            let msg = format!($fmt, $($arg)*);
+             println!("{}", DebugColor::Red.to_background_fn()(msg));
         }
 
     };
@@ -2238,7 +2248,14 @@ impl QueueModule {
             // Get medium state for this link
             let medium = self.link_mediums.get(&link_id).unwrap();
             let idle_slot = medium.is_idle(now);
-
+            if !idle_slot {
+                debug_edca!(
+                    "{} [MEDIUM] L-{} BUSY until {}",
+                    format_elapsed!(now),
+                    link_id,
+                    format_elapsed!(medium.busy_until)  // You'll need to expose this
+                );
+            }
             // AIFS gating
             let aifs_until = st.medium_free_since + aifs(st.param);
             let aifs_satisfied = idle_slot && aifs_until <= now;
@@ -3225,12 +3242,12 @@ impl QueueModule {
                 }
                 if let Ok(mut map) = self.array_dcf_values.lock() {
                         // Apply backoff to all contenders on this link
-                    for key in contenders {
+                    for key in contenders.clone() {
                         if let Some(st) = map.get_mut(&key) {
                             let old_cw = st.cw;
                             st.on_failure();
-                            debug_edca!(
-                                "  ↳ ({}, {:?}, L-{}): CW {} → {}, backoff={}",
+                            debug_edca_r!(
+                                " \t\t ↳ ({}, {:?}, L-{}): CW {} → {}, backoff={}",
                                 key.0, key.1, key.2,
                                 old_cw,
                                 st.cw,
@@ -3238,7 +3255,14 @@ impl QueueModule {
                             );
                         }
                     }
-                    
+                    debug_edca_r!(
+                            "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
+                            format_elapsed!(now),
+                            link_id,
+                            contenders.len(),
+                            T_col * 1000.0
+                        );
+                                            
                     // Freeze all MACs on this link
                         for ((_, _, lid), st) in map.iter_mut() {
                             if *lid == link_id {
@@ -3248,8 +3272,6 @@ impl QueueModule {
                         }
                 }
                 
-                // transmissions_scheduled = true;
-
                 // CRITICAL FIX: Schedule wake-up after collision resolves
                 context.scheduler
                     .schedule_event(T_col_dur, Self::deque_schedule_service, ())
@@ -3300,6 +3322,12 @@ impl QueueModule {
                 if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key) {
                     st.on_failure(); // Increase CW and redraw backoff
                 }
+                // schedule next tick to allow backoff countdown (no deadlock)
+                context.scheduler
+                    .schedule_event(Duration::from_secs_f64(SLOT), Self::deque_schedule_service, ())
+                    .unwrap();
+
+                transmissions_scheduled = true; // Prevent duplicate scheduling
                 
                 continue;
             }
@@ -3365,18 +3393,6 @@ impl QueueModule {
                     .unwrap();
             }
         }
-
-        if self.queue.is_empty() {
-            debug_edca!("{} [SCHEDULER] Queue empty, stopping", format_elapsed!(now));
-        } else if !transmissions_scheduled {
-            debug_edca!(
-                "{} [SCHEDULER] ⚠️ Exiting without scheduling next tick | Q_size={}",
-                format_elapsed!(now),
-                self.queue.len()
-            );
-        }
-
-
     }
 
   
