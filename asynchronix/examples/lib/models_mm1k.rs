@@ -22,6 +22,12 @@ use tai_time::TaiTime;
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
 
+pub const ROOM_W: f64 = 24.0;
+pub const ROOM_H: f64 = 12.0;
+
+/// Access Point at room center (if you need the coords elsewhere)
+pub const AP_X: f64 = ROOM_W / 2.0;
+pub const AP_Y: f64 = ROOM_H / 2.0;
 // use crate::db_debug_bgprint;
 
 use crate::lib::{
@@ -278,9 +284,9 @@ impl STA_source {
     ) -> Self {
         let arrival_rate = arrival_rate_bps / mean_length;
         let effective_mu = rate_service_bps / mean_length;
-        println!("\n*************************************************");
-        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t Arrival_rate (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
-                            src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
+        // println!("\n*************************************************");
+        // println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | RATE_IN: {:.3} Mbps, Rate_service: {:.3} (packs/s),\n\t Arrival_rate (pack/s): {:.3}, Departure_rate: {:.3},  L = {}",
+        //                     src, coordinates, dest,                     arrival_rate_bps/1E6, rate_service_bps / 1E6 , arrival_rate,effective_mu ,mean_length);
 
         Self {
             output_port: Default::default(),
@@ -2176,7 +2182,7 @@ impl QueueModule {
             service_rate: 0.0,
             t0_time: Instant::now(),
             csv_metrics: CsvType::new(&folder_dir).expect("?? CSVTYPE"),
-            coords_queue: Coords::new(),
+            coords_queue: Coords::with_coords(AP_X, AP_Y, 0.0),  // To test.
             p_tx: P_TX,
             STA_coords_grid: Vec::new(),
             STA_coords_map: HashMap::new(),
@@ -2631,70 +2637,79 @@ impl QueueModule {
         // Select best link for this packet
         let selected_link: Option<u8> = self.select_link_for_packet(&pkt, now);
         
-        match selected_link {
-            Some(link_id) => {
-                log_mlo!(
-                    now,
-                    "Packet {} (STA {} → {}) assigned to LINK-{}: Q_size={}",
-                    pkt.packet_id,
-                    pkt.sta_src_id,
-                    pkt.sta_dest_id,
-                    link_id, 
-                    self.queue.len(), 
-                );
-                
-                // Cache the selected link in packet metadata
-                pkt.assign_link(link_id);
-                
-                // Create MacKey with link_id
-                pkt.mac_key_cached = Some(if is_ul {
-                    (pkt.sta_src_id, pkt.edca_ac, link_id)
-                } else {
-                    (-1, pkt.edca_ac, link_id)
-                });
-                
-                if self.queue.len() < self.queue_maxsize {
-                    self.cache_input_packet(pkt.clone(), link_id).await;
-                    self.queue.push(pkt);
+        
+        
+        if !is_ul{ // Extra guard to prevent wrong routing. 
+            match selected_link {
+                Some(link_id) => {
+                    log_mlo!(
+                        now,
+                        "📥 DL Packet {} (STA {} → {}) assigned to LINK-{}: Q_size={}",
+                        pkt.packet_id,
+                        pkt.sta_src_id,
+                        pkt.sta_dest_id,
+                        link_id, 
+                        self.queue.len(), 
+                    );
+                    
+                    // Cache the selected link in packet metadata
+                    pkt.assign_link(link_id);
+                    
+                    // Create MacKey with link_id
+                    pkt.mac_key_cached = Some(if is_ul {
+                        (pkt.sta_src_id, pkt.edca_ac, link_id)
+                    } else {
+                        (-1, pkt.edca_ac, link_id)
+                    });
+                    
+                    if self.queue.len() < self.queue_maxsize {
+                        self.cache_input_packet(pkt.clone(), link_id).await;
+                        self.queue.push(pkt);
 
-                    self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1); // add to lookup hashmap, per link 
-                    
-                    // Trigger scheduling if medium is idle
-                    
-                    if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {
-                        // We schedule it one slot time in the future.
-                        // This prevents the immediate call bug and starts the
-                        // 9µs timer loop correctly.
-                        ctx.scheduler
-                            .schedule_event(
-                                Duration::from_secs_f64(SLOT), // SLOT = 9e-6
-                                Self::deque_schedule_service, 
-                                ()
-                            )
-                            .unwrap();
+                        self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1); // add to lookup hashmap, per link 
+                        
+                        // Trigger scheduling if medium is idle
+                        
+                        if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {
+                            // We schedule it one slot time in the future.
+                            // This prevents the immediate call bug and starts the
+                            // 9µs timer loop correctly.
+                            ctx.scheduler
+                                .schedule_event(
+                                    Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                    Self::deque_schedule_service, 
+                                    ()
+                                )
+                                .unwrap();
+                        }
+                        
+                        // if !self.packet_being_served {
+                        //     if let Some(medium) = self.link_mediums.get(&link_id) {
+                        //         if medium.is_idle(now) {
+                        //             self.deque_schedule_service((), ctx).await;
+                        //         }
+                        //     }
+                        // }
+                    } else {
+                        self.blocked_packet_counter += 1;
+                        log_mlo!(now, "❌ QUEUE FULL - dropped packet {}", pkt.packet_id);
                     }
-                    
-                    // if !self.packet_being_served {
-                    //     if let Some(medium) = self.link_mediums.get(&link_id) {
-                    //         if medium.is_idle(now) {
-                    //             self.deque_schedule_service((), ctx).await;
-                    //         }
-                    //     }
-                    // }
-                } else {
+                }
+                None => {
                     self.blocked_packet_counter += 1;
-                    log_mlo!(now, "❌ QUEUE FULL - dropped packet {}", pkt.packet_id);
+                    log_mlo!(
+                        now,
+                        "❌ No available link for STA {} (not MLO-capable or all links busy)",
+                        pkt.sta_src_id
+                    );
                 }
             }
-            None => {
-                self.blocked_packet_counter += 1;
-                log_mlo!(
-                    now,
-                    "❌ No available link for STA {} (not MLO-capable or all links busy)",
-                    pkt.sta_src_id
-                );
-            }
+          }
+        else{ // guard against BG DL+UL traffic being sent to both inputs. 
+
+            // println!("[Input DL Discard] NOT DL (SRC: {} > DST: {} ) ", pkt.sta_src_id , pkt.sta_dest_id, ); 
         }
+
     }
 
     /// Uplink input function (from STAs)
@@ -2709,69 +2724,78 @@ impl QueueModule {
         // Select link for uplink packet
         let selected_link = self.select_link_for_packet(&packet, now);
         
-        match selected_link {
-            Some(link_id) => {
-                packet.assign_link(link_id);
-                packet.mac_key_cached = Some(if is_ul {
-                    (packet.sta_src_id, packet.edca_ac, link_id)
-                } else {
-                    (-1, packet.edca_ac, link_id)
-                });
-                
+    
+
+        if is_ul{
+            match selected_link {
+                Some(link_id) => {
+                    packet.assign_link(link_id);
+                    packet.mac_key_cached = Some(if is_ul {
+                        (packet.sta_src_id, packet.edca_ac, link_id)
+                    } else {
+                        (-1, packet.edca_ac, link_id)
+                    });
+                    
 
 
-                if self.queue.len() < self.queue_maxsize {
-                    packet.queue_in_instant = now;
-                    self.cache_input_packet(packet.clone(), link_id).await;
-                    self.queue.push(packet.clone());
-                    self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1);
+                    if self.queue.len() < self.queue_maxsize {
+                        packet.queue_in_instant = now;
+                        self.cache_input_packet(packet.clone(), link_id).await;
+                        self.queue.push(packet.clone());
+                        self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1);
 
-                    log_mlo!(
-                        now,
-                        "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
-                        packet.packet_id,
-                        packet.sta_src_id,
-                        packet.sta_dest_id,
-                        link_id,
-                        self.queue.len()
-                    );
+                        log_mlo!(
+                            now,
+                            "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
+                            packet.packet_id,
+                            packet.sta_src_id,
+                            packet.sta_dest_id,
+                            link_id,
+                            self.queue.len()
+                        );
 
-                    if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {                        
-                        context.scheduler
-                            .schedule_event(
-                                Duration::from_secs_f64(SLOT), // SLOT = 9e-6
-                                Self::deque_schedule_service, 
-                                ()
-                            )
-                            .unwrap();
+                        if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {                        
+                            context.scheduler
+                                .schedule_event(
+                                    Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                    Self::deque_schedule_service, 
+                                    ()
+                                )
+                                .unwrap();
+                        }
+
+                        // if self.queue.len() == 1 && !self.packet_being_served {
+                        //     if let Some(medium) = self.link_mediums.get(&link_id) {
+                        //         if medium.is_idle(now) {
+                        //             self.deque_schedule_service((), context).await;
+                        //         }
+                        //     }
+                        // }
+                    } else {
+                        self.blocked_packet_counter += 1;
+                        log_mlo!(
+                            now,
+                            "❌ UL Queue full - dropped packet {} from STA{}",
+                            packet.packet_id,
+                            packet.sta_src_id
+                        );
                     }
-
-                    // if self.queue.len() == 1 && !self.packet_being_served {
-                    //     if let Some(medium) = self.link_mediums.get(&link_id) {
-                    //         if medium.is_idle(now) {
-                    //             self.deque_schedule_service((), context).await;
-                    //         }
-                    //     }
-                    // }
-                } else {
+                }
+                None => {
                     self.blocked_packet_counter += 1;
                     log_mlo!(
                         now,
-                        "❌ UL Queue full - dropped packet {} from STA{}",
-                        packet.packet_id,
+                        "❌ No available link for UL packet from STA{}",
                         packet.sta_src_id
                     );
                 }
             }
-            None => {
-                self.blocked_packet_counter += 1;
-                log_mlo!(
-                    now,
-                    "❌ No available link for UL packet from STA{}",
-                    packet.sta_src_id
-                );
-            }
+            
         }
+        else{ // guard against BG DL+UL traffic being sent to both inputs. 
+            // println!("[Input UL Discard] NOT UL (SRC: {} !> DST: {} ) ", packet.sta_src_id , packet.sta_dest_id, ); 
+        }
+    
     }
 
     #[inline]
@@ -2849,7 +2873,6 @@ impl QueueModule {
     ) -> (AmpduPacket, Duration) {
         let mut success_indices: Vec<usize> = Vec::new();
         let (sta_src_id, sta_dest_id) = (first_packet.sta_src_id, first_packet.sta_dest_id);
-        
         // Get the link_id from the first packet
         let link_id = first_packet.assigned_link_id
             .expect("Packet must have assigned_link_id before building AMPDU");
@@ -2863,12 +2886,15 @@ impl QueueModule {
         self.aux_ampdu_serviced.link_id = link_id;  // Tag AMPDU with link
 
         let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id;
+
+        // println!("IS_UL = {} ( {} > {})", is_ul, first_packet.sta_src_id, first_packet.sta_dest_id); 
         
         let mac_key: MacKey = if is_ul {
             (first_packet.sta_src_id, first_packet.edca_ac, link_id)
         } else {
             (-1, first_packet.edca_ac, link_id)
         };
+
         self.aux_ampdu_serviced.mac_key = mac_key;
 
         let txop_us: f64 = self.array_dcf_values
@@ -2911,7 +2937,13 @@ impl QueueModule {
                 let new_size = self.aux_ampdu_serviced.size + 1;
 
                 // Calculate airtime for the new AMPDU size
+                // NOTE: we assume links are simmetrical, src and dest are mixed up for DL/UL, 
+                //       but we compute distance correctly and rest of parameters follow. 
+
                 if is_ul {
+
+                    println!("Computing UL AMPDU airtime: src: {:?}, dest: {:?}", self.coords_queue, current_packet.sta_src_coords.clone()); 
+
                     resultz = airtime_ampdu(
                         new_total_length as f64,
                         new_size,
@@ -2921,14 +2953,16 @@ impl QueueModule {
                         channel_width, 
                     );
                 } else {
-                    let dest_coords = self
+                    let dest_coords = self  
                         .STA_coords_map
                         .get(&(current_packet.sta_dest_id as usize))
                         .unwrap_or_else(|| {
                             panic!("no coordinates for STA {}", current_packet.sta_dest_id)
                         })
                         .clone();
-
+                    
+                        
+                    println!("Computing DL AMPDU airtime: src: {:?}, dest: {:?}", self.coords_queue, dest_coords); 
                     resultz = airtime_ampdu(
                         new_total_length as f64,
                         new_size,

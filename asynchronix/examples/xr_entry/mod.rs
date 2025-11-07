@@ -32,6 +32,7 @@ use crate::lib::{
     // AmpduPacket,
     Coords,
     DebugColor,
+    models_mm1k::{AP_X, AP_Y, ROOM_H, ROOM_W}, 
     //   MpduPacket, SlidingWindowAverage,
     // MAX_AMPDU_SIZE,
     // P_TX,
@@ -66,14 +67,12 @@ struct VRPair {
     mbox_emu_link:  Mailbox<EmulatedLink>, 
 }
 
+// const ROOM_W: f64 = 24.0;
+// const ROOM_H: f64 = 12.0;
 
-
-const ROOM_W: f64 = 24.0;
-const ROOM_H: f64 = 12.0;
-
-/// Access Point at room center (if you need the coords elsewhere)
-pub const AP_X: f64 = ROOM_W / 2.0;
-pub const AP_Y: f64 = ROOM_H / 2.0;
+// /// Access Point at room center (if you need the coords elsewhere)
+// pub const AP_X: f64 = ROOM_W / 2.0;
+// pub const AP_Y: f64 = ROOM_H / 2.0;
 
 /// Draw a uniform random starting point inside the room.
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
@@ -105,6 +104,7 @@ impl VRPair {
         obs_config: ObservationConfig, 
         reward_mode: usize, 
         t_update_abr: f32, 
+        ap_coords: Coords, 
 
     ) -> Self {
 
@@ -155,7 +155,8 @@ impl VRPair {
         let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
-        let server_coords: Coords = Coords::with_coords(AP_X, AP_Y, 0.0);
+        let server_coords: Coords = ap_coords.clone();
+
         let mut client_coords = Coords::with_coords(distance, 0.0, 0.0);
         if !test_distances_everest_bool{
         }
@@ -198,6 +199,7 @@ impl VRPair {
             false,
             0.0,
             0, 
+            ap_coords, 
         );
         let mut sta_client = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -210,6 +212,7 @@ impl VRPair {
             false,
             0.0,
             0, 
+            ap_coords, 
 
         );
 
@@ -466,7 +469,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let output_path = format!("Results/{}", name_folder);
     fs::create_dir_all(&output_path).expect("Failed to create directory");
 
+    
     let t0 = MonotonicTime::EPOCH;
+    let ap_coords: Coords = Coords::with_coords(AP_X, AP_Y, 0.0);
+
     let mut vr_pairs: Vec<VRPair> = Vec::new();
     let mut xr_client_addresses = Vec::new();
     let mut xr_server_addresses = Vec::new();
@@ -579,6 +585,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             obs_config, 
             reward_mode, 
             t_update_abr, 
+            ap_coords, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -615,6 +622,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             obs_config, 
             reward_mode, 
             t_update_abr, 
+            ap_coords, 
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -632,26 +640,28 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     for i in 0..n_bg {        
 
         let coords = Coords {
-            x: distance,
-            y: 0.0,
-            z: 0.0,
+            x: distance + AP_X,  // relative to AP location 
+            y: 0.0 + AP_Y,  // also relative to AP location
+            z: 0.0,         // unused
         };
-        // let sta_id_dl = PREFIX_ID_DOWNLINK + 50 + i as i32;
-        // let sta_id_ul = PREFIX_ID_UPLINK + 50 + i as i32; 
+        let sta_id_dl = PREFIX_ID_DOWNLINK + 50 + i as i32;
+        let sta_id_ul = PREFIX_ID_UPLINK + 50 + i as i32; 
 
-        let sta_id = 300 + i as i32;
+        // let sta_id = 300 + i as i32;
 
         let bg_sta = STA_extended::new(
             // rate_bps_in,
             mean_length_bg,
-            sta_id,
-            1, // Default destination (AP)
+            sta_id_dl,
+            sta_id_ul, // Default destination (AP)
             coords,
             true,
             t0,
             true,
             rate_bps_bg_in, // Background traffic rate
             is_ul_bg_traffic, 
+            ap_coords, 
+
         );
 
         let mbox_bg_sta = Mailbox::new();
@@ -659,20 +669,21 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         bg_sta_mailboxes.push(mbox_bg_sta);
         
         // TODO: REVISIT
-        // let ap_coords: Coords = Coords::with_coords(AP_X, AP_Y, 0.0);
-        // queue.STA_coords_map.insert(
-        //     sta_id_dl as usize,
-        //     ap_coords,
-        // );
-        // queue.STA_coords_map.insert(
-        //     sta_id_ul as usize,
-        //     bg_sta.sta_coordinates.clone(),
-        // );
+        queue.STA_coords_map.insert(
+            sta_id_dl as usize,
+            ap_coords,
+        );
 
-        // bg_sta_models.push(bg_sta);
-        // all_sta_ids.push(sta_id);
+        queue.STA_coords_map.insert(
+            sta_id_ul as usize,
+            bg_sta.sta_coordinates.clone(),
+        );
+        
+        bg_sta_models.push(bg_sta);
+        all_sta_ids.push(sta_id_dl);
+        all_sta_ids.push(sta_id_ul);
+
     }
-    
 
     // Connect all STAs to queue
     for vr in vr_pairs.iter_mut() {
@@ -739,6 +750,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             println!("  [BG STA {}] Connecting to QueueModule::input (Downlink AND Uplink)", bg_sta.sta_id);
             bg_sta.output_network_port.connect(QueueModule::input, &mbox_queue); 
             bg_sta.output_network_port.connect(QueueModule::input_UL, &mbox_queue); 
+
+
+            // because each DL or UL BG packet will go to both input_UL and input in this mode, we guard via is_ul each input, 
+            // so STA_IDs are VERY importantin DL/UL, but we have enough free IDs using the consts that it is OK with up to 50 STAs per category. 
         }
         else{
             crate::print_red!("WRONG OPTION!! BG STA{} is UL: {}", i, bg_sta.is_ul_bg , ); 

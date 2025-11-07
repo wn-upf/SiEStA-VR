@@ -6599,6 +6599,7 @@ pub struct STA_extended {
     pub t_0: TaiTime<0>,
     pub is_ul_bg: usize, // 3 modes: 0 -> DL only, 1 -> UL, 2 -> DL/UL 
     pub random_seed: StdRng, 
+    pub ap_coords: Coords, // used for BG DL traffic in TX
 }
 #[allow(unused)]
 impl STA_extended {
@@ -6613,6 +6614,7 @@ impl STA_extended {
         is_bg_sta: bool,
         arrival_rate_BG: f64,
         is_ul_bg: usize, 
+        ap_coords: Coords, 
     ) -> Self {
         let arrival_rate_BG_packets = arrival_rate_BG / mean_length_BG;
 
@@ -6638,6 +6640,7 @@ impl STA_extended {
             is_bg_sta,
             is_ul_bg, 
             random_seed,
+            ap_coords, 
         }
     }
 
@@ -6801,32 +6804,33 @@ impl STA_extended {
         async move {
                 // let mut rng = rand::thread_rng();
 
+
+            // let mut sta_coordinates = self.sta_coordinates; 
             if self.does_sta_tx && self.is_bg_sta {
                 // if STA is "TX type"         (and not "RX only")
-                let (packet_src, packet_dest) = match self.is_ul_bg {
+                let (packet_src, packet_dest, sta_coords) = match self.is_ul_bg {
                     0 => { 
                         // Mode 0: DL Only
                         // Packet comes FROM the AP (self.destination_id) TO this STA (self.sta_id)
-                        (self.destination_id, self.sta_id)
+                        (self.sta_id, self.destination_id,self.sta_coordinates)
                     },
                     1 => { 
-                        // Mode 1: UL Only
-                        // Packet comes FROM this STA (self.sta_id) TO the AP (self.destination_id)
-                        (self.sta_id, self.destination_id)
+                        // Mode 1: UL Only.  UL packets have src and dest flipped by the Queue when building AMPDUs. 
+                        // Packet comes FROM this STA (self.sta_id) TO the AP (self.destination_id).
+                        (  self.destination_id, self.sta_id,   self.sta_coordinates )
                     },
                     2 => { 
                         // Mode 2: Both (50/50 chance)
-
-                        
                         if self.random_seed.gen::<bool>()  { // 50/50 chance
                             // Send UL
                             // print_magenta!("Mode 2 -> UL: {} {}", self.destination_id, self.sta_id); 
 
-                            (self.sta_id, self.destination_id)
+                             ( self.destination_id, self.sta_id,  self.sta_coordinates )
+                            
                         } else {
                             // Send DL
                             // print_pink!("Mode 2 -> DL: {} {}", self.destination_id, self.sta_id); 
-                            (self.destination_id, self.sta_id)
+                            (self.sta_id, self.destination_id,self.sta_coordinates)
                         }
                     },
                     _ => { 
@@ -6854,20 +6858,24 @@ impl STA_extended {
 
                 packet.sta_src_id = packet_src;
                 packet.sta_dest_id = packet_dest;
+                packet.sta_src_coords = sta_coords;
+                // println!("src coords: {:?}", sta_coords); 
 
-                packet.sta_src_coords = self.sta_coordinates;
 
-                // print_dblue!(
-                //     // DebugColor::Blue,
-                //     "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
-                //     format_elapsed!(context.scheduler.time()),
-                //     self.sta_id,
-                //     packet.packet_id,
-                //     packet.sta_src_id, 
-                //     packet.sta_dest_id,
-                //     self.sta_coordinates,
-                //     packet.edca_ac, 
-                // );
+                // packet.sta_src_id = packet_src;
+                // packet.sta_dest_id = packet_dest;
+                // packet.sta_src_coords = self.sta_coordinates;
+
+                print_dblue!(
+                    "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
+                    format_elapsed!(context.scheduler.time()),
+                    self.sta_id,
+                    packet.packet_id,
+                    packet.sta_src_id, 
+                    packet.sta_dest_id,
+                    self.sta_coordinates,
+                    packet.edca_ac, 
+                );
 
                 // self.output_network_port.send(packet).await;
                 context

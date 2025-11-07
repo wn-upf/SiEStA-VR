@@ -39,6 +39,7 @@ use crate::lib::{
     // AmpduPacket,
     Coords,
     DebugColor,
+    models_mm1k::{AP_X, AP_Y, ROOM_W, ROOM_H}
     //   MpduPacket, SlidingWindowAverage,
     // MAX_AMPDU_SIZE,
     // P_TX,
@@ -55,12 +56,6 @@ use crate::lib::UPLINK_QUEUE_SIZE;
 pub const SIM_START_TIME: u64 = 1;
 
 
-const ROOM_W: f64 = 24.0;
-const ROOM_H: f64 = 12.0;
-
-/// Access Point at room center (if you need the coords elsewhere)
-pub const AP_X: f64 = ROOM_W / 2.0;
-pub const AP_Y: f64 = ROOM_H / 2.0;
 
 /// Draw a uniform random starting point inside the room.
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {

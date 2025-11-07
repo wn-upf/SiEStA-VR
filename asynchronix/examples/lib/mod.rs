@@ -2001,7 +2001,6 @@ pub fn airtime_ampdu(
         _ => 20.0, // default at 20 dBm 
     }; 
 
-
     let mut effPt: f64 = p_tx;
 
     let SU_spatial_streams = 2.0;
@@ -2022,10 +2021,10 @@ pub fn airtime_ampdu(
         coords_dest.y,
         coords_dest.z,
     );
-    // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance); 
+
+    print_pink!("coords_src: {:?}, coords_dest: {:?}, DISTANCE = {:.4} m", coords_src, coords_dest, distance); 
     let PL = path_loss(distance);
     let mut Pr = effPt - PL;
-
 
     // 3. Calculate the noise adjustment for wider channels.
     let noise_adjustment_db = match channel_width {
@@ -2037,7 +2036,6 @@ pub fn airtime_ampdu(
     };
 
     // 4. Normalize the Pr to its 20 MHz equivalent.
-    // (i.e., subtract the extra noise)
     Pr = Pr - noise_adjustment_db;
 
     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
@@ -2074,8 +2072,6 @@ pub fn airtime_ampdu(
 
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
 
-
-
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
 
     let L: f64 = total_bits_transmitted / n_mpdus as f64; // TODO: Check if it's correct to have a size as f32 (in reality not, but as avg model? )
@@ -2099,8 +2095,8 @@ pub fn airtime_ampdu(
     let rts_cts_overhead_time = T_RTS + SIFS + T_CTS + SIFS;
     let rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;
 
-    // print_dblue!("[AMPDU airtime = {:.3} ms] Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t|distance={:.3}, PathLoss = {:.3}, RTS/CTS Overhead: {:.1}|"
-    //              ,phy_time * 1000.0,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
+    print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
+                 ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
 
     
     phy_time
