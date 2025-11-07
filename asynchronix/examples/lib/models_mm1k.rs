@@ -2942,16 +2942,16 @@ impl QueueModule {
 
                 if is_ul {
 
-                    println!("Computing UL AMPDU airtime: src: {:?}, dest: {:?}", self.coords_queue, current_packet.sta_src_coords.clone()); 
-
                     resultz = airtime_ampdu(
                         new_total_length as f64,
                         new_size,
-                        self.coords_queue,
                         current_packet.sta_src_coords.clone(),
+                        self.coords_queue,
                         P_TX,
                         channel_width, 
                     );
+                    println!("Computing UL AMPDU airtime: src: {:?}, dest: {:?}", current_packet.sta_src_coords.clone(), self.coords_queue, ); 
+
                 } else {
                     let dest_coords = self  
                         .STA_coords_map
