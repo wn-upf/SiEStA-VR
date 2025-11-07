@@ -6849,8 +6849,8 @@ impl STA_extended {
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
-                // let len_random = exponential(self.mean_length_packets_BG as f64) as usize;
-                let len_random = self.mean_length_packets_BG as usize;
+                // let len_random = exponential(self.mean_length_packets_BG as f64) as usize; // RANDOM SIZE 
+                let len_random = self.mean_length_packets_BG as usize;                 // DETERMINISTIC SIZE
 
                 packet.length_packet = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
@@ -6861,21 +6861,16 @@ impl STA_extended {
                 packet.sta_src_coords = sta_coords;
                 // println!("src coords: {:?}", sta_coords); 
 
-
-                // packet.sta_src_id = packet_src;
-                // packet.sta_dest_id = packet_dest;
-                // packet.sta_src_coords = self.sta_coordinates;
-
-                print_dblue!(
-                    "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
-                    format_elapsed!(context.scheduler.time()),
-                    self.sta_id,
-                    packet.packet_id,
-                    packet.sta_src_id, 
-                    packet.sta_dest_id,
-                    self.sta_coordinates,
-                    packet.edca_ac, 
-                );
+                // print_dblue!(
+                //     "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
+                //     format_elapsed!(context.scheduler.time()),
+                //     self.sta_id,
+                //     packet.packet_id,
+                //     packet.sta_src_id, 
+                //     packet.sta_dest_id,
+                //     self.sta_coordinates,
+                //     packet.edca_ac, 
+                // );
 
                 // self.output_network_port.send(packet).await;
                 context

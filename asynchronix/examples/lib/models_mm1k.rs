@@ -55,9 +55,7 @@ pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
 const DEBUG_EDCA: bool =    false; 
-pub const DEBUG_MLO: bool = true;
-
-
+pub const DEBUG_MLO: bool = false;
 
 pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
 
@@ -2950,7 +2948,7 @@ impl QueueModule {
                         P_TX,
                         channel_width, 
                     );
-                    println!("Computing UL AMPDU airtime: src: {:?}, dest: {:?}", current_packet.sta_src_coords.clone(), self.coords_queue, ); 
+                    // println!("Computing UL AMPDU airtime: src: {:?}, dest: {:?}", current_packet.sta_src_coords.clone(), self.coords_queue, ); 
 
                 } else {
                     let dest_coords = self  
@@ -2962,7 +2960,7 @@ impl QueueModule {
                         .clone();
                     
                         
-                    println!("Computing DL AMPDU airtime: src: {:?}, dest: {:?}", self.coords_queue, dest_coords); 
+                    // println!("Computing DL AMPDU airtime: src: {:?}, dest: {:?}", self.coords_queue, dest_coords); 
                     resultz = airtime_ampdu(
                         new_total_length as f64,
                         new_size,
