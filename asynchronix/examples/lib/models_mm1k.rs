@@ -235,7 +235,7 @@ impl PoissonSource {
             time_interarrival = max(time_interarrival, Duration::from_secs_f64(1E-9));
 
             let len_random = exponential(self.mean_length_packets as f64, &mut self.rng_seed) as usize;
-            packet.length_packet = cmp::max(1, len_random);
+            packet.length_packet_bits = cmp::max(1, len_random);
 
             self.num_packets_sent += 1;
             packet.packet_id = self.num_packets_sent;
@@ -360,7 +360,7 @@ impl STA_source {
 
                 // let len_random = self.mean_length_packets as usize;
 
-                packet.length_packet = cmp::max(1, len_random);
+                packet.length_packet_bits = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
 
                 packet.sta_src_id = self.sta_id;
@@ -1150,8 +1150,8 @@ impl QueueMechanism {
             self.network_emulator.refill_all_buckets(now);
         }
         self.log_active_bw_patterns(now, &packet);
-        if packet.length_packet == 0 {
-            packet.length_packet = packet.data_inner.len();   // fallback for early traffic
+        if packet.length_packet_bits == 0 {
+            packet.length_packet_bits = packet.data_inner.len();   // fallback for early traffic
         }          
         // Get the potential delay for the packet
         let reason = match self.network_emulator.should_transmit_with_delay(
@@ -1673,7 +1673,7 @@ impl NetworkPatternEmulator {
                     // valid_until,
                     ..
                 } => {
-                        let pkt_bits = (packet.length_packet * 8) as f64;
+                        let pkt_bits = (packet.length_packet_bits * 8) as f64;
                         let (can_send, delay) = pattern.bandwidth_account(current_time, Some(pkt_bits));
                     
                         if can_send {
@@ -1946,7 +1946,7 @@ impl Medium {
         self.tx_owner = None;
         self.busy_until = until;
     }
-    #[inline] pub fn set_nav_until(&mut self, t: TaiTime<0>) { self.nav_until = t; }
+    #[inline] pub fn _set_nav_until(&mut self, t: TaiTime<0>) { self.nav_until = t; }
 
     /// Release an owned TXOP at `now` (called exactly when TX completes)
     #[inline] pub fn release_txop(&mut self, now: TaiTime<0>) {
@@ -1963,9 +1963,9 @@ impl Medium {
         if self.is_idle(now) { self.tx_owner = None; }
     }
 
-    #[inline] pub fn current_owner(&self) -> Option<MacKey> { self.tx_owner }
-    #[inline] pub fn last_owner(&self) -> Option<MacKey> { self.last_txop_owner }
-    #[inline] pub fn last_end(&self) -> TaiTime<0> { self.last_txop_end }
+    #[inline] pub fn _current_owner(&self) -> Option<MacKey> { self.tx_owner }
+    #[inline] pub fn _last_owner(&self) -> Option<MacKey> { self.last_txop_owner }
+    #[inline] pub fn _last_end(&self) -> TaiTime<0> { self.last_txop_end }
 }
 
 #[allow(unused)]
@@ -2032,7 +2032,7 @@ pub struct StaCapabilities {
 #[derive(Clone, Debug)]
 pub struct LinkConfig {
     pub link_id: u8,
-    pub frequency_ghz: f64,  // 5 or 6
+    pub _frequency_ghz: f64,  // 5 or 6
     pub bandwidth_mhz: u16,   // 80, 160, 320
 }
 
@@ -2044,7 +2044,7 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
             vec![
                 LinkConfig {
                     link_id: 0,
-                    frequency_ghz: 5.0,
+                    _frequency_ghz: 5.0,
                     bandwidth_mhz: 80,
                 },
             ]
@@ -2053,12 +2053,12 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
              vec![
             LinkConfig {
                 link_id: 0,
-                frequency_ghz: 5.0,
+                _frequency_ghz: 5.0,
                 bandwidth_mhz: 80,
             },
             LinkConfig {
                 link_id: 1,
-                frequency_ghz: 6.0,
+                _frequency_ghz: 6.0,
                 bandwidth_mhz: 80,
             },
             ]
@@ -2067,12 +2067,12 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
              vec![
             LinkConfig {
                 link_id: 0,
-                frequency_ghz: 5.0,
+                _frequency_ghz: 5.0,
                 bandwidth_mhz: 80,
             },
             LinkConfig {
                 link_id: 1,
-                frequency_ghz: 6.0,
+                _frequency_ghz: 6.0,
                 bandwidth_mhz: 160,
             },
             ]
@@ -2081,12 +2081,12 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
              vec![
             LinkConfig {
                 link_id: 0,
-                frequency_ghz: 5.0,
+                _frequency_ghz: 5.0,
                 bandwidth_mhz: 80,
             },
             LinkConfig {
                 link_id: 1,
-                frequency_ghz: 6.0,
+                _frequency_ghz: 6.0,
                 bandwidth_mhz: 320,
             },
             ]
@@ -2098,7 +2098,7 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
             vec![
                 LinkConfig {
                     link_id: 0,
-                    frequency_ghz: 5.0,
+                    _frequency_ghz: 5.0,
                     bandwidth_mhz: 80,
                 },
             ]
@@ -2412,7 +2412,7 @@ impl QueueModule {
                 sta_id,
                 MLO_LINK_SELECTION_STRATEGY,
             );
-        pkt.print(DebugColor::Blue); 
+        // pkt.print(DebugColor::Blue); 
 
         }
         
@@ -2558,7 +2558,7 @@ impl QueueModule {
 
             // Calculate transmission delay for a single packet
             let resultz = airtime_ampdu(
-                packet.length_packet as f64,
+                packet.length_packet_bits as f64,
                 1,
                 coords_queue, 
                 packet.sta_src_coords,
@@ -2572,7 +2572,7 @@ impl QueueModule {
             let mut high = MAX_AMPDU_SIZE;
             let mut optimal_n_packets = 0;
             let mut resultz_full_ampdu = airtime_ampdu(
-                packet.length_packet as f64 * high as f64,
+                packet.length_packet_bits as f64 * high as f64,
                 high,
                 coords_queue,
                 packet.sta_src_coords,
@@ -2583,7 +2583,7 @@ impl QueueModule {
             while low <= high {
                 let mid = (low + high) / 2;
                 let test_resultz = airtime_ampdu(
-                    packet.length_packet as f64 * mid as f64,
+                    packet.length_packet_bits as f64 * mid as f64,
                     mid,
                     coords_queue, 
                     packet.sta_src_coords,
@@ -2931,7 +2931,7 @@ impl QueueModule {
                 }
 
                 let new_total_length =
-                    self.aux_ampdu_serviced.total_length + current_packet.length_packet;
+                    self.aux_ampdu_serviced.total_length + current_packet.length_packet_bits;
                 let new_size = self.aux_ampdu_serviced.size + 1;
 
                 // Calculate airtime for the new AMPDU size
@@ -3006,7 +3006,7 @@ impl QueueModule {
                         sta_dest_id: cloned_packet.sta_dest_id as usize,
                         packet_id: cloned_packet.packet_id as i32,
                         now,
-                        length_packet: cloned_packet.length_packet,
+                        length_packet: cloned_packet.length_packet_bits,
                         ampdu_id: self.ampdu_id,
                         is_collision: false,
                         collision_backoff: 0.0,
@@ -3130,15 +3130,15 @@ impl QueueModule {
             }
         }
 
-        if DEBUG_PRINT_ENABLED {
-            print_yellow!(
-                "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
-                format_elapsed!(now),
-                link_id,
-                format_elapsed!(now + last_service_duration)
-            );
-            self.aux_ampdu_serviced.print();
-        }
+        // if DEBUG_PRINT_ENABLED {
+        print_yellow!(
+            "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
+            format_elapsed!(now),
+            link_id,
+            format_elapsed!(now + last_service_duration)
+        );
+        self.aux_ampdu_serviced.print();
+        // }
 
         self.link_is_transmitting.insert(link_id, true);
         let ampdu_to_send =
@@ -3567,7 +3567,7 @@ impl Sink {
 
             if let Ok(mut data) = self.mutex_data.lock() {
                 data.system_time += packet_total_time.as_secs_f64();
-                data.av_l += packet.length_packet as f64;
+                data.av_l += packet.length_packet_bits as f64;
                 data.rx_packets_counter += 1;
                 data.last_time = taitime_to_f64!(now);
             }

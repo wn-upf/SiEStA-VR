@@ -22,15 +22,13 @@ use std::io::{self, Write};
 use std::path::{PathBuf};
 
 
-pub const BATCH_SIZE_CSV : usize = 256*2; 
-
-const CHANNEL_WIDTH: usize = 80; //MHz
+pub const BATCH_SIZE_CSV : usize = 256*16; 
 
 const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;
 const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
-const CW_MIN: i32 = 8;
+// const CW_MIN: i32 = 8;
 const DIFS: f64 = 2.0 * SLOT + SIFS;
 
 
@@ -1620,7 +1618,7 @@ impl fmt::Display for HeaderALVRStream {
 #[derive(Debug, Clone)]
 pub struct MpduPacket {
     pub packet_id: usize,
-    pub length_packet: usize,
+    pub length_packet_bits: usize,
     pub queue_in_instant: TaiTime<0>,
     pub queue_out_instant: TaiTime<0>,
     pub T_q: Duration,
@@ -1658,7 +1656,7 @@ impl MpduPacket {
     pub fn new() -> Self {
         Self {
             packet_id: 0,
-            length_packet: 0,
+            length_packet_bits: 0,
             queue_in_instant: TaiTime::default(),
             queue_out_instant: TaiTime::default(),
             T_q: Duration::ZERO,
@@ -1696,7 +1694,7 @@ impl MpduPacket {
             self.header_alvr.next_packet_index,
             self.header_alvr.shard_index,
             self.header_alvr.shards_count - 1,
-            self.length_packet
+            self.length_packet_bits
         );
         let a = format!(
             "SRC: {} DEST: {}| Packet ID: {}, ALVR F: {} S: {}/{} L: {}",
@@ -1706,7 +1704,7 @@ impl MpduPacket {
             self.header_alvr.next_packet_index,
             self.header_alvr.shard_index,
             self.header_alvr.shards_count - 1,
-            self.length_packet
+            self.length_packet_bits
         );
         a
     }
@@ -1747,16 +1745,18 @@ impl AmpduPacket {
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {}\x1b[0m",
-            self.size, self.sta_src_id, self.sta_dest_id, self.total_length
+            "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {} Bits\x1b[0m",
+            self.size, self.sta_src_id, self.sta_dest_id, self.total_length, 
         );
         //  println!("AMPDU on LINK-{}: {} packets, {} bytes", 
         //     self.link_id, self.mpdu_packets.len(), self.total_length);
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID: {:.0}, T_q: {:.3} ms , T_s: {:.3} ms",
+                "\x1b[33m\t - Packet ID: {:.0}, L = {} bits ({} Bytes inner) | T_q: {:.3} ms , T_s: {:.3} ms",
                 // |  ALVR: S{}/{} , F: {}  \x1b[0m",
                 packet.packet_id,
+                packet.length_packet_bits, 
+                packet.data_inner.len(), // data_inner length counts bytes
                 packet.T_q.as_secs_f64() * 1000.0,
                 packet.T_s.as_secs_f64() * 1000.0,
                 // packet.header_alvr.shard_index,
@@ -2090,13 +2090,13 @@ pub fn airtime_ampdu(
     // let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
     //                                                                   // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
     let phy_time =
-        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK;   // ⬅  removed DIFS + SLOT + BO
+        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK;   // ⬅  removed DIFS + SLOT + BO, it happens in EDCA now. 
     
-    let rts_cts_overhead_time = T_RTS + SIFS + T_CTS + SIFS;
+    let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;
     let rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;
 
-    // print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
-    //              ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
+    print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
+                 ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
 
     
     phy_time

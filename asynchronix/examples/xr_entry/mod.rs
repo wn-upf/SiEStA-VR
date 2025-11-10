@@ -50,8 +50,7 @@ use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRCl
 use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 1;
-
-
+pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400; 
 
 
 struct VRPair {
@@ -67,12 +66,6 @@ struct VRPair {
     mbox_emu_link:  Mailbox<EmulatedLink>, 
 }
 
-// const ROOM_W: f64 = 24.0;
-// const ROOM_H: f64 = 12.0;
-
-// /// Access Point at room center (if you need the coords elsewhere)
-// pub const AP_X: f64 = ROOM_W / 2.0;
-// pub const AP_Y: f64 = ROOM_H / 2.0;
 
 /// Draw a uniform random starting point inside the room.
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
@@ -157,13 +150,15 @@ impl VRPair {
 
         let server_coords: Coords = ap_coords.clone();
 
-        let mut client_coords = Coords::with_coords(distance, 0.0, 0.0);
-        if !test_distances_everest_bool{
-        }
-        else{
+
+        let mut client_coords = Coords::with_coords(distance + AP_X, AP_Y, 0.0);
+        if test_distances_everest_bool{
             
             let mut rng = thread_rng(); 
             client_coords = random_room_coords(&mut rng); 
+        }
+        else{
+
         }
 
         let mut xr_server = XRServer::new(
@@ -184,9 +179,21 @@ impl VRPair {
             obs_config, 
             reward_mode, 
             t_update_abr, 
+            PACKET_SIZE_SOCKETS_BYTES, 
         );
 
-        let mut xr_client = XRClient::new(client_ip, fps, t0, name_folder, test, abr_choice, simu_unique_str, bm_string, t_update_abr);
+        let mut xr_client = XRClient::new(
+            client_ip,
+            fps,
+            t0,
+            name_folder,
+            test,
+            abr_choice,
+            simu_unique_str,
+            bm_string,
+            t_update_abr,
+            PACKET_SIZE_SOCKETS_BYTES
+        );
 
         let mut sta_server = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -261,9 +268,6 @@ impl VRPair {
         }
     }
 }
-
-
-
 
 
 /// Truncated exponential sampler with mean `mean` before truncation and hard bounds [a,b].
@@ -796,7 +800,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let mut simu = sim_builder.init(t0);
     let scheduler = simu.scheduler();
 
-    let packet_size = 1400;
+    let packet_size = PACKET_SIZE_SOCKETS_BYTES;
 
     // Schedule XR events
     for addr in &emu_addresses {

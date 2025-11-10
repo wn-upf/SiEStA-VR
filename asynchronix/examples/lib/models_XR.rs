@@ -3214,6 +3214,8 @@ pub struct XRServer {
     pub name_folder: String,
     pub network_effects: Vec<NetworkPattern>, 
 
+    pub packet_size_sockets: usize, 
+
     pub video_sample_filename: String, 
     pub gop_size: usize, 
     pub intra_refresh: bool, 
@@ -3255,7 +3257,7 @@ impl XRServer {
         obs_config: ObservationConfig, 
         reward_mode: usize ,
         t_update_abr: f32, 
-
+        packet_size_sockets: usize, 
     ) -> Self {
 
         let system_time = SystemTime::UNIX_EPOCH;
@@ -3359,6 +3361,7 @@ impl XRServer {
             ),
 
             network_effects: effects.to_vec() ,  
+            packet_size_sockets, 
             video_sample_filename: final_file.to_string(), 
             gop_size, 
             intra_refresh, 
@@ -3733,12 +3736,12 @@ impl XRServer {
 
             let mut elapsed: Duration = now.duration_since(self.t_0);
 
-            // debug_print!(
-            //     DebugColor::DarkGreen,
-            //     "{}[DBG XR_SERVER {}] Sending to network the following packets:",
-            //     self.ip_self,
-            //     elapsed.as_secs_f64(),
-            // );
+            debug_print!(
+                DebugColor::DarkGreen,
+                "{}[DBG XR_SERVER {}] Sending to network the following packets:",
+                self.ip_self,
+                elapsed.as_secs_f64(),
+            );
             while !stop {
                 let bytes_received = {
                     let mut guard = receiver.lock().unwrap();
@@ -3868,7 +3871,7 @@ impl XRServer {
 
             if let Some(mut sender) = self.audio_app_sender.clone() {
                 // 1) how big is our "two empties" payload?
-                let payload_len = 1400 + 600; 
+                let payload_len = (1400 + 600) * 8; 
 
                 // 2) compute the hidden prefix so fragmentation/sharding still lines up
                 let header = VideoPacketHeader::new(Duration::from_secs(1), false);
@@ -4162,7 +4165,7 @@ impl XRServer {
         let client_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
         let client_send_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
         let server_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
-        let packet_size: i32 = 1400;
+        let packet_size: i32 = self.packet_size_sockets as i32; 
 
         if let Ok(mut stream_socket) = StreamSocketBuilder::connect_to_client_mod(
             HANDSHAKE_ACTION_TIMEOUT,
@@ -4605,6 +4608,7 @@ pub struct XRClient {
 
     pub framerate: f32,
 
+    pub packet_size_sockets: usize, 
 
     pub output_app_network: Output<MpduPacket>,
 
@@ -4729,6 +4733,8 @@ impl XRClient {
         simu_id: &str, // for logging
         bm_str: &str,  // for logging 
         t_update_abr: f32,
+        packet_size_sockets: usize, 
+
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
@@ -4756,6 +4762,7 @@ impl XRClient {
             output_app_tracking_sender: None,
             out_video_decoded: Output::default(),
             framerate: fps,
+            packet_size_sockets, 
             output_app_network: Output::default(),
             // output_tracking: Output::default(),
             current_coordinates_tracking: Vec3::ZERO,
@@ -4868,7 +4875,7 @@ impl XRClient {
         let now = context.scheduler.time();
         println!("[XRClient {}] Rebooting session at {:.7}s", self.server_ip, format_elapsed!(now));
 
-        let packet_size = 1400; // or pass from args/config
+        let packet_size = self.packet_size_sockets;
         self.t_0 = now;
         self.last_tracking_time = now;
         self.is_decoder_ready = false;
@@ -6736,9 +6743,8 @@ impl STA_extended {
     pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         // do everything else to the packet:
 
-        packet.length_packet = (packet.header_alvr.packet_length + 100) as usize;
+        packet.length_packet_bits = (packet.header_alvr.packet_length * 8 + 100 * 8) as usize; // convert length (bytes) to bits + App header (100 bytes)
         // println!("Length packet XR {}", packet.length_packet);
-
         packet.packet_id = self.num_packets_sent;
 
         packet.sta_src_id = self.sta_id;
@@ -6761,7 +6767,7 @@ impl STA_extended {
     pub async fn input_wireless(&mut self, ampdu_packet: AmpduPacket, context: &Context<Self>) {
         let mut packet_batch = Vec::new(); // Create a batch to hold packets
         let now: TaiTime<0> = context.scheduler.time();
-        println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
+        // println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
         if ampdu_packet.sta_dest_id == self.sta_id {
             // make sure we ignore packets not corresponding to STA
             for packet in ampdu_packet.mpdu_packets {
@@ -6852,7 +6858,7 @@ impl STA_extended {
                 // let len_random = exponential(self.mean_length_packets_BG as f64) as usize; // RANDOM SIZE 
                 let len_random = self.mean_length_packets_BG as usize;                 // DETERMINISTIC SIZE
 
-                packet.length_packet = cmp::max(1, len_random);
+                packet.length_packet_bits = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
 
 
@@ -6861,16 +6867,16 @@ impl STA_extended {
                 packet.sta_src_coords = sta_coords;
                 // println!("src coords: {:?}", sta_coords); 
 
-                // print_dblue!(
-                //     "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
-                //     format_elapsed!(context.scheduler.time()),
-                //     self.sta_id,
-                //     packet.packet_id,
-                //     packet.sta_src_id, 
-                //     packet.sta_dest_id,
-                //     self.sta_coordinates,
-                //     packet.edca_ac, 
-                // );
+                print_dblue!(
+                    "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
+                    format_elapsed!(context.scheduler.time()),
+                    self.sta_id,
+                    packet.packet_id,
+                    packet.sta_src_id, 
+                    packet.sta_dest_id,
+                    self.sta_coordinates,
+                    packet.edca_ac, 
+                );
 
                 // self.output_network_port.send(packet).await;
                 context
