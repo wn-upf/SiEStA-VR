@@ -3130,15 +3130,15 @@ impl QueueModule {
             }
         }
 
-        // if DEBUG_PRINT_ENABLED {
-        print_yellow!(
-            "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
-            format_elapsed!(now),
-            link_id,
-            format_elapsed!(now + last_service_duration)
-        );
-        self.aux_ampdu_serviced.print();
-        // }
+        if DEBUG_PRINT_ENABLED {
+            print_yellow!(
+                "{} [DBG AMPDU] LINK-{} --Dequeueing AMPDU, serviced at {}",
+                format_elapsed!(now),
+                link_id,
+                format_elapsed!(now + last_service_duration)
+            );
+            self.aux_ampdu_serviced.print();
+        }
 
         self.link_is_transmitting.insert(link_id, true);
         let ampdu_to_send =

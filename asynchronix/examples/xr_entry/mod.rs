@@ -106,8 +106,7 @@ impl VRPair {
         let abr_choice; 
         println!("[VR session {}] with abr_choice: {}", pair_index, abr_enabled);
     
-        // UNCOMMENT (when not evaluating RL in same scenario) . 
-        // if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
+        if matches!(abr_enabled, 3){  // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest. 
 
             if pair_index == 0{ 
                 abr_choice = abr_enabled; 
@@ -125,10 +124,10 @@ impl VRPair {
                     initial_bitrate = *values.choose(&mut rng).unwrap() as f64; 
                 }                
             }
-        // }
-        // else{
-            // abr_choice = abr_enabled; //makes all sessions have same ABR choice
-        // }
+        }
+        else{
+            abr_choice = abr_enabled; //makes all sessions have same ABR choice
+        }
         println!("[VR session {}] Final: {}", pair_index, abr_choice);
 
         let bm_string = match abr_choice
@@ -472,7 +471,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     let output_path = format!("Results/{}", name_folder);
     fs::create_dir_all(&output_path).expect("Failed to create directory");
-
     
     let t0 = MonotonicTime::EPOCH;
     let ap_coords: Coords = Coords::with_coords(AP_X, AP_Y, 0.0);
