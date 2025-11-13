@@ -22,7 +22,7 @@ use std::io::{self, Write};
 use std::path::{PathBuf};
 
 
-pub const BATCH_SIZE_CSV : usize = 256*16; 
+pub const BATCH_SIZE_CSV : usize = 256*4; 
 
 const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;

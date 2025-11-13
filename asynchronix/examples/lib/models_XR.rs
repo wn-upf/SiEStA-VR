@@ -3544,12 +3544,12 @@ impl XRServer {
                     let shards_lost = inner.shards_lost;
 
                     for (frame, shard) in frames_lost.iter().zip(shards_lost.iter()) {
-                        print_red!(
-                            "[Deadline Server {}] Frame {} lost {} shards",
-                            self.ip_self,
-                            frame,
-                            shard
-                        );
+                        // print_red!(
+                        //     "[Deadline Server {}] Frame {} lost {} shards",
+                        //     self.ip_self,
+                        //     frame,
+                        //     shard
+                        // );
                         let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
                         self.STATISTICS_MANAGER.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // parallel to the one in bitrate manager. 
                         self.bitrate_manager.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // report one frame lost, and nº of video shards lost
@@ -4178,7 +4178,7 @@ impl XRServer {
             packet_size as _,
             self.t_update_abr, 
         ) {
-            println!("Connection established!");
+            // println!("{} Connection established!", client_ip);
             self.is_streaming = true;
 
             self.video_app_sender =
@@ -4913,7 +4913,8 @@ impl XRClient {
             packet_size as _,
             self.t_update_abr, 
         ) {
-            println!("Connection established!");
+            // println!("{} Connection established!", self.server_ip,);
+
             self.is_streaming = true;
 
             self.input_app_video = Some(

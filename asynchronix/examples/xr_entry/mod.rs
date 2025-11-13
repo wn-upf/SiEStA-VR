@@ -295,15 +295,19 @@ fn truncated_exponential_seconds<R: Rng>(rng: &mut R, mean: f64, a: f64, b: f64)
 
 
 fn generate_session_timeline_basic(
-    // rng: &mut R,
     sim_init_time: f64, 
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
 
+    let mut rng = thread_rng(); 
     let mut sessions = Vec::new();
 
-    let start = sim_init_time;
+    // exponentially distributed start offset between 1 and 5 seconds
+    let start_offset = truncated_exponential_seconds(&mut rng, 2.5, 1.0, 5.0);
+
+    let start = sim_init_time + start_offset;
     let end = stoptime;
+
     sessions.push((start, end));
     sessions
 }

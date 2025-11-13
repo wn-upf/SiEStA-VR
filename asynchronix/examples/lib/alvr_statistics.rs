@@ -384,7 +384,7 @@ impl StatisticsManager {
     }
 
     pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
-        println!("[{}] Report fl : {} sl: {} ", self.id_XR, fl, sl);
+        // println!("[{}] Report fl : {} sl: {} ", self.id_XR, fl, sl);
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
