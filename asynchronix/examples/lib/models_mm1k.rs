@@ -13,7 +13,7 @@ use asynchronix::ports::Output;
 use std::time::{Duration, Instant};
 use rand_distr::{Normal, Distribution, Exp};
 use crate::lib::alvr_stream_socket::parse_shard_data;
-use crate::lib::{ SLOT, MacKey};
+use crate::lib::{ DOWNLINK_QUEUE_SIZE, UPLINK_QUEUE_SIZE,  MacKey, SLOT};
 use crate::lib::DebugColor; 
 use rand::rngs::StdRng;
 // use crate::lib::TESTS_RANDOM_PATTERNS;
@@ -55,7 +55,7 @@ pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
 const DEBUG_EDCA: bool =    false; 
-pub const DEBUG_MLO: bool = false;
+pub const DEBUG_MLO: bool = true;
 
 pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
 
@@ -1977,7 +1977,7 @@ pub struct QueueModule {
     // pub queue: VecDeque<MpduPacket>,
     pub queue: Vec<MpduPacket>, 
 
-    pub queue_maxsize: usize,
+    pub queue_maxsize_dl: usize,
     pub service_timer: Duration,
     // pub aux_packet_serviced: MpduPacket,
     pub aux_ampdu_serviced: AmpduPacket,
@@ -2118,7 +2118,6 @@ impl QueueModule {
         PL_prob: f64,
         vec_ids: Vec<i32>,
         folder_dir: String,
-        ul_size: usize,
         emulated_tests: Option<(bool, bool, bool, bool)>,
         link_configs: Vec<LinkConfig>, // NEW: Configure available links
     ) -> Self {
@@ -2169,7 +2168,9 @@ impl QueueModule {
         Self {
             // queue: VecDeque::with_capacity(queue_size),
             queue: Vec::with_capacity(queue_size),
-            queue_maxsize: queue_size,
+            // queue_maxsize_k:        queue_size, 
+            queue_maxsize_dl:         DOWNLINK_QUEUE_SIZE,
+            ul_capacity_queue_device: UPLINK_QUEUE_SIZE,
             link_outputs,
             service_timer: Duration::ZERO,
             aux_ampdu_serviced: AmpduPacket::new(),
@@ -2191,7 +2192,6 @@ impl QueueModule {
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
             PL_probability: PL_prob,
-            ul_capacity_queue_device: ul_size,
             ampdu_id: 0,
             link_mediums,
             link_channel_widths, 
@@ -2550,11 +2550,7 @@ impl QueueModule {
         let coords_queue = self.coords_queue; // Assuming Coords is Copy
         let p_tx = self.p_tx;                 // f64 is Copy
 
-        // --- MUTABLE OPERATION ---
-        // Now, this mutable borrow of `self` is the *only* active borrow.
         let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
-            // All this logic now runs ONCE per flow.
-            // We use the local variables, not `self`.
 
             // Calculate transmission delay for a single packet
             let resultz = airtime_ampdu(
@@ -2564,7 +2560,6 @@ impl QueueModule {
                 packet.sta_src_coords,
                 p_tx,         
                 channel_width,
-
             );
 
             // Binary search
@@ -2615,8 +2610,6 @@ impl QueueModule {
             }
         }); // <-- Mutable borrow of self.sta_stats_cache ends here
 
-        // --- UPDATE ---
-        // This part runs for EVERY packet, but it's very fast.
         entry.packet_count += 1;
 
         // Re-calculate the expected delivery time based on the new count
@@ -2660,7 +2653,7 @@ impl QueueModule {
                         (-1, pkt.edca_ac, link_id)
                     });
                     
-                    if self.queue.len() < self.queue_maxsize {
+                    if self.queue.len() < self.queue_maxsize_dl {
                         self.cache_input_packet(pkt.clone(), link_id).await;
                         self.queue.push(pkt);
 
@@ -2720,9 +2713,7 @@ impl QueueModule {
         let is_ul = packet.sta_src_id > packet.sta_dest_id;
         
         // Select link for uplink packet
-        let selected_link = self.select_link_for_packet(&packet, now);
-        
-    
+        let selected_link = self.select_link_for_packet(&packet, now);    
 
         if is_ul{
             match selected_link {
@@ -2734,49 +2725,29 @@ impl QueueModule {
                         (-1, packet.edca_ac, link_id)
                     });
                     
+                    packet.queue_in_instant = now; // UL packets always go in queue, later they're dropped if they exceed max of STA/EDCA_AC virtual queue. 
+                    self.cache_input_packet(packet.clone(), link_id).await;
+                    self.queue.push(packet.clone());
+                    self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1);
 
+                    log_mlo!(
+                        now,
+                        "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
+                        packet.packet_id,
+                        packet.sta_src_id,
+                        packet.sta_dest_id,
+                        link_id,
+                        self.queue.len()
+                    );
 
-                    if self.queue.len() < self.queue_maxsize {
-                        packet.queue_in_instant = now;
-                        self.cache_input_packet(packet.clone(), link_id).await;
-                        self.queue.push(packet.clone());
-                        self.link_queue_depths.entry(link_id).and_modify(|c| *c += 1);
-
-                        log_mlo!(
-                            now,
-                            "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
-                            packet.packet_id,
-                            packet.sta_src_id,
-                            packet.sta_dest_id,
-                            link_id,
-                            self.queue.len()
-                        );
-
-                        if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {                        
-                            context.scheduler
-                                .schedule_event(
-                                    Duration::from_secs_f64(SLOT), // SLOT = 9e-6
-                                    Self::deque_schedule_service, 
-                                    ()
-                                )
-                                .unwrap();
-                        }
-
-                        // if self.queue.len() == 1 && !self.packet_being_served {
-                        //     if let Some(medium) = self.link_mediums.get(&link_id) {
-                        //         if medium.is_idle(now) {
-                        //             self.deque_schedule_service((), context).await;
-                        //         }
-                        //     }
-                        // }
-                    } else {
-                        self.blocked_packet_counter += 1;
-                        log_mlo!(
-                            now,
-                            "❌ UL Queue full - dropped packet {} from STA{}",
-                            packet.packet_id,
-                            packet.sta_src_id
-                        );
+                    if self.queue.len() == 1 && *self.link_is_transmitting.get(&link_id).unwrap() == false {                        
+                        context.scheduler
+                            .schedule_event(
+                                Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                Self::deque_schedule_service, 
+                                ()
+                            )
+                            .unwrap();
                     }
                 }
                 None => {
@@ -3173,18 +3144,32 @@ impl QueueModule {
         for ((sta_src, sta_dest), packets) in sta_packets.iter() {
             let is_ul = sta_src > sta_dest;
             if is_ul && packets.packet_count > self.ul_capacity_queue_device {
-                let excess_count = packets.packet_count - self.ul_capacity_queue_device;
+                let excess_count: usize = packets.packet_count - self.ul_capacity_queue_device;
                 overflowing_flows.insert((*sta_src, *sta_dest), excess_count);
                 
-                // print_red!(
-                //     "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {}), dropping {}",
-                //     format_elapsed!(now),
-                //     sta_src,
-                //     sta_dest,
-                //     packets.packet_count,
-                //     self.ul_capacity_queue_device,
-                //     excess_count
-                // );
+                print_red!(
+                    "{} [UL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {}), dropping {}",
+                    format_elapsed!(now),
+                    sta_src,
+                    sta_dest,
+                    packets.packet_count,
+                    self.ul_capacity_queue_device,
+                    excess_count
+                );
+            }
+            if !is_ul && packets.packet_count > self.queue_maxsize_dl {
+
+                let excess_count_dl: usize = packets.packet_count - self.queue_maxsize_dl;
+                overflowing_flows.insert((*sta_src, *sta_dest), excess_count_dl);
+                print_red!(
+                    "{} [DL CAPACITY EXCEEDED] STA {} -> AP {}: {} packets (max: {}), dropping {}",
+                    format_elapsed!(now),
+                    sta_src,
+                    sta_dest,
+                    packets.packet_count,
+                    self.ul_capacity_queue_device,
+                    excess_count_dl
+                );
             }
         }
         let mut global_indices_to_drop = std::collections::HashSet::new();
@@ -3220,20 +3205,12 @@ impl QueueModule {
                     // This is a packet to drop
                     self.blocked_packet_counter += 1;
                     
-                    // --- CRITICAL: Decrement per-link queue depth ---
+                    // Decrement per-link queue depth
                     if let Some(link_id) = packet.assigned_link_id {
                         if let Some(count) = self.link_queue_depths.get_mut(&link_id) {
                             *count = count.saturating_sub(1);
                         }
                     }
-                    
-                    // print_red!(
-                    //     "{} [UL PACKET DROPPED] Packet_ID: {}, SRC: {}, DST: {}",
-                    //     format_elapsed!(now),
-                    //     packet.packet_id,
-                    //     packet.sta_src_id,
-                    //     packet.sta_dest_id
-                    // );
 
                     return false; // Drop from queue
                 }

@@ -37,6 +37,8 @@ pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
 pub const UPLINK_QUEUE_SIZE: usize = 128;
+pub const DOWNLINK_QUEUE_SIZE: usize = 1000; 
+
 pub const NUMBER_OF_RANDOM_EVENTS: usize = 20; 
 
 

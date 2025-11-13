@@ -516,7 +516,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         pl_prob,
         all_sta_ids.clone(),
         name_folder.clone(),
-        UPLINK_QUEUE_SIZE,
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
         link_configs, 
     );
