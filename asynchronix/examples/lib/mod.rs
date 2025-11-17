@@ -21,7 +21,6 @@ use std::time::Duration;
 use std::io::{self, Write};
 use std::path::{PathBuf};
 
-pub const BESTEFFORT_EDCA: bool = true; 
 pub const BATCH_SIZE_CSV : usize = 256*4; 
 
 const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds

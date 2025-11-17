@@ -16,7 +16,7 @@ use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc, BESTEFFORT_EDCA,  HevcParser, WindowType, render_text};
+use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc,  HevcParser, WindowType, render_text};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -3234,6 +3234,9 @@ pub struct XRServer {
     pub reward_mode: usize, // 0 -> naive, 1->normalized, 2-> ?? For future reward shape. 
     pub t_update_abr: f32, 
 
+    pub edca_be_mode: bool,  
+
+
 
 
 }
@@ -3258,6 +3261,8 @@ impl XRServer {
         reward_mode: usize ,
         t_update_abr: f32, 
         packet_size_sockets: usize, 
+        edca_be_mode: bool,  
+
     ) -> Self {
 
         let system_time = SystemTime::UNIX_EPOCH;
@@ -3375,8 +3380,7 @@ impl XRServer {
             fov_optix_manager: fovoptix_struct, 
             reward_mode, 
             t_update_abr, 
-
-            
+            edca_be_mode,             
         }
     }
 
@@ -3806,7 +3810,7 @@ impl XRServer {
                                 // if stream_id == VIDEO || stream_id == AUDIO {
                                     
 
-                                    if !BESTEFFORT_EDCA {
+                                    if !self.edca_be_mode {
                                         if stream_id == VIDEO{
                                             packet.edca_ac = EdcaAc::Video; 
                                         }
@@ -4723,8 +4727,8 @@ pub struct XRClient {
 
     abr_mode: usize, 
     t_update_abr: f32,
-    // everest_capacity_vec: Vec<f32>, 
-    // everest_throughput_vec: Vec<f32>, 
+    
+    edca_be_mode: bool, 
 }
 
 #[allow(unused)]
@@ -4741,6 +4745,8 @@ impl XRClient {
         bm_str: &str,  // for logging 
         t_update_abr: f32,
         packet_size_sockets: usize, 
+        edca_be_mode: bool, 
+
 
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
@@ -4850,7 +4856,9 @@ impl XRClient {
 
             nada_receiver,  
             abr_mode, 
-            t_update_abr,              
+            t_update_abr,   
+            edca_be_mode, 
+           
         }
     }
 
@@ -5159,7 +5167,7 @@ impl XRClient {
                                 // }
 
 
-                                if !BESTEFFORT_EDCA {
+                                if !self.edca_be_mode {
                                     if stream_id == TRACKING {
                                         packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering. 
 
@@ -5172,7 +5180,6 @@ impl XRClient {
                                     packet.edca_ac = EdcaAc::BestEffort; 
                                 }
                                 self.outport_tracking_network.send(packet).await
-
 
                             } else {
                                 println!(

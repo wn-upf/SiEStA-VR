@@ -38,7 +38,7 @@ use crate::lib::{
     // P_TX,
 };
 
-
+pub const NUM_INPUT_ARGS_SIM: usize = 29; 
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64;  // 1 Gbps link
 
 use std::{fs, u64};
@@ -54,6 +54,16 @@ pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400; 
 
 
+
+
+
+/// Draw a uniform random starting point inside the room.
+fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
+    let x = rng.gen_range(0.0..ROOM_W / 1.5 ); // adjust to make distances shorter by 1.5
+    let y = rng.gen_range(0.0..ROOM_H / 1.5 ); // adjust to make distances shorter by 1.5
+    Coords::with_coords(x, y, 0.0)
+}
+
 struct VRPair {
     xr_server: XRServer,
     xr_client: XRClient,
@@ -65,14 +75,7 @@ struct VRPair {
     mbox_sta_server: Mailbox<STA_extended>,
     mbox_sta_client: Mailbox<STA_extended>,
     mbox_emu_link:  Mailbox<EmulatedLink>, 
-}
-
-
-/// Draw a uniform random starting point inside the room.
-fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
-    let x = rng.gen_range(0.0..ROOM_W / 1.5 ); // adjust to make distances shorter by 1.5
-    let y = rng.gen_range(0.0..ROOM_H / 1.5 ); // adjust to make distances shorter by 1.5
-    Coords::with_coords(x, y, 0.0)
+    edca_be_mode: bool, 
 }
 
 impl VRPair {
@@ -99,6 +102,7 @@ impl VRPair {
         reward_mode: usize, 
         t_update_abr: f32, 
         ap_coords: Coords, 
+        edca_be_mode: bool, 
 
     ) -> Self {
 
@@ -180,6 +184,7 @@ impl VRPair {
             reward_mode, 
             t_update_abr, 
             PACKET_SIZE_SOCKETS_BYTES, 
+            edca_be_mode, 
         );
 
         let mut xr_client = XRClient::new(
@@ -192,7 +197,8 @@ impl VRPair {
             simu_unique_str,
             bm_string,
             t_update_abr,
-            PACKET_SIZE_SOCKETS_BYTES
+            PACKET_SIZE_SOCKETS_BYTES,
+            edca_be_mode, 
         );
 
         let mut sta_server = STA_extended::new(
@@ -265,6 +271,7 @@ impl VRPair {
             mbox_sta_server,
             mbox_sta_client,
             mbox_emu_link, 
+            edca_be_mode, 
         }
     }
 }
@@ -366,11 +373,12 @@ pub struct SimParams {
     pub reward_mode: usize,     // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
     pub t_update_abr: f32, 
     pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel.
-    pub MLO_config: String,  
+    pub mlo_config: String,  
+    pub edca_be:    usize, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
-    assert!(args.len() == 28, "unexpected number of args");
+    assert!(args.len() == NUM_INPUT_ARGS_SIM, "unexpected number of args");
     SimParams {
         stoptime:               args[1].parse().unwrap(),
         mean_length_bg:         args[2].parse().unwrap(),
@@ -398,7 +406,8 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         reward_mode:            args[24].parse().unwrap(), 
         t_update_abr:           args[25].parse().unwrap(), 
         eval_string:            args[26].parse().unwrap(), 
-        MLO_config:             args[27].parse().unwrap(), 
+        mlo_config:             args[27].parse().unwrap(), 
+        edca_be:                args[28].parse().unwrap(), 
     }
 }
 
@@ -436,12 +445,14 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         reward_mode, 
         t_update_abr, 
         eval_string, 
-        MLO_config, 
+        mlo_config, 
+        edca_be,  
     } = params;
 
 
     let sim_unique_string = format!("Simu_{}", sim_id);      
     let test_distances_everest_bool = test_distances_everest != 0; 
+    let edca_be_bool = edca_be != 0; 
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -470,8 +481,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                                   
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}__BGThr{:.2}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{MLO_config}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, 
+        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}__BGThr{:.2}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_config}_EDCAbe{:.0}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, 
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -508,7 +519,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
 
 
-    let link_configs = crate::lib::models_mm1k::create_mlo_config(&MLO_config); 
+    let link_configs = crate::lib::models_mm1k::create_mlo_config(&mlo_config); 
 
     // Create and configure queue
     let mut queue = QueueModule::new(
@@ -592,6 +603,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             reward_mode, 
             t_update_abr, 
             ap_coords, 
+            edca_be_bool, 
         ); 
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -629,6 +641,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             reward_mode, 
             t_update_abr, 
             ap_coords, 
+            edca_be_bool, 
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
