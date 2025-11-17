@@ -16,7 +16,7 @@ use image_compare::rgb_hybrid_compare;
 use rand::prelude::IteratorRandom;
 use rand_distr::{Normal, Distribution};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc, HevcParser, WindowType, render_text};
+use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc, BESTEFFORT_EDCA,  HevcParser, WindowType, render_text};
 use anyhow::Result;
 use regex::Regex;
 use std::cell::RefCell;
@@ -3805,16 +3805,23 @@ impl XRServer {
                                 }
                                 // if stream_id == VIDEO || stream_id == AUDIO {
                                     
-                                    if stream_id == VIDEO{
-                                        packet.edca_ac = EdcaAc::Video; 
+
+                                    if !BESTEFFORT_EDCA {
+                                        if stream_id == VIDEO{
+                                            packet.edca_ac = EdcaAc::Video; 
+                                        }
+                                        else if stream_id == AUDIO {
+                                            packet.edca_ac = EdcaAc::Video; // justification: we want them to be synchronized/aggregated  
+                                                                            // together with video AMPDUs (for better efficiency).  
+                                        }
+                                        else if stream_id == FOVOPTIX_BW_PROBE{
+                                            packet.edca_ac = EdcaAc::BestEffort; 
+                                        }
                                     }
-                                    else if stream_id == AUDIO {
-                                        packet.edca_ac = EdcaAc::Video; // justification: we want them to be synchronized/aggregated  
-                                                                         // together with video AMPDUs (for better efficiency).  
-                                    }
-                                    else if stream_id == FOVOPTIX_BW_PROBE{
+                                    else{
                                         packet.edca_ac = EdcaAc::BestEffort; 
                                     }
+                                   
                                     self.outport_videoapp_network.send(packet).await;
                                 // }
 
@@ -5150,15 +5157,22 @@ impl XRClient {
                                 //         packet.header_alvr
                                 //     );
                                 // }
-                                if stream_id == TRACKING {
-                                    packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering. 
-                                    self.outport_tracking_network.send(packet).await
 
+
+                                if !BESTEFFORT_EDCA {
+                                    if stream_id == TRACKING {
+                                        packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering. 
+
+                                    }
+                                    else if stream_id == FOVOPTIX_BW_PROBE{
+                                        packet.edca_ac = EdcaAc::BestEffort; // Should not block actual VR traffic.. 
+                                    }
                                 }
-                                else if stream_id == FOVOPTIX_BW_PROBE{
-                                    packet.edca_ac = EdcaAc::BestEffort; // Should not block actual VR traffic.. 
-                                    self.outport_tracking_network.send(packet).await
+                                else{
+                                    packet.edca_ac = EdcaAc::BestEffort; 
                                 }
+                                self.outport_tracking_network.send(packet).await
+
 
                             } else {
                                 println!(

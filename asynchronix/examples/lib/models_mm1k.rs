@@ -55,7 +55,7 @@ pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
 const DEBUG_EDCA: bool =    false; 
-pub const DEBUG_MLO: bool = true;
+pub const DEBUG_MLO: bool = false;
 
 pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
 
@@ -73,7 +73,6 @@ macro_rules! debug_edca {
             let msg = format!($fmt, $($arg)*);
              println!("{}", DebugColor::Blue.to_background_fn()(msg));
         }
-
     };
 }
 #[macro_export]
@@ -94,7 +93,6 @@ macro_rules! debug_schedule {
             let msg = format!($fmt, $($arg)*);
             println!("{}", DebugColor::Navy.to_background_fn()(msg));
         // }
-
     };
 }
 
@@ -118,15 +116,7 @@ macro_rules! log_link_selection {
     };
 }
 
-macro_rules! log_mlo_contention {
-    ($now:expr, $link_id:expr, $($arg:tt)*) => {
-        if DEBUG_MLO {
-            print!("\x1b[38;5;214m{} [LINK-{}] ", format_elapsed!($now), $link_id);
-            println!($($arg)*);
-            print!("\x1b[0m");
-        }
-    };
-}
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LinkSelectionStrategy {
@@ -822,12 +812,14 @@ impl NetworkPattern {
 }
 
 
-
-
-pub struct EmulatedLink { /// Can be inserted between any STA output and the `QueueModule` input.
-
+pub struct EmulatedLink {
+    /// Can be inserted between any STA output and the `QueueModule` input.
     pub output: Output<MpduPacket>,
     queue_mechanism: QueueMechanism,
+    /// Optional bandwidth emulation in bits per second (e.g., 1_000_000_000 for 1 Gbps)
+    bandwidth_bps: Option<u64>,
+    /// Time when the link will be free (last packet finishes transmission)
+    link_free_time: TaiTime<0>,
 }
 
 impl EmulatedLink {
@@ -846,7 +838,6 @@ impl EmulatedLink {
         emulated_tests: Option<(bool, bool, bool, bool)>,
         id_sta: IpAddr, 
     ) -> Self {
-
         let queue_mechanism: QueueMechanism;
 
         if let Some(values_tests) = emulated_tests {
@@ -865,12 +856,70 @@ impl EmulatedLink {
         EmulatedLink {
             output: Default::default(),
             queue_mechanism,
-            
+            bandwidth_bps: None, // Disabled by default for backward compatibility
+            link_free_time: now,
         }
     }
 
+    /// Create a new emulated link with bandwidth emulation (e.g., 1 Gbps).
+    /// - `bandwidth_bps`: bandwidth in bits per second (e.g., 1_000_000_000 for 1 Gbps)
+    pub fn new_with_bandwidth(
+        max_queue_size: usize,
+        now: TaiTime<0>,
+        emulated_tests: Option<(bool, bool, bool, bool)>,
+        id_sta: IpAddr,
+        bandwidth_bps: u64,
+    ) -> Self {
+        let mut link = Self::new(max_queue_size, now, emulated_tests, id_sta);
+        link.bandwidth_bps = Some(bandwidth_bps);
+        link
+    }
+
+    /// Convenience method to create a 1 Gbps emulated link
+    pub fn new_1gbps(
+        max_queue_size: usize,
+        now: TaiTime<0>,
+        emulated_tests: Option<(bool, bool, bool, bool)>,
+        id_sta: IpAddr,
+    ) -> Self {
+        Self::new_with_bandwidth(max_queue_size, now, emulated_tests, id_sta, 1_000_000_000)
+    }
+
+    /// Enable or disable bandwidth emulation
+    pub fn set_bandwidth(&mut self, bandwidth_bps: Option<u64>) {
+        self.bandwidth_bps = bandwidth_bps;
+    }
+
+    /// Calculate transmission delay for a packet based on its size and configured bandwidth
+    fn calculate_transmission_delay(&self, packet_size_bytes: usize) -> Option<Duration> {
+        self.bandwidth_bps.map(|bw| {
+            // Transmission time = (packet_size_bits) / (bandwidth_bps)
+            let packet_size_bits = (packet_size_bytes as u64) * 8;
+            let delay_nanos = (packet_size_bits * 1_000_000_000) / bw;
+            Duration::from_nanos(delay_nanos.max(1))
+        })
+    }
+
     /// Handle packet arrival from a STA. Applies emulation logic, possibly queuing or dropping.
-    pub async fn input(&mut self, packet: MpduPacket, context: &Context<Self>) {
+    pub async fn input(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
+        let now = context.scheduler.time();
+        
+        // Apply bandwidth emulation if enabled
+        if let Some(transmission_delay) = self.calculate_transmission_delay(packet.length_packet_bits * 8) {
+            // Calculate when this packet can start transmission
+            let transmission_start = if now >= self.link_free_time {
+                now // Link is free, start immediately
+            } else {
+                self.link_free_time // Link is busy, queue behind previous packet
+            };
+            
+            // Update when the link will be free
+            self.link_free_time = transmission_start + transmission_delay;
+            
+            // Set the packet's deadline
+            packet.emulated_added_delay_deadline = Some(self.link_free_time);
+        }
+        
         // Delegate to the queue mechanism
         match self.queue_mechanism.enqueue_or_transmit(packet, context) {
             EnqueueResult::Transmitted(pkt) => {
@@ -880,7 +929,6 @@ impl EmulatedLink {
             EnqueueResult::Queued(queued_pkt) => {
                 // Scheduled for delayed transmission
                 if let Some(deadline) = queued_pkt.emulated_added_delay_deadline {
-                    let now = context.scheduler.time();
                     let delay = deadline
                         .duration_since(now)
                         .max(Duration::from_nanos(1));
@@ -894,23 +942,21 @@ impl EmulatedLink {
                 }
             }
             EnqueueResult::Dropped => {
-                // Packet dropped by network pattern or overflow. Logging can go here.
-                // print_red!(
-                //     // crate::lib::DebugColor::Red,
-                //     "[EMULATED LINK] Packet dropped by network emulator", 
-                // );
+                // Packet dropped by network pattern or overflow
+                // Reset link time if bandwidth emulation is enabled
+                if self.bandwidth_bps.is_some() {
+                    self.link_free_time = now;
+                }
             }
         }
     }
 
-
     pub fn flush_queue<'a>(
-    &'a mut self,
-    _: (),
-    context: &'a Context<Self>,
-) -> impl Future<Output = ()> + Send + 'a {
+        &'a mut self,
+        _: (),
+        context: &'a Context<Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
             self.queue_mechanism.next_flush_scheduled = None;
             // This now efficiently gets only the ready packets
             let ready = self.queue_mechanism.process_emu_queued_packets(context);
@@ -922,40 +968,16 @@ impl EmulatedLink {
             // Efficiently schedule the next flush based on the *new* front packet.
             if let Some(next_pkt) = self.queue_mechanism.queue.front() {
                 if let Some(next_deadline) = next_pkt.emulated_added_delay_deadline {
-                    let now   = context.scheduler.time();
+                    let now = context.scheduler.time();
                     let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
                     self.queue_mechanism.next_flush_scheduled = Some(next_deadline);
                     
                     context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
                 }
             }
-
         }
     }
 
-
-    /// Scheduled event: attempt to emit all ready packets from the internal queue
-    pub fn flush_queue_slow<'a>( // traverses whole queue. 
-    &'a mut self,
-    _: (),
-    context: &'a Context<Self>,
-) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            let ready = self.queue_mechanism.process_emu_queued_packets(context);
-            for pkt in ready {
-                self.output.send(pkt).await;
-            }
-            if let Some(next_deadline) = self.queue_mechanism.queue
-                .iter()
-                .filter_map(|p| p.emulated_added_delay_deadline)
-                .min()
-            {
-                let now   = context.scheduler.time();
-                let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
-                context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
-            }
-        }
-    }
 }
 
 impl Model for EmulatedLink {}

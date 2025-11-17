@@ -39,8 +39,9 @@ use crate::lib::{
 };
 
 
+pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64;  // 1 Gbps link
 
-use std::fs;
+use std::{fs, u64};
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
@@ -222,7 +223,7 @@ impl VRPair {
 
         );
 
-        let mut emu_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests, server_ip); 
+        let mut emu_link = EmulatedLink::new_with_bandwidth(MAX_EMULATED_QUEUE_PACKETS, t0, netem_values_tests, server_ip, BANDWIDTH_EMU_LINK); 
 
         let mbox_xr_server = Mailbox::new();
         let mbox_xr_client = Mailbox::new();
@@ -555,7 +556,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     assert!(n_close <= n_xr, "n_close_users must not exceed total XR users");
 
     let localhost_v4 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-    let scratch_link = EmulatedLink::new(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)), localhost_v4); 
+    let scratch_link = EmulatedLink::new_with_bandwidth(MAX_EMULATED_QUEUE_PACKETS, t0, Some((test_bandwidth, test_jitter, test_pl, test_random)), localhost_v4, BANDWIDTH_EMU_LINK); 
 
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
