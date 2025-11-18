@@ -55,7 +55,7 @@ pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
 const DEBUG_EDCA: bool =    false; 
-pub const DEBUG_MLO: bool = true;
+pub const DEBUG_MLO: bool = false;
 
 
 // pub const DEBUG_SCHEDULING: bool = false;

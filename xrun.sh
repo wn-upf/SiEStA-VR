@@ -32,14 +32,10 @@ T_ABR=0.3
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-
-
-
 simTime=35.0
 k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 RANDOM_SEEDS=({1..3})
 MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
-
 
 ############################################################################# <- BG Traffic
 N_BGs=( 0 )                ## Nº of BG STAs
@@ -48,13 +44,12 @@ IS_UL_BG=( 0 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL
 rates_bps_BGtraffic=( 100E6 )
 ############################################################################# <- VR streaming params
 
-N_XR=(3 ) 
+N_XR=( 1 2 3 4 5 6 ) 
 initial_bitrate_mbps=( 100.0 ) # VR Only
 
 ############################################################################# 
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
 MLO_CONFIGS=( "MLO0" "MLO1" "MLO3" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
-
 
 distance_list=( 1.5 ) ## Distance to AP of users
 num_close_users=( 0 )         ## number of users with alternate AP distance
