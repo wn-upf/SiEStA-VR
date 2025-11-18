@@ -10,7 +10,7 @@ use asynchronix::time::MonotonicTime;
 use tai_time::TaiTime;
 // use xkbcommon::xkb::Table;
 // use crate::lib::models_XR::BitrateMode;
-use crate::lib::models_mm1k::StaCapabilities; 
+use crate::lib::models_mm1k::{LinkSelectionStrategy, StaCapabilities}; 
 use rand::seq::SliceRandom;
 // use futures_util::Stream;
 // use lib::alvr_stream_socket::{Buffer, StreamReceiver};
@@ -24,7 +24,7 @@ use rand::Rng;
 
 // mod lib; // for calling m own local library
 
-use crate::lib::models_mm1k::{EmulatedLink, LinkConfig, MAX_EMULATED_QUEUE_PACKETS, NetworkPattern, QueueModule};
+use crate::lib::models_mm1k::{EmulatedLink, LinkConfig,  MAX_EMULATED_QUEUE_PACKETS, NetworkPattern, QueueModule};
 use crate::lib::{
     exponential,
     PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, PREFIX_ID_BG, 
@@ -38,7 +38,7 @@ use crate::lib::{
     // P_TX,
 };
 
-pub const NUM_INPUT_ARGS_SIM: usize = 29; 
+pub const NUM_INPUT_ARGS_SIM: usize = 30; 
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64;  // 1 Gbps link
 
 use std::{fs, u64};
@@ -373,8 +373,9 @@ pub struct SimParams {
     pub reward_mode: usize,     // 0-> naive , 1-> normalized, 2-> ??? todo shaping. 
     pub t_update_abr: f32, 
     pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel.
-    pub mlo_config: String,  
+    pub mlo_channel_config: String,  
     pub edca_be:    usize, 
+    pub mlo_link_sel_policy: usize, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -406,8 +407,9 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         reward_mode:            args[24].parse().unwrap(), 
         t_update_abr:           args[25].parse().unwrap(), 
         eval_string:            args[26].parse().unwrap(), 
-        mlo_config:             args[27].parse().unwrap(), 
+        mlo_channel_config:             args[27].parse().unwrap(), 
         edca_be:                args[28].parse().unwrap(), 
+        mlo_link_sel_policy:    args[29].parse().unwrap(), 
     }
 }
 
@@ -445,8 +447,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         reward_mode, 
         t_update_abr, 
         eval_string, 
-        mlo_config, 
+        mlo_channel_config, 
         edca_be,  
+        mlo_link_sel_policy, 
     } = params;
 
 
@@ -463,6 +466,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         _ => (false, false, false, false), // Default/STD case
     };
 
+
     // Use the test type from parameter as suffix directly
     let suffix = if ["BW", "JI", "PL", "STD", "RANDOM"].contains(&test_type.as_str()) {
         test_type.as_str()
@@ -478,11 +482,20 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         2 => {NestVrProfile::Anxious},
         _ => {NestVrProfile::Balanced}, //default to balanced 
     }; 
+
+
+    // pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::LyapunovBackpressure;
+    let mlo_policy = match mlo_link_sel_policy{
+        0 => LinkSelectionStrategy::PrimaryFirst, 
+        1 => LinkSelectionStrategy::Opportunistic, 
+        2 => LinkSelectionStrategy::LyapunovBackpressure, 
+        _ => LinkSelectionStrategy::Opportunistic,
+    }; 
                                   
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}_PL{:.1}_NXR{:.0}_NBG{:.0}__BGThr{:.2}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_config}_EDCAbe{:.0}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, 
+        "sim_T{:.0}_D{:.0}_Br{:.1}Mbps_PL{:.1}_NXR{:.0}_NBG{:.0}_BGThr{:.0}Mbps_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in/1e6 ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string()
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -519,7 +532,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
 
 
-    let link_configs = crate::lib::models_mm1k::create_mlo_config(&mlo_config); 
+    let link_configs = crate::lib::models_mm1k::create_mlo_config(&mlo_channel_config); 
 
     // Create and configure queue
     let mut queue = QueueModule::new(
@@ -530,6 +543,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         name_folder.clone(),
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
         link_configs, 
+        mlo_policy, 
     );
 
     for sta_id in &all_sta_ids {
@@ -577,7 +591,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         2 => ObservationConfig::RunningAvg, 
         _ => ObservationConfig::ManualScaledV1, 
     }; 
-
 
     for i in 0..n_close{ // to set up variable distance scenarios across users
         let first_vr_pair_distance: VRPair= VRPair::new(
@@ -744,8 +757,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
 
     // Connect background STAs to queue
-    
-    
     println!("Connecting background STAs...");
     for (i, bg_sta) in bg_sta_models.iter_mut().enumerate() {
         

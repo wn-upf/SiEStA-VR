@@ -52,7 +52,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 
 
-pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring these 2 from input args to simulator
+pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
@@ -1019,8 +1019,7 @@ impl StreamSocket {
 
         // Drain empties the map while yielding (key, value) pairs.
         for (frame_deadlined, lost_in_frame) in self.lost_shards_deadline_map.drain() {
-            debug_bgprint!(
-                DebugColor::Red,
+            crate::print_red!(
                 "[Flush deadline] Packets lost in frame {}: {:?}",
                 frame_deadlined,
                 lost_in_frame

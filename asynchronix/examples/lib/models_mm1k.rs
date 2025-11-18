@@ -55,9 +55,8 @@ pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
 
 const DEBUG_EDCA: bool =    false; 
-pub const DEBUG_MLO: bool = false;
+pub const DEBUG_MLO: bool = true;
 
-pub const MLO_LINK_SELECTION_STRATEGY: LinkSelectionStrategy = LinkSelectionStrategy::Opportunistic;
 
 // pub const DEBUG_SCHEDULING: bool = false;
 
@@ -133,6 +132,24 @@ pub enum LinkSelectionStrategy {
     RoundRobin,
     /// Use link that has shortest expected transmission time
     LowestLatency,
+    // Lyapunov
+    LyapunovBackpressure, 
+}
+use std::fmt;
+// Implement the standard library's Display trait
+impl fmt::Display for LinkSelectionStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use a match expression to map each variant to its desired string
+        match self {
+            LinkSelectionStrategy::Opportunistic => write!(f, "Opportunistic"),
+            LinkSelectionStrategy::PrimaryFirst => write!(f, "PrimaryFirst"),
+            LinkSelectionStrategy::LoadBalanced => write!(f, "LoadBalanced"),
+            LinkSelectionStrategy::QualityBased => write!(f, "QualityBased"),
+            LinkSelectionStrategy::RoundRobin => write!(f, "RoundRobin"),
+            LinkSelectionStrategy::LowestLatency => write!(f, "LowestLatency"),
+            LinkSelectionStrategy::LyapunovBackpressure => write!(f, "Backpressure"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1816,13 +1833,13 @@ fn aifs(p: EdcaParam) -> Duration {
 }
 
 pub const EDCA_TABLE: [EdcaParam; 4] = [
-    /* VO */ EdcaParam { cw_min:  3,  cw_max:  7,  aifsn: 2, txop_limit_us:  1504 },
-    /* VI */ EdcaParam { cw_min:  7,  cw_max: 15, aifsn: 2,   txop_limit_us:  3008 },
-    /* BE */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 3, txop_limit_us:    0 },
-    /* BK */ EdcaParam { cw_min: 15,  cw_max: 1023, aifsn: 7, txop_limit_us:    0 },
+    /* VO */ EdcaParam { cw_min:  3,   cw_max:   7,  aifsn: 2,  txop_limit_us:  1504 },
+    /* VI */ EdcaParam { cw_min:  7,   cw_max:  15,  aifsn: 2,  txop_limit_us:  3008 },
+    /* BE */ EdcaParam { cw_min: 15,  cw_max: 1023,  aifsn: 3,  txop_limit_us:  0    },
+    /* BK */ EdcaParam { cw_min: 15,  cw_max: 1023,  aifsn: 7,  txop_limit_us:  0    },
 ];
 
-#[derive(Hash, Clone, Copy, Debug)]
+#[derive(Hash, Clone, Debug)]
 pub struct DcfStats {
     pub cw: i32,
     pub backoff_counter: i32, 
@@ -1830,6 +1847,8 @@ pub struct DcfStats {
     pub param: EdcaParam,          // <-- NEW (static per AC)
     pub medium_free_since: TaiTime<0>,   // NEW – 
     pub backoff_frozen: bool,            // NEW
+    pub edca_ac_str: String, 
+    pub last_backoff_drawn_logs: i32, // Only for logging to CSV the 'drawn' BO value.
     // pub slot_timer_event,
 }
  
@@ -1839,19 +1858,35 @@ use crate::lib::EdcaAc;
 impl DcfStats {
      pub fn new(ac: EdcaAc) -> Self {
         let p = EDCA_TABLE[ac as usize];
+
+        let edca_ac_str = match ac {
+            EdcaAc::Voice =>      "AC_VO",
+            EdcaAc::Video =>      "AC_VI",
+            EdcaAc::Background => "AC_BK", 
+            EdcaAc::BestEffort=>  "AC_BE", 
+        }; 
+
+        let drawn_randomly_bo = rand::thread_rng().gen_range(0..=p.cw_min); 
+
         Self {
             cw: p.cw_min,
-            backoff_counter: rand::thread_rng().gen_range(0..=p.cw_min),
+            backoff_counter: drawn_randomly_bo, 
             retry_count: 0,
             param: p,
             medium_free_since: TaiTime::EPOCH, 
-            backoff_frozen: false, 
+            backoff_frozen: false,
+            edca_ac_str: edca_ac_str.to_string(),   
+            last_backoff_drawn_logs: drawn_randomly_bo , 
         }
     }
 
     /// Draw a new random back-off inside the current CW.
     pub fn reload_backoff(&mut self) {
-        self.backoff_counter = rand::thread_rng().gen_range(0..=self.cw);
+
+        let randomly_drawn = rand::thread_rng().gen_range(0..=self.cw);
+
+        self.backoff_counter         = randomly_drawn.clone();  //this one 'ticks down' 
+        self.last_backoff_drawn_logs = randomly_drawn.clone();  // this one logs the drawn value for each tx. 
     }
 
     /// Call after a **successful** transmission.
@@ -1874,7 +1909,10 @@ impl DcfStats {
             return false;           // “give up”
         }
         self.cw = ((self.cw + 1) * 2 ) - 1;          // CW = 2·(CW+1) − 1
-        if self.cw > self.param.cw_max { self.cw = self.param.cw_max; }
+        
+        if self.cw > self.param.cw_max{
+            self.cw = self.param.cw_max;
+        }
         self.reload_backoff();
         true                                           // keep packet
     }
@@ -1990,62 +2028,6 @@ impl Medium {
     #[inline] pub fn _last_end(&self) -> TaiTime<0> { self.last_txop_end }
 }
 
-#[allow(unused)]
-#[derive(Clone)]
-pub struct QueueModule {
-    // pub output_port_sta1: Output<AmpduPacket>,
-
-    pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
-    // pub queue: VecDeque<MpduPacket>,
-    pub queue: Vec<MpduPacket>, 
-
-    pub queue_maxsize_dl: usize,
-    pub service_timer: Duration,
-    // pub aux_packet_serviced: MpduPacket,
-    pub aux_ampdu_serviced: AmpduPacket,
-
-    // pub packet_being_served: bool,
-    pub link_is_transmitting: HashMap<u8, bool>, 
-
-    pub blocked_packet_counter: usize,
-    pub arrived_packet_counter: usize,
-    pub queue_length_counter: usize,
-    // pub arrival_rate: f64,
-    pub service_rate: f64,
-    pub t0_time: Instant,
-
-    pub csv_metrics: CsvType,
-
-    pub coords_queue: Coords,
-    pub p_tx: f64,
-
-    pub STA_coords_grid: Vec<Coords>,
-
-    pub STA_coords_map: HashMap<usize, Coords>,
-
-    pub cumulative_stats_queue: Arc<Mutex<QueueStats>>,
-
-    pub stats_tx: Option<Sender<StatsUpdate>>,
-    pub stats_rx: Option<Receiver<StatsUpdate>>,
-
-    pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
-
-    // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
-    pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization 
-    pub PL_probability: f64,
-
-    // pub queue_network_emulator: QueueMechanism,
-    pub ul_capacity_queue_device: usize,
-    pub ampdu_id: u32, 
-
-    // pub shared_medium: Medium, 
-    pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
-    pub link_channel_widths: HashMap<u8, usize>,  // Store channel width per link
-    pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
-    pub link_queue_depths: HashMap<u8, usize>, // Required for optimization to stop iterating O(n) over queue
-    pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
-
-}
 #[derive(Clone, Debug)]
 pub struct StaCapabilities {
     pub is_str_capable: bool,
@@ -2131,9 +2113,68 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
     a
 }
 
+
+
+#[allow(unused)]
+#[derive(Clone)]
+pub struct QueueModule {
+    // pub output_port_sta1: Output<AmpduPacket>,
+
+    pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
+    // pub queue: VecDeque<MpduPacket>,
+    pub queue: Vec<MpduPacket>, 
+
+    pub queue_maxsize_dl: usize,
+    pub service_timer: Duration,
+    // pub aux_packet_serviced: MpduPacket,
+    pub aux_ampdu_serviced: AmpduPacket,
+
+    // pub packet_being_served: bool,
+    pub link_is_transmitting: HashMap<u8, bool>, 
+
+    pub blocked_packet_counter: usize,
+    pub arrived_packet_counter: usize,
+    pub queue_length_counter: usize,
+    // pub arrival_rate: f64,
+    pub service_rate: f64,
+    pub t0_time: Instant,
+
+    pub csv_metrics: CsvType,
+
+    pub coords_queue: Coords,
+    pub p_tx: f64,
+
+    pub STA_coords_grid: Vec<Coords>,
+
+    pub STA_coords_map: HashMap<usize, Coords>,
+
+    pub cumulative_stats_queue: Arc<Mutex<QueueStats>>,
+
+    pub stats_tx: Option<Sender<StatsUpdate>>,
+    pub stats_rx: Option<Receiver<StatsUpdate>>,
+
+    pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
+
+    // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>, 
+    pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization 
+    pub PL_probability: f64,
+
+    // pub queue_network_emulator: QueueMechanism,
+    pub ul_capacity_queue_device: usize,
+    pub ampdu_id: u32, 
+
+    // pub shared_medium: Medium, 
+    pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
+    pub link_channel_widths: HashMap<u8, usize>,  // Store channel width per link
+    pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
+    pub link_queue_depths: HashMap<u8, usize>, // Required for optimization to stop iterating O(n) over queue
+    pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
+
+    pub mlo_linkselection_strat: LinkSelectionStrategy, 
+
+}
 #[allow(unused)]
 impl QueueModule {
-  
      pub fn new(
         num_stas: usize,
         queue_size: usize,
@@ -2142,6 +2183,7 @@ impl QueueModule {
         folder_dir: String,
         emulated_tests: Option<(bool, bool, bool, bool)>,
         link_configs: Vec<LinkConfig>, // NEW: Configure available links
+        mlo_linkselection_strat: LinkSelectionStrategy, 
     ) -> Self {
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
         let mut dcf_stats_vec = HashMap::new();
@@ -2219,6 +2261,7 @@ impl QueueModule {
             link_channel_widths, 
             link_queue_depths, 
             sta_capabilities: HashMap::new(),
+            mlo_linkselection_strat, 
         }
     }
 
@@ -2364,10 +2407,72 @@ impl QueueModule {
         winner.into_values().collect()
     }
 
+    /// ## A snippet from previous code that optimized a similar problem: 
+    ///  let mut selected_sta = None;
+            // if LYAPUNOV_POLICY == true {
+            //     let mut min_priority = f64::MAX;
+            //     debug_schedule!(
+            //         "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
+            //         format_elapsed!(now)
+            //     );
+            //     for (key, info) in sta_packets.iter() {
+            //         let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency;
+            //         let rhs = info.expected_queue_delivery_ms;
+            //         let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
+            //             lhs - rhs
+            //         } else {
+            //             1E12 as f64
+            //         };
+            //         let is_ul = if key.0 > key.1 {1} else {0};
+            //         debug_schedule!(
+            //             "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | is_ul = {} (src: {} dest: {}) ",
+            //             key.0,
+            //             info.packet_count,
+            //             key.0,
+            //             priority,
+            //             lhs,
+            //             rhs,
+            //             is_ul,
+            //             key.0,
+            //             key.1,
+            //         );
+            //         if priority < min_priority {
+            //             min_priority = priority;
+            //             selected_sta = Some(*key);
+            //         }
+            //     }
+            // } else if SOFTMAX_POLICY == true {
+            //     debug_schedule!("SOFTMAX POLICY", );
+            //     let mut softmax_values: Vec<f64> = Vec::new();
+            //     let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
+            //     for ((sta_src, sta_dest), packets) in sta_packets.iter() {
+            //         let _is_ul = if sta_src > sta_dest {1} else {0};
+            //         debug_schedule!(
+            //             "IS_UL = {} | ( src: {}, dest: {} )",
+            //             _is_ul,
+            //             sta_src,
+            //             sta_dest
+            //         );
+            //         softmax_values.push(packets.expected_queue_delivery_ms);
+            //         softmax_keys.push((*sta_src, *sta_dest));
+            //     }
+            //     pub const SOFTMAX_TEMP: f64 = 1000.0;
+            //     let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
+            //     let mut rng = rand::thread_rng();
+            //     let selected_index = softmax_probs
+            //         .iter()
+            //         .position(|&p| (1.0 - p) > rng.gen::<f64>())
+            //         .unwrap_or(softmax_probs.len() - 1);
+            //     let selected_key = softmax_keys[selected_index];
+            //     selected_sta = Some(selected_key);
+            // } else {
+            //     // NORMAL POLICY: FIFO
+            // }
+    
 
-    /// Select the best link for a given packet based on strategy and STA capabilities
     #[inline]
-    fn select_link_for_packet(&mut self, pkt: &MpduPacket, now: TaiTime<0>) -> Option<u8> {
+    fn select_link_for_packet(&mut self, pkt: &MpduPacket, now: TaiTime<0>) -> Option<u8> {     /// Select the best link for a given packet based on strategy and STA capabilities
+
         let sta_id = if pkt.sta_src_id > pkt.sta_dest_id {
             pkt.sta_src_id  // Uplink
         } else {
@@ -2414,14 +2519,18 @@ impl QueueModule {
         //     cap.is_str_capable
         // );
         
-        let selected = match MLO_LINK_SELECTION_STRATEGY {
+        let selected = match self.mlo_linkselection_strat {
             LinkSelectionStrategy::PrimaryFirst => {
                 self.select_primary_first(&cap.links, now)
             }
             LinkSelectionStrategy::Opportunistic => {
                 self.select_opportunistic(&cap.links, now)
             }
+            LinkSelectionStrategy::LyapunovBackpressure => {
+                self.select_lyapunov_backpressure(&cap.links, now)
+            }
             _ => {
+                println!("Mode {} UNIMPLEMENTED --> DEFAULT TO OPPORTUNISTIC", self.mlo_linkselection_strat.to_string()); 
                 self.select_opportunistic(&cap.links, now)
             }
         };
@@ -2432,12 +2541,10 @@ impl QueueModule {
                 "✓ Selected LINK-{} for STA {} (strat: {:?})",
                 link_id,
                 sta_id,
-                MLO_LINK_SELECTION_STRATEGY,
+                self.mlo_linkselection_strat,
             );
         // pkt.print(DebugColor::Blue); 
-
         }
-        
         selected
     }
 
@@ -2446,6 +2553,51 @@ impl QueueModule {
     // Now an O(1) lookup
         self.link_queue_depths.get(&link_id).copied().unwrap_or(0)
     }
+
+    #[inline]
+    fn select_lyapunov_backpressure(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+        // 1. Handle edge cases
+        if available_links.is_empty() {
+            return None;
+        }
+        // If only one link, there's no choice to make
+        if available_links.len() == 1 {
+            return Some(available_links[0]);
+        }
+
+        // 2. Find the link with the minimum queue depth
+        let mut min_depth = usize::MAX;
+        let mut selected_link = available_links[0]; // Default to the first link
+
+        for &link_id in available_links {
+            // Use your existing O(1) lookup
+            let depth = self.get_link_queue_depth(link_id);
+
+            // Optional logging to see the decision process
+            // log_link_selection!(
+            //     now,
+            //     "Lyapunov: Checking LINK-{} -> Q_depth = {}",
+            //     link_id,
+            //     depth
+            // );
+
+            if depth < min_depth {
+                min_depth = depth;
+                selected_link = link_id;
+            }
+        }
+
+        // log_link_selection!(
+        //     now,
+        //     "Lyapunov: Selected LINK-{} (min_depth = {})",
+        //     selected_link,
+        //     min_depth
+        // );
+        
+        // 3. Return the link with the shortest queue
+        Some(selected_link)
+    }
+
     #[inline]
     fn select_opportunistic(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
             // 1. Handle edge cases (no links or only one link)
@@ -2789,6 +2941,51 @@ impl QueueModule {
     
     }
 
+    fn get_ampdu_utility(
+        &self,
+        n_mpdus: usize,
+        first_packet: &MpduPacket, // To get coordinates, length, etc.
+        mac_key: &MacKey,
+    ) -> (f64, f64) {
+        if n_mpdus == 0 {
+            return (0.0, 0.0);
+        }
+        
+        let (sta_id, ac, link_id) = *mac_key;
+        let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
+        let packet_bits = first_packet.length_packet_bits as f64;
+        let total_bits = packet_bits * n_mpdus as f64;
+        let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id;
+
+        // Use the same logic as build_new_ampdu to get coords
+        let (src_coords, dest_coords) = if is_ul {
+            (first_packet.sta_src_coords, self.coords_queue)
+        } else {
+            let dest_coords = self.STA_coords_map
+                .get(&(first_packet.sta_dest_id as usize))
+                .unwrap()
+                .clone();
+            (self.coords_queue, dest_coords)
+        };
+
+        let airtime_secs = airtime_ampdu(
+            total_bits,
+            n_mpdus as i32,
+            src_coords,
+            dest_coords,
+            P_TX, // This is a global, ok
+            channel_width,
+        );
+
+        if airtime_secs == 0.0 {
+            return (0.0, 0.0); // Avoid division by zero
+        }
+        
+        let utility = n_mpdus as f64 / airtime_secs;
+        (utility, airtime_secs)
+    }
+
+
     #[inline]
     fn select_next_sta(&self) -> &HashMap<(i32, i32), StaRateInfo> {    // The entire slow loop is gone, O(1) lookup. 
 
@@ -2831,30 +3028,45 @@ impl QueueModule {
             self.deque_schedule_service((), context).await;
             // context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
         }
-        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&mac_key) { st.on_success(st.param.cw_min); }
 
-        let mut drained = smallvec::SmallVec::<[StatsUpdate; 64]>::new();
-        if let Some(rx) = self.stats_rx.as_mut() {
-            while let Ok(up) = rx.try_recv() { drained.push(up); }
-        }
-        if !drained.is_empty() {
-            if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
-                for u in &drained {
-                    qstats.update_cumstats(u.T_s, u.T_q, u.blocked_packet_counter, u.arrived_packet_counter, u.queue_length_when_out);
+ 
+
+        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&mac_key) { 
+            
+            let prev_retries = st.retry_count; 
+            let prev_cw_val = st.cw;
+            let prev_drawn_bo=st.last_backoff_drawn_logs; 
+
+            
+            st.on_success(st.param.cw_min); 
+
+
+
+            let mut drained = smallvec::SmallVec::<[StatsUpdate; 64]>::new();
+            if let Some(rx) = self.stats_rx.as_mut() {
+                while let Ok(up) = rx.try_recv() { drained.push(up); }
+            }
+            if !drained.is_empty() {
+                if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
+                    for u in &drained {
+                        qstats.update_cumstats(u.T_s, u.T_q, u.blocked_packet_counter, u.arrived_packet_counter, u.queue_length_when_out);
+                    }
+                }
+
+                if CSV_PER_PACKET{
+                    for u in drained { // CSV write outside the lock
+                        self.csv_metrics.update_stats(
+                            u.now, u.packet_id as usize, u.queue_length_when_out, u.T_s, u.T_q,
+                            u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision,
+                            u.collision_backoff, u.link_id as usize, prev_cw_val as usize, prev_retries, prev_drawn_bo, st.edca_ac_str.clone(), 
+                        );
+                    }
                 }
             }
-
-            if CSV_PER_PACKET{
-                for u in drained { // CSV write outside the lock
-                    self.csv_metrics.update_stats(
-                        u.now, u.packet_id as usize, u.queue_length_when_out, u.T_s, u.T_q,
-                        u.length_packet, u.sta_src_id, u.sta_dest_id, u.ampdu_id, u.is_collision,
-                         u.collision_backoff, u.link_id as usize,  
-                    );
-                }
-            }
         }
-
+        else{
+            print_red!("NO MAC_KEY VALUE in array DCF vals??? {:?}", mac_key); 
+        }
     }
     #[inline]
     fn build_new_ampdu<'a>(

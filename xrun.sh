@@ -19,58 +19,58 @@ module load x264
 export PATH=$HOME/.local/bin:$PATH
 
 NUMBER_OF_JOBS=12
-SERIAL_EXECUTION=0
+SERIAL_EXECUTION=1
 
 DEBUG_PROFILE_FLAMEGRAPH=0
+
 #############################################################################
 # RL params: 
 observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
 reward_mode=0
 T_ABR=0.3
 #############################################################################
-# initial_bitrate_mbps=( 100.0 )
 
 TEST_TYPE=("STD") # Can be "BW", "JI", "PL", "RANDOM", or "STD" for different emulated tests (or none)
 
-simTime=15.0
+
+
+
+simTime=35.0
 k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
+RANDOM_SEEDS=({1..3})
+MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 
-# RANDOM_SEEDS=({1..3})
-RANDOM_SEEDS=(666)
+
+############################################################################# <- BG Traffic
+N_BGs=( 0 )                ## Nº of BG STAs
 mean_length_BG=12000.0     ## BG traffic length 
-# rate_bps_src_BG=50E6;   ## BG traffic arrival rate
-
-# rates_bps_BGtraffic=( 100E6 200E6 300E6 400E6 600E6 900E6)
+IS_UL_BG=( 0 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 rates_bps_BGtraffic=( 100E6 )
+############################################################################# <- VR streaming params
 
-# N_XR=( 1 2 3 4 5 6 ) 
+N_XR=(3 ) 
+initial_bitrate_mbps=( 100.0 ) # VR Only
 
-EDCA_BE_MODE=(0 1)
-N_XR=( 1 )
+############################################################################# 
+EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
 MLO_CONFIGS=( "MLO0" "MLO1" "MLO3" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
-IS_UL_BG=( 0 ) ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 
-N_BGs=( 1 )
-distance_list=( 10.0 ) ## Distance to AP of users
-num_close_users=( 0 )     ## number of users with alternate AP distance
+
+distance_list=( 1.5 ) ## Distance to AP of users
+num_close_users=( 0 )         ## number of users with alternate AP distance
 distance_close_users=( 1.5 )  ## to have heterogeneous distances, (only if num_close_users > 0)
 everest_tests=0             ## Everest tests randomizes all VR STA distances, makes them move in 1 m radius. 
 PL=0.1
 fps_list=( 90.0 )  # VR Only
-initial_bitrate_mbps=( 100.0 ) # VR Only
 # IS_UL_BG=(  2 )
 
 ABR_ENABLED=( 0 )
 nest_profiles=( 1 ) ## balanced and that's it                                  2 => {NestVrProfile::Anxious},
-
 video_samples=("snow")
-
 intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
 GoP_sizes=(90)
-
 temp_file=$(mktemp)
 SHUFFLED_CMDS=$(mktemp)
-
 SIM_COUNT=0                 # counter of simulations, not an input arg
 # N_STEPS_RL=7_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced (admittedly manually) with the python script.   
 
@@ -117,37 +117,39 @@ for test in "${TEST_TYPE[@]}"; do
                                                             for MLO_config in "${MLO_CONFIGS[@]}"; do 
                                                                 for rate_BG in "${rates_bps_BGtraffic[@]}"; do 
                                                                     for edca_be in "${EDCA_BE_MODE[@]}"; do 
-                                                                        NAME_ABR="ABR_${ABR}"
-                                                                        # Create the folder for results saving
-                                                                        name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.1f_NXR%.0f_NBG%.0f_BGThr%.2f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f_obs%.0f_Tabr%.3f_%s_%s_EDCAbe%.0f" \
-                                                                                    "$simTime" "$distance" "$bitrate" "$PL" "$nxr" "$nbg" "$rate_BG" "$is_ul" "$test" "$video_sample" "$FPS" "$close_users" "$close_distance" "$seed" "$gop" "$intrarefresh" "$ABR" "$nest_profile" "$observation_type" "$T_ABR" "$NAME_ABR" "$MLO_config" "$edca_be")
-                                                                
-                                                                        (( SIM_COUNT++ ))  # ← increment
-                                                                        # mkdir -p "Results/$name_folder"
+                                                                        for MLO_policy in "${MLO_policies[@]}"; do 
 
-                                                                        echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
-                                                                        # # else                                    ## Serial execution
-                                                                        # rm out_log.ans
-                                                                        # script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be" "out_log.ans"
-                                                                        # sleep 5
-                                                                        # # fi
+                                                                            NAME_ABR="ABR_${ABR}"
+                                                                            # Create the folder for results saving
+                                                                            # name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.1f_NXR%.0f_NBG%.0f_BGThr%.2f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f_obs%.0f_Tabr%.3f_%s_%s_EDCAbe%.0f" \
+                                                                            #             "$simTime" "$distance" "$bitrate" "$PL" "$nxr" "$nbg" "$rate_BG" "$is_ul" "$test" "$video_sample" "$FPS" "$close_users" "$close_distance" "$seed" "$gop" "$intrarefresh" "$ABR" "$nest_profile" "$observation_type" "$T_ABR" "$NAME_ABR" "$MLO_config" "$edca_be")
+                                                                    
+                                                                            (( SIM_COUNT++ ))  # ← increment
+
+                                                                            # echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
 
 
-                                                                        # --- Profiling Block using samply ---
-                                                                        # if DEBUG_PROFILE_FLAMEGRAPH
-                                                                        #     echo "--- Starting Profiling Run for XR_sim with samply ---"
+                                                                            rm out_log.ans
+                                                                            script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy" "out_log.ans"
+                                                                            sleep 5
 
-                                                                        #     # Define the output file
-                                                                        #     PROFILE_HTML_FILE="XR_sim_profile.html"
 
-                                                                        #     # Run samply against your binary and arguments. 
-                                                                        #     # The -o flag tells samply where to save the profile.
-                                                                        #     samply record -o $PROFILE_HTML_FILE -- \
-                                                                        #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be
+                                                                            # --- Profiling Block using samply ---
+                                                                            # if DEBUG_PROFILE_FLAMEGRAPH
+                                                                            #     echo "--- Starting Profiling Run for XR_sim with samply ---"
 
-                                                                        #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
-                                                                        #     exit 0 # Exit the job after generating the profile
-                                                                        # fi 
+                                                                            #     # Define the output file
+                                                                            #     PROFILE_HTML_FILE="XR_sim_profile.html"
+
+                                                                            #     # Run samply against your binary and arguments. 
+                                                                            #     # The -o flag tells samply where to save the profile.
+                                                                            #     samply record -o $PROFILE_HTML_FILE -- \
+                                                                            #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy
+
+                                                                            #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
+                                                                            #     exit 0 # Exit the job after generating the profile
+                                                                            # fi 
+                                                                        done
                                                                     done
                                                                 done 
                                                             done 

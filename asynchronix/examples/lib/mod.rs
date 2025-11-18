@@ -1101,20 +1101,24 @@ pub fn exponential<R: Rng + ?Sized>(mean: f64, rng: &mut R) -> f64 {
 // Separate struct to hold the data that will be shared
 #[derive(Clone)]
 pub struct CsvData {
-    v_timestamp: Vec<String>,
-    v_packet_id: Vec<usize>,
-    v_queue_size: Vec<usize>,
-    v_queue_ts: Vec<f64>,
-    v_queue_tq: Vec<f64>,
-    v_packet_l: Vec<usize>,
+    v_timestamp:          Vec<String>,
+    v_packet_id:          Vec<usize>,
+    v_queue_size:         Vec<usize>,
+    v_queue_ts:           Vec<f64>,
+    v_queue_tq:           Vec<f64>,
+    v_packet_l:           Vec<usize>,
 
-    v_id_src: Vec<usize>,
-    v_id_dest: Vec<usize>,
-    v_ampdu_id: Vec<u32>, 
+    v_id_src:             Vec<usize>,
+    v_id_dest:            Vec<usize>,
+    v_ampdu_id:           Vec<u32>, 
+    v_collision:          Vec<usize>, 
+    v_T_collision:        Vec<f64>, 
+    v_link_id:            Vec<usize>, 
+    v_cw_value:           Vec<usize>, 
+    v_retries:            Vec<u8>, 
+    v_last_backoff_value: Vec<i32>, 
 
-    v_collision: Vec<usize>, 
-    v_T_collision: Vec<f64>, 
-    v_link_id: Vec<usize>, 
+    v_edca_ac:            Vec<String>, 
 }
 
 impl CsvData {
@@ -1133,7 +1137,10 @@ impl CsvData {
             v_collision: Vec::new(), 
             v_T_collision: Vec::new(), 
             v_link_id: Vec::new(), 
-
+            v_cw_value: Vec::new(), 
+            v_retries: Vec::new(), 
+            v_last_backoff_value: Vec::new(), 
+            v_edca_ac: Vec::new(),  
         }
     }
 }
@@ -1157,7 +1164,7 @@ impl CsvType {
         let mut buf = BufWriter::new(file);
         // Write header if file is empty
         if buf.get_ref().metadata()?.len() == 0 {
-            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision,link_id")?;
+            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision,link_id,CW_value,backoff_retry_counter,last_BO_drawn,EDCA_AC")?;
             buf.flush()?;
         }
         Ok(Self {
@@ -1182,6 +1189,10 @@ impl CsvType {
         is_collision: bool,
         T_collision: f64, 
         link_id: usize, 
+        cw_val: usize, 
+        num_retries_backoff: u8, 
+        last_backoff: i32, 
+        edca_ac: String, 
     ) {
         let ts_str = format_timestamp!(now);
         {
@@ -1198,6 +1209,11 @@ impl CsvType {
             data.v_collision.push(is_collision as usize); 
             data.v_T_collision.push(T_collision); 
             data.v_link_id.push(link_id); 
+            data.v_cw_value.push(cw_val); 
+            data.v_retries.push(num_retries_backoff); 
+            data.v_last_backoff_value.push(last_backoff); 
+            data.v_edca_ac.push(edca_ac); 
+
         }
 
         // Check if batch limit reached
@@ -1221,7 +1237,7 @@ impl CsvType {
         for i in 0..data.v_timestamp.len() {
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 data.v_timestamp[i],
                 data.v_packet_id[i],
                 data.v_queue_size[i],
@@ -1234,6 +1250,10 @@ impl CsvType {
                 data.v_collision[i], 
                 data.v_T_collision[i], 
                 data.v_link_id[i],
+                data.v_cw_value[i],
+                data.v_retries[i], 
+                data.v_last_backoff_value[i],
+                data.v_edca_ac[i], 
             )?;
         }
         writer.flush()?;
@@ -1250,7 +1270,11 @@ impl CsvType {
         data.v_collision.clear();
         data.v_T_collision.clear();
         data.v_link_id.clear();
-
+        data.v_cw_value.clear();
+        data.v_retries.clear();
+        data.v_last_backoff_value.clear(); 
+        data.v_edca_ac.clear();  
+        
         Ok(())
     }
 }
@@ -1979,8 +2003,6 @@ pub fn collision_delay() -> f32 {
 //         data_service_delay: T_DATA,
 //     }
 // }
-
-
 
 
 #[inline]
