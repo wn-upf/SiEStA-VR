@@ -7,7 +7,7 @@ use crate::lib::{alvr_stream_socket::StreamReceiver, BATCH_SIZE_CSV};
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::{get_prefix_path, render_text, AveragingStrategy, EdcaAc, HevcParser, WindowType};
 use crate::{
-    debug_debug,
+    // debug_debug,
     print_magenta,
     taitime_to_f64,
     // print_blue, print_brown, print_dblue, print_brown
@@ -3482,7 +3482,7 @@ impl XRServer {
 
             match packet {
                 ClientControlPacket::NetworkStatistics(network_stats) => {
-                    debug_debug!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
+                    // debug_debug!(DebugColor:: Teal, "{:.9}[DBG SERVER STATS]- Received stats for frame {:2.0}: \nNetwork stats:\n\t\t{:#?}",now.duration_since(self.t_0).as_secs_f64(), network_stats.frame_index,network_stats);
 
                     // let mut map_rtt_lock = map_clone.write().unwrap();
                     let frame_id: u32 = network_stats.frame_index as u32;
@@ -3507,7 +3507,7 @@ impl XRServer {
                         }
 
                         rtt = now.duration_since(send_instant);
-                        debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
+                        // debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
                         let netstats = network_stats.clone();
 
                         let (peak_network_throughput_bps, frame_interarrival_s) =
@@ -3773,8 +3773,9 @@ impl XRServer {
             debug_print!(
                 DebugColor::DarkGreen,
                 "{}[DBG XR_SERVER {}] Sending to network the following packets:",
-                self.ip_self,
                 elapsed.as_secs_f64(),
+                self.ip_self,
+
             );
             while !stop {
                 let bytes_received = {
@@ -3829,12 +3830,13 @@ impl XRServer {
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
 
                                 if packet.header_alvr.shard_index == 0 {
-                                    // println!(
-                                    //     "{:.9}-Server {} sending {:#?}",
-                                    //     now.duration_since(self.t_0).as_secs_f64(),
-                                    //     self.ip_self,
-                                    //     packet.header_alvr
-                                    // );
+                                    debug_print!(
+                                        DebugColor::DarkGreen, 
+                                        "{:.9}-Server {} sending {:#?}",
+                                        now.duration_since(self.t_0).as_secs_f64(),
+                                        self.ip_self,
+                                        packet.header_alvr
+                                    );
                                 }
                                 // if stream_id == VIDEO || stream_id == AUDIO {
 
@@ -3905,7 +3907,7 @@ impl XRServer {
 
             if let Some(mut sender) = self.audio_app_sender.clone() {
                 // 1) how big is our "two empties" payload?
-                let payload_len = (1400 + 600) * 8;
+                let payload_len_bytes = (1400 + 600);
 
                 // 2) compute the hidden prefix so fragmentation/sharding still lines up
                 let header = VideoPacketHeader::new(Duration::from_secs(1), false);
@@ -3913,17 +3915,20 @@ impl XRServer {
                 let hidden_offset = SHARD_PREFIX_SIZE + hsize;
 
                 // 3) allocate one big vec = prefix + payload
-                let mut raw = vec![0u8; hidden_offset + payload_len];
+                let mut raw = vec![0u8; hidden_offset + payload_len_bytes];
 
                 // 4) (optional) encode your header into the reserved space
                 let header_bytes = bincode::serialize(&header).unwrap();
                 raw[SHARD_PREFIX_SIZE..SHARD_PREFIX_SIZE + hsize].copy_from_slice(&header_bytes);
 
+
+                // debug_bgprint!(DebugColor::SaddleBrown, "{} Generating audio frame of {} bytes", format_elapsed!(now), payload_len_bytes); 
+
                 // 5) wrap it—length is _only_ the payload
                 let buf = crate::lib::alvr_stream_socket::Buffer {
                     inner: raw,
                     hidden_offset,
-                    length: payload_len,
+                    length: payload_len_bytes,
                     _phantom: std::marker::PhantomData::<()>,
                 };
 
@@ -4310,7 +4315,7 @@ impl<T> DroppingVecDeque<T> {
         self.enqued_frame_counter += 1;
         debug_print!(
             DebugColor::Gold,
-            "[VecDecoder] Pushing frame {}, decoder_length: {}, max: {},",
+            "[VecDecoder] Pushing frame {}, Jitter Buffer length: {}, max: {}",
             self.enqued_frame_counter,
             self.deque.len(),
             self.capacity,
@@ -5706,11 +5711,11 @@ impl XRClient {
                         .unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
-                    debug_print!(
-                        DebugColor::Gold,
-                        "[DEBUG DECODE] NAL first 20 bytes: {:?}",
-                        sized_vec
-                    );
+                    // debug_print!(
+                    //     DebugColor::Gold,
+                    //     "[DEBUG DECODE] NAL first 20 bytes: {:?}",
+                    //     sized_vec
+                    // );
 
                     self.decoder_queue.push((frame_id as usize, nal.to_vec()));
 

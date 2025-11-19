@@ -66,7 +66,7 @@ pub mod gcc_nada_estimator;
 //     Lazy::new(|| Mutex::new(None))
 // }
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 
 pub const USE_FFMPEG_DEMO: bool = false;
 
@@ -1617,10 +1617,13 @@ impl fmt::Display for HeaderALVRStream {
         } else {
             write!(
                 f,
-                "(ALVR F: {}, S: {}/{})",
-                self.next_packet_index,
+                "(ALVR ID: {} |  s{:>3}/{:>3}, F: {:>4})",
+
+                self.stream_id, 
                 self.shard_index,
-                self.shards_count - 1
+                self.shards_count - 1, 
+                self.next_packet_index,
+
             )
         }
     }
@@ -1761,23 +1764,23 @@ impl AmpduPacket {
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {} Bits\x1b[0m",
-            self.size, self.sta_src_id, self.sta_dest_id, self.total_length,
+            "\x1b[33m \t[AMPDU INFO]\tSize: {}, Total Length: {} Bits | SRC_ID: {}, DEST_ID: {} \x1b[0m",
+            self.size, self.total_length, self.sta_src_id, self.sta_dest_id,
         );
         //  println!("AMPDU on LINK-{}: {} packets, {} bytes",
         //     self.link_id, self.mpdu_packets.len(), self.total_length);
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID: {:.0}, L = {} bits ({} Bytes inner) | T_q: {:.3} ms , T_s: {:.3} ms",
-                // |  ALVR: S{}/{} , F: {}  \x1b[0m",
+                "\x1b[33m\t - Packet ID:{:>4}, L ={:>6} bits ({:>5} Bytes inner) | T_q: {:.3} ms , T_s: {:.3} ms | StreamID: {} | shard {:>3}/{:>3} , F:{:>5}\x1b[0m",
                 packet.packet_id,
                 packet.length_packet_bits,
                 packet.data_inner.len(), // data_inner length counts bytes
                 packet.T_q.as_secs_f64() * 1000.0,
                 packet.T_s.as_secs_f64() * 1000.0,
-                // packet.header_alvr.shard_index,
-                // packet.header_alvr.shards_count - 1,
-                // packet.header_alvr.next_packet_index,
+                packet.header_alvr.stream_id, 
+                packet.header_alvr.shard_index,
+                packet.header_alvr.shards_count - 1,
+                packet.header_alvr.next_packet_index,
             );
         }
     }

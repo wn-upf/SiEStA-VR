@@ -41,8 +41,8 @@ use rand::SeedableRng;
 pub const ROOM_W: f64 = 24.0;
 pub const ROOM_H: f64 = 12.0;
 
-pub const AP_X: f64 = ROOM_W / 2.0;
 /// Access Point at room center
+pub const AP_X: f64 = ROOM_W / 2.0;
 pub const AP_Y: f64 = ROOM_H / 2.0;
 
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
@@ -63,8 +63,11 @@ pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
+
+
 pub const DEBUG_EDCA: bool = false;
 pub const DEBUG_MLO: bool = false;
+
 
 // pub const DEBUG_SCHEDULING: bool = false;
 // pub const SOFTMAX_POLICY: bool = false;
@@ -2969,7 +2972,7 @@ impl QueueModule {
             AMPDU_sent.mpdu_packets.len(),
             self.queue.len(),
             AMPDU_sent.total_length,
-            AMPDU_sent.size - 1
+            AMPDU_sent.size
         );
         // AMPDU_sent.print();
         self.ampdu_id += 1; // increment the AMPDU counter for logging.
@@ -3226,10 +3229,10 @@ impl QueueModule {
             if random_value <= self.PL_probability {
                 // Packet loss - leave original in queue for retransmission
                 failed_count += 1;
-                log_mlo!(
-                    now,
-                    "  ❌ Packet {} failed (PL={:.3}), will be retransmitted",
-                    packet.packet_id,
+                debug_bgprint!(
+                    DebugColor::DarkRed, 
+                    "❌ Packet {} failed (PL={:.3}), will be retransmitted",
+                    packet.header_alvr,
                     self.PL_probability
                 );
                 self.blocked_packet_counter += 1;

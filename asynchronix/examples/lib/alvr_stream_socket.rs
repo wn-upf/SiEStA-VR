@@ -1,3 +1,4 @@
+use crate::debug_bgprint;
 use crate::lib::models_mm1k::NetworkPattern;
 use crate::lib::DebugColor;
 use crate::lib::OldCsvTrace;
@@ -1472,7 +1473,8 @@ impl StreamSocket {
                 components.in_progress_packets.iter().find(|(idx, _)| {
                     wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
                 })
-            {
+            {   
+                debug_bgprint!(DebugColor::DarkOrange, "idx {} discarded because {} already found ", idx, shard_recv_state_mut.packet_index); 
                 let mut editprog = inprog.clone();
                 let idx = *idx; // fix borrow rule
                 let packet = components.in_progress_packets.remove(&idx).unwrap();
