@@ -1,33 +1,18 @@
 // asynchronix/examples/xr_entry.rs
 use anyhow::Result;
 #[allow(unused)]
-////////////////////////////////////// XR SIMULATOR ////////////////////////////
-///
-///     Mixing up connection.rs and bitratemanager to simplify the process of generating frames.
-///     
+    
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
-use tai_time::TaiTime;
-// use xkbcommon::xkb::Table;
-// use crate::lib::models_XR::BitrateMode;
 use crate::lib::models_mm1k::{LinkSelectionStrategy, StaCapabilities}; 
 use rand::seq::SliceRandom;
-// use futures_util::Stream;
-// use lib::alvr_stream_socket::{Buffer, StreamReceiver};
-
-// use tai_time::TaiTime;
-
 use rand::{thread_rng, SeedableRng};
 use rand::rngs::StdRng;
-
 use rand::Rng;
-
-// mod lib; // for calling m own local library
-
-use crate::lib::models_mm1k::{EmulatedLink, LinkConfig,  MAX_EMULATED_QUEUE_PACKETS, NetworkPattern, QueueModule};
+use crate::lib::models_mm1k::{EmulatedLink,  MAX_EMULATED_QUEUE_PACKETS, NetworkPattern, QueueModule};
 use crate::lib::{
     exponential,
-    PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, PREFIX_ID_BG, 
+    PREFIX_ID_DOWNLINK, PREFIX_ID_UPLINK, 
     // frametransmission_delay,
     // AmpduPacket,
     Coords,
@@ -38,24 +23,16 @@ use crate::lib::{
     // P_TX,
 };
 
-pub const NUM_INPUT_ARGS_SIM: usize = 30; 
-pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64;  // 1 Gbps link
-
 use std::{fs, u64};
-
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
-
 use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer};
-use crate::lib::UPLINK_QUEUE_SIZE;
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400; 
-
-
-
-
+pub const NUM_INPUT_ARGS_SIM: usize = 30; 
+pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64;  // 1 Gbps link
 
 /// Draw a uniform random starting point inside the room.
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
@@ -75,7 +52,6 @@ struct VRPair {
     mbox_sta_server: Mailbox<STA_extended>,
     mbox_sta_client: Mailbox<STA_extended>,
     mbox_emu_link:  Mailbox<EmulatedLink>, 
-    edca_be_mode: bool, 
 }
 
 impl VRPair {
@@ -271,7 +247,6 @@ impl VRPair {
             mbox_sta_server,
             mbox_sta_client,
             mbox_emu_link, 
-            edca_be_mode, 
         }
     }
 }
@@ -322,7 +297,7 @@ fn generate_session_timeline_basic(
 
 fn generate_session_timeline<R: Rng>(
     rng: &mut R,
-    sim_init_time: f64, 
+    // sim_init_time: f64, 
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
     let start_time_pause = truncated_exponential_seconds(rng, 15.0, 8.0, 25.0);
@@ -533,7 +508,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
 
     let link_configs = crate::lib::models_mm1k::create_mlo_config(&mlo_channel_config); 
-
+    
+    let available_links: Vec<_> = link_configs.iter().map(|lc| lc.link_id).collect();
+    
     // Create and configure queue
     let mut queue = QueueModule::new(
         all_sta_ids.len(),
@@ -547,26 +524,32 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     );
 
     for sta_id in &all_sta_ids {
+        // This ensures that in MLO0, everyone gets [0], 
+        // in MLO1, everyone gets [0, 1], etc. Todo: tri-band case. 
+        
         let capabilities = if *sta_id >= PREFIX_ID_UPLINK && *sta_id < PREFIX_ID_DOWNLINK {
-            // Uplink STAs (clients) - MLO capable with both links
+            // Uplink STAs (clients)
             StaCapabilities {
-                is_str_capable: true,  // or false based on your requirements
-                links: vec![0, 1],     // Both links available
+                _is_str_capable: true,
+                links: available_links.clone(), // <--- Dynamic
             }
         } else if *sta_id >= PREFIX_ID_DOWNLINK {
-            // Downlink STAs (servers) - MLO capable with both links
+            // Downlink STAs (servers)
             StaCapabilities {
-                is_str_capable: true,
-                links: vec![0, 1],
+                _is_str_capable: true,
+                links: available_links.clone(), // <--- Dynamic
             }
         } else {
-            // Background traffic - single link (legacy)
+            // Background traffic
+            // NOTE: If BG traffic should ALWAYS be single link (even in MLO), 
+            // use vec![available_links[0]] instead. 
+            // Otherwise, use available_links.clone() to let them use whatever is open.
             StaCapabilities {
-                is_str_capable: true,
-                links: vec![0, 1],  // BGs MLO capable. 
+                _is_str_capable: true,
+                links: available_links.clone(), 
             }
         };
-    
+
         queue.sta_capabilities.insert(*sta_id, capabilities);
     }
 
@@ -844,7 +827,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         
         let mut sessions = if test_distances_everest_bool 
             {
-                generate_session_timeline(&mut rng, init, stoptime)
+                generate_session_timeline(&mut rng, stoptime)
             }
             else{
                 generate_session_timeline_basic(init, stoptime)

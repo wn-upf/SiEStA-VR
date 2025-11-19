@@ -5,7 +5,7 @@ use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV};
 use crate::lib::{
     GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted, models_XR::TimedVecFLR };
 use crate::lib::DebugColor;
-use crate::print_magenta;
+// use crate::print_magenta;
 use std::fs::OpenOptions;
 // use std::io::{self, Write};
 use std::net::IpAddr;
@@ -119,7 +119,7 @@ pub struct StatisticsManager {
 
 use std::{fs::{ create_dir_all}, io::{BufWriter}, thread,};
 use crossbeam_channel::{bounded, Sender};
-use csv::Writer;
+// use csv::Writer;
 
 #[derive(serde::Serialize, Clone, Debug)]
 struct StatsRow {

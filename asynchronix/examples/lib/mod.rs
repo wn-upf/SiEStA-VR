@@ -28,7 +28,7 @@ const PHY_DURATION: f64 = 100E-6;
 const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
 // const CW_MIN: i32 = 8;
-const DIFS: f64 = 2.0 * SLOT + SIFS;
+// const DIFS: f64 = 2.0 * SLOT + SIFS; // unused with EDCA
 
 
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
@@ -42,9 +42,11 @@ pub const NUMBER_OF_RANDOM_EVENTS: usize = 20;
 
 
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
-
+#[allow(unused)]
 pub const PREFIX_ID_DOWNLINK: i32 = 100; 
+#[allow(unused)]
 pub const PREFIX_ID_UPLINK:   i32 = 200; 
+#[allow(unused)]
 pub const PREFIX_ID_BG:       i32 = 300; 
 
 // Define a constant to control debugging
@@ -1834,13 +1836,7 @@ pub struct Coords {
 }
 
 impl Coords {
-    pub fn new() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        }
-    }
+   
     pub fn with_coords(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
     }
@@ -2011,11 +2007,11 @@ pub fn airtime_ampdu(
     n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
-    p_tx_orig: f64,
+    _p_tx_orig: f64,
     channel_width: usize, 
 ) -> f64 {
 
-    let p_tx = match channel_width {
+    let p_tx_cheated = match channel_width {
         20 => 20.0, 
         40 => 20.0, 
         80 => 20.0, 
@@ -2024,7 +2020,7 @@ pub fn airtime_ampdu(
         _ => 20.0, // default at 20 dBm 
     }; 
 
-    let mut effPt: f64 = p_tx;
+    let effPt: f64 = p_tx_cheated;
 
     let SU_spatial_streams = 2.0;
 
@@ -2115,9 +2111,8 @@ pub fn airtime_ampdu(
     let phy_time =
         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK;   // ⬅  removed DIFS + SLOT + BO, it happens in EDCA now. 
     
-    let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;
-    let rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;
-
+    // let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;                            // ONLY FOR DEBUG
+    // let _rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;              // ONLY FOR DEBUG
     // print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
     //              ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
 
@@ -2370,11 +2365,11 @@ fn get_third_octet(ip: IpAddr) -> Option<u8> {
 struct OldCsvTrace 
 { 
     path: PathBuf,
-    writer: Option<csv::Writer<std::fs::File>>, 
+    _writer: Option<csv::Writer<std::fs::File>>, 
 }
 impl Clone for OldCsvTrace 
 { fn clone(&self) -> Self {
-     OldCsvTrace { path: self.path.clone(), writer: None, }
+     OldCsvTrace { path: self.path.clone(), _writer: None, }
      } 
 }
 

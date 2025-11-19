@@ -18,7 +18,7 @@ use std::io::BufRead;
 use rand::Rng;
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 
-use crate::debug_bgprint;
+// use crate::debug_bgprint;
 use std::cell::{RefCell, Cell};
 use std::fmt::{self, Debug};
 use std::{
@@ -52,7 +52,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 
 
-pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring these 2 from input args to simulator
+pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring this from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
@@ -942,9 +942,7 @@ impl StreamSocket {
             // chunk_frames: VecDeque::new(),
             time_since_last_update: t0,
             csv_trace: OldCsvTrace::default(), 
-            frame_sizes: None, 
             tmp_buf: Vec::new(), 
-
             last_lo : Cell::new(0), 
             last_hi: Cell::new(1), 
             video_chunk_duration: self.video_chunk_duration,  
@@ -1890,8 +1888,6 @@ pub struct StreamSender<H> {
     pub time_since_last_update: TaiTime<0>,
 
     csv_trace: OldCsvTrace, 
-
-    frame_sizes: Option<FrameSizeTable>, 
     tmp_buf: Vec<u8>,
     // col_cache: HashMap<u32, usize>, 
     last_lo: Cell<usize>,
@@ -2259,10 +2255,8 @@ impl<H: Serialize> StreamSender<H> {
 
             // round to integer Mbps that must exist as a column
                         // Cache column index on bitrate (avoid per-frame map lookup):
-            let want_mbps = current_bitrate_mbps.round() as u32;
+            // let want_mbps = current_bitrate_mbps.round() as u32;
             
-            
-
             let bytes_this_frame = table.bytes_interp_cached(current_bitrate_mbps as f32, id_frame, &self.last_lo, &self.last_hi); 
             // bytes interpolation, when current_bitrate is not in {5,10,15..max_bitrate} for fastness
 
@@ -2322,14 +2316,6 @@ impl<H: Serialize> StreamSender<H> {
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
 }
-
-#[inline]
-fn alloc_uninit(size: usize) -> Vec<u8> {
-    let mut v = Vec::<u8>::with_capacity(size);
-    unsafe { v.set_len(size); } // write every byte before any read!
-    v
-}
-
 
 
 impl<T> HandleTryAgain<T> for io::Result<T> {
@@ -2547,7 +2533,7 @@ impl ReceiverDataStats {
 
 #[derive(Clone)]
 struct FrameSizeTable {
-    fps: u32,
+    _fps: u32,
     mbps_cols: Vec<u32>,                 // e.g. [5,10,15,...]
     col_index: HashMap<u32, usize>,      // 5 -> 0, 10 -> 1, ...
     // Column-major: framesizes[col_idx][frame_idx] -> bytes
@@ -2625,56 +2611,10 @@ impl FrameSizeTable {
         ((v0 + f * (v1 - v0)).round() as u32) as usize
     }
 
-    #[inline(always)]
-    fn bytes_interp(&self, want_mbps: f32, frame_idx: usize) -> usize {
-        let offset_idx = |idx: usize, v_len: usize| (idx + self.start_offset) % v_len;
-
-        // Fast path: exact match
-        if let Some(&col_idx) = self.col_index.get(&(want_mbps.round() as u32)) {
-            let v = &self.framesizes[col_idx];
-            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
-        }
-
-        // Find bracketing columns
-        let mbps_cols = &self.mbps_cols;
-        let n = mbps_cols.len();
-        if n == 0 {
-            return 0;
-        }
-        if want_mbps <= mbps_cols[0] as f32 {
-            let v = &self.framesizes[0];
-            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
-        }
-        if want_mbps >= mbps_cols[n - 1] as f32 {
-            let v = &self.framesizes[n - 1];
-            return v[offset_idx(frame_idx, v.len())] as usize; // <-- Use offset
-        }
-
-        // Binary search avoids O(n)
-        let hi = match mbps_cols.binary_search_by(|&v| v.cmp(&(want_mbps as u32))) {
-            Ok(i) => i,
-            Err(i) => i,
-        };
-        let lo = hi.saturating_sub(1);
-
-        let m0 = mbps_cols[lo] as f32;
-        let m1 = mbps_cols[hi] as f32;
-        let f = (want_mbps - m0) / (m1 - m0); // interpolation factor in [0,1]
-
-        let v0_vec = &self.framesizes[lo];
-        let v1_vec = &self.framesizes[hi];
-        let v0 = v0_vec[offset_idx(frame_idx, v0_vec.len())] as f32; // <-- Use offset
-        let v1 = v1_vec[offset_idx(frame_idx, v1_vec.len())] as f32; // <-- Use offset
-
-        ((v0 + f * (v1 - v0)).round() as u32) as usize
-    }
-
-
-
-    fn load(final_file: &str, fps: u32) -> anyhow::Result<Self> {
+    fn load(final_file: &str, _fps: u32) -> anyhow::Result<Self> {
         let path = get_prefix_path(&format!(
             "csv_framesizes/{}_{}fps_fused_framesizes.csv",
-            final_file, fps
+            final_file, _fps
         ));
         if !std::path::Path::new(&path).exists() {
             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
@@ -2727,7 +2667,7 @@ impl FrameSizeTable {
             .map(|(i, &m)| (m, i))
             .collect::<HashMap<_, _>>();
 
-        Ok(Self { fps, mbps_cols, col_index, framesizes, start_offset})
+        Ok(Self { _fps, mbps_cols, col_index, framesizes, start_offset})
     }
 
 
@@ -2761,7 +2701,7 @@ fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> 
 
 
 
-
+#[allow(unused)]                                                                                    
 #[inline]
 fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
     let mut v = vec![0u8; size];
@@ -2775,6 +2715,7 @@ fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
     v
 }
 
+#[allow(unused)]                                                                                    
 pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Calculate the payload size based on bitrate
     let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;

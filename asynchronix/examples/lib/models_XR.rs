@@ -1,15 +1,16 @@
 use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender
 };
-use crate::lib::gcc_nada_estimator::{self, GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
-use crate::lib::{alvr_stream_socket::StreamReceiver, HeuristicStats, BATCH_SIZE_CSV};
-use async_std::future::pending;
+use crate::lib::gcc_nada_estimator::{GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
+use crate::lib::{alvr_stream_socket::StreamReceiver, BATCH_SIZE_CSV};
+// use async_std::future::pending;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng};
 use rand::SeedableRng;
-use crate::{debug_debug, print_blue, print_brown, print_dblue, print_magenta, taitime_to_f64
-    //  print_brown
+use crate::{
+    debug_debug, print_magenta, taitime_to_f64, 
+    // print_blue, print_brown, print_dblue, print_brown
     };
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
@@ -22,7 +23,7 @@ use regex::Regex;
 use std::cell::RefCell;
 use std::fs::{OpenOptions};
 use std::io::{BufReader, Read, Write, BufWriter};
-use std::net::{self, Ipv4Addr};
+use std::net::{Ipv4Addr};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,7 +79,7 @@ use std::f64::consts::PI;
 use std::future::Future;
 use std::sync::RwLock;
 
-
+use std::sync::OnceLock;
 use crate::lib::CsvTrace;
 use crate::lib::alvr_statistics::StatisticsManager;
 use crate::lib::{exponential, AmpduPacket, Coords, DebugColor, MpduPacket, SlidingWindowAverage};
@@ -89,54 +90,18 @@ use super::alvr_stream_socket::{
 };
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::get_third_octet;
-// use async_process::Child;
-
 use crate::lib::gcc_nada_estimator::*;
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 
 
-fn hide_by_title_with_wmctrl(title: &str) {
-    let _ = std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("wmctrl -r \"{}\" -b add,hidden", title))
-        .status();
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn send_window_to_background(win: &minifb::Window) {
-    // On X11: minimize the window right after creation.
-    // This avoids focus-stealing distractions while your script runs.
-    unsafe {
-        use std::ptr;
-        use x11::xlib::{
-            XOpenDisplay, XDefaultScreen, XIconifyWindow, XFlush, XCloseDisplay,
-            Window as XWindow,
-        };
-
-        // minifb returns the OS handle as *mut c_void. For X11 it's the XWindow (an integer)
-        // casted to a pointer. Convert back via usize -> XWindow.
-        let w: XWindow = (win.get_window_handle() as usize) as XWindow;
-
-        let display = XOpenDisplay(ptr::null());
-        if !display.is_null() {
-            let screen = XDefaultScreen(display);
-            // Ask the WM to iconify (minimize) this window
-            XIconifyWindow(display, w, screen);
-            XFlush(display);
-            XCloseDisplay(display);
-        }
-    }
-}
-
-
-
-
-
-
+////////////////////////////////////// CONSTS////////////////////////////////////////
 
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
-
+#[allow(unused)]
 pub const FRAMERATE_WINDOWS: usize = 60;
+#[allow(unused)]                                                                                    
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment, 
 
 pub const SCALE_FACTOR_WINDOW: f64 = 0.15;
 
@@ -158,27 +123,21 @@ pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 pub const DECODER_BUFFERING_FRAMES: usize = 3;
 // pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
 
-#[allow(unused)]                                                                                    
-pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment, 
 
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
 pub const ALPHA_THROUGHPUT: f32 = 0.1; 
-
-
 pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1; 
 
-/// Number of consecutive good matches required to re-establish synchronization
+const RL_WINDOW_OBSERVATION_SIZE: usize = 5; 
 
-// static _STATISTICS_MANAGER: OptLazy<StatisticsManager> = lazy_mut_none();
+static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 
-// lazy_static! {
-//     static ref REFERENCE_DECODERS: Arc<Mutex<HashMap<IpAddr, SynchronizedDecoder>>> =
-//         Arc::new(Mutex::new(HashMap::new()));
-// }
+
+
+
 #[allow(unused)]
 pub struct FramePair {
     decoded: Option<Vec<u32>>,
@@ -193,14 +152,10 @@ pub struct PerfectInfoBitrateMessage{
     bitrate_mbps: f32, 
 }
 
-use std::sync::OnceLock;
-
-static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
 fn get_counter() -> &'static AtomicUsize {
     PRINT_COUNTER.get_or_init(|| AtomicUsize::new(0))
 }
-
 
 pub fn is_keyframe(frame: &[u8]) -> bool {
     // Check for start code
@@ -1218,7 +1173,7 @@ pub enum BitrateMode {
 
         ReinforcementLearner {
             bitrate_ladder_mbps: Vec<f32>, 
-            step_interval: Duration, 
+            // step_interval: Duration, 
             connector: Arc<Mutex<Box<dyn RLConnector + Send>>>,
             last_action_idx: Arc<Mutex<usize>>,
             last_decision_instant: Arc<Mutex<TaiTime<0>>>,
@@ -1336,9 +1291,9 @@ impl RLObservationVector{
         }
     } 
 
-    pub fn seq_len(&self) -> usize {
-        self.observations.len()
-    }
+    // pub fn seq_len(&self) -> usize {
+    //     self.observations.len()
+    // }
 
     /// Return a flat Vec<f32> of length (max_len * FEAT_DIM), left-padded with zeros.
     /// Layout: [o_{t-k+1}, ..., o_t] row-major, zeros for missing prefix.
@@ -1372,20 +1327,12 @@ pub struct RLTransition {
     pub cont_action_mbps: Option<f32>,  // NEW: raw continuous action, if any
 }
 
-
-
-// pub struct RLStep {
-    // pub obs: RLObservationVector, 
-    // pub reward: f32, 
-    // pub done: bool, 
-// }
 pub trait RLConnector {
     fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction;
     fn post_transition(&mut self, transition: &RLTransition);
     fn reset_window(&mut self);
 }
 
-const RL_WINDOW_OBSERVATION_SIZE: usize = 5; 
 
 #[derive(Debug, Clone)]
 pub struct ObsWindow {
@@ -1775,7 +1722,7 @@ impl TimedVecFLR {
 
     fn prune_old(&mut self, cutoff: f32) {
         // While items are being removed, decrement the running totals
-        while let Some(&(t, ref data)) = self.vec_data.front() {
+        while let Some(&(t, ref _data)) = self.vec_data.front() {
             if t < cutoff {
                 // We need to pop and get the value to subtract it
                 if let Some((_, popped_data)) = self.vec_data.pop_front() {
@@ -1831,14 +1778,14 @@ impl TimedVecBuffer{
             }
         }
     }
-    pub fn avg_buffer_level_period(&self) -> f32 {
-        if self.vec_buflevel.is_empty() {
-            return 0.0;
-        }
+    // pub fn avg_buffer_level_period(&self) -> f32 {
+    //     if self.vec_buflevel.is_empty() {
+    //         return 0.0;
+    //     }
 
-        let sum: f32 = self.vec_buflevel.iter().map(|&(_, v)| v as f32).sum();
-        sum / self.vec_buflevel.len() as f32
-    }
+    //     let sum: f32 = self.vec_buflevel.iter().map(|&(_, v)| v as f32).sum();
+    //     sum / self.vec_buflevel.len() as f32
+    // }
 
 }
 
@@ -2116,7 +2063,7 @@ impl BitrateManager {
                 println!("Debug ladder: {:?}", ladder_mbps); 
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
-                    step_interval: Duration::from_secs_f32(t_update_abr as f32),
+                    // step_interval: Duration::from_secs_f32(t_update_abr as f32),
                     connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(&action_ep, &reward_ep,  &ctx, sim_unique_string , RL_WINDOW_OBSERVATION_SIZE)))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
@@ -2418,7 +2365,7 @@ impl BitrateManager {
 
                 BitrateMode::EVeREst { bitrate_ladder_mbps }
                     => {
-                        let mut bitrate_bps = self.last_target_bitrate_bps; 
+                        // let mut bitrate_bps = self.last_target_bitrate_bps; 
                         // print_red!("bitrate first: {} Mbps", bitrate_bps / 1e6);  
                         
                         let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
@@ -2448,7 +2395,7 @@ impl BitrateManager {
                                     .unwrap_or(bitrate_ladder_mbps[0])
                             }
                         };
-                        bitrate_bps = new_mbps * 1e6; 
+                        let mut bitrate_bps = new_mbps * 1e6; 
 
                         let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma ).ceil() as usize ; 
                         let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);  
@@ -2555,32 +2502,24 @@ impl BitrateManager {
                     bitrate_bps =
                         upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap());
 
-                    let heur_stats = HeuristicStats {
-                        bitrate_step_count: profile_config.bitrate_step_count,
-
-                        bitrate_dec_steps: profile_config.bitrate_dec_steps,
-                        bitrate_inc_steps: profile_config.bitrate_inc_steps,
-
-                        bitrate_step_size_mbps: self.bitrate_step_size_bps_nest / 1e6,
-
-                        r_rtt: r_rtt,
-                        r_inc: r_inc,
-
-                        rtt_adj_prob: profile_config.rtt_adj_prob,
-                        bitrate_inc_prob: profile_config.bitrate_inc_prob,
-
-                        fps_tx_avg: fps_tx_avg,
-                        fps_rx_avg: fps_rx_avg,
-
-                        nfr_avg: nfr_avg,
-                        rtt_avg_ms: rtt_avg_ms,
-
-                        nfr_thresh: profile_config.nfr_thresh,
-                        rtt_thresh_ms: profile_config.rtt_thresh_ms,
-
-                        requested_bitrate_mbps: bitrate_bps / 1e6,
-                        estimated_capacity_mbps: estimated_capacity_bps / 1e6, 
-                    };
+                    // let heur_stats = HeuristicStats {
+                    //     bitrate_step_count: profile_config.bitrate_step_count,
+                    //     bitrate_dec_steps: profile_config.bitrate_dec_steps,
+                    //     bitrate_inc_steps: profile_config.bitrate_inc_steps,
+                    //     bitrate_step_size_mbps: self.bitrate_step_size_bps_nest / 1e6,
+                    //     r_rtt: r_rtt,
+                    //     r_inc: r_inc,
+                    //     rtt_adj_prob: profile_config.rtt_adj_prob,
+                    //     bitrate_inc_prob: profile_config.bitrate_inc_prob,
+                    //     fps_tx_avg: fps_tx_avg,
+                    //     fps_rx_avg: fps_rx_avg,
+                    //     nfr_avg: nfr_avg,
+                    //     rtt_avg_ms: rtt_avg_ms,
+                    //     nfr_thresh: profile_config.nfr_thresh,
+                    //     rtt_thresh_ms: profile_config.rtt_thresh_ms,
+                    //     requested_bitrate_mbps: bitrate_bps / 1e6,
+                    //     estimated_capacity_mbps: estimated_capacity_bps / 1e6, 
+                    // };
 
                     // print_pink!(
                     //     // DebugColor::Purple,
@@ -2595,7 +2534,7 @@ impl BitrateManager {
             
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps,
-                    step_interval,
+                    // step_interval,
                     connector,
                     last_action_idx,
                     last_decision_instant,
@@ -2928,7 +2867,7 @@ impl BitrateManager {
                 const MAX_FLR_AVG: f32 = 1.5; // From your code comment
                 const MAX_PL_SUM: f32 = 1400.0; // obs_last/pl_sum_period
                 const MAX_FRAME_SIZE_AVG: f32 = 200_000.0; // obs_last/frame_size_avg_bytes
-                const MAX_REBUFFER_SUM: f32 = 6.0; // obs_last/rebuffer_event_sum
+                // const MAX_REBUFFER_SUM: f32 = 6.0; // obs_last/rebuffer_event_sum
 
                 // Bipolar (scale to [-1.0, 1.0])
                 const MAX_ABS_OW_DELAY: f32 = 0.02; // obs_last/ow_delay_period_ewma
@@ -3020,7 +2959,7 @@ impl BitrateManager {
         let std = self.reward_stat.get_std();
         let normalized_reward = (reward - mean) / (std + 1e-8);
         
-        reward
+        normalized_reward
 
 
     }
@@ -3049,21 +2988,21 @@ impl BitrateManager {
         reward
     }
 
-    pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
-        let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
+    // pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
+    //     let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
 
-        println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.rtt_ms_avg_s, obs.flr_avg_s); 
+    //     println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.rtt_ms_avg_s, obs.flr_avg_s); 
 
-        let reward = if obs.flr_avg_s <= 0.05 {
-            if obs.rtt_ms_avg_s <= 40.0 { // let's use this manual MTP threshold
-                self.vmaf_manual_function(obs.last_target_bitrate_mbps) * alpha
-            }
-            else{
-                0.0}
-        }
-        else{0.0}; 
-        reward
-    }
+    //     let reward = if obs.flr_avg_s <= 0.05 {
+    //         if obs.rtt_ms_avg_s <= 40.0 { // let's use this manual MTP threshold
+    //             self.vmaf_manual_function(obs.last_target_bitrate_mbps) * alpha
+    //         }
+    //         else{
+    //             0.0}
+    //     }
+    //     else{0.0}; 
+    //     reward
+    // }
 }
 
 // static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> =
@@ -3185,8 +3124,8 @@ impl CsvTracking {
 struct TrackingLog {
     device_id: u64,
     position: Vec3,
-    orientation: Quat,
-    linear_velocity: Vec3,
+    _orientation: Quat,
+    _linear_velocity: Vec3,
 }
 
 #[allow(unused)]
@@ -3653,8 +3592,8 @@ impl XRServer {
                                     let log_entry = TrackingLog {
                                         device_id,
                                         position: motion.pose.position,
-                                        orientation: motion.pose.orientation,
-                                        linear_velocity: motion.linear_velocity,
+                                        _orientation: motion.pose.orientation,
+                                        _linear_velocity: motion.linear_velocity,
                                     };
 
                                     // Just print for now
@@ -6157,7 +6096,6 @@ impl XRClient {
                                                     WindowOptions::default()
                                                 ) {
                                                     Ok(window) => {
-                                                        // hide_by_title_with_wmctrl(&window_title);
                                                         windows.insert(self.server_ip.clone(), window);
                                                         print_pretty!(DebugColor::Green,
                                                             "Created display window for {} ({} x {})", 

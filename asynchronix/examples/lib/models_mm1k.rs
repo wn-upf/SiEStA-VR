@@ -1,4 +1,9 @@
-use crate::{debug_bgprint, debug_debug, print_blue, print_dblue, print_green, print_pretty, print_prettyyyy, print_red, print_yellow};
+
+
+use crate::{
+    debug_bgprint, debug_debug, print_prettyyyy, print_red, print_yellow
+    // print_blue, print_dblue, print_green, print_pretty,
+};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
 use std::cmp::{self, max};
@@ -21,50 +26,53 @@ use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
-
-pub const ROOM_W: f64 = 24.0;
-pub const ROOM_H: f64 = 12.0;
-
-/// Access Point at room center (if you need the coords elsewhere)
-pub const AP_X: f64 = ROOM_W / 2.0;
-pub const AP_Y: f64 = ROOM_H / 2.0;
-// use crate::db_debug_bgprint;
+use crate::{debug_print, format_elapsed, taitime_to_f64};
 
 use crate::lib::{
     collision_delay, exponential,  airtime_ampdu, perStaLockStats, AmpduPacket, Coords,
     CsvType, CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE, NUMBER_OF_RANDOM_EVENTS,
     P_TX,
 };
-// use std::collections::HashSet;
-use crate::{debug_print, format_elapsed, taitime_to_f64};
 
 use rand::{SeedableRng};
 
-//////////// CONST DEFINES ///////////
+////////////////////////// CONSTS/////////////////////
+pub const ROOM_W: f64 = 24.0;
+pub const ROOM_H: f64 = 12.0;
 
-// #[macro_export]
-// macro_rules! debug_schedule {
-//     ($fmt:expr,$($arg:tt)*) => {
-//         if DEBUG_SCHEDULING == true {
-//             println!($fmt, $($arg)*);
-//         }
-//     }
-// }
+pub const AP_X: f64 = ROOM_W / 2.0;  /// Access Point at room center 
+pub const AP_Y: f64 = ROOM_H / 2.0;
+
+
+pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
+pub const CSV_PER_PACKET: bool = true; // To collect Queueing times, Service, queue state, collisions per-packet in QUEUE_STATS.csv
+
+pub const STEP1_TBEGIN: f64 = 10.0;
+pub const STEP1_TEND: f64 =   20.0;
+
+pub const STEP2_TBEGIN: f64 = 30.0;
+pub const STEP2_TEND: f64 =   40.0;
+
+pub const STEP3_TBEGIN: f64 = 50.0;
+pub const STEP3_TEND: f64 =   60.0;
+
+pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
+pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
+pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0 ; // allow bursts of N MTUs 
-
-const DEBUG_EDCA: bool =    false; 
+pub const DEBUG_EDCA: bool =    false; 
 pub const DEBUG_MLO: bool = false;
 
 
+
 // pub const DEBUG_SCHEDULING: bool = false;
+// pub const SOFTMAX_POLICY: bool = false;
+// pub const LYAPUNOV_POLICY: bool = false;
+// pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
 
-pub const SOFTMAX_POLICY: bool = false;
-pub const LYAPUNOV_POLICY: bool = false;
-pub const LYAPUNOV_V: f64 = 5E7; // Lyapunov optimization parameter
-
-
+//////////////////////// MACROS ////////////////////////////////
 #[macro_export]
 macro_rules! debug_edca {
     ($fmt:expr, $($arg:tt)*) => {
@@ -114,12 +122,9 @@ macro_rules! log_link_selection {
         }
     };
 }
-
-
-
+#[allow(unused)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LinkSelectionStrategy {
-
     // Choose the channel that is free using backoffs 
     Opportunistic, 
     /// Always prefer primary link (link 0)
@@ -152,16 +157,8 @@ impl fmt::Display for LinkSelectionStrategy {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct LinkMetrics {
-    pub link_id: u8,
-    pub current_queue_depth: usize,  // Packets assigned to this link
-    pub avg_airtime_ms: f64,         // Average airtime per packet
-    pub idle_since: TaiTime<0>,      // When link became idle
-    pub collision_count: usize,      // Recent collisions
-    pub throughput_mbps: f64,        // Estimated throughput
-}
 
+#[allow(unused)]
 #[derive(Clone, Debug)]
 pub struct StaRateInfo {
     total_transmission_delay_single: f64,
@@ -174,7 +171,7 @@ pub struct StaRateInfo {
     expected_queue_delivery_ms: f64,
 
 }
-
+#[allow(unused)]
 pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     if temperature <= 0.0 {
         panic!("Temperature must be greater than 0");
@@ -188,21 +185,6 @@ pub fn softmax_with_temperature(values: &[f64], temperature: f64) -> Vec<f64> {
     let sum_exp: f64 = exp_values.iter().sum();
     exp_values.iter().map(|&v| v / sum_exp).collect()
 }
-pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
-pub const CSV_PER_PACKET: bool = true; // To collect Queueing times, Service, queue state, collisions per-packet in QUEUE_STATS.csv
-
-pub const STEP1_TBEGIN: f64 = 10.0;
-pub const STEP1_TEND: f64 =   20.0;
-
-pub const STEP2_TBEGIN: f64 = 30.0;
-pub const STEP2_TEND: f64 =   40.0;
-
-pub const STEP3_TBEGIN: f64 = 50.0;
-pub const STEP3_TEND: f64 =   60.0;
-
-pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
-pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
-pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
 pub struct PoissonSource {
     pub arrival_rate: f64,
@@ -494,7 +476,7 @@ pub enum JitterDistributionType {
     Uniform,
 }
 
-#[allow(unused)]
+#[allow(unused, unused_variables)]
 #[derive(Clone, Debug, Serialize, Deserialize )]
 pub enum NetworkPattern {
     Constant,
@@ -838,7 +820,7 @@ pub struct EmulatedLink {
     /// Time when the link will be free (last packet finishes transmission)
     link_free_time: TaiTime<0>,
 }
-
+#[allow(unused)]
 impl EmulatedLink {
     /// Create a new emulated link.
     /// - `max_queue_size`: maximum packets to buffer in the emulator
@@ -1344,7 +1326,7 @@ impl QueueMechanism {
         }
 }
 
-
+#[allow(unused)]
 #[derive(Clone, Debug)]
 pub enum RandomEventKind {
     PacketLoss,
@@ -1352,7 +1334,7 @@ pub enum RandomEventKind {
     Bandwidth,
 }
 
-
+#[allow(unused)]
 #[derive(Clone, Debug)]
 pub struct NetworkPatternEmulator {
     patterns: Vec<NetworkPattern>,
@@ -1920,71 +1902,6 @@ impl DcfStats {
 
 
 
-#[inline]
-fn ac_short(ac: EdcaAc) -> &'static str {
-    match ac {
-        EdcaAc::Voice => "VO",
-        EdcaAc::Video => "VI",
-        EdcaAc::BestEffort => "BE",
-        EdcaAc::Background => "BK",
-    }
-}
-
-#[inline]
-fn fmt_key(key: &MacKey) -> String {
-    // key: (sta_id, EdcaAc)
-    let sta = key.0;
-    let ac  = ac_short(key.1);
-    // AP uses -1 in your code — keep it visible:
-    format!("STA={:>2} AC={}", sta, ac)
-}
-
-
-
-#[inline]
-fn maps_to(key: &MacKey, p: &MpduPacket) -> bool {
-    let (sta_id, ac, link_id) = *key;
-    let is_ul = p.sta_src_id > p.sta_dest_id;
-    let p_sta = if is_ul { p.sta_src_id } else { -1 };
-    let p_link = p.assigned_link_id.unwrap_or(0);
-    
-    p_sta == sta_id && p.edca_ac == ac && p_link == link_id
-}
-
-
-
-fn ac_needs_tick(
-    key: &MacKey,
-    st: &DcfStats,
-    q: &Vec<MpduPacket>,
-    now: TaiTime<0>,
-    sta_capabilities: &HashMap<i32, StaCapabilities>,
-) -> bool {
-    let (sta_id, _, link_id) = *key;
-    
-    // Check if STA can use this link
-    if sta_id != -1 {
-        if let Some(cap) = sta_capabilities.get(&sta_id) {
-            if !cap.links.contains(&link_id) {
-                return false;
-            }
-        }
-    }
-    
-    // Does the queue hold a packet for this STA?
-    let has_pkts = q.iter().any(|p| {
-        let p_sta = if p.sta_src_id > p.sta_dest_id { p.sta_src_id } else { -1 };
-        p_sta == sta_id
-    });
-    
-    if !has_pkts { return false; }
-    
-    let aifs_done = st.medium_free_since + aifs(st.param) <= now;
-    !aifs_done || st.backoff_counter > 0
-}
-
-
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Medium {
     busy_until: TaiTime<0>,     // actual airtime occupied
@@ -2030,7 +1947,7 @@ impl Medium {
 
 #[derive(Clone, Debug)]
 pub struct StaCapabilities {
-    pub is_str_capable: bool,
+    pub _is_str_capable: bool,
     pub links: Vec<u8>,
 }
 #[derive(Clone, Debug)]
