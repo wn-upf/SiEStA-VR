@@ -2,22 +2,23 @@ use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::alvr_packets::NetworkStatisticsPacket;
 use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV};
 
-use crate::lib::{
-    GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely, SlidingWindowWeighted, models_XR::TimedVecFLR };
 use crate::lib::DebugColor;
+use crate::lib::{
+    models_XR::TimedVecFLR, GraphNetworkStatisticsCsv, NominalBitrateStats, SlidingWindowTimely,
+    SlidingWindowWeighted,
+};
 // use crate::print_magenta;
 use std::fs::OpenOptions;
 // use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::Path;
 // use ::{warn, SlidingWindowAverage};
+use std::io::Read;
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 use tai_time::TaiTime;
-use std::io::Read;
-
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -111,14 +112,13 @@ pub struct StatisticsManager {
     // optional: only log every N frames
     // stats_stride: usize,
     frame_counter: usize,
-    framerate_server: f32, 
+    framerate_server: f32,
 
-    flr_shardloss_count: TimedVecFLR,  
-
+    flr_shardloss_count: TimedVecFLR,
 }
 
-use std::{fs::{ create_dir_all}, io::{BufWriter}, thread,};
 use crossbeam_channel::{bounded, Sender};
+use std::{fs::create_dir_all, io::BufWriter, thread};
 // use csv::Writer;
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -143,9 +143,9 @@ struct StatsRow {
     nominal_bitrate: f32,
     interval_avg_plot_throughput: f32,
     decoder_jitterbuffer_level: u8,
-    num_rebuffering_events: u8, 
-    flr_deadline: usize, 
-    shardloss_deadline: usize, 
+    num_rebuffering_events: u8,
+    flr_deadline: usize,
+    shardloss_deadline: usize,
 }
 
 struct CsvSink {
@@ -171,16 +171,32 @@ impl CsvSink {
 
         // let mut wtr = csv::Writer::from_writer(BufWriter::with_capacity(1 << 22, file));
         let mut wtr = csv::WriterBuilder::new()
-            .has_headers(false) // <-- This is the fix  
-            .from_writer(BufWriter::with_capacity(1 << 24, file));  
+            .has_headers(false) // <-- This is the fix
+            .from_writer(BufWriter::with_capacity(1 << 24, file));
         if is_empty {
             wtr.write_record([
-                "timestamp","frame_index","frame_size_bytes","server_fps",
-                "frame_span_ms","interarrival_jitter_ms","ow_delay_ms","filtered_ow_delay_ms",
-                "rtt_ms","frame_interarrival_ms","frame_jitter_ms","frames_skipped",
-                "shards_lost","shards_duplicated","instant_network_throughput_bps",
-                "peak_network_throughput_bps","nominal_bitrate","interval_avg_plot_throughput",
-                "decoder_jitterbuffer_level", "rebuffering_events" ,"flr_sum_deadline", "shardloss_sum_deadline", 
+                "timestamp",
+                "frame_index",
+                "frame_size_bytes",
+                "server_fps",
+                "frame_span_ms",
+                "interarrival_jitter_ms",
+                "ow_delay_ms",
+                "filtered_ow_delay_ms",
+                "rtt_ms",
+                "frame_interarrival_ms",
+                "frame_jitter_ms",
+                "frames_skipped",
+                "shards_lost",
+                "shards_duplicated",
+                "instant_network_throughput_bps",
+                "peak_network_throughput_bps",
+                "nominal_bitrate",
+                "interval_avg_plot_throughput",
+                "decoder_jitterbuffer_level",
+                "rebuffering_events",
+                "flr_sum_deadline",
+                "shardloss_sum_deadline",
             ])?;
             wtr.flush()?;
         }
@@ -191,8 +207,9 @@ impl CsvSink {
             let mut wtr = wtr;
             let mut batch = 0;
             while let Ok(row) = rx.recv() {
-
-                if wtr.serialize(row).is_err() { break; }
+                if wtr.serialize(row).is_err() {
+                    break;
+                }
                 batch += 1;
                 if batch >= BATCH_SIZE_CSV {
                     let _ = wtr.flush();
@@ -207,8 +224,7 @@ impl CsvSink {
 
     #[inline]
     fn write(&self, row: StatsRow) {
-
-        // println!("SENDING ROW: {:?}", row); 
+        // println!("SENDING ROW: {:?}", row);
         // Fast, lock-free path; drops on full queue if you prefer lossy:
         let _ = self.tx.send(row);
     }
@@ -222,15 +238,12 @@ impl StatisticsManager {
         steamvr_pipeline_frames: f32,
         folder: &str,
         ip_self: IpAddr,
-        framerate_server: f32, 
+        framerate_server: f32,
     ) -> Self {
-
-
         let num = crate::lib::get_4_octet(ip_self);
         let file_stem = format!("XR_stats_{num:?}");
 
-        let csv_sink = CsvSink::new(folder, &file_stem)
-            .expect("failed to init CSV sink");
+        let csv_sink = CsvSink::new(folder, &file_stem).expect("failed to init CSV sink");
 
         Self {
             history_buffer: VecDeque::new(),
@@ -315,14 +328,12 @@ impl StatisticsManager {
             id_XR: ip_self,
             csv_sink,
             frame_counter: 0,
-            framerate_server, 
-            flr_shardloss_count: TimedVecFLR::new(1.0), 
-            // flr_shardloss_count: TimedVecFLR::new(), 
-
+            framerate_server,
+            flr_shardloss_count: TimedVecFLR::new(1.0),
+            // flr_shardloss_count: TimedVecFLR::new(),
         }
     }
 
-        
     pub fn clear(&mut self) {
         // Clear history
         self.history_buffer.clear();
@@ -379,11 +390,11 @@ impl StatisticsManager {
 
         crate::print_blue!(
             "[StatisticsManager] Cleared all state for new session (id={:?})",
-            self.id_XR, 
+            self.id_XR,
         );
     }
 
-    pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
+    pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32) {
         // println!("[{}] Report fl : {} sl: {} ", self.id_XR, fl, sl);
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
@@ -394,7 +405,7 @@ impl StatisticsManager {
         network_stats: NetworkStatisticsPacket,
         rtt: Duration,
         now: TaiTime<0>,
-        current_bitrate_target_mbps: f32, 
+        current_bitrate_target_mbps: f32,
     ) -> (f32, f32) {
         // println!("--- DEBUG: report_network_statistics CALLED! ---");
         self.packets_skipped_total += network_stats.frames_skipped as usize;
@@ -490,8 +501,12 @@ impl StatisticsManager {
         //     network_stats.frame_index
         // );
 
-        let mut flr_deadline = self.flr_shardloss_count.sum_flr(crate::taitime_to_f64!(now) as f32 ); 
-        let mut shardloss_deadline = self.flr_shardloss_count.sum_shard_loss(crate::taitime_to_f64!(now) as f32); 
+        let mut flr_deadline = self
+            .flr_shardloss_count
+            .sum_flr(crate::taitime_to_f64!(now) as f32);
+        let mut shardloss_deadline = self
+            .flr_shardloss_count
+            .sum_shard_loss(crate::taitime_to_f64!(now) as f32);
 
         self.last_stats = GraphNetworkStatisticsCsv {
             timestamp: now
@@ -502,7 +517,7 @@ impl StatisticsManager {
 
             frame_size_bytes: network_stats.bytes_in_frame as usize,
 
-            server_fps: self.framerate_server, 
+            server_fps: self.framerate_server,
 
             frame_span_ms: network_stats.frame_span * 1000.0,
 
@@ -527,42 +542,40 @@ impl StatisticsManager {
             requested_bps: current_bitrate_target_mbps,
 
             interval_avg_plot_throughput: self.interval_avg_plot_throughput,
-            decoder_jitterbuffer_level: network_stats.buffer_level_decoder, 
-            num_rebuffering_events: network_stats.rebuffering_events_last_s, 
+            decoder_jitterbuffer_level: network_stats.buffer_level_decoder,
+            num_rebuffering_events: network_stats.rebuffering_events_last_s,
             flr_deadline,
-            shardloss_deadline, 
+            shardloss_deadline,
         };
-
-
 
         // print_magenta!("\t{:#?}", self.last_stats);
 
         self.frame_counter += 1;
 
         let row = StatsRow {
-                timestamp:                       self.last_stats.timestamp,
-                frame_index:                     self.last_stats.frame_index,
-                frame_size_bytes:                self.last_stats.frame_size_bytes,
-                server_fps:                      self.last_stats.server_fps,
-                frame_span_ms:                   self.last_stats.frame_span_ms,
-                interarrival_jitter_ms:          self.last_stats.interarrival_jitter_ms,
-                ow_delay_ms:                     self.last_stats.ow_delay_ms,
-                filtered_ow_delay_ms:            self.last_stats.filtered_ow_delay_ms,
-                rtt_ms:                          self.last_stats.rtt_ms,
-                frame_interarrival_ms:           self.last_stats.frame_interarrival_ms,
-                frame_jitter_ms:                 self.last_stats.frame_jitter_ms,
-                frames_skipped:                  self.last_stats.frames_skipped,
-                shards_lost:                     self.last_stats.shards_lost,
-                shards_duplicated:               self.last_stats.shards_duplicated,
-                instant_network_throughput_bps:  self.last_stats.instant_network_throughput_bps,
-                peak_network_throughput_bps:     self.last_stats.peak_network_throughput_bps,
-                nominal_bitrate:                 current_bitrate_target_mbps,
-                interval_avg_plot_throughput:    self.interval_avg_plot_throughput,
-                decoder_jitterbuffer_level:      self.last_stats.decoder_jitterbuffer_level,
-                num_rebuffering_events:          self.last_stats.num_rebuffering_events, 
-                flr_deadline :                   self.last_stats.flr_deadline, 
-                shardloss_deadline:              self.last_stats.shardloss_deadline, 
-            };
+            timestamp: self.last_stats.timestamp,
+            frame_index: self.last_stats.frame_index,
+            frame_size_bytes: self.last_stats.frame_size_bytes,
+            server_fps: self.last_stats.server_fps,
+            frame_span_ms: self.last_stats.frame_span_ms,
+            interarrival_jitter_ms: self.last_stats.interarrival_jitter_ms,
+            ow_delay_ms: self.last_stats.ow_delay_ms,
+            filtered_ow_delay_ms: self.last_stats.filtered_ow_delay_ms,
+            rtt_ms: self.last_stats.rtt_ms,
+            frame_interarrival_ms: self.last_stats.frame_interarrival_ms,
+            frame_jitter_ms: self.last_stats.frame_jitter_ms,
+            frames_skipped: self.last_stats.frames_skipped,
+            shards_lost: self.last_stats.shards_lost,
+            shards_duplicated: self.last_stats.shards_duplicated,
+            instant_network_throughput_bps: self.last_stats.instant_network_throughput_bps,
+            peak_network_throughput_bps: self.last_stats.peak_network_throughput_bps,
+            nominal_bitrate: current_bitrate_target_mbps,
+            interval_avg_plot_throughput: self.interval_avg_plot_throughput,
+            decoder_jitterbuffer_level: self.last_stats.decoder_jitterbuffer_level,
+            num_rebuffering_events: self.last_stats.num_rebuffering_events,
+            flr_deadline: self.last_stats.flr_deadline,
+            shardloss_deadline: self.last_stats.shardloss_deadline,
+        };
         self.csv_sink.write(row);
 
         // // Call method to save data to CSV
@@ -571,7 +584,6 @@ impl StatisticsManager {
         // }
         return (peak_network_throughput_bps, frame_interarrival);
     }
-
 
     pub fn report_input_acquired(&mut self, target_timestamp: Duration) {
         if !self

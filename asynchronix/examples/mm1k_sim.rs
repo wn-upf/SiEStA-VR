@@ -756,7 +756,7 @@
 //         vec_ids_stas.clone(),
 //         name_folder,
 //         UPLINK_QUEUE_SIZE,
-//         None, 
+//         None,
 //     );
 
 //     // Setup coordinates
@@ -1292,7 +1292,7 @@
 //         vec_ids_stas.clone(),
 //         name_folder,
 //         UPLINK_QUEUE_SIZE,
-//         None, 
+//         None,
 //     );
 
 //     // mutex data handles to be able to access simulator variables, as csv vecs or CumulativeStats

@@ -1,25 +1,27 @@
+use crate::lib::models_mm1k::NetworkPattern;
+use crate::lib::DebugColor;
+use crate::lib::OldCsvTrace;
+use crate::lib::{get_prefix_path, get_third_octet, HevcParser};
+use crate::print_green;
+use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use ffmpeg_sidecar::command::FfmpegCommand;
+use rand::Rng;
 use std::collections::HashMap;
-use std::io::{Read};
+#[allow(unused)]
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
 #[allow(unused_imports)]
 #[allow(dead_code)]
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use crate::lib::{get_third_octet, HevcParser, get_prefix_path};
-use crate::lib::DebugColor;
-use ffmpeg_sidecar::command::FfmpegCommand;
-use std::io::BufReader;
-use crate::lib::OldCsvTrace;
-use crate::print_green;
-use crate::lib::models_mm1k::NetworkPattern;
-#[allow(unused)]
-use std::io::BufRead;
-use rand::Rng;
-use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 
 // use crate::debug_bgprint;
-use std::cell::{RefCell, Cell};
+use crate::lib::models_XR::SHARD_PREFIX_SIZE;
+use crate::lib::models_XR::{XRDevice, HEIGHT_ENCODER, WIDTH_ENCODER};
+use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug};
 use std::{
     cmp::Ordering,
@@ -30,8 +32,6 @@ use std::{
     // net::{TcpListener, UdpSocket},
     time::Duration,
 };
-use crate::lib::models_XR::{XRDevice, HEIGHT_ENCODER, WIDTH_ENCODER};
-use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 // use crate::lib::DebugColor;
 use anyhow::{anyhow, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -39,24 +39,20 @@ use std::error::Error;
 // use std::io::{Read, Write};
 use std::net::IpAddr;
 
+use csv::Writer;
 use std::result::Result::Ok;
 use tai_time::TaiTime;
-use csv::{ Writer};
 
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 
 // use super::alvr_packets::NetworkStatisticsPacket;
 // use std::env;
 
-
-
-
-
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring this from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
-// pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
+                                        // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
@@ -73,9 +69,7 @@ pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 pub const CONTROL_STREAM: u16 = 5;
 
-
-pub const FOVOPTIX_BW_PROBE: u16 = 9; 
-
+pub const FOVOPTIX_BW_PROBE: u16 = 9;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 pub struct ChunkedHevcEncoder {
@@ -91,8 +85,8 @@ pub struct ChunkedHevcEncoder {
     frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
-    gop_size: usize, 
-    intra_refresh: bool, 
+    gop_size: usize,
+    intra_refresh: bool,
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -104,9 +98,9 @@ impl ChunkedHevcEncoder {
         chunk_duration: f64,
         string: String,
         offset_video: f64,
-        framerate: f32, 
-        gop_size: usize, 
-        intra_refresh: bool, 
+        framerate: f32,
+        gop_size: usize,
+        intra_refresh: bool,
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(1000);
@@ -123,8 +117,8 @@ impl ChunkedHevcEncoder {
             frame_queue: VecDeque::new(),
             parser: HevcParser::new(),
             encoder_str: string.clone(),
-            gop_size, 
-            intra_refresh, 
+            gop_size,
+            intra_refresh,
         }
     }
 
@@ -137,17 +131,19 @@ impl ChunkedHevcEncoder {
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
 
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, ) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
         // let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
-        
-        let bitrate_adjusted_fps = bitrate_mbps; 
+
+        let bitrate_adjusted_fps = bitrate_mbps;
         // Since the encoded video samples are 60fps, we thus adjust bitrate to match with the actual second units.
 
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
         println!(
             "{} - {} CHUNKING with bitrate {} Mbps",
-            crate::format_elapsed!(now),self.encoder_str, bitrate_mbps,
+            crate::format_elapsed!(now),
+            self.encoder_str,
+            bitrate_mbps,
         );
         self.parser.buffer.clear();
         // println!("**** AAAA INPUT IS {} *****", self.input);
@@ -159,7 +155,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
                 .args(&["-threads", "2"])
-                .args(&["-hide_banner", "-nostats", "-loglevel", "error"]) 
+                .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "8"])
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
@@ -173,16 +169,15 @@ impl ChunkedHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 // .args(&["-preset", "llhq"])
-
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
-                // the throughput distribution will match that of the bitrate target strictly by padding. 
+                .args(&["-bufsize", &self.bitrate]) // 1-second VBV window (optional but keeps it tight)
+                // the throughput distribution will match that of the bitrate target strictly by padding.
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
-                .args(&["-bf", "0"])    // force zero B-frames for PIR to work
+                .args(&["-bf", "0"]) // force zero B-frames for PIR to work
                 .args(&["-intra-refresh", "1"]) // Enable intra-refresh coding
-                // .args(&["-intra-refresh-period", &format!("{:.0}, ", self.gop_size) ]) 
+                // .args(&["-intra-refresh-period", &format!("{:.0}, ", self.gop_size) ])
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
@@ -195,10 +190,8 @@ impl ChunkedHevcEncoder {
                 .args(&["-t", &self.chunk_duration.to_string()])
                 // .args(&["-re"]) // read at realtime speed
                 .args(&["-threads", "2"])
-                .args(&["-hide_banner", "-nostats", "-loglevel", "error"]) 
+                .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "5"])
-
-
                 .input(&self.input)
                 .args(&[
                     "-vf",
@@ -208,13 +201,11 @@ impl ChunkedHevcEncoder {
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
-                .args(&["-preset", "fast"])  // TODO : llhq is preferrable but deprecated on some of the HPC GPUs. 
+                .args(&["-preset", "fast"]) // TODO : llhq is preferrable but deprecated on some of the HPC GPUs.
                 // .args(&["-preset", "llhq"])
-
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate])   // 1-second VBV window (optional but keeps it tight)
-
+                .args(&["-bufsize", &self.bitrate]) // 1-second VBV window (optional but keeps it tight)
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", &format!("{:.0}", self.gop_size)]) // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
@@ -228,8 +219,6 @@ impl ChunkedHevcEncoder {
         let mut child = command.spawn().unwrap();
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
-
-
 
         if let Some(stderr) = child.take_stderr() {
             let mut err_reader = std::io::BufReader::new(stderr);
@@ -450,7 +439,6 @@ impl std::fmt::Display for ConError {
     }
 }
 
-
 #[derive(Clone)]
 pub struct InProgressPacket {
     buffer: Vec<u8>,
@@ -559,11 +547,10 @@ pub struct KalmanFilter {
     k_gain: f32,
     measured_delay: f32,
 
-    pub last_tx_time: f32,  
-    // TaiTime<0>, 
-    pub last_rx_time: f32,  
-    // TaiTime<0>, 
-
+    pub last_tx_time: f32,
+    // TaiTime<0>,
+    pub last_rx_time: f32,
+    // TaiTime<0>,
 }
 
 impl Default for KalmanFilter {
@@ -580,8 +567,7 @@ impl Default for KalmanFilter {
             k_gain: 0.0,
             measured_delay: 0.0,
             last_tx_time: 0.0,
-            last_rx_time: 0.0, 
-
+            last_rx_time: 0.0,
         }
     }
 }
@@ -638,8 +624,8 @@ struct ReconstructedPacket {
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
 
-    tx_instant_packet: f32,   // used for NADA ABR in XRClient connection loop
-    rx_instant_packet: f32,  
+    tx_instant_packet: f32, // used for NADA ABR in XRClient connection loop
+    rx_instant_packet: f32,
 }
 
 impl fmt::Debug for ReconstructedPacket {
@@ -784,9 +770,8 @@ pub struct ReceiverData<H> {
     highest_rx_frame_index: i32,
     highest_rx_shard_index: i32,
     // tx_instant_first_shard: TaiTime<0>,
-
     tx_instant_packet: f32,
-    rx_instant_packet: f32, 
+    rx_instant_packet: f32,
 }
 #[allow(unused)]
 impl<H> ReceiverData<H> {
@@ -796,7 +781,7 @@ impl<H> ReceiverData<H> {
         } else {
             vec![2 as u8, 2]
         }
-    }  
+    }
 
     pub fn get_tx_time_first(&self) -> f32 {
         self.tx_instant_packet
@@ -920,7 +905,7 @@ pub struct StreamSocket {
     highest_rx_frame_index: i32,
 
     pub lost_shards_deadline_map: HashMap<u32, usize>, // key: frame_id, val: shard loss
-    pub video_chunk_duration: f32, 
+    pub video_chunk_duration: f32,
 }
 #[allow(unused)]
 impl StreamSocket {
@@ -941,11 +926,11 @@ impl StreamSocket {
             // ffmpeg_maxbitrate_encoder: None,
             // chunk_frames: VecDeque::new(),
             time_since_last_update: t0,
-            csv_trace: OldCsvTrace::default(), 
-            tmp_buf: Vec::new(), 
-            last_lo : Cell::new(0), 
-            last_hi: Cell::new(1), 
-            video_chunk_duration: self.video_chunk_duration,  
+            csv_trace: OldCsvTrace::default(),
+            tmp_buf: Vec::new(),
+            last_lo: Cell::new(0),
+            last_hi: Cell::new(1),
+            video_chunk_duration: self.video_chunk_duration,
             // col_cache: HashMap::new(),
         }
     }
@@ -1008,7 +993,6 @@ impl StreamSocket {
             inner: Arc::clone(&self.receive_socket),
         }
     }
-
 
     pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
         let cap = self.lost_shards_deadline_map.len();
@@ -1152,7 +1136,7 @@ impl StreamSocket {
                 overwritten_data_backup: None,
                 should_discard: false,
                 frame_first_shard_deadline: None,
-                // tx_r_instant, 
+                // tx_r_instant,
             })
         };
 
@@ -1335,15 +1319,13 @@ impl StreamSocket {
                     let max_time = values.iter().map(|shard| shard.rx_instant).max().unwrap();
 
                     frame_span = max_time.duration_since(min_time).as_secs_f32();
-                    
-                    
-                    
+
                     frame_interarrival = max_time
                         .duration_since(self.prev_frame_rx_instant)
                         .as_secs_f32();
-                    
-                    if self.prev_frame_rx_instant == TaiTime::EPOCH{
-                        frame_interarrival = Duration::ZERO.as_secs_f32(); // prevent very high values at begginning of simulation.  
+
+                    if self.prev_frame_rx_instant == TaiTime::EPOCH {
+                        frame_interarrival = Duration::ZERO.as_secs_f32(); // prevent very high values at begginning of simulation.
                     }
 
                     self.prev_frame_rx_instant = max_time;
@@ -1359,9 +1341,8 @@ impl StreamSocket {
                             self.kalman.ow_delay = frame_interarrival
                                 - (first_shard_stats.tx_r_instant - prev_frame_tx_r_instant);
 
-
-                            self.kalman.last_tx_time = first_shard_stats.tx_r_instant; 
-                            self.kalman.last_rx_time = prev_frame_tx_r_instant;    
+                            self.kalman.last_tx_time = first_shard_stats.tx_r_instant;
+                            self.kalman.last_rx_time = prev_frame_tx_r_instant;
                         }
                         self.prev_frame_tx_r_instant = Some(first_shard_stats.tx_r_instant);
 
@@ -1485,19 +1466,20 @@ impl StreamSocket {
             }
         }
 
-        if ALVR_ORIGINAL_SOCKETRX_BEHAVIOR{
-             // Keep only shards with later packet index (using wrapping logic)
-             while let Some((idx, inprog)) = components.in_progress_packets.iter().find(|(idx, _)| {
-                wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
-            }) {
-
-                let mut editprog = inprog.clone(); 
+        if ALVR_ORIGINAL_SOCKETRX_BEHAVIOR {
+            // Keep only shards with later packet index (using wrapping logic)
+            while let Some((idx, inprog)) =
+                components.in_progress_packets.iter().find(|(idx, _)| {
+                    wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
+                })
+            {
+                let mut editprog = inprog.clone();
                 let idx = *idx; // fix borrow rule
                 let packet = components.in_progress_packets.remove(&idx).unwrap();
-                
-                let shards_lost = editprog.num_shards_expected - editprog.received_shard_indices.len(); 
-                self.lost_shards_deadline_map
-                .insert(idx, shards_lost);
+
+                let shards_lost =
+                    editprog.num_shards_expected - editprog.received_shard_indices.len();
+                self.lost_shards_deadline_map.insert(idx, shards_lost);
                 // Recycle buffer
                 components.used_buffer_sender.send(packet.buffer).ok();
             }
@@ -1516,7 +1498,7 @@ pub enum StreamSocketBuilder {
 
 #[allow(unused)]
 impl StreamSocketBuilder {
-    pub fn build(self, max_packet_size: usize, video_chunk_duration: f32, ) -> StreamSocket {
+    pub fn build(self, max_packet_size: usize, video_chunk_duration: f32) -> StreamSocket {
         match self {
             StreamSocketBuilder::Channel(sender, receiver) => {
                 StreamSocket {
@@ -1541,7 +1523,7 @@ impl StreamSocketBuilder {
                     highest_rx_shard_index: -1,
                     highest_rx_frame_index: -1,
                     lost_shards_deadline_map: HashMap::new(),
-                    video_chunk_duration, 
+                    video_chunk_duration,
                 }
             }
         }
@@ -1582,7 +1564,7 @@ impl StreamSocketBuilder {
         port: u16,
         max_packet_size: usize,
         timeout: Duration,
-        video_chunk_duration: f32, 
+        video_chunk_duration: f32,
     ) -> ConResult<StreamSocket> {
         let protocol: SocketProtocol;
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
@@ -1635,7 +1617,7 @@ impl StreamSocketBuilder {
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
             lost_shards_deadline_map: HashMap::new(),
-            video_chunk_duration, 
+            video_chunk_duration,
         })
     }
 
@@ -1649,7 +1631,7 @@ impl StreamSocketBuilder {
         send_buffer_bytes: SocketBufferSize,
         recv_buffer_bytes: SocketBufferSize,
         max_packet_size: usize,
-        video_chunk_duration: f32, 
+        video_chunk_duration: f32,
     ) -> ConResult<StreamSocket> {
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
             match protocol {
@@ -1707,7 +1689,7 @@ impl StreamSocketBuilder {
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
             lost_shards_deadline_map: HashMap::new(),
-            video_chunk_duration,  
+            video_chunk_duration,
         })
     }
 
@@ -1720,7 +1702,7 @@ impl StreamSocketBuilder {
         send_buffer: SocketBufferSize,
         recv_buffer: SocketBufferSize,
         packet_size: usize,
-        video_chunk_duration: f32, 
+        video_chunk_duration: f32,
     ) -> Result<StreamSocket> {
         let (sender, receiver) = buffered_channel();
 
@@ -1731,7 +1713,7 @@ impl StreamSocketBuilder {
         server_ip: IpAddr,
         port: u16,
         packet_size: usize,
-        video_chunk_duration: f32, 
+        video_chunk_duration: f32,
     ) -> Result<StreamSocket> {
         // let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) = match self {
         //     StreamSocketBuilder::Channel(sender, receiver) => {
@@ -1829,9 +1811,8 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             highest_rx_frame_index: packet.highest_rx_frame_index,
             highest_rx_shard_index: packet.highest_rx_shard_index,
 
-            
             tx_instant_packet: packet.tx_instant_packet,
-            rx_instant_packet: packet.rx_instant_packet, 
+            rx_instant_packet: packet.rx_instant_packet,
         })
     }
 }
@@ -1857,8 +1838,6 @@ pub fn parse_shard_data(data: &[u8]) -> Result<(u32, u16, u32, u32, u32, f32), &
         tx_r_instant,
     ))
 }
-
-
 
 #[derive(Clone)]
 pub struct StreamSender<H> {
@@ -1887,17 +1866,14 @@ pub struct StreamSender<H> {
     // Keep the initialization flag:
     pub time_since_last_update: TaiTime<0>,
 
-    csv_trace: OldCsvTrace, 
+    csv_trace: OldCsvTrace,
     tmp_buf: Vec<u8>,
-    // col_cache: HashMap<u32, usize>, 
+    // col_cache: HashMap<u32, usize>,
     last_lo: Cell<usize>,
     last_hi: Cell<usize>,
 
-    pub video_chunk_duration: f32, 
+    pub video_chunk_duration: f32,
 }
-
-
-
 
 #[allow(unused)]
 impl<H> StreamSender<H> {
@@ -1978,33 +1954,31 @@ impl<H: Serialize> StreamSender<H> {
         id_frame: usize,
         name_folder: &str,
         // max_bitrate_ladder_mbps: f32,
-        network_effects: &[NetworkPattern], 
-        final_file: &str, 
-        framerate: f32, 
-        gop_size: usize, 
-        intra_refresh: bool, 
+        network_effects: &[NetworkPattern],
+        final_file: &str,
+        framerate: f32,
+        gop_size: usize,
+        intra_refresh: bool,
     ) -> Result<Buffer<H>> {
         let _id_frame_files_ref = id_frame + 1;
 
-         // Decide the suffix based on framerate
+        // Decide the suffix based on framerate
         let fps_suffix: &'static str = match framerate.round() as u32 {
-            60  =>  "_60fps.mp4",
-            90  =>  "_90fps.mp4",
+            60 => "_60fps.mp4",
+            90 => "_90fps.mp4",
             120 => "_120fps.mp4",
-            _   => "", // default: leave as-is if unexpected fps
+            _ => "", // default: leave as-is if unexpected fps
         };
-         // Compose filename with suffix
+        // Compose filename with suffix
         let file_with_fps;
 
-        if final_file == "snow"{
-            file_with_fps  = format!("{final_file}{fps_suffix}"); 
-        }
-        else{
-            file_with_fps = final_file.to_string(); 
+        if final_file == "snow" {
+            file_with_fps = format!("{final_file}{fps_suffix}");
+        } else {
+            file_with_fps = final_file.to_string();
         }
 
-        
-        let input_path = get_prefix_path(&format!("video_samples_vmaf/{}", file_with_fps)); 
+        let input_path = get_prefix_path(&format!("video_samples_vmaf/{}", file_with_fps));
 
         // let input_path = &format!(
         //     "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/{file_with_fps}.mp4"
@@ -2013,7 +1987,7 @@ impl<H: Serialize> StreamSender<H> {
         // if !std::path::Path::new(&input_path).exists() {
         //     return Err(anyhow::anyhow!("Input file does not exist: {}", input_path));
         // }
-        // println!("[DBG FILENAME] IS {}", file_with_fps); 
+        // println!("[DBG FILENAME] IS {}", file_with_fps);
 
         let mut buffer: Vec<u8> = Vec::new();
         // print_pretty!(
@@ -2038,63 +2012,58 @@ impl<H: Serialize> StreamSender<H> {
                 let random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
                 // let random_offset = OFFSET_VIDEO;
 
-                let third_octet = get_third_octet(ip).unwrap(); 
+                let third_octet = get_third_octet(ip).unwrap();
 
                 if self.csv_trace.path.as_os_str().is_empty() {
                     // one CSV per run – put it next to the hevc files, but anywhere is fine
-                    let csv_path = get_prefix_path( &format!("Results/{}/trace_offline_video{}.csv",
-                        name_folder,
-                        third_octet,)
-                    );
+                    let csv_path = get_prefix_path(&format!(
+                        "Results/{}/trace_offline_video{}.csv",
+                        name_folder, third_octet,
+                    ));
 
-
-                    let csv_path_emu = 
-                        get_prefix_path(&format!(
-                            "Results/{}/trace_emu_effects{}.csv",
-                            name_folder,
-                            third_octet,
-                        ));
-                    print_green!("Creating OFFLINE CSV at: {csv_path}", ); 
+                    let csv_path_emu = get_prefix_path(&format!(
+                        "Results/{}/trace_emu_effects{}.csv",
+                        name_folder, third_octet,
+                    ));
+                    print_green!("Creating OFFLINE CSV at: {csv_path}",);
 
                     let mut wtr = Writer::from_path(&csv_path)?;
-                    let mut wtr2 = Writer::from_path(&csv_path_emu)?;                     
+                    let mut wtr2 = Writer::from_path(&csv_path_emu)?;
 
                     wtr.write_record(&[
                         "OFFSET_VIDEO",
                         "PATH_VIDEO",
                         "IDR_FREQUENCY",
-                        // "Intrarefresh_enabled", 
+                        // "Intrarefresh_enabled",
                         "timestamp",
                         "ID_frame",
-                        "Lost", 
+                        "Lost",
                         "Throughput(avg)",
-                    ])?; 
+                    ])?;
 
-                    // wtr2.write_record(&["EMU_EFFECTS", ] )?; 
+                    // wtr2.write_record(&["EMU_EFFECTS", ] )?;
                     wtr2.write_record(NetworkPattern::csv_headers())?;
 
                     for emu in network_effects {
-
                         wtr2.write_record(emu.to_csv_row())?;
-                        // wtr2.write_record(&[ format!("{:#?}", emu) ] )?; 
+                        // wtr2.write_record(&[ format!("{:#?}", emu) ] )?;
                     }
 
                     wtr.write_record(&[
-                        format!("{random_offset:.4}"),     // offset used for this run
-                        input_path.to_owned(),             // source clip
-                        format!("{}", gop_size), 
-                        // json, 
-                        "".to_string(),                                // placeholder timestamp
-                        "".to_string(),                                // placeholder id_f
-                        "".to_string(),                                // placeholder lost
-                        "".to_string(), 
+                        format!("{random_offset:.4}"), // offset used for this run
+                        input_path.to_owned(),         // source clip
+                        format!("{}", gop_size),
+                        // json,
+                        "".to_string(), // placeholder timestamp
+                        "".to_string(), // placeholder id_f
+                        "".to_string(), // placeholder lost
+                        "".to_string(),
                     ])?;
 
                     wtr.flush()?;
-                    wtr2.flush()?; 
+                    wtr2.flush()?;
                     self.csv_trace.path = csv_path.into();
                 }
-    
 
                 let encoder: ChunkedHevcEncoder = ChunkedHevcEncoder::new(
                     &input_path,
@@ -2104,9 +2073,9 @@ impl<H: Serialize> StreamSender<H> {
                     self.video_chunk_duration as f64, // Chunk duration in seconds
                     format!("[ENCODER {}]", ip),
                     random_offset,
-                    framerate, 
-                    gop_size, 
-                    intra_refresh, 
+                    framerate,
+                    gop_size,
+                    intra_refresh,
                 );
 
                 // Wrap the encoder in an Arc<Mutex<_>>
@@ -2199,15 +2168,15 @@ impl<H: Serialize> StreamSender<H> {
                     }
                 };
             };
-        } else {             // non-FFMPEG mode, fast!
+        } else {
+            // non-FFMPEG mode, fast!
 
             if self.csv_trace.path.as_os_str().is_empty() {
-                let third_octet = get_third_octet(ip).unwrap(); 
-                
+                let third_octet = get_third_octet(ip).unwrap();
+
                 let csv_path_emu = get_prefix_path(&format!(
                     "Results/{}/trace_emu_effects{}.csv",
-                    name_folder,
-                    third_octet,
+                    name_folder, third_octet,
                 ));
 
                 let parent_dir = std::path::Path::new(&csv_path_emu)
@@ -2230,9 +2199,8 @@ impl<H: Serialize> StreamSender<H> {
                             wtr2.write_record(emu.to_csv_row())?;
                         }
                         wtr2.flush()?;
-                        print_green!("Created EMU EFFECTS CSV at (new): {csv_path_emu}", );
+                        print_green!("Created EMU EFFECTS CSV at (new): {csv_path_emu}",);
                         self.csv_trace.path = csv_path_emu.into();
-
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         // another thread/process already created it, just open for append if you need to
@@ -2254,20 +2222,24 @@ impl<H: Serialize> StreamSender<H> {
             let table = get_table(final_file, fps)?; // global cached
 
             // round to integer Mbps that must exist as a column
-                        // Cache column index on bitrate (avoid per-frame map lookup):
+            // Cache column index on bitrate (avoid per-frame map lookup):
             // let want_mbps = current_bitrate_mbps.round() as u32;
-            
-            let bytes_this_frame = table.bytes_interp_cached(current_bitrate_mbps as f32, id_frame, &self.last_lo, &self.last_hi); 
+
+            let bytes_this_frame = table.bytes_interp_cached(
+                current_bitrate_mbps as f32,
+                id_frame,
+                &self.last_lo,
+                &self.last_hi,
+            );
             // bytes interpolation, when current_bitrate is not in {5,10,15..max_bitrate} for fastness
 
             // Reuse one buffer:
             ensure_len_uninit(&mut self.tmp_buf, bytes_this_frame);
-            buffer = self.tmp_buf.clone();      
+            buffer = self.tmp_buf.clone();
 
-            //////////// FAST CODE /////////////// 
+            //////////// FAST CODE ///////////////
             // buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
-            // println!("TODO use CSV frame sizes per bitrate"); 
-
+            // println!("TODO use CSV frame sizes per bitrate");
         }
 
         // Rest of your function remains the same
@@ -2316,7 +2288,6 @@ impl<H: Serialize> StreamSender<H> {
 pub trait HandleTryAgain<T> {
     fn handle_try_again(self) -> ConResult<T>;
 }
-
 
 impl<T> HandleTryAgain<T> for io::Result<T> {
     fn handle_try_again(self) -> ConResult<T> {
@@ -2445,11 +2416,9 @@ impl ReceiverDataStats {
     }
 }
 
-
 // use once_cell::sync::OnceCell;
 
-
-//// NEW code for reading CSV of frame sizes, in order to emulate video transmission. 
+//// NEW code for reading CSV of frame sizes, in order to emulate video transmission.
 // #[derive(Clone)]
 // struct FrameSizeTable {
 //     fps: u32,
@@ -2529,25 +2498,26 @@ impl ReceiverDataStats {
 //     Ok(table)
 // }
 
-
-
 #[derive(Clone)]
 struct FrameSizeTable {
     _fps: u32,
-    mbps_cols: Vec<u32>,                 // e.g. [5,10,15,...]
-    col_index: HashMap<u32, usize>,      // 5 -> 0, 10 -> 1, ...
+    mbps_cols: Vec<u32>,            // e.g. [5,10,15,...]
+    col_index: HashMap<u32, usize>, // 5 -> 0, 10 -> 1, ...
     // Column-major: framesizes[col_idx][frame_idx] -> bytes
-    framesizes: Vec<Vec<u32>>,           // use u32 to halve memory on 64-bit
-    start_offset: usize,                 // <-- ADD THIS FIELD
+    framesizes: Vec<Vec<u32>>, // use u32 to halve memory on 64-bit
+    start_offset: usize,       // <-- ADD THIS FIELD
 }
 
 impl FrameSizeTable {
-
     // Return interpolated frame size (bytes) for arbitrary Mbps
-   #[inline(always)]
-    fn bytes_interp_cached(&self, want_mbps: f32, frame_idx: usize,
-                           last_lo: &Cell<usize>, last_hi: &Cell<usize>) -> usize
-    {
+    #[inline(always)]
+    fn bytes_interp_cached(
+        &self,
+        want_mbps: f32,
+        frame_idx: usize,
+        last_lo: &Cell<usize>,
+        last_hi: &Cell<usize>,
+    ) -> usize {
         // Get the pre-calculated random offset
         let offset_idx = |idx: usize, v_len: usize| (idx + self.start_offset) % v_len;
 
@@ -2620,12 +2590,15 @@ impl FrameSizeTable {
             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
         }
 
-        let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(&path)?;
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(&path)?;
         let headers = rdr.headers()?.clone();
 
         let mut mbps_cols = Vec::with_capacity(headers.len().saturating_sub(1));
         for h in headers.iter().skip(1) {
-            let m = h.trim_end_matches("Mbps")
+            let m = h
+                .trim_end_matches("Mbps")
                 .parse::<u32>()
                 .map_err(|_| anyhow::anyhow!("Bad column name: {}", h))?;
             mbps_cols.push(m);
@@ -2647,7 +2620,7 @@ impl FrameSizeTable {
         }
 
         let num_frames = framesizes.get(0).map_or(0, |v| v.len());
-        
+
         let start_offset = if num_frames > 1 {
             let middle_frame = num_frames / 2;
             // gen_range is exclusive of the upper bound: [0, middle_frame)
@@ -2660,17 +2633,20 @@ impl FrameSizeTable {
             0 // No frames or only one frame
         };
 
-
         let col_index = mbps_cols
             .iter()
             .enumerate()
             .map(|(i, &m)| (m, i))
             .collect::<HashMap<_, _>>();
 
-        Ok(Self { _fps, mbps_cols, col_index, framesizes, start_offset})
+        Ok(Self {
+            _fps,
+            mbps_cols,
+            col_index,
+            framesizes,
+            start_offset,
+        })
     }
-
-
 }
 
 #[inline]
@@ -2679,14 +2655,16 @@ fn ensure_len_uninit(buf: &mut Vec<u8>, size: usize) {
         // reserve_exact avoids overgrowth if sizes vary a lot
         buf.reserve_exact(size - buf.capacity());
     }
-    unsafe { buf.set_len(size); } // do NOT read before you write if anyone depends on bytes, while unsafe code it seems to work and helps make things fast
+    unsafe {
+        buf.set_len(size);
+    } // do NOT read before you write if anyone depends on bytes, while unsafe code it seems to work and helps make things fast
 }
 
-
-use once_cell::sync::Lazy;
 use dashmap::DashMap;
+use once_cell::sync::Lazy;
 
-static TABLE_CACHE: Lazy<DashMap<(String, u32), Arc<FrameSizeTable>>> = Lazy::new(|| DashMap::new());
+static TABLE_CACHE: Lazy<DashMap<(String, u32), Arc<FrameSizeTable>>> =
+    Lazy::new(|| DashMap::new());
 
 fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> {
     if let Some(entry) = TABLE_CACHE.get(&(final_file.to_string(), fps)) {
@@ -2699,14 +2677,16 @@ fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> 
     Ok(entry.clone())
 }
 
-
-
-#[allow(unused)]                                                                                    
+#[allow(unused)]
 #[inline]
 fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
     let mut v = vec![0u8; size];
-    if size == 0 { return v; }
-    if size > 1 { v[1] = 1; }
+    if size == 0 {
+        return v;
+    }
+    if size > 1 {
+        v[1] = 1;
+    }
     // Tight loop; compilers auto-vectorize the addition pipeline well enough.
     for i in 2..size {
         // wrapping to stay in u8
@@ -2715,7 +2695,7 @@ fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
     v
 }
 
-#[allow(unused)]                                                                                    
+#[allow(unused)]
 pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     // Calculate the payload size based on bitrate
     let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;

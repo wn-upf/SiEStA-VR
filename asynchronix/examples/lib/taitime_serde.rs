@@ -1,9 +1,9 @@
 // src/taitime_serde.rs
-use serde::{Deserializer, Serializer};
-use serde::de::Error as DeError;
-use serde::{Deserialize};
-use tai_time::TaiTime;
 use crate::format_elapsed;
+use serde::de::Error as DeError;
+use serde::Deserialize;
+use serde::{Deserializer, Serializer};
+use tai_time::TaiTime;
 
 pub fn serialize<S>(t: &TaiTime<0>, s: S) -> Result<S::Ok, S::Error>
 where

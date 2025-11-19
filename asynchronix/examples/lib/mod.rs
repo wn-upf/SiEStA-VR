@@ -19,9 +19,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use std::io::{self, Write};
-use std::path::{PathBuf};
+use std::path::PathBuf;
 
-pub const BATCH_SIZE_CSV : usize = 256*4; 
+pub const BATCH_SIZE_CSV: usize = 256 * 4;
 
 const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;
@@ -30,24 +30,22 @@ const SIFS: f64 = 16E-6;
 // const CW_MIN: i32 = 8;
 // const DIFS: f64 = 2.0 * SLOT + SIFS; // unused with EDCA
 
-
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 pub const MAX_AMPDU_SIZE: i32 = 64;
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
 pub const UPLINK_QUEUE_SIZE: usize = 128;
-pub const DOWNLINK_QUEUE_SIZE: usize = 1000; 
+pub const DOWNLINK_QUEUE_SIZE: usize = 1000;
 
-pub const NUMBER_OF_RANDOM_EVENTS: usize = 20; 
-
+pub const NUMBER_OF_RANDOM_EVENTS: usize = 20;
 
 pub const _INITIAL_BITRATE_MBPS_SIM: f32 = 100.0;
 #[allow(unused)]
-pub const PREFIX_ID_DOWNLINK: i32 = 100; 
+pub const PREFIX_ID_DOWNLINK: i32 = 100;
 #[allow(unused)]
-pub const PREFIX_ID_UPLINK:   i32 = 200; 
+pub const PREFIX_ID_UPLINK: i32 = 200;
 #[allow(unused)]
-pub const PREFIX_ID_BG:       i32 = 300; 
+pub const PREFIX_ID_BG: i32 = 300;
 
 // Define a constant to control debugging
 
@@ -60,8 +58,8 @@ pub mod models_mm1k;
 pub mod alvr_control_socket;
 pub mod taitime_serde;
 
-pub mod gcc_nada_estimator;
 pub mod fovoptix;
+pub mod gcc_nada_estimator;
 
 // pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
@@ -120,9 +118,6 @@ macro_rules! print_prettyyyy {
     };
 }
 
-
-
-
 #[macro_export]
 macro_rules! print_prettyyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
@@ -142,8 +137,6 @@ macro_rules! debug_print {
         }
     }
 }
-
-
 
 #[macro_export]
 macro_rules! debug_debug {
@@ -166,9 +159,6 @@ macro_rules! format_elapsed {
         format!("{:.9}", total_seconds)
     }};
 }
-
-
-
 
 #[macro_export]
 macro_rules! taitime_to_f64 {
@@ -209,9 +199,6 @@ macro_rules! print_blue {
     };
 }
 
-
-
-
 #[macro_export]
 macro_rules! print_dblue {
     ($fmt:expr, $($arg:tt)*) => {
@@ -235,7 +222,6 @@ macro_rules! print_magenta {
     };
 }
 
-
 #[macro_export]
 macro_rules! print_brown {
     ($fmt:expr, $($arg:tt)*) => {
@@ -244,13 +230,10 @@ macro_rules! print_brown {
     };
 }
 
+use std::env;
 
-use std::env; 
-
-
-fn get_prefix_path(directory: &str) -> String{
-
-   let home = env::var("HOME").unwrap_or_default();
+fn get_prefix_path(directory: &str) -> String {
+    let home = env::var("HOME").unwrap_or_default();
 
     if home.contains("fmaura") {
         // HPC user
@@ -259,10 +242,12 @@ fn get_prefix_path(directory: &str) -> String{
         // Local Ubuntu user
         format!("{}/Desktop/Rust_MG1/asynchronix/{}", home, directory)
     } else {
-        format!("/gpfs/home/fmaura/simulator_asynchronix/asynchronix/{}", directory) // still in HPC, absolute path
+        format!(
+            "/gpfs/home/fmaura/simulator_asynchronix/asynchronix/{}",
+            directory
+        ) // still in HPC, absolute path
     }
 }
-
 
 // use crate::lib::alvr_stream_socket::ConResult;
 #[allow(unused)]
@@ -397,7 +382,6 @@ impl DebugColor {
     }
 }
 
-
 #[derive(Clone)]
 pub struct SlidingWindowWeighted<T> {
     history_buffer: VecDeque<T>,
@@ -412,8 +396,8 @@ impl<T> SlidingWindowWeighted<T> {
         }
     }
     pub fn clear(&mut self) {
-        self.history_buffer.clear(); 
-        self.interval_buffer.clear();  
+        self.history_buffer.clear();
+        self.interval_buffer.clear();
     }
 
     pub fn submit_sample(&mut self, sample: T, interval: f32) {
@@ -431,7 +415,12 @@ impl<T> SlidingWindowWeighted<T> {
     }
 }
 
-fn get_4_octet(ip: IpAddr) -> u8 { match ip { IpAddr::V4(v4) => v4.octets()[2], IpAddr::V6(_) => 0 } } // get the 4th octet of IpAddr (for tagging CSVs)
+fn get_4_octet(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[2],
+        IpAddr::V6(_) => 0,
+    }
+} // get the 4th octet of IpAddr (for tagging CSVs)
 
 #[allow(unused)]
 // Renders ASCII text into the minifb window with coordinates.
@@ -688,8 +677,7 @@ impl<T> SlidingWindowTimely<T> {
     }
     pub fn clear(&mut self) {
         self.history_buffer.clear();
-        self.interval_buffer.clear(); 
-
+        self.interval_buffer.clear();
     }
 
     pub fn submit_sample(&mut self, sample: T, interval: f32) {
@@ -1009,9 +997,8 @@ pub struct SlidingWindowAverage<T> {
 }
 #[allow(unused)]
 impl<T> SlidingWindowAverage<T> {
-
-    pub fn clear(&mut self,){
-        self.history_buffer.clear(); 
+    pub fn clear(&mut self) {
+        self.history_buffer.clear();
     }
 
     pub fn new(initial_value: T, max_history_size: usize) -> Self {
@@ -1038,14 +1025,14 @@ impl<T> SlidingWindowAverage<T> {
         self.history_buffer.len()
     }
 
-        // Method to return an iterator over the history_buffer
+    // Method to return an iterator over the history_buffer
     pub fn get_history_iter(&self) -> std::collections::vec_deque::Iter<'_, T> {
         self.history_buffer.iter()
     }
-    
 }
 impl SlidingWindowAverage<i64> {
-    pub fn get_average(&self) -> f32 { // obtain the average value of integers. 
+    pub fn get_average(&self) -> f32 {
+        // obtain the average value of integers.
         self.history_buffer.iter().sum::<i64>() as f32 / self.history_buffer.len() as f32
     }
 }
@@ -1074,8 +1061,6 @@ impl SlidingWindowAverage<Duration> {
     pub fn get_average(&self) -> Duration {
         self.history_buffer.iter().sum::<Duration>() / self.history_buffer.len() as u32
     }
-    
-
 }
 
 #[macro_export]
@@ -1087,10 +1072,9 @@ macro_rules! format_timestamp {
     }};
 }
 
-
 /// Draws an exponential sample using RNG seed.
 pub fn exponential<R: Rng + ?Sized>(mean: f64, rng: &mut R) -> f64 {
-    let u: f64 = rng.gen_range(0.0..1.0); 
+    let u: f64 = rng.gen_range(0.0..1.0);
     -mean * u.ln()
 }
 
@@ -1103,28 +1087,27 @@ pub fn exponential<R: Rng + ?Sized>(mean: f64, rng: &mut R) -> f64 {
 // Separate struct to hold the data that will be shared
 #[derive(Clone)]
 pub struct CsvData {
-    v_timestamp:          Vec<String>,
-    v_packet_id:          Vec<usize>,
-    v_queue_size:         Vec<usize>,
-    v_queue_ts:           Vec<f64>,
-    v_queue_tq:           Vec<f64>,
-    v_packet_l:           Vec<usize>,
+    v_timestamp: Vec<String>,
+    v_packet_id: Vec<usize>,
+    v_queue_size: Vec<usize>,
+    v_queue_ts: Vec<f64>,
+    v_queue_tq: Vec<f64>,
+    v_packet_l: Vec<usize>,
 
-    v_id_src:             Vec<usize>,
-    v_id_dest:            Vec<usize>,
-    v_ampdu_id:           Vec<u32>, 
-    v_collision:          Vec<usize>, 
-    v_T_collision:        Vec<f64>, 
-    v_link_id:            Vec<usize>, 
-    v_cw_value:           Vec<usize>, 
-    v_retries:            Vec<u8>, 
-    v_last_backoff_value: Vec<i32>, 
+    v_id_src: Vec<usize>,
+    v_id_dest: Vec<usize>,
+    v_ampdu_id: Vec<u32>,
+    v_collision: Vec<usize>,
+    v_T_collision: Vec<f64>,
+    v_link_id: Vec<usize>,
+    v_cw_value: Vec<usize>,
+    v_retries: Vec<u8>,
+    v_last_backoff_value: Vec<i32>,
 
-    v_edca_ac:            Vec<String>, 
+    v_edca_ac: Vec<String>,
 }
 
 impl CsvData {
-    
     pub fn new() -> Self {
         Self {
             v_timestamp: Vec::new(),
@@ -1135,14 +1118,14 @@ impl CsvData {
             v_packet_l: Vec::new(),
             v_id_src: Vec::new(),
             v_id_dest: Vec::new(),
-            v_ampdu_id: Vec::new(),  
-            v_collision: Vec::new(), 
-            v_T_collision: Vec::new(), 
-            v_link_id: Vec::new(), 
-            v_cw_value: Vec::new(), 
-            v_retries: Vec::new(), 
-            v_last_backoff_value: Vec::new(), 
-            v_edca_ac: Vec::new(),  
+            v_ampdu_id: Vec::new(),
+            v_collision: Vec::new(),
+            v_T_collision: Vec::new(),
+            v_link_id: Vec::new(),
+            v_cw_value: Vec::new(),
+            v_retries: Vec::new(),
+            v_last_backoff_value: Vec::new(),
+            v_edca_ac: Vec::new(),
         }
     }
 }
@@ -1158,11 +1141,13 @@ pub struct CsvType {
 impl CsvType {
     /// Creates a new CsvType with a buffered writer and specified batch size.
     pub fn new(folder_name: &str) -> io::Result<Self> {
-
         let dir = format!("Results/{}", folder_name);
         std::fs::create_dir_all(&dir)?;
         let file_path = format!("{}/QUEUE_stats.csv", dir);
-        let file = OpenOptions::new().create(true).append(true).open(&file_path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)?;
         let mut buf = BufWriter::new(file);
         // Write header if file is empty
         if buf.get_ref().metadata()?.len() == 0 {
@@ -1189,12 +1174,12 @@ impl CsvType {
         id_dest: usize,
         ampdu_id: u32,
         is_collision: bool,
-        T_collision: f64, 
-        link_id: usize, 
-        cw_val: usize, 
-        num_retries_backoff: u8, 
-        last_backoff: i32, 
-        edca_ac: String, 
+        T_collision: f64,
+        link_id: usize,
+        cw_val: usize,
+        num_retries_backoff: u8,
+        last_backoff: i32,
+        edca_ac: String,
     ) {
         let ts_str = format_timestamp!(now);
         {
@@ -1208,14 +1193,13 @@ impl CsvType {
             data.v_id_src.push(id_src);
             data.v_id_dest.push(id_dest);
             data.v_ampdu_id.push(ampdu_id);
-            data.v_collision.push(is_collision as usize); 
-            data.v_T_collision.push(T_collision); 
-            data.v_link_id.push(link_id); 
-            data.v_cw_value.push(cw_val); 
-            data.v_retries.push(num_retries_backoff); 
-            data.v_last_backoff_value.push(last_backoff); 
-            data.v_edca_ac.push(edca_ac); 
-
+            data.v_collision.push(is_collision as usize);
+            data.v_T_collision.push(T_collision);
+            data.v_link_id.push(link_id);
+            data.v_cw_value.push(cw_val);
+            data.v_retries.push(num_retries_backoff);
+            data.v_last_backoff_value.push(last_backoff);
+            data.v_edca_ac.push(edca_ac);
         }
 
         // Check if batch limit reached
@@ -1249,13 +1233,13 @@ impl CsvType {
                 data.v_id_src[i],
                 data.v_id_dest[i],
                 data.v_ampdu_id[i],
-                data.v_collision[i], 
-                data.v_T_collision[i], 
+                data.v_collision[i],
+                data.v_T_collision[i],
                 data.v_link_id[i],
                 data.v_cw_value[i],
-                data.v_retries[i], 
+                data.v_retries[i],
                 data.v_last_backoff_value[i],
-                data.v_edca_ac[i], 
+                data.v_edca_ac[i],
             )?;
         }
         writer.flush()?;
@@ -1274,9 +1258,9 @@ impl CsvType {
         data.v_link_id.clear();
         data.v_cw_value.clear();
         data.v_retries.clear();
-        data.v_last_backoff_value.clear(); 
-        data.v_edca_ac.clear();  
-        
+        data.v_last_backoff_value.clear();
+        data.v_edca_ac.clear();
+
         Ok(())
     }
 }
@@ -1289,7 +1273,6 @@ impl Drop for CsvType {
         }
     }
 }
-
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -1662,21 +1645,27 @@ pub struct MpduPacket {
     pub has_consumed_emu_tokens: bool,
     pub emulated_added_delay_deadline: Option<TaiTime<0>>,
 
-    pub original_index: usize, 
-    pub edca_ac: EdcaAc,          
+    pub original_index: usize,
+    pub edca_ac: EdcaAc,
 
     pub mac_key_cached: Option<MacKey>,
-    pub assigned_link_id: Option<u8>, 
+    pub assigned_link_id: Option<u8>,
     // pub is_alvr_control_packet: bool,
 }
 #[repr(u8)]
 #[allow(unused)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum EdcaAc { Voice = 0, Video = 1, BestEffort = 2, Background = 3 }
-impl Default for EdcaAc { fn default() -> Self { EdcaAc::BestEffort }}
-
-
-
+pub enum EdcaAc {
+    Voice = 0,
+    Video = 1,
+    BestEffort = 2,
+    Background = 3,
+}
+impl Default for EdcaAc {
+    fn default() -> Self {
+        EdcaAc::BestEffort
+    }
+}
 
 #[allow(unused)]
 impl MpduPacket {
@@ -1698,10 +1687,10 @@ impl MpduPacket {
             header_alvr: HeaderALVRStream::default(),
             has_consumed_emu_tokens: false,
             emulated_added_delay_deadline: None,
-            original_index: 0, 
-            edca_ac: EdcaAc::BestEffort , 
-            mac_key_cached: None, 
-            assigned_link_id: None, 
+            original_index: 0,
+            edca_ac: EdcaAc::BestEffort,
+            mac_key_cached: None,
+            assigned_link_id: None,
             // is_alvr_control_packet: false,
         }
     }
@@ -1710,7 +1699,7 @@ impl MpduPacket {
         assert!(self.assigned_link_id.is_none(), "Link already assigned");
         self.assigned_link_id = Some(link_id);
     }
-    
+
     pub fn print(&self, color: DebugColor) -> String {
         print_prettyyy!(
             color,
@@ -1737,7 +1726,7 @@ impl MpduPacket {
     }
 }
 
-type MacKey = (i32, EdcaAc, u8);      // e.g. (AP_ID, AC_VO) or (sta_id, AC_BE); last u8 for MLO link ID
+type MacKey = (i32, EdcaAc, u8); // e.g. (AP_ID, AC_VO) or (sta_id, AC_BE); last u8 for MLO link ID
 
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {
@@ -1747,8 +1736,8 @@ pub struct AmpduPacket {
     pub sta_dest_id: i32, // ID for the destination STA
     pub size: i32,
     pub coordinates: Coords,
-    pub mac_key: MacKey, 
-    pub link_id: u8, // MLO field for intended link . 
+    pub mac_key: MacKey,
+    pub link_id: u8, // MLO field for intended link .
 }
 
 impl AmpduPacket {
@@ -1766,23 +1755,23 @@ impl AmpduPacket {
                 z: 0.0,
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
             mac_key: MacKey::default(),
-            link_id: 0, 
+            link_id: 0,
         }
     }
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
             "\x1b[33m \t[AMPDU INFO]\tSize: {}, STA_src_ID: {}, STA_dest_ID: {}, Total Length: {} Bits\x1b[0m",
-            self.size, self.sta_src_id, self.sta_dest_id, self.total_length, 
+            self.size, self.sta_src_id, self.sta_dest_id, self.total_length,
         );
-        //  println!("AMPDU on LINK-{}: {} packets, {} bytes", 
+        //  println!("AMPDU on LINK-{}: {} packets, {} bytes",
         //     self.link_id, self.mpdu_packets.len(), self.total_length);
         for packet in &self.mpdu_packets {
             println!(
                 "\x1b[33m\t - Packet ID: {:.0}, L = {} bits ({} Bytes inner) | T_q: {:.3} ms , T_s: {:.3} ms",
                 // |  ALVR: S{}/{} , F: {}  \x1b[0m",
                 packet.packet_id,
-                packet.length_packet_bits, 
+                packet.length_packet_bits,
                 packet.data_inner.len(), // data_inner length counts bytes
                 packet.T_q.as_secs_f64() * 1000.0,
                 packet.T_s.as_secs_f64() * 1000.0,
@@ -1836,7 +1825,6 @@ pub struct Coords {
 }
 
 impl Coords {
-   
     pub fn with_coords(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
     }
@@ -1876,7 +1864,6 @@ pub fn path_loss(d: f64) -> f64 {
 }
 #[inline]
 pub fn collision_delay() -> f32 {
-
     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
 
     // let _L: f64 = total_bits_transmitted / n_mpdus as f64;
@@ -1895,10 +1882,9 @@ pub fn collision_delay() -> f32 {
     // let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
 
     let T_collision = T_RTS + SIFS + T_CTS;
-    //  + DIFS + SLOT + T_DETERMINISTIC_BACKOFF; // 
+    //  + DIFS + SLOT + T_DETERMINISTIC_BACKOFF; //
 
     T_collision as f32
-    
 }
 
 // pub fn frametransmission_delay( // LEGACY: todo DELETE
@@ -1931,7 +1917,7 @@ pub fn collision_delay() -> f32 {
 //         coords_dest.y,
 //         coords_dest.z,
 //     );
-//     // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance); 
+//     // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance);
 //     let PL = path_loss(distance);
 //     let Pr = effPt - PL;
 
@@ -1956,7 +1942,7 @@ pub fn collision_delay() -> f32 {
 //         _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
 //     };
 
-//     // println!("P_rx = {}", Pr); 
+//     // println!("P_rx = {}", Pr);
 
 //     let Subcarriers = match channel_width {
 //         // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
@@ -1990,7 +1976,7 @@ pub fn collision_delay() -> f32 {
 //         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
 
 //     // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
-//     // println!("T = {:?}", T); 
+//     // println!("T = {:?}", T);
 //     ResultsFrameTXDelay {
 //         pathloss: PL,
 //         p_rx: Pr,
@@ -2000,7 +1986,6 @@ pub fn collision_delay() -> f32 {
 //     }
 // }
 
-
 #[inline]
 pub fn airtime_ampdu(
     total_bits_transmitted: f64,
@@ -2008,28 +1993,27 @@ pub fn airtime_ampdu(
     coords_src: Coords,
     coords_dest: Coords,
     _p_tx_orig: f64,
-    channel_width: usize, 
+    channel_width: usize,
 ) -> f64 {
-
     let p_tx_cheated = match channel_width {
-        20 => 20.0, 
-        40 => 20.0, 
-        80 => 20.0, 
-        160 => 23.0, 
-        320 => 30.05, 
-        _ => 20.0, // default at 20 dBm 
-    }; 
+        20 => 20.0,
+        40 => 20.0,
+        80 => 20.0,
+        160 => 23.0,
+        320 => 30.05,
+        _ => 20.0, // default at 20 dBm
+    };
 
     let effPt: f64 = p_tx_cheated;
 
     let SU_spatial_streams = 2.0;
 
-    // if SU_spatial_streams > 1.0 {   // TODO: AMEND THE USE OF THESE 
+    // if SU_spatial_streams > 1.0 {   // TODO: AMEND THE USE OF THESE
     //     effPt = effPt - 3.0 * SU_spatial_streams
     // };
     // // Effective Pt
     // if channel_width > 20 {
-    //     effPt = effPt - 3.0 * (channel_width as f64 / 20.0); // linear formula too restrictive, seems to be log? 
+    //     effPt = effPt - 3.0 * (channel_width as f64 / 20.0); // linear formula too restrictive, seems to be log?
     // }
 
     let distance = calculate_distance(
@@ -2041,7 +2025,7 @@ pub fn airtime_ampdu(
         coords_dest.z,
     );
 
-    // print_pink!("coords_src: {:?}, coords_dest: {:?}, DISTANCE = {:.4} m", coords_src, coords_dest, distance); 
+    // print_pink!("coords_src: {:?}, coords_dest: {:?}, DISTANCE = {:.4} m", coords_src, coords_dest, distance);
     let PL = path_loss(distance);
     let mut Pr = effPt - PL;
 
@@ -2051,7 +2035,7 @@ pub fn airtime_ampdu(
         80 => 6.02,
         160 => 9.03,
         320 => 12.04,
-    _ => 0.0, // For 20 MHz or any other default
+        _ => 0.0, // For 20 MHz or any other default
     };
 
     // 4. Normalize the Pr to its 20 MHz equivalent.
@@ -2078,7 +2062,7 @@ pub fn airtime_ampdu(
         _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
     };
 
-    // println!("P_rx = {}", Pr); 
+    // println!("P_rx = {}", Pr);
 
     let Subcarriers = match channel_width {
         320 => 3920, // 320 MHz: data subcarriers (EHT / Wi-Fi7)
@@ -2108,15 +2092,13 @@ pub fn airtime_ampdu(
 
     // let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
     //                                                                   // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
-    let phy_time =
-        T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK;   // ⬅  removed DIFS + SLOT + BO, it happens in EDCA now. 
-    
+    let phy_time = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK; // ⬅  removed DIFS + SLOT + BO, it happens in EDCA now.
+
     // let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;                            // ONLY FOR DEBUG
     // let _rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;              // ONLY FOR DEBUG
     // print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
-    //              ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,); 
+    //              ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,);
 
-    
     phy_time
 }
 
@@ -2265,11 +2247,11 @@ pub struct GraphNetworkStatisticsCsv {
     pub requested_bps: f32,
 
     pub interval_avg_plot_throughput: f32,
-    pub decoder_jitterbuffer_level: u8, 
-    pub num_rebuffering_events: u8, 
+    pub decoder_jitterbuffer_level: u8,
+    pub num_rebuffering_events: u8,
 
-    pub flr_deadline:       usize, 
-    pub shardloss_deadline: usize, 
+    pub flr_deadline: usize,
+    pub shardloss_deadline: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2351,46 +2333,38 @@ fn get_third_octet(ip: IpAddr) -> Option<u8> {
             let octets = ipv4.octets(); // returns [u8; 4]
             Some(octets[2]) // third octet (0-based index)
         }
-        _ => { None }
-        // IpAddr::V6(_) => None, // IPv6 doesn't have octets in the same sense
+        _ => None, // IpAddr::V6(_) => None, // IPv6 doesn't have octets in the same sense
     }
 }
 
-
-
-
-
-
 #[derive(Default)]
-struct OldCsvTrace 
-{ 
+struct OldCsvTrace {
     path: PathBuf,
-    _writer: Option<csv::Writer<std::fs::File>>, 
+    _writer: Option<csv::Writer<std::fs::File>>,
 }
-impl Clone for OldCsvTrace 
-{ fn clone(&self) -> Self {
-     OldCsvTrace { path: self.path.clone(), _writer: None, }
-     } 
+impl Clone for OldCsvTrace {
+    fn clone(&self) -> Self {
+        OldCsvTrace {
+            path: self.path.clone(),
+            _writer: None,
+        }
+    }
 }
 
-
-
-use std::fs::{File};
-
-
+use std::fs::File;
 
 use async_std::sync::Mutex as aMutex;
 
 #[derive(Default)]
 struct CsvTrace {
-    path:   PathBuf,
+    path: PathBuf,
     writer: Option<Arc<aMutex<csv::Writer<BufWriter<File>>>>>,
 }
 
 impl Clone for CsvTrace {
     fn clone(&self) -> Self {
         CsvTrace {
-            path:   self.path.clone(),
+            path: self.path.clone(),
             writer: None, // cloned instance will re-init its own writer
         }
     }
@@ -2471,8 +2445,6 @@ pub enum AveragingStrategy {
     },
 }
 
-
-
 #[derive(Serialize, Deserialize, Clone, Debug, Copy, Default)]
 pub struct HeuristicStats {
     pub bitrate_step_count: usize,
@@ -2498,7 +2470,7 @@ pub struct HeuristicStats {
     pub rtt_thresh_ms: f32,
 
     pub requested_bitrate_mbps: f32,
-    pub estimated_capacity_mbps: f32, 
+    pub estimated_capacity_mbps: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -179,26 +179,26 @@ pub struct ClientStatistics {
 pub struct DeadlineShardlossStatPacket {
     pub frame_indexes: Vec<u32>,
     pub shards_lost: Vec<usize>,
-    // pub edca_ac: EdcaAc, 
+    // pub edca_ac: EdcaAc,
 }
-#[derive(Default, Serialize, Deserialize, Clone, Debug )]
-pub struct NadaStats{
-    pub frame_send_timestamp:i64,
-    pub shard_loss_rate:f64,
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+pub struct NadaStats {
+    pub frame_send_timestamp: i64,
+    pub shard_loss_rate: f64,
     pub plr: f64,
-    pub is_idr:bool,
+    pub is_idr: bool,
 
     //RTCP Feedback Report: NADA Receiver--> Sender
-    pub nada_feedback:bool,
-    pub nada_xcurr:f64,
-    pub nada_rmode:i8,
-    pub nada_recv:i64,
+    pub nada_feedback: bool,
+    pub nada_xcurr: f64,
+    pub nada_rmode: i8,
+    pub nada_recv: i64,
 
     //Only to debug NADA Receiver
     pub t_last: i64,
-    pub d_queue:i64,
-    pub d_tilde:f64,
-} 
+    pub d_queue: i64,
+    pub d_tilde: f64,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkStatisticsPacket {
@@ -226,22 +226,21 @@ pub struct NetworkStatisticsPacket {
 
     pub lost_shards_deadline: usize,
 
-    pub everest_capacity_update: f32, 
-    pub everest_throughput_update: f32, 
-    pub everest_dshort: f32, 
-    pub everest_dlong: f32, 
-    pub everest_command: EverestCommand, 
-    pub buffer_level_decoder: u8, 
-    pub rebuffering_events_last_s: u8, 
+    pub everest_capacity_update: f32,
+    pub everest_throughput_update: f32,
+    pub everest_dshort: f32,
+    pub everest_dlong: f32,
+    pub everest_command: EverestCommand,
+    pub buffer_level_decoder: u8,
+    pub rebuffering_events_last_s: u8,
 
-    pub nada_stats: NadaStats, 
-
-    // NADA FIELDS after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed 
+    pub nada_stats: NadaStats,
+    // NADA FIELDS after checking code implementation, loss ratio computation of NADA seems not too work, reluctant about adding it to testbed
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug,)]
-pub enum EverestCommand{
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub enum EverestCommand {
     SlowDown,
     SpeedUp,
-    Continue, 
+    Continue,
 }

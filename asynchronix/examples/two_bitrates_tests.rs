@@ -1,17 +1,16 @@
 use std::fs;
-use std::panic::{AssertUnwindSafe};
-use std::panic; 
+use std::panic;
+use std::panic::AssertUnwindSafe;
 
-// pub const INTRAREFRESH_ENABLED: bool = true; 
+// pub const INTRAREFRESH_ENABLED: bool = true;
 
-pub const FRAMERATE_WINDOWS: usize = 60; 
-pub const INITIAL_FRAMERATE_FPS: f32 = 90.0; 
-// pub const IDR_FRAME_SIZE_GOP: usize = 30; 
+pub const FRAMERATE_WINDOWS: usize = 60;
+pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
+// pub const IDR_FRAME_SIZE_GOP: usize = 30;
 
 const SCALE: f64 = 0.15;
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
-
 
 const MAX_PARALLEL_VMAF: usize = 5;
 const WORKERS: usize = 1;
@@ -20,18 +19,16 @@ const MAX_PARALLEL_ENCODE: usize = 6;
 static ENCODE_SLOTS: Lazy<Arc<Semaphore>> =
     Lazy::new(|| Arc::new(Semaphore::const_new(MAX_PARALLEL_ENCODE)));
 
+pub const RESYNC_BUFFER: usize = 20;
+const SIM_HISTORY: usize = 20;
+const DESYNC_STD_DEV: f64 = 20.0;
+const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500);
 
+pub const MAX_BITRATE_REFERENCE: f32 = 100.0;
 
-pub const RESYNC_BUFFER: usize = 20; 
-const SIM_HISTORY: usize = 20; 
-const DESYNC_STD_DEV :f64 = 20.0; 
-const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500); 
-
-pub const MAX_BITRATE_REFERENCE: f32 = 100.0; 
-
-#[path = "lib/mod.rs"]      // relative path to the module root you want
-mod lib; 
-use lib::render_text; 
+#[path = "lib/mod.rs"] // relative path to the module root you want
+mod lib;
+use lib::render_text;
 
 macro_rules! print_prettyy {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
@@ -41,8 +38,6 @@ macro_rules! print_prettyy {
         // }
     };
 }
-
-
 
 pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
 // pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
@@ -59,105 +54,97 @@ pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
 /// Number of consecutive poor matches before considering sync lost
 pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 30;
 
-pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30; 
+pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30;
 const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to wait for buffer
 
-const RECOVERY_GRACE_PERIOD: usize = 5;      // Frames to wait before trying to find new similarity matches
-const RECOVERY_MATCH_THRESHOLD: f64 = 0.35;   // More lenient similarity threshold during recovery
-const RECOVERY_MAX_ATTEMPTS: usize = 1;       // How many consecutive frames to check before accepting new offset
+const RECOVERY_GRACE_PERIOD: usize = 5; // Frames to wait before trying to find new similarity matches
+const RECOVERY_MATCH_THRESHOLD: f64 = 0.35; // More lenient similarity threshold during recovery
+const RECOVERY_MAX_ATTEMPTS: usize = 1; // How many consecutive frames to check before accepting new offset
 
-
-use std::collections::{BTreeSet, BTreeMap};
 use futures::stream::StreamExt;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::Semaphore;
 
 use std::io::BufRead;
-use walkdir::WalkDir;
 use tokio::join;
 use tokio::spawn;
+use walkdir::WalkDir;
 
 /// One global pool → one permit per concurrent VMAF job
-static VMAF_SLOTS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
-    Arc::new(Semaphore::const_new(MAX_PARALLEL_VMAF))
-});
+static VMAF_SLOTS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::const_new(MAX_PARALLEL_VMAF)));
 use futures::stream::FuturesUnordered;
-
 
 use futures::future::join_all;
 
 // static METRIC_SLOTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::const_new(30)); // ≤4 frames in flight
-use asynchronix::model::Context;
-use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::collections::HashMap;
-use std::io::{Read, Write};
-#[allow(unused_imports)]
-#[allow(dead_code)]
-use std::process::{Child, Command, Stdio};
-use colored::Colorize;
-use std::sync::{Arc, Mutex};
-use ffmpeg_sidecar::command::FfmpegCommand;
-use rand::seq::IteratorRandom;
-use std::io::BufReader;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use anyhow::Result;
 use async_std::task;
+use asynchronix::model::Context;
+use colored::Colorize;
+use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use ffmpeg_sidecar::command::FfmpegCommand;
 use minifb::{Key, Scale, Window, WindowOptions};
+use rand::seq::IteratorRandom;
 use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{ VecDeque};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::error::Error;
+use std::fmt::{self, Debug};
 use std::fs::File;
 use std::hash::Hash;
-use std::io::{ BufWriter};
+use std::io::BufReader;
+use std::io::BufWriter;
+use std::io::{Read, Write};
+#[allow(unused_imports)]
+#[allow(dead_code)]
+use std::process::{Child, Command, Stdio};
 use std::process::{ChildStdin, ChildStdout};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tempfile::TempDir;
-use std::cell::RefCell;
-use std::fmt::{self, Debug};
 use std::{
-    collections::{HashSet,},
+    collections::HashSet,
     io,
     marker::PhantomData,
     mem,
     // net::{TcpListener, UdpSocket},
-}; 
-
-
+};
+use tempfile::TempDir;
 
 use std::net::IpAddr;
 // use tokio::sync::Semaphore;
-use std::result::Result::Ok;
-use tai_time::TaiTime;
-use std::{
-    fs::{ OpenOptions},
-    path::PathBuf,
-};
+use asynchronix::model::Model;
+use asynchronix::ports::Output;
+use core::f64;
 use csv::Writer;
+use dashmap::DashMap;
+use glam::{Quat, Vec3};
+use image::{ImageBuffer, Rgb};
+use image_compare::rgb_hybrid_compare;
+use once_cell::sync::Lazy;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use image::{ImageBuffer, Rgb};
-use image_compare::rgb_hybrid_compare;
 use regex::Regex;
-use std::net::Ipv4Addr;
-use std::thread_local;
-use std::path::Path;
-use core::f64;
-use glam::{Quat, Vec3};
-use once_cell::sync::Lazy;
-use std::time::SystemTime;
-use std::{ vec};
-use dashmap::DashMap;
-use asynchronix::model::{ Model};
-use asynchronix::ports::Output;
 use std::cmp::{self, max};
 use std::f64::consts::PI;
 use std::future::Future;
+use std::net::Ipv4Addr;
+use std::path::Path;
+use std::result::Result::Ok;
 use std::sync::RwLock;
+use std::thread_local;
+use std::time::SystemTime;
+use std::vec;
+use std::{fs::OpenOptions, path::PathBuf};
+use tai_time::TaiTime;
 
 use lazy_static::lazy_static;
 
@@ -181,7 +168,6 @@ struct FrameMetrics {
     ssim: f64,
 }
 
-
 #[macro_export]
 macro_rules! print_greennn {
     ($fmt:expr, $($arg:tt)*) => {
@@ -204,13 +190,11 @@ macro_rules! print_purples {
     };
 }
 
-
-
 #[derive(Clone)]
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
     name_folder: String,
-    name_file_w_path: String, 
+    name_file_w_path: String,
 }
 
 impl MetricsLogger {
@@ -221,20 +205,20 @@ impl MetricsLogger {
             value = octets[2]
         }
         // create it (and any missing parents) if it doesn't exist
-        let dir =format!("Results/{}", name_folder); 
+        let dir = format!("Results/{}", name_folder);
         std::fs::create_dir_all(&dir)?;
-        let filename = format!( "Results/{}/VMAF_metrics_{}.csv", name_folder, value); 
+        let filename = format!("Results/{}/VMAF_metrics_{}.csv", name_folder, value);
         let file = File::create(filename.clone())?;
         let writer = csv::Writer::from_writer(file);
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             name_folder: name_folder.to_string(),
-            name_file_w_path: filename, 
+            name_file_w_path: filename,
         })
     }
     /// Call once, after `join_all(vmaf_jobs).await`
     pub fn finalize(&self) -> Result<()> {
-    // 1/ read everything (skip header)
+        // 1/ read everything (skip header)
 
         let mut rdr = csv::Reader::from_path(&*self.name_file_w_path)?;
         let mut rows: Vec<FrameMetrics> = rdr.deserialize().flatten().collect();
@@ -244,41 +228,32 @@ impl MetricsLogger {
         {
             // drop the guard immediately so the file handle is released
             let mut guard = self.writer.lock().unwrap();
-            guard.flush()?;          // just to be safe
+            guard.flush()?; // just to be safe
         }
         // 3/ overwrite the file
         let mut wtr = csv::Writer::from_path(&*self.name_file_w_path)?;
         // wtr.write_record(&["frame_number","timestamp_ms","vmaf","psnr","ssim"])?;
-        for r in rows { wtr.serialize(r)?; }
+        for r in rows {
+            wtr.serialize(r)?;
+        }
         wtr.flush()?;
         Ok(())
     }
 
-    pub fn new_for_trace(
-        scenario: &str,
-        trace_idx: usize,
-        two_encoders: bool, 
-    ) -> Result<Self> {
+    pub fn new_for_trace(scenario: &str, trace_idx: usize, two_encoders: bool) -> Result<Self> {
         let dir = format!("Results/{}", scenario);
         std::fs::create_dir_all(&dir)?;
 
-        let strrrrr = if two_encoders{
-                "bitrate"
-            }
-            else{
-                "loss"
-            }; 
+        let strrrrr = if two_encoders { "bitrate" } else { "loss" };
 
+        // let filename = format!( "Results/{}/VMAF_metrics_{}_{}.csv", name_folder, strrrrr, value);
 
-        // let filename = format!( "Results/{}/VMAF_metrics_{}_{}.csv", name_folder, strrrrr, value); 
-
-
-        let path = format!("{}/VMAF_metrics_{}_{}.csv", dir, strrrrr,  trace_idx);
+        let path = format!("{}/VMAF_metrics_{}_{}.csv", dir, strrrrr, trace_idx);
         let file = std::fs::File::create(&path.clone().to_string())?;
         Ok(Self {
             writer: Arc::new(std::sync::Mutex::new(csv::Writer::from_writer(file))),
             name_folder: scenario.to_string(),
-            name_file_w_path: path, 
+            name_file_w_path: path,
         })
     }
     /// *The heavy ffmpeg work happens in a dedicated thread;* the caller just awaits
@@ -287,7 +262,7 @@ impl MetricsLogger {
         &self,
         frame_number: u64,
         timestamp_ms: f64,
-        ref_buf: Vec<u8>,        // own the data
+        ref_buf: Vec<u8>, // own the data
         lossy_buf: Vec<u8>,
         ip_client: IpAddr,
     ) -> anyhow::Result<()> {
@@ -302,10 +277,10 @@ impl MetricsLogger {
             // a) create a per‑frame temp dir
             let tmp = tempfile::TempDir::new().expect("create TempDir");
 
-            let ref_path   = tmp.path().join("ref.rgb");
+            let ref_path = tmp.path().join("ref.rgb");
             let lossy_path = tmp.path().join("lossy.rgb");
 
-            std::fs::write(&ref_path,   &ref_buf).expect("write ref");
+            std::fs::write(&ref_path, &ref_buf).expect("write ref");
             std::fs::write(&lossy_path, &lossy_buf).expect("write lossy");
 
             // b) run the heavy ffmpeg+libvmaf pipeline
@@ -319,31 +294,30 @@ impl MetricsLogger {
 
             // c) temp dir and semaphore permit are dropped here
         })
-        .await?;       // propagate panic / JoinError
+        .await?; // propagate panic / JoinError
 
         Ok(())
     }
 
-       
-      // ───────────────────── helper for parsing metrics ───────
+    // ───────────────────── helper for parsing metrics ───────
     fn extract_metric(&self, path: &std::path::Path, key: &str) -> Option<f64> {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|content| {
-                // Find the line containing the key
-                content.lines()
-                    .find(|line| line.contains(key))
-                    .and_then(|line| {
-                        // Extract the value after the key
-                        let after_key = line.split(key).nth(1)?;
-                        // Find the first number in the remaining text
-                        after_key.split_whitespace()
-                            .next()?
-                            .trim()
-                            .parse::<f64>()
-                            .ok()
-                    })
-            })
+        std::fs::read_to_string(path).ok().and_then(|content| {
+            // Find the line containing the key
+            content
+                .lines()
+                .find(|line| line.contains(key))
+                .and_then(|line| {
+                    // Extract the value after the key
+                    let after_key = line.split(key).nth(1)?;
+                    // Find the first number in the remaining text
+                    after_key
+                        .split_whitespace()
+                        .next()?
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                })
+        })
     }
 
     pub fn process_frame_metrics(
@@ -356,9 +330,7 @@ impl MetricsLogger {
     ) {
         // ─────────── setup a temp dir ───────────
         let tmp = TempDir::new().expect("create TempDir");
-        let metrics_dir = tmp.path()
-            .join(&self.name_folder)
-            .join("Sink_for_video");
+        let metrics_dir = tmp.path().join(&self.name_folder).join("Sink_for_video");
         std::fs::create_dir_all(&metrics_dir).unwrap();
         let vmaf_json = metrics_dir.join("vmaf.json");
 
@@ -405,27 +377,28 @@ impl MetricsLogger {
         }
 
         // ───────── parse the JSON ─────────
-        let raw = std::fs::read_to_string(&vmaf_json)
-            .expect("read vmaf JSON");
-        let j: serde_json::Value =
-            serde_json::from_str(&raw).expect("parse vmaf JSON");
+        let raw = std::fs::read_to_string(&vmaf_json).expect("read vmaf JSON");
+        let j: serde_json::Value = serde_json::from_str(&raw).expect("parse vmaf JSON");
 
         // pooled_metrics now includes:
         //  • vmaf.mean
         //  • float_ssim.mean
-        // println!("METRICS: \n{j}"); 
+        // println!("METRICS: \n{j}");
 
-        let vmaf_score = j["pooled_metrics"]["vmaf"]["mean"]
-            .as_f64().unwrap_or(0.0);
-        
+        let vmaf_score = j["pooled_metrics"]["vmaf"]["mean"].as_f64().unwrap_or(0.0);
+
         let ssim_score = j["pooled_metrics"]["float_ssim"]["mean"]
-            .as_f64().unwrap_or(0.0);
+            .as_f64()
+            .unwrap_or(0.0);
 
         // ─────────── log & emit ───────────
         print_greennn!(
             "T:{:.3} [{}] | Frame {} : VMAF {:.2}, SSIM {:.4}",
-            timestamp_ms, ip_client, frame_number,
-            vmaf_score,  ssim_score
+            timestamp_ms,
+            ip_client,
+            frame_number,
+            vmaf_score,
+            ssim_score
         );
 
         let fm = FrameMetrics {
@@ -437,7 +410,6 @@ impl MetricsLogger {
         };
         self.log_metrics(&fm).unwrap();
     }
-
 
     fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
         // Get a single mutex guard and use it for both operations
@@ -451,7 +423,7 @@ impl MetricsLogger {
     }
 }
 
-use std::time::Instant; 
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct NalUnit {
@@ -460,11 +432,11 @@ pub struct NalUnit {
     pub is_keyframe: bool,
 }
 pub struct SynStateOld {
-    id_offset:       i32,                      // LOW id + offset  → REF id
-    recent_low:      VecDeque<(u32, Vec<u8>)>, // (id, rgb)
-    recent_ref:      VecDeque<(u32, Vec<u8>)>,
-    sim_history:     VecDeque<f64>,            // store VMAF-ish similarity
-    desync_since:    Option<Instant>,          // first time stddev > 20
+    id_offset: i32,                       // LOW id + offset  → REF id
+    recent_low: VecDeque<(u32, Vec<u8>)>, // (id, rgb)
+    recent_ref: VecDeque<(u32, Vec<u8>)>,
+    sim_history: VecDeque<f64>,    // store VMAF-ish similarity
+    desync_since: Option<Instant>, // first time stddev > 20
 }
 
 impl SynStateOld {
@@ -482,17 +454,24 @@ impl SynStateOld {
     /// `sim` is converted to a VMAF-style scale (0–100) internally.
     pub fn on_pair(&mut self, id_low: u32, id_ref: u32, sim: f64) {
         // ---- 1.  update similarity history --------------------------------
-        let vmaf_like = sim * 100.0;                   // 0–1  →  0–100
-        if self.sim_history.len() == SIM_HISTORY { self.sim_history.pop_front(); }
+        let vmaf_like = sim * 100.0; // 0–1  →  0–100
+        if self.sim_history.len() == SIM_HISTORY {
+            self.sim_history.pop_front();
+        }
         self.sim_history.push_back(vmaf_like);
 
         // ---- 2.  test stddev ----------------------------------------------
         if self.sim_history.len() == SIM_HISTORY {
             let mean = self.sim_history.iter().copied().sum::<f64>() / SIM_HISTORY as f64;
-            let var  = self.sim_history.iter().map(|v| (v-mean)*(v-mean)).sum::<f64>() / SIM_HISTORY as f64;
+            let var = self
+                .sim_history
+                .iter()
+                .map(|v| (v - mean) * (v - mean))
+                .sum::<f64>()
+                / SIM_HISTORY as f64;
             let stddev = var.sqrt();
 
-            print_prettyy!(DebugColor::DarkBlue, "STD DEV WINDOW = {:.3}", stddev);  
+            print_prettyy!(DebugColor::DarkBlue, "STD DEV WINDOW = {:.3}", stddev);
 
             if stddev >= DESYNC_STD_DEV {
                 // either start or continue the desync timer
@@ -506,14 +485,14 @@ impl SynStateOld {
         // ---- 3.  if we have been desynced for ≥ 2 s → try realign ---------
         if let Some(since) = self.desync_since {
             if since.elapsed() >= DESYNC_HIST_WINDOW {
-                print_reds!("Trying to realign! D: {}", since.elapsed().as_secs_f32()); 
+                print_reds!("Trying to realign! D: {}", since.elapsed().as_secs_f32());
                 if let Some(delta) = self.find_new_offset() {
                     println!("[RESYNC] detected offset {delta:+} (low+δ → ref)");
                     self.id_offset = delta;
                     // flush history so we don’t instantly trigger again
                     self.sim_history.clear();
                 }
-                self.desync_since = None;             // restart the detector
+                self.desync_since = None; // restart the detector
             }
         }
     }
@@ -527,33 +506,40 @@ impl SynStateOld {
     }
 
     /// Current mapping:  *deliver LOW id + `offset()` when looking inside REF*
-    #[inline] pub fn offset(&self) -> i32 { self.id_offset }
+    #[inline]
+    pub fn offset(&self) -> i32 {
+        self.id_offset
+    }
 
     //──────────────────────── helpers ──────────────────────────────────────
     fn push_with_cap<T>(dq: &mut VecDeque<T>, v: T) {
-        if dq.len() == RESYNC_BUFFER { dq.pop_front(); }
+        if dq.len() == RESYNC_BUFFER {
+            dq.pop_front();
+        }
         dq.push_back(v);
     }
 
     /// brute-force search in the 20×20 buffers – 400 similarities max
     fn find_new_offset(&self) -> Option<i32> {
-        let mut best = (0_i32, 0.0_f64);            // (δ, score)
+        let mut best = (0_i32, 0.0_f64); // (δ, score)
 
         for (id_l, rgb_l) in &self.recent_low {
             for (id_r, rgb_r) in &self.recent_ref {
                 let s = similarity_rgb_hybrid(rgb_l, rgb_r, WIDTH_ENCODER, HEIGHT_ENCODER);
-                
+
                 if s > best.1 {
                     best = ((*id_r as i32) - (*id_l as i32), s);
                 }
             }
         }
-        if best.1 > 0.8 { Some(best.0) } else { None }   // need “good enough” match
+        if best.1 > 0.8 {
+            Some(best.0)
+        } else {
+            None
+        } // need “good enough” match
     }
 
-
     fn find_new_offset_window(&self) -> Option<i32> {
-
         /// How many consecutive frames we demand before trusting a δ
         const WIN_LEN: usize = 8;
         /// Maximum window-average similarity we still call “good”
@@ -570,7 +556,7 @@ impl SynStateOld {
 
         // we will see the same δ many times – keep only first encounter
         let mut seen: HashSet<i32> = HashSet::new();
-        let mut best: Option<(i32, f64)> = None;                 // (δ, best_avg)
+        let mut best: Option<(i32, f64)> = None; // (δ, best_avg)
 
         for (id_l0, _rgb_l0) in &self.recent_low {
             for (id_r0, _rgb_r0) in &self.recent_ref {
@@ -593,18 +579,13 @@ impl SynStateOld {
                         // make sure frames are consecutive (robust against drops)
                         if let Some(p) = prev_id_l {
                             if *id_l != p + 1 {
-                                win.clear();          // gap → break the run
+                                win.clear(); // gap → break the run
                             }
                         }
                         prev_id_l = Some(*id_l);
 
                         // push similarity into the sliding window
-                        let s = similarity_rgb_hybrid(
-                            rgb_l,
-                            rgb_r,
-                            WIDTH_ENCODER,
-                            HEIGHT_ENCODER,
-                        );
+                        let s = similarity_rgb_hybrid(rgb_l, rgb_r, WIDTH_ENCODER, HEIGHT_ENCODER);
                         if win.len() == WIN_LEN {
                             win.pop_front();
                         }
@@ -615,7 +596,7 @@ impl SynStateOld {
                             best_avg_for_delta = best_avg_for_delta.max(avg);
                         }
                     } else {
-                        win.clear();                  // missing pair → break the run
+                        win.clear(); // missing pair → break the run
                         prev_id_l = None;
                     }
                 }
@@ -636,7 +617,6 @@ impl SynStateOld {
         best.map(|(d, _)| d)
     }
 }
-
 
 struct RingBuffer {
     buf: VecDeque<f32>,
@@ -665,7 +645,8 @@ impl RingBuffer {
         }
 
         let mean = self.buf.iter().copied().sum::<f32>() / n as f32;
-        let var = self.buf
+        let var = self
+            .buf
             .iter()
             .map(|x| {
                 let diff = x - mean;
@@ -676,7 +657,6 @@ impl RingBuffer {
 
         var.sqrt()
     }
-
 
     fn as_vec(&self) -> Vec<f32> {
         self.buf.iter().copied().collect()
@@ -818,8 +798,8 @@ impl DebugColor {
 
 #[derive(Debug, Clone)]
 struct FrameInfo {
-    id:       u32,
-    lost:     bool,
+    id: u32,
+    lost: bool,
 }
 
 /// Standalone function for finding the next NAL start code in a buffer
@@ -860,7 +840,7 @@ pub struct HevcDecoder {
     pub expected_frame_size: usize, // Expected size of decoded RGB frames
 
     max_buffered_frames: usize, // Maximum number of frames to buffer
-    min_buffered_frames: usize, 
+    min_buffered_frames: usize,
     decoder_string: String,
     // shared_params: Option<Arc<SharedParameterSetManager>>,
     last_sync_generation: u64,
@@ -891,17 +871,19 @@ impl HevcDecoder {
         let mut child = FfmpegCommand::new()
             .args(&["-threads", "1"])
             .hwaccel("cuda")
-
-            .args(&["-skip_frame", "none",              // NO SKIPPING UPON FRAME LOSS!
-                    "-skip_loop_filter", "none",
-                    "-skip_idct", "none"])
-            .args(&["-err_detect", "aggressive",])
+            .args(&[
+                "-skip_frame",
+                "none", // NO SKIPPING UPON FRAME LOSS!
+                "-skip_loop_filter",
+                "none",
+                "-skip_idct",
+                "none",
+            ])
+            .args(&["-err_detect", "aggressive"])
             .args(&["-fflags", "+discardcorrupt"])
-
             .args(&["-f", "hevc", "-i", "-"])
             .args(&["-vsync", "0"])
             // .args(&["-vf", &format!("fps={}", framerate)])
-            
             .args(&["-pix_fmt", "rgb24"])
             // .args(&["-tune", "zerolatency"])
             // .args(&["-bf", "0"])    // disable use of B-frames
@@ -1030,7 +1012,7 @@ impl HevcDecoder {
             priming_complete: false,
             expected_frame_size: frame_size,
             max_buffered_frames: 30,
-            min_buffered_frames: 5, 
+            min_buffered_frames: 5,
 
             decoder_string: decoder_str.to_string(),
 
@@ -1043,13 +1025,13 @@ impl HevcDecoder {
             initialization_phase: false, // Flag for the decoder's initialization phase
             pending_frames: VecDeque::new(),
             internal_frame_counter: 0,
-            // frame_rate_target: FRAMERATE_WINDOWS as f32, 
+            // frame_rate_target: FRAMERATE_WINDOWS as f32,
             // last_frame_time: Instant::now(),
-            // frame_interval: Duration::from_secs_f64(1.0 / FRAMERATE_WINDOWS as f64), 
-            processing_semaphore: Arc::new(Semaphore::new(10)),  
-            decoded_frame_counter: 0, 
-            id_queue: VecDeque::new(), 
-            pending_param_sets: None, 
+            // frame_interval: Duration::from_secs_f64(1.0 / FRAMERATE_WINDOWS as f64),
+            processing_semaphore: Arc::new(Semaphore::new(10)),
+            decoded_frame_counter: 0,
+            id_queue: VecDeque::new(),
+            pending_param_sets: None,
         }
     }
 
@@ -1192,8 +1174,7 @@ impl HevcDecoder {
         }
 
         // After injecting parameter sets, process any frames in buffer
-        if was_processed && depth == 0 {    
-            
+        if was_processed && depth == 0 {
             // self.decoded_frames.clear();
             // self.id_queue.clear();
             // self.frame_buffer.clear();
@@ -1320,20 +1301,19 @@ impl HevcDecoder {
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
 
         let _permit = self.processing_semaphore.acquire().await;
-        
+
         // Add data to the parser
         self.parser.add_data(&packet);
 
         // Extract frames from the parser and buffer them
         let frames = self.parser.get_frames();
-        let mut pushed = false; 
+        let mut pushed = false;
 
-        
         for frame in frames {
             self.frame_buffer.push_back(frame);
-                self.id_queue.push_back(id);
-                pushed = true; 
-            }
+            self.id_queue.push_back(id);
+            pushed = true;
+        }
 
         // If we're in recovery mode, handle differently
         if self.recovery_frames > 0 {
@@ -1408,7 +1388,7 @@ impl HevcDecoder {
 
                     if frame.len() == self.expected_frame_size {
                         self.decoded_frames.push_back(frame);
-                        self.frames_processed += 1; 
+                        self.frames_processed += 1;
                     } else {
                         println!(
                             "{} ⚠️ Received malformed frame (size={}), expected {}",
@@ -1564,7 +1544,8 @@ impl HevcDecoder {
         let _ = self.process_decoded_frames();
 
         if let Some(frame) = self.decoded_frames.pop_front() {
-            let id = self.id_queue
+            let id = self
+                .id_queue
                 .pop_front()
                 .expect("decoder out‐of‐sync: id_queue empty");
             Some((frame, id, ts))
@@ -1829,11 +1810,9 @@ pub struct ChunkedOldHevcEncoder {
     frame_queue: VecDeque<Vec<u8>>,
     parser: HevcParser,
     encoder_str: String,
-    intra_refresh: bool, 
+    intra_refresh: bool,
 
-    fps_desired: f32, 
-
-
+    fps_desired: f32,
 }
 #[allow(unused)]
 impl ChunkedOldHevcEncoder {
@@ -1845,9 +1824,8 @@ impl ChunkedOldHevcEncoder {
         chunk_duration: f64,
         string: String,
         offset_video: f64,
-        intra_refresh: bool, 
-        fps_desired: f32, 
-
+        intra_refresh: bool,
+        fps_desired: f32,
     ) -> Self {
         println!("Initializing ChunkedOldHevcEncoder");
         let (frame_tx, frame_rx) = bounded(100);
@@ -1864,8 +1842,8 @@ impl ChunkedOldHevcEncoder {
             frame_queue: VecDeque::new(),
             parser: HevcParser::new(),
             encoder_str: string.clone(),
-            intra_refresh, 
-            fps_desired, 
+            intra_refresh,
+            fps_desired,
         }
     }
 
@@ -1878,8 +1856,7 @@ impl ChunkedOldHevcEncoder {
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
 
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, idr: u32, ) {
-        
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, idr: u32) {
         let _encode_permit = ENCODE_SLOTS.clone().acquire_owned().await.unwrap();
         let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.fps_desired;
 
@@ -1892,12 +1869,10 @@ impl ChunkedOldHevcEncoder {
         // );
         self.parser.buffer.clear();
         let mut command = FfmpegCommand::new();
-        
+
         if self.intra_refresh {
-        
             command
                 .args(&["-threads", "1"])
-
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
@@ -1913,7 +1888,7 @@ impl ChunkedOldHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-rc", "cbr"])
-                .args(&["-bf", "0"])    // disable use of B-frames
+                .args(&["-bf", "0"]) // disable use of B-frames
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
@@ -1923,9 +1898,7 @@ impl ChunkedOldHevcEncoder {
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]); // output raw HEVC
-       
         } else {
-
             command
                 .args(&["-threads", "1"])
                 .hwaccel("cuda")
@@ -1943,10 +1916,8 @@ impl ChunkedOldHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 // .args(&["-tune", "zerolatency"])
-
                 .args(&["-rc", "cbr"])
-                .args(&["-bf", "0"])    // disable use of B-frames
-             
+                .args(&["-bf", "0"]) // disable use of B-frames
                 .args(&["-fps_mode", "passthrough"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-rc-lookahead", "0"])
@@ -2052,19 +2023,17 @@ impl ChunkedOldHevcEncoder {
 
 use csv::StringRecord;
 
-
 fn make_encoder_task(
     tag: usize,
     bitrate_mbps: f32,
-    framerate_fps: f32, 
+    framerate_fps: f32,
     trace: Arc<Vec<FrameInfo>>,
     tx: Sender<(usize, u32, Vec<u8>)>,
     video_path: String,
     offset_video: f64,
     simulate_loss: bool,
-    idr_freq: u32, 
-    intra_refresh: bool, 
-
+    idr_freq: u32,
+    intra_refresh: bool,
 ) {
     task::spawn(async move {
         // 1️⃣ Create your encoder
@@ -2076,8 +2045,8 @@ fn make_encoder_task(
             1.0,
             format!("ENC{}M", bitrate_mbps),
             offset_video,
-            intra_refresh, 
-            framerate_fps, 
+            intra_refresh,
+            framerate_fps,
         );
 
         // 2️⃣ Iterate until we’ve produced every ID in the trace
@@ -2093,14 +2062,13 @@ fn make_encoder_task(
                     let info = &trace[produced];
                     produced += 1;
 
-                    let millis_sleep = (1000 / FRAMERATE_WINDOWS ) as u64; 
+                    let millis_sleep = (1000 / FRAMERATE_WINDOWS) as u64;
                     async_std::task::sleep(Duration::from_millis(millis_sleep)).await;
 
                     // simulate loss only on the “low” path
                     if !simulate_loss || !info.lost {
                         if tx.send((tag, info.id, pkt)).is_err() {
-
-                            println!("Encoder of tag {tag} hung up!"); 
+                            println!("Encoder of tag {tag} hung up!");
                             // receiver hung up → terminate task
                             return;
                         }
@@ -2118,25 +2086,22 @@ fn make_encoder_task(
 /* convert “RGBRGB…” byte slice to Vec<u32> suitable for minifb */
 fn rgb_to_u32(src: &[u8]) -> Vec<u32> {
     src.chunks_exact(3)
-       .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
-       .collect()
+        .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
+        .collect()
 }
 
 /* nearest-neighbour down-scale to (w_out,h_out) */
-fn resize_nn(buf: &[u32], w_in: usize, h_in: usize,
-             w_out: usize, h_out: usize) -> Vec<u32>
-{
+fn resize_nn(buf: &[u32], w_in: usize, h_in: usize, w_out: usize, h_out: usize) -> Vec<u32> {
     let mut out = vec![0u32; w_out * h_out];
     for y in 0..h_out {
         let src_y = y * h_in / h_out;
         for x in 0..w_out {
             let src_x = x * w_in / w_out;
-            out[y*w_out + x] = buf[src_y*w_in + src_x];
+            out[y * w_out + x] = buf[src_y * w_in + src_x];
         }
     }
     out
 }
-
 
 /* similarity in [0.0,1.0]  (1.0 ⇒ perfect match) */
 fn similarity_rgb_hybrid(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
@@ -2146,43 +2111,42 @@ fn similarity_rgb_hybrid(a: &[u8], b: &[u8], w: usize, h: usize) -> f64 {
 }
 type Packet = (usize, u32, Vec<u8>);
 
-fn make_low_task(
-    trace: Arc<Vec<FrameInfo>>,
-    mut rx_raw: Receiver<Vec<u8>>,
-    tx: Sender<Packet>,
-) {
+fn make_low_task(trace: Arc<Vec<FrameInfo>>, mut rx_raw: Receiver<Vec<u8>>, tx: Sender<Packet>) {
     task::spawn(async move {
         for row in trace.iter() {
             // pull one packet for this CSV row
-            let pkt = loop { if let Ok(p) = rx_raw.try_recv() { break p } };
+            let pkt = loop {
+                if let Ok(p) = rx_raw.try_recv() {
+                    break p;
+                }
+            };
             if !row.lost {
-                tx.send((0, row.id, pkt)).ok();      // only good frames go out
+                tx.send((0, row.id, pkt)).ok(); // only good frames go out
             }
         }
     });
 }
-fn make_ref_task(
-    trace: Arc<Vec<FrameInfo>>,
-    mut rx_raw: Receiver<Vec<u8>>,
-    tx: Sender<Packet>,
-) {
+fn make_ref_task(trace: Arc<Vec<FrameInfo>>, mut rx_raw: Receiver<Vec<u8>>, tx: Sender<Packet>) {
     task::spawn(async move {
         for row in trace.iter() {
-            let pkt = loop { if let Ok(p) = rx_raw.try_recv() { break p } };
-            tx.send((1, row.id, pkt)).ok();          // never skipped
+            let pkt = loop {
+                if let Ok(p) = rx_raw.try_recv() {
+                    break p;
+                }
+            };
+            tx.send((1, row.id, pkt)).ok(); // never skipped
         }
     });
 }
 
-
 /* draw the two half-frames *plus* the ID text */
 fn draw_pair(
-    window:  &mut Window,
-    rgb_l:   &[u8],
-    rgb_r:   &[u8],
-    scenario: &str, 
-    id:      u32,
-    t:       f64, 
+    window: &mut Window,
+    rgb_l: &[u8],
+    rgb_r: &[u8],
+    scenario: &str,
+    id: u32,
+    t: f64,
 ) -> Result<()> {
     const W: usize = WIDTH_ENCODER;
     const H: usize = HEIGHT_ENCODER;
@@ -2191,19 +2155,27 @@ fn draw_pair(
     let sh = (H as f64 * SCALE) as usize;
     let ww = sw * 2 + 10;
 
-    let left  = resize_nn(&rgb_to_u32(rgb_l),  W, H, sw, sh);
-    let right = resize_nn(&rgb_to_u32(rgb_r),  W, H, sw, sh);
+    let left = resize_nn(&rgb_to_u32(rgb_l), W, H, sw, sh);
+    let right = resize_nn(&rgb_to_u32(rgb_r), W, H, sw, sh);
 
     let mut buf = vec![0u32; ww * sh];
     for y in 0..sh {
         let dst = y * ww;
-        buf[dst..dst+sw].copy_from_slice(&left[y*sw..(y+1)*sw]);
-        buf[dst+sw+10..dst+sw+10+sw].copy_from_slice(&right[y*sw..(y+1)*sw]);
+        buf[dst..dst + sw].copy_from_slice(&left[y * sw..(y + 1) * sw]);
+        buf[dst + sw + 10..dst + sw + 10 + sw].copy_from_slice(&right[y * sw..(y + 1) * sw]);
     }
 
     let y_lbl = sh - 40;
-    render_text(&mut buf, &format!("#{}", id), 10,           y_lbl, ww, 0xFFAA00, 2);
-    render_text(&mut buf, &format!("#{}", id), sw + 20,      y_lbl, ww, 0xFFAA00, 2);
+    render_text(&mut buf, &format!("#{}", id), 10, y_lbl, ww, 0xFFAA00, 2);
+    render_text(
+        &mut buf,
+        &format!("#{}", id),
+        sw + 20,
+        y_lbl,
+        ww,
+        0xFFAA00,
+        2,
+    );
 
     window.set_title(&format!("T: {:6.4} ID {} | Scenario: {scenario}", t, id,));
     window.update_with_buffer(&buf, ww, sh)?;
@@ -2211,23 +2183,22 @@ fn draw_pair(
 }
 
 #[derive(Clone)]
-struct FrameBuf { // structure for having synthetic frames replacing losses. Idea is to filter them out of analysis later, but this way we keep both decoders synced as best as we can. 
+struct FrameBuf {
+    // structure for having synthetic frames replacing losses. Idea is to filter them out of analysis later, but this way we keep both decoders synced as best as we can.
     rgb: Vec<u8>,
-    synthetic: bool,   // true ⇢ this is a repeated / “fake” frame
+    synthetic: bool, // true ⇢ this is a repeated / “fake” frame
 }
 
 // 1) Update FramePair to remember both input IDs
 pub struct FramePair {
-    pub decoded:       Option<Vec<u32>>, // low-bitrate pixels
-    pub reference:     Option<Vec<u32>>, // high-bitrate pixels
-    pub decoded_raw:   Option<Vec<u8>>,  // low-bitrate raw RGB24
-    pub reference_raw: Option<Vec<u8>>,  // high-bitrate raw RGB24
-    pub frame_id:      usize,            // internal pair counter
-    pub regular_id:    usize,            // original “low” frame id
-    pub max_id:        usize,            // original “high” frame id
+    pub decoded: Option<Vec<u32>>,      // low-bitrate pixels
+    pub reference: Option<Vec<u32>>,    // high-bitrate pixels
+    pub decoded_raw: Option<Vec<u8>>,   // low-bitrate raw RGB24
+    pub reference_raw: Option<Vec<u8>>, // high-bitrate raw RGB24
+    pub frame_id: usize,                // internal pair counter
+    pub regular_id: usize,              // original “low” frame id
+    pub max_id: usize,                  // original “high” frame id
 }
-
-
 
 pub struct SynchronizedDecoder {
     regular_decoder: HevcDecoder,
@@ -2235,27 +2206,27 @@ pub struct SynchronizedDecoder {
     output_queue: VecDeque<FramePair_old>,
     throttle_semaphore: Arc<Semaphore>,
     next_frame_id: Arc<AtomicUsize>,
-    
+
     // Sync state
     state: SyncState,
     offset: Option<i64>,
-    
+
     // Counters for state transitions
     match_counter: usize,
     mismatch_counter: usize,
-    
+
     // Buffering
     buffering_active: bool,
     buffering_start_time: Option<Instant>,
-    
+
     client_ip: IpAddr,
 
-    recovery_frame_counter: usize,             // Counts frames processed in recovery mode
-    recovery_last_offset: Option<i64>,         // Stores the offset when entering recovery mode
-    recovery_consecutive_matches: usize,       // Counts consecutive good matches with a new offset
-    recovery_candidate_offset: Option<i64>,    // Potential new offset during recovery
+    recovery_frame_counter: usize, // Counts frames processed in recovery mode
+    recovery_last_offset: Option<i64>, // Stores the offset when entering recovery mode
+    recovery_consecutive_matches: usize, // Counts consecutive good matches with a new offset
+    recovery_candidate_offset: Option<i64>, // Potential new offset during recovery
 
-    recovery_base_offset: i64, 
+    recovery_base_offset: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2272,7 +2243,6 @@ const MISMATCHES_TO_RECOVERY: usize = 5;
 const MAX_PEEK_COUNT: usize = 50;
 const BUFFERING_THRESHOLD: usize = 50;
 
-
 #[derive(Debug)]
 pub struct FramePair_old {
     decoded: Option<Vec<u32>>,
@@ -2281,7 +2251,6 @@ pub struct FramePair_old {
     reference_raw: Option<Vec<u8>>,
     frame_id: usize,
 }
-
 
 fn compute_enhanced_frame_similarity(
     frame1: &[u8],
@@ -2356,18 +2325,13 @@ impl SynchronizedDecoder {
 
             recovery_candidate_offset: None,
             recovery_frame_counter: 0,
-            recovery_last_offset: None, 
-            recovery_consecutive_matches: 0 , 
+            recovery_last_offset: None,
+            recovery_consecutive_matches: 0,
 
-            recovery_base_offset: 0, 
+            recovery_base_offset: 0,
         }
     }
-    pub async fn process_raw_packet(
-        &mut self,
-        tag: usize,
-        packet: Vec<u8>,
-        id: u32,
-    ) {
+    pub async fn process_raw_packet(&mut self, tag: usize, packet: Vec<u8>, id: u32) {
         if tag == 0 {
             self.regular_decoder.process_packet(packet, id).await;
         } else {
@@ -2375,8 +2339,14 @@ impl SynchronizedDecoder {
         }
         self.synchronize_frame_buffers();
     }
-    
-    pub async fn process_packets(&mut self, regular_frame: Option<Vec<u8>>, max_frame: Option<Vec<u8>>, id_reg: u32, id_max: u32) {
+
+    pub async fn process_packets(
+        &mut self,
+        regular_frame: Option<Vec<u8>>,
+        max_frame: Option<Vec<u8>>,
+        id_reg: u32,
+        id_max: u32,
+    ) {
         // Process incoming packets
         if let Some(reg_data) = regular_frame.clone() {
             self.regular_decoder.process_packet(reg_data, id_reg).await;
@@ -2384,9 +2354,8 @@ impl SynchronizedDecoder {
         if let Some(max_data) = max_frame.clone() {
             self.max_decoder.process_packet(max_data, id_max).await;
         }
-        if !regular_frame.is_none() && !max_frame.is_none(){
+        if !regular_frame.is_none() && !max_frame.is_none() {
             self.synchronize_frame_buffers();
-
         }
         // Try to synchronize frames
     }
@@ -2401,61 +2370,67 @@ impl SynchronizedDecoder {
         }
     }
 
-
-
-    
     fn check_buffering_status(&mut self) -> bool {
         if !self.buffering_active {
             return false;
         }
-        
+
         let buffer_size = self.output_queue.len();
-        let elapsed = self.buffering_start_time
+        let elapsed = self
+            .buffering_start_time
             .map(|t| t.elapsed())
             .unwrap_or(Duration::ZERO);
-            
+
         if buffer_size >= BUFFERING_THRESHOLD || elapsed >= MAX_BUFFERING_TIME {
-            println!("✅ Buffer ready! Size: {}/{}, Time elapsed: {:.2}s", 
-                buffer_size, BUFFERING_THRESHOLD, elapsed.as_secs_f32());
+            println!(
+                "✅ Buffer ready! Size: {}/{}, Time elapsed: {:.2}s",
+                buffer_size,
+                BUFFERING_THRESHOLD,
+                elapsed.as_secs_f32()
+            );
             self.buffering_active = false;
             return false;
         }
-        
+
         return true;
     }
-    
+
     fn can_synchronize(&self) -> bool {
         // Need sufficient frames in both decoders and space in output queue
-        return self.regular_decoder.available_frames() >= 20 &&
-               self.max_decoder.available_frames() >= 1 &&
-               self.output_queue.len() < MAX_OUTPUT_QUEUE_LEN;
+        return self.regular_decoder.available_frames() >= 20
+            && self.max_decoder.available_frames() >= 1
+            && self.output_queue.len() < MAX_OUTPUT_QUEUE_LEN;
     }
-    
+
     fn synchronize_frame_buffers(&mut self) {
         // Process any decoded frames
         self.regular_decoder.process_decoded_frames();
         self.max_decoder.process_decoded_frames();
-        
+
         // Main synchronization loop
         while self.can_synchronize() {
             // Get the next max frame
             if let Some((max_raw, max_pixels, max_id)) = self.consume_max_frame() {
                 // Peek at regular frames to find matches
-                let regular_candidates = if self.state == SyncState::Locked
-                {
+                let regular_candidates = if self.state == SyncState::Locked {
                     self.peek_regular_frames(2)
-                } else{
+                } else {
                     self.peek_regular_frames(MAX_PEEK_COUNT)
                 };
 
-                print_prettyy!( DebugColor::Yellow, "Peeked {} regular frames, {} available ", regular_candidates.len(), self.regular_decoder.decoded_frames.len()); 
+                print_prettyy!(
+                    DebugColor::Yellow,
+                    "Peeked {} regular frames, {} available ",
+                    regular_candidates.len(),
+                    self.regular_decoder.decoded_frames.len()
+                );
                 if regular_candidates.is_empty() {
                     continue; // No regular frames available
                 }
-                
+
                 // Find best match based on current state
                 let match_result = self.find_best_match(&max_raw, max_id, &regular_candidates);
-                
+
                 // Handle the match result
                 self.process_match(match_result, max_id, max_raw, max_pixels);
             } else {
@@ -2463,12 +2438,12 @@ impl SynchronizedDecoder {
             }
         }
     }
-    
+
     fn find_best_match(
         &self,
         max_raw: &[u8],
         max_id: usize,
-        candidates: &[(Vec<u8>, Vec<u32>, usize)]
+        candidates: &[(Vec<u8>, Vec<u32>, usize)],
     ) -> Option<(usize, f64, usize)> {
         match self.state {
             SyncState::Seeking | SyncState::Recovering => {
@@ -2476,9 +2451,14 @@ impl SynchronizedDecoder {
                 let mut best_idx = 0;
                 let mut best_sim = f64::MAX;
                 let mut best_reg_id = 0;
-                
+
                 for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
-                    let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                    let sim = compute_enhanced_frame_similarity(
+                        reg_raw,
+                        max_raw,
+                        WIDTH_ENCODER,
+                        HEIGHT_ENCODER,
+                    );
                     if sim < best_sim {
                         best_sim = sim;
                         best_idx = idx;
@@ -2486,79 +2466,94 @@ impl SynchronizedDecoder {
                     }
                 }
                 // println!("[{:?}] best_sim {:.3}", self.state, best_sim);
-                
+
                 if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
-                    print_greennn!("[{:?}] {} has best_sim  ({:.3}), better than threshold {}", self.state, best_idx,best_sim, ACCEPTABLE_SIMILARITY_THRESHOLD);
+                    print_greennn!(
+                        "[{:?}] {} has best_sim  ({:.3}), better than threshold {}",
+                        self.state,
+                        best_idx,
+                        best_sim,
+                        ACCEPTABLE_SIMILARITY_THRESHOLD
+                    );
 
                     return Some((best_idx, best_sim, best_reg_id));
+                } else {
+                    print_purples!("No good similarity",);
                 }
-                else{
-                    print_purples!("No good similarity", ); 
-                }
-            },
+            }
             SyncState::Locked => {
                 // In locked state, use the expected offset
                 if let Some(offset) = self.offset {
-                    println!("LOCKED: Offset -> {}", offset); 
+                    println!("LOCKED: Offset -> {}", offset);
 
                     let expected_reg_id = (max_id as i64 + offset) as usize;
-                    
+
                     // First try to find exact match
                     for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
                         if *reg_id == expected_reg_id {
-                            let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                            let sim = compute_enhanced_frame_similarity(
+                                reg_raw,
+                                max_raw,
+                                WIDTH_ENCODER,
+                                HEIGHT_ENCODER,
+                            );
                             if sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
                                 return Some((idx, sim, *reg_id));
                             }
                         }
                     }
-                    
+
                     // If exact match not found, find best similarity
                     let mut best_idx = 0;
                     let mut best_sim = f64::MAX;
                     let mut best_reg_id = 0;
-                    
+
                     for (idx, (reg_raw, _, reg_id)) in candidates.iter().enumerate() {
-                        let sim = compute_enhanced_frame_similarity(reg_raw, max_raw, WIDTH_ENCODER, HEIGHT_ENCODER);
+                        let sim = compute_enhanced_frame_similarity(
+                            reg_raw,
+                            max_raw,
+                            WIDTH_ENCODER,
+                            HEIGHT_ENCODER,
+                        );
                         if sim < best_sim {
                             best_sim = sim;
                             best_idx = idx;
                             best_reg_id = *reg_id;
                         }
                     }
-                    
+
                     if best_sim <= ACCEPTABLE_SIMILARITY_THRESHOLD {
                         return Some((best_idx, best_sim, best_reg_id));
                     }
                 }
             }
         }
-        
+
         None // No good match found
     }
-    
+
     fn process_match(
-        &mut self, 
+        &mut self,
         match_result: Option<(usize, f64, usize)>,
         max_id: usize,
         max_raw: Vec<u8>,
-        max_pixels: Vec<u32>
+        max_pixels: Vec<u32>,
     ) {
         let mut matched_regular = None;
-        
+
         if self.state == SyncState::Recovering {
             self.recovery_frame_counter += 1;
-            
+
             // During initial recovery period, just use the previous offset and don't check similarity
             if self.recovery_frame_counter < RECOVERY_GRACE_PERIOD {
                 if let Some(old_offset) = self.recovery_last_offset {
                     // Calculate where the regular frame should be based on the old offset
                     let expected_reg_id = (max_id as i64 + old_offset) as usize;
-                    
+
                     // Find and consume the regular frame closest to the expected ID
                     let mut closest_idx = 0;
                     let mut closest_distance = usize::MAX;
-                    
+
                     let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
                     for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
                         let distance = reg_id.abs_diff(expected_reg_id);
@@ -2567,32 +2562,35 @@ impl SynchronizedDecoder {
                             closest_idx = idx;
                         }
                     }
-                    
+
                     // Consume frames up to and including the closest match
                     if !candidates.is_empty() {
                         let consumed_frames = self.consume_regular_frames(closest_idx + 1);
                         matched_regular = consumed_frames.last().cloned();
-                        
+
                         println!("🔄 Recovery: Using old offset {}. Expected: {}, Actual: {:?}, Distance: {}",
-                                 old_offset, expected_reg_id, 
-                                 matched_regular.as_ref().map(|(_, _, id)| id), 
-                                 closest_distance);
+                                old_offset, expected_reg_id,
+                                matched_regular.as_ref().map(|(_, _, id)| id),
+                                closest_distance);
                     } else {
                         // No regular frames available, just output the max frame
-                        println!("🔄 Recovery: No regular frames available for Max #{}", max_id);
+                        println!(
+                            "🔄 Recovery: No regular frames available for Max #{}",
+                            max_id
+                        );
                     }
                 }
             } else {
                 // After grace period, start looking for good similarity matches again
                 if let Some((best_idx, best_sim, best_reg_id)) = match_result {
                     let new_offset = best_reg_id as i64 - max_id as i64;
-                    
+
                     // Check if this is a genuinely good match
                     if best_sim <= RECOVERY_MATCH_THRESHOLD {
                         if self.recovery_candidate_offset == Some(new_offset) {
                             // This offset matches our previous candidate
                             self.recovery_consecutive_matches += 1;
-                            
+
                             // If we've seen enough consecutive matches with this offset
                             if self.recovery_consecutive_matches >= RECOVERY_MAX_ATTEMPTS {
                                 // We have confidence in this new offset
@@ -2613,14 +2611,17 @@ impl SynchronizedDecoder {
                             }
                         } else {
                             // New candidate offset
-                            println!("🔄 Recovery: Found potential new offset {} (sim: {:.4})", new_offset, best_sim);
+                            println!(
+                                "🔄 Recovery: Found potential new offset {} (sim: {:.4})",
+                                new_offset, best_sim
+                            );
                             // self.recovery_candidate_offset = Some(new_offset);
-                            // self.recovery_last_offset = Some(new_offset); 
+                            // self.recovery_last_offset = Some(new_offset);
                             // self.recovery_consecutive_matches = 1;
-                            self.state = SyncState::Locked; 
-                            self.offset = Some(new_offset); 
+                            self.state = SyncState::Locked;
+                            self.offset = Some(new_offset);
                         }
-                        
+
                         // Consume the matched regular frame
                         let consumed_frames = self.consume_regular_frames(best_idx + 1);
                         matched_regular = consumed_frames.last().cloned();
@@ -2629,13 +2630,13 @@ impl SynchronizedDecoder {
                         if let Some(old_offset) = self.recovery_last_offset {
                             // Use time-based matching like in the grace period
                             let expected_reg_id = (max_id as i64 + old_offset) as usize;
-                            
+
                             // Find closest regular frame (similar to grace period logic)
                             let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
                             if !candidates.is_empty() {
                                 let mut closest_idx = 0;
                                 let mut closest_distance = usize::MAX;
-                                
+
                                 for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
                                     let distance = reg_id.abs_diff(expected_reg_id);
                                     if distance < closest_distance {
@@ -2643,14 +2644,14 @@ impl SynchronizedDecoder {
                                         closest_idx = idx;
                                     }
                                 }
-                                
+
                                 // Consume frames up to and including the closest match
                                 let consumed_frames = self.consume_regular_frames(closest_idx + 1);
                                 matched_regular = consumed_frames.last().cloned();
-                                
+
                                 println!("🔄 Recovery: Using recovery offset {}. Expected: {}, Actual: {:?} (poor sim: {:.4})",
-                                         old_offset, expected_reg_id, 
-                                         matched_regular.as_ref().map(|(_, _, id)| id), 
+                                         old_offset, expected_reg_id,
+                                         matched_regular.as_ref().map(|(_, _, id)| id),
                                          best_sim);
                             }
                         } else {
@@ -2666,13 +2667,13 @@ impl SynchronizedDecoder {
                         let expected_reg_id = (max_id as i64 + old_offset) as usize;
                         println!("🔄 Recovery: No match found. Using old offset {} for Max #{} (expecting Reg #{})",
                                  old_offset, max_id, expected_reg_id);
-                        
+
                         // Try to find a frame close to the expected ID
                         let candidates = self.peek_regular_frames(MAX_PEEK_COUNT);
                         if !candidates.is_empty() {
                             let mut closest_idx = 0;
                             let mut closest_distance = usize::MAX;
-                            
+
                             for (idx, (_, _, reg_id)) in candidates.iter().enumerate() {
                                 let distance = reg_id.abs_diff(expected_reg_id);
                                 if distance < closest_distance {
@@ -2680,7 +2681,7 @@ impl SynchronizedDecoder {
                                     closest_idx = idx;
                                 }
                             }
-                            
+
                             // Consume frames up to and including the closest match
                             let consumed_frames = self.consume_regular_frames(closest_idx + 1);
                             matched_regular = consumed_frames.last().cloned();
@@ -2695,15 +2696,17 @@ impl SynchronizedDecoder {
                 if best_sim <= GOOD_SIMILARITY_THRESHOLD {
                     // Very good match - update state
                     self.mismatch_counter = 0;
-                    
+
                     match self.state {
                         SyncState::Seeking | SyncState::Recovering => {
                             self.match_counter += 1;
-                            
+
                             // Calculate offset between streams
                             let new_offset = best_reg_id as i64 - max_id as i64;
-                            
-                            if self.match_counter >= MATCHES_NEEDED_TO_LOCK && !self.buffering_active {
+
+                            if self.match_counter >= MATCHES_NEEDED_TO_LOCK
+                                && !self.buffering_active
+                            {
                                 // We've found enough consecutive good matches to lock
                                 println!("🔒 Synchronization Locked! Offset: {}", new_offset);
                                 self.state = SyncState::Locked;
@@ -2713,13 +2716,12 @@ impl SynchronizedDecoder {
                                 // Not enough matches yet, but update the potential offset
                                 self.offset = Some(new_offset);
                             }
-                        },
+                        }
                         SyncState::Locked => {
                             // Already locked, just confirm current offset
-                        }
-                        // SyncState::Recovering => {} // Handled in the above logic
+                        } // SyncState::Recovering => {} // Handled in the above logic
                     }
-                    
+
                     // Consume regular frames up to and including the matched one
                     let consumed_frames = self.consume_regular_frames(best_idx + 1);
                     matched_regular = consumed_frames.last().cloned();
@@ -2727,36 +2729,40 @@ impl SynchronizedDecoder {
                     // Match isn't good enough
                     self.handle_mismatch(max_id);
 
-                    
                     // Consume just one regular frame to advance
                     let consumed_frames = self.consume_regular_frames(1);
                     matched_regular = consumed_frames.last().cloned();
                 }
             } else {
                 // No match found
-                self.handle_mismatch(max_id); 
+                self.handle_mismatch(max_id);
                 // Don't consume any regular frames
             }
         }
-        
+
         // Output the pair
         self.output_pair(matched_regular, Some((max_raw, max_pixels, max_id)));
     }
-    
+
     fn handle_mismatch(&mut self, max_id: usize) {
         self.match_counter = 0;
-        
+
         if self.state == SyncState::Locked {
             self.mismatch_counter += 1;
-            if self.mismatch_counter >=2{
-                print_purples!("Locked-> Mismatch {} / {}" , self.mismatch_counter, MISMATCHES_TO_RECOVERY); 
-
+            if self.mismatch_counter >= 2 {
+                print_purples!(
+                    "Locked-> Mismatch {} / {}",
+                    self.mismatch_counter,
+                    MISMATCHES_TO_RECOVERY
+                );
             }
-            
+
             if self.mismatch_counter >= MISMATCHES_TO_RECOVERY {
-                println!("🔄 Sync lost ({}). Entering recovery mode with preserved offset: {:?}", 
-                         self.mismatch_counter, self.offset);
-                
+                println!(
+                    "🔄 Sync lost ({}). Entering recovery mode with preserved offset: {:?}",
+                    self.mismatch_counter, self.offset
+                );
+
                 // Store the current offset when entering recovery mode
                 self.recovery_last_offset = self.offset;
                 self.state = SyncState::Recovering;
@@ -2765,73 +2771,82 @@ impl SynchronizedDecoder {
                 self.recovery_consecutive_matches = 0;
                 self.recovery_candidate_offset = None;
 
-                self.recovery_base_offset = self.offset.unwrap(); 
-
+                self.recovery_base_offset = self.offset.unwrap();
             }
         }
     }
-    
+
     fn consume_max_frame(&mut self) -> Option<(Vec<u8>, Vec<u32>, usize)> {
         let current_frame_id = self.max_decoder.internal_frame_counter;
-        
-        self.max_decoder.decoded_frames.pop_front().and_then(|frame_raw| {
-            self.max_decoder.internal_frame_counter += 1;
-            
-            convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
-                .map(|pixels| (frame_raw, pixels, current_frame_id))
-        })
+
+        self.max_decoder
+            .decoded_frames
+            .pop_front()
+            .and_then(|frame_raw| {
+                self.max_decoder.internal_frame_counter += 1;
+
+                convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
+                    .map(|pixels| (frame_raw, pixels, current_frame_id))
+            })
     }
-    
+
     fn peek_regular_frames(&self, max_count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
         let mut frames = Vec::with_capacity(max_count);
         let base_id = self.regular_decoder.frames_processed;
-        
-        for (idx, frame_raw) in self.regular_decoder.decoded_frames.iter().take(max_count).enumerate() {
+
+        for (idx, frame_raw) in self
+            .regular_decoder
+            .decoded_frames
+            .iter()
+            .take(max_count)
+            .enumerate()
+        {
             if let Some(pixels) = convert_rgb_to_u32(frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
                 frames.push((frame_raw.clone(), pixels, base_id + idx));
             }
         }
-        
+
         frames
     }
-    
+
     fn consume_regular_frames(&mut self, count: usize) -> Vec<(Vec<u8>, Vec<u32>, usize)> {
         let mut frames = Vec::with_capacity(count);
-        
+
         for _ in 0..count {
             let current_frame_id = self.regular_decoder.frames_processed;
-            
+
             if let Some(frame_raw) = self.regular_decoder.decoded_frames.pop_front() {
                 self.regular_decoder.frames_processed += 1;
-                
-                if let Some(pixels) = convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER) {
+
+                if let Some(pixels) = convert_rgb_to_u32(&frame_raw, WIDTH_ENCODER, HEIGHT_ENCODER)
+                {
                     frames.push((frame_raw, pixels, current_frame_id));
                 }
             } else {
                 break;
             }
         }
-        
+
         frames
     }
-    
+
     fn output_pair(
         &mut self,
         regular: Option<(Vec<u8>, Vec<u32>, usize)>,
-        reference: Option<(Vec<u8>, Vec<u32>, usize)>
+        reference: Option<(Vec<u8>, Vec<u32>, usize)>,
     ) {
         let frame_id = self.next_frame_id.fetch_add(1, Ordering::SeqCst);
-        
+
         let (decoded, decoded_raw, _) = match regular {
             Some((raw, pixels, id)) => (Some(pixels), Some(raw), Some(id)),
             None => (None, None, None),
         };
-        
+
         let (reference_pixels, reference_raw, _) = match reference {
             Some((raw, pixels, id)) => (Some(pixels), Some(raw), Some(id)),
             None => (None, None, None),
         };
-        
+
         let sync_pair = FramePair_old {
             decoded,
             reference: reference_pixels,
@@ -2839,23 +2854,23 @@ impl SynchronizedDecoder {
             reference_raw,
             frame_id,
         };
-        
-        // println!("Debug sync_pair: {:?}", sync_pair); 
+
+        // println!("Debug sync_pair: {:?}", sync_pair);
 
         self.output_queue.push_back(sync_pair);
     }
-    
+
     pub fn next_frame_pair(&mut self) -> Option<FramePair_old> {
         // Check if we're still buffering
         if self.check_buffering_status() {
             return None;
         }
-        
+
         // Make sure we have enough buffer before returning frames
         if self.output_queue.len() <= BUFFERING_THRESHOLD / 3 {
             self.synchronize_frame_buffers();
         }
-        
+
         // Only return a frame if we have sufficient buffer
         if self.output_queue.len() > BUFFERING_THRESHOLD / 3 {
             if let Some(pair) = self.output_queue.pop_front() {
@@ -2868,25 +2883,22 @@ impl SynchronizedDecoder {
             None
         }
     }
-    
+
     // Public API methods
     pub fn get_sync_state(&self) -> SyncState {
         self.state.clone()
     }
-    
+
     pub fn get_stable_offset(&self) -> Option<i64> {
         self.offset
     }
-    
+
     pub fn change_stable_offset(&mut self, new: i64) {
         self.offset = Some(new);
     }
 }
 
-pub async fn process_trace_single_encoder_new(
-    trace_csv: PathBuf,
-    ip: IpAddr,
-) -> Result<()> {
+pub async fn process_trace_single_encoder_new(trace_csv: PathBuf, ip: IpAddr) -> Result<()> {
     // extract scenario name & trace index
     let file_name = trace_csv.file_name().unwrap().to_string_lossy();
     let caps = Regex::new(r"trace_offline_video(\d+)\.csv$")?
@@ -2894,11 +2906,17 @@ pub async fn process_trace_single_encoder_new(
         .expect("filename didn’t match");
     let trace_idx: usize = caps[1].parse()?;
 
-    let scenario = trace_csv.parent()
+    let scenario = trace_csv
+        .parent()
         .and_then(|p| p.file_name())
         .unwrap()
         .to_string_lossy();
-    print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario);
+    print_prettyy!(
+        DebugColor::Blue,
+        "Starting SIM: {} | Scenario: {}",
+        file_name,
+        scenario
+    );
 
     // extract bitrate
     let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)_")?;
@@ -2927,28 +2945,25 @@ pub async fn process_trace_single_encoder_new(
         .as_str()
         .ne("0");
 
-
     println!("Extracted intra_refresh flag: {}", intra_refresh);
 
     // setup metrics logger
-    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false, )?;
+    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false)?;
 
     // parse CSV trace
     let trace_path = trace_csv.to_str().unwrap();
-    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(trace_path)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(trace_path)?;
 
-        let start = Instant::now(); 
+    let start = Instant::now();
     // 1. ─ parse CSV ───────────────────────────────────────
-    let mut raw_ids     = Vec::new();
-    let mut raw_ts: Vec<f64> = Vec::new(); 
-    let mut path_video  = None::<String>;
-    let mut offset_video= None::<f64>;
+    let mut raw_ids = Vec::new();
+    let mut raw_ts: Vec<f64> = Vec::new();
+    let mut path_video = None::<String>;
+    let mut offset_video = None::<f64>;
     let mut idr_frequency = None::<u32>;
     let mut throughput_data = Vec::<f64>::new();
-
-
-
-
 
     // let trace_path = "/…/trace_offline_video0.csv";
     let mut rdr = csv::ReaderBuilder::new()
@@ -2958,22 +2973,17 @@ pub async fn process_trace_single_encoder_new(
     for rec in rdr.records() {
         let rec = rec?;
 
-        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2), intra_refresh (col 3); 
+        // first non‐empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2), intra_refresh (col 3);
 
-        println!("rec = {:?}", rec); 
+        println!("rec = {:?}", rec);
 
         if path_video.is_none() {
-            if let (Some(o), Some(p), Some(i)) =
-                (rec.get(0), rec.get(1), rec.get(2))
-            {
-                if !o.trim().is_empty()
-                 && !p.trim().is_empty()
-                 && !i.trim().is_empty()
-                {
-                    offset_video    = Some(o.trim().parse()?);
-                    path_video      = Some(p.trim().to_string());
-                    idr_frequency   = Some(i.trim().parse()?);
-                    // intra_refresh = Some(j.trim().parse()?);  
+            if let (Some(o), Some(p), Some(i)) = (rec.get(0), rec.get(1), rec.get(2)) {
+                if !o.trim().is_empty() && !p.trim().is_empty() && !i.trim().is_empty() {
+                    offset_video = Some(o.trim().parse()?);
+                    path_video = Some(p.trim().to_string());
+                    idr_frequency = Some(i.trim().parse()?);
+                    // intra_refresh = Some(j.trim().parse()?);
 
                     continue;
                 }
@@ -2985,15 +2995,17 @@ pub async fn process_trace_single_encoder_new(
             (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
         {
             // skip any empty/data‐garbage rows
-            if id_s.trim().is_empty() { continue; }
+            if id_s.trim().is_empty() {
+                continue;
+            }
 
-            let id:    u32   = id_s.trim().parse()?;
-            let lost:  bool  = lost_s.trim().parse::<u32>()? != 0;
-            let tp:    f64   = tp_s.trim().parse()?;
-            let ts:     f64 = _ts.trim().parse()?; 
+            let id: u32 = id_s.trim().parse()?;
+            let lost: bool = lost_s.trim().parse::<u32>()? != 0;
+            let tp: f64 = tp_s.trim().parse()?;
+            let ts: f64 = _ts.trim().parse()?;
 
             raw_ids.push(id);
-            raw_ts.push(ts); 
+            raw_ts.push(ts);
             throughput_data.push(tp);
 
             // if you want to track lost in the CSV pass-through you could also
@@ -3001,18 +3013,18 @@ pub async fn process_trace_single_encoder_new(
         }
     }
 
-
-        // sanity‐check & unwrap
+    // sanity‐check & unwrap
     let video = path_video
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
-    let offset = offset_video
-        .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
-    let idr    = idr_frequency
-        .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
+    let offset = offset_video.ok_or_else(|| anyhow::anyhow!("missing offset"))?;
+    let idr = idr_frequency.ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
 
-    let ts_map: HashMap<u32,f64> = raw_ids.iter().cloned().zip(raw_ts.iter().cloned()).collect();
-
+    let ts_map: HashMap<u32, f64> = raw_ids
+        .iter()
+        .cloned()
+        .zip(raw_ts.iter().cloned())
+        .collect();
 
     println!(
         "Video={}\n, offset={} s\n, IDR_FREQ={}fps\n, read {} frames\n, {} throughput samples\n",
@@ -3023,27 +3035,41 @@ pub async fn process_trace_single_encoder_new(
         throughput_data.len()
     );
 
-
-    let video = path_video.clone().ok_or_else(|| anyhow::anyhow!("missing video path"))?;
+    let video = path_video
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
     let offset = offset_video.ok_or_else(|| anyhow::anyhow!("missing offset"))?;
     let idr = idr_frequency.ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
 
     // rebuild full trace & lost set
-    raw_ids.sort_unstable(); raw_ids.dedup();
+    raw_ids.sort_unstable();
+    raw_ids.dedup();
     let min_id = *raw_ids.first().unwrap();
     let max_id = *raw_ids.last().unwrap();
     let id_set: HashSet<_> = raw_ids.iter().cloned().collect();
     let mut trace = Vec::with_capacity((max_id - min_id + 1) as usize);
     for id in min_id..=max_id {
-        trace.push(FrameInfo { id, lost: !id_set.contains(&id) });
+        trace.push(FrameInfo {
+            id,
+            lost: !id_set.contains(&id),
+        });
     }
     let lost_ids: BTreeSet<u32> = trace.iter().filter(|f| f.lost).map(|f| f.id).collect();
     let trace = Arc::new(trace);
 
     // spawn encoder task
-    let (tx_low, rx_low) = unbounded::<(usize,u32,Vec<u8>)>();
+    let (tx_low, rx_low) = unbounded::<(usize, u32, Vec<u8>)>();
     make_encoder_task(
-        0, bitrate, fps_value, Arc::clone(&trace), tx_low.clone(), video.clone(), offset, false, idr, intra_refresh, 
+        0,
+        bitrate,
+        fps_value,
+        Arc::clone(&trace),
+        tx_low.clone(),
+        video.clone(),
+        offset,
+        false,
+        idr,
+        intra_refresh,
     );
     drop(tx_low);
 
@@ -3062,7 +3088,10 @@ pub async fn process_trace_single_encoder_new(
     )?;
 
     // sync-state machine
-    enum SyncState { InSync, OutOfSync }
+    enum SyncState {
+        InSync,
+        OutOfSync,
+    }
     let mut sync_state = SyncState::InSync;
     let mut lost_run = 0;
     let loss_threshold = 5;
@@ -3071,11 +3100,8 @@ pub async fn process_trace_single_encoder_new(
     let expected = trace.len();
     let mut seen_pairs = 0;
     // let mut vmaf_jobs = Vec::new();
-    let sem = Arc::new(Semaphore::new(5)); 
-    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
-        FuturesUnordered::new();
-
-
+    let sem = Arc::new(Semaphore::new(5));
+    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> = FuturesUnordered::new();
 
     let mut low_buf = HashMap::new();
     let mut ref_buf = HashMap::new();
@@ -3093,10 +3119,15 @@ pub async fn process_trace_single_encoder_new(
                 if lost_ids.contains(&id) {
                     lost_run += 1;
                     sync_state = SyncState::OutOfSync;
-                    if lost_run > loss_threshold { pending_resync = true; }
+                    if lost_run > loss_threshold {
+                        pending_resync = true;
+                    }
                     // synthetic filler
                     if let Some(last) = last_real_low.take() {
-                        let fb = FrameBuf { rgb: last.rgb.clone(), synthetic: true };
+                        let fb = FrameBuf {
+                            rgb: last.rgb.clone(),
+                            synthetic: true,
+                        };
                         low_buf.insert(id, fb.clone());
                         ready_ids.insert(id);
                     }
@@ -3111,7 +3142,10 @@ pub async fn process_trace_single_encoder_new(
                             pending_resync = false;
                             print_prettyy!(DebugColor::Green, "Resync at IDR frame {}", fid);
                         }
-                        let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
+                        let fb = FrameBuf {
+                            rgb: rgb.clone(),
+                            synthetic: false,
+                        };
                         low_buf.insert(fid, fb.clone());
                         last_real_low = Some(fb);
                         if ref_buf.contains_key(&fid) {
@@ -3121,12 +3155,20 @@ pub async fn process_trace_single_encoder_new(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => { low_done = true; }
+            Err(RecvTimeoutError::Disconnected) => {
+                low_done = true;
+            }
         }
 
         // drain ref decoder
         while let Some((rgb_r, id, _)) = dec_ref.next_decoded_frame() {
-            ref_buf.insert(id, FrameBuf { rgb: rgb_r, synthetic: false });
+            ref_buf.insert(
+                id,
+                FrameBuf {
+                    rgb: rgb_r,
+                    synthetic: false,
+                },
+            );
             if low_buf.contains_key(&id) {
                 ready_ids.insert(id);
             }
@@ -3137,10 +3179,17 @@ pub async fn process_trace_single_encoder_new(
         for &id in &ready_ids {
             if let (Some(fb_l), Some(fb_r)) = (low_buf.remove(&id), ref_buf.remove(&id)) {
                 // draw always
-                draw_pair(&mut window, &fb_l.rgb, &fb_r.rgb, &scenario, id, ts_map[&id])?;
+                draw_pair(
+                    &mut window,
+                    &fb_l.rgb,
+                    &fb_r.rgb,
+                    &scenario,
+                    id,
+                    ts_map[&id],
+                )?;
                 seen_pairs += 1;
                 // only metric when in-sync and real frame
-                 if matches!(sync_state, SyncState::InSync) && !fb_l.synthetic {
+                if matches!(sync_state, SyncState::InSync) && !fb_l.synthetic {
                     let logger = metric.clone();
                     let cpu_semaphore = sem.clone();
                     let vmaf_semaphore = VMAF_SLOTS.clone();
@@ -3155,7 +3204,7 @@ pub async fn process_trace_single_encoder_new(
                         // throttle total VMAF concurrency
                         let _vmaf_permit = vmaf_semaphore.acquire_owned().await.unwrap();
                         // throttle CPU usage
-                        let _cpu_permit  = cpu_semaphore.acquire_owned().await.unwrap();
+                        let _cpu_permit = cpu_semaphore.acquire_owned().await.unwrap();
 
                         if let Err(e) = logger
                             .process_frame_buffers(
@@ -3172,16 +3221,19 @@ pub async fn process_trace_single_encoder_new(
                         // permits are dropped here, freeing slots
                     });
                     vmaf_tasks.push(handle);
-                }
-                 else {
+                } else {
                     println!("⏭ Skipping VMAF for out-of-sync or synthetic id {}", id);
                 }
                 to_remove.push(id);
             }
         }
-        for id in to_remove { ready_ids.remove(&id); }
+        for id in to_remove {
+            ready_ids.remove(&id);
+        }
 
-        if seen_pairs >= expected || low_done { break; }
+        if seen_pairs >= expected || low_done {
+            break;
+        }
         window.update();
     }
 
@@ -3190,16 +3242,12 @@ pub async fn process_trace_single_encoder_new(
             eprintln!("VMAF task panicked: {}", join_err);
         }
     }
-    
+
     metric.finalize()?;
     Ok(())
 }
 
-
-pub async fn process_trace_two_encoders_no_loss(
-    trace_csv: PathBuf,
-    ip: IpAddr,
-) -> Result<()> {
+pub async fn process_trace_two_encoders_no_loss(trace_csv: PathBuf, ip: IpAddr) -> Result<()> {
     // extract scenario name & trace index
     let file_name = trace_csv.file_name().unwrap().to_string_lossy();
     let caps = Regex::new(r"trace_offline_video(\d+)\.csv$")?
@@ -3207,11 +3255,17 @@ pub async fn process_trace_two_encoders_no_loss(
         .expect("filename didn’t match");
     let trace_idx: usize = caps[1].parse()?;
 
-    let scenario = trace_csv.parent()
+    let scenario = trace_csv
+        .parent()
         .and_then(|p| p.file_name())
         .unwrap()
         .to_string_lossy();
-    print_prettyy!(DebugColor::Blue, "Starting SIM: {} | Scenario: {}", file_name, scenario);
+    print_prettyy!(
+        DebugColor::Blue,
+        "Starting SIM: {} | Scenario: {}",
+        file_name,
+        scenario
+    );
 
     // extract bitrate
     let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)_")?;
@@ -3238,7 +3292,8 @@ pub async fn process_trace_two_encoders_no_loss(
         .and_then(|caps| caps.name("ir"))
         .ok_or_else(|| anyhow::anyhow!("IR flag missing"))?
         .as_str()
-        .parse::<u32>()? > 0;
+        .parse::<u32>()?
+        > 0;
 
     // setup metrics logger (no-loss mode)
     let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, true)?;
@@ -3262,13 +3317,8 @@ pub async fn process_trace_two_encoders_no_loss(
 
         // first non-empty row → OFFSET_VIDEO (col 0), PATH_VIDEO (col 1), IDR_FREQUENCY (col 2), INTRA_REFRESH (col 3)
         if path_video.is_none() {
-            if let (Some(o), Some(p), Some(i)) =
-                (rec.get(0), rec.get(1), rec.get(2))
-            {
-                if !o.trim().is_empty()
-                    && !p.trim().is_empty()
-                    && !i.trim().is_empty()
-                {
+            if let (Some(o), Some(p), Some(i)) = (rec.get(0), rec.get(1), rec.get(2)) {
+                if !o.trim().is_empty() && !p.trim().is_empty() && !i.trim().is_empty() {
                     offset_video = Some(o.trim().parse()?);
                     path_video = Some(p.trim().to_string());
                     idr_frequency = Some(i.trim().parse()?);
@@ -3281,7 +3331,9 @@ pub async fn process_trace_two_encoders_no_loss(
         if let (Some(_ts), Some(id_s), Some(_lost), Some(tp_s)) =
             (rec.get(3), rec.get(4), rec.get(5), rec.get(6))
         {
-            if id_s.trim().is_empty() { continue; }
+            if id_s.trim().is_empty() {
+                continue;
+            }
 
             let id: u32 = id_s.trim().parse()?;
             let ts: f64 = _ts.trim().parse()?;
@@ -3297,16 +3349,15 @@ pub async fn process_trace_two_encoders_no_loss(
     let video = path_video
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing video path"))?;
-    let offset = offset_video
-        .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
-    let idr = idr_frequency
-        .ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
-
+    let offset = offset_video.ok_or_else(|| anyhow::anyhow!("missing offset"))?;
+    let idr = idr_frequency.ok_or_else(|| anyhow::anyhow!("missing IDR_FREQUENCY"))?;
 
     let ts_map = Arc::new(
-        raw_ids.iter().cloned()
+        raw_ids
+            .iter()
+            .cloned()
             .zip(raw_ts.iter().cloned())
-            .collect::<HashMap<_, _>>()
+            .collect::<HashMap<_, _>>(),
     );
 
     println!(
@@ -3319,13 +3370,17 @@ pub async fn process_trace_two_encoders_no_loss(
     );
 
     // rebuild full trace (no loss assumption)
-    raw_ids.sort_unstable(); raw_ids.dedup();
+    raw_ids.sort_unstable();
+    raw_ids.dedup();
     let min_id = *raw_ids.first().unwrap();
     let max_id = *raw_ids.last().unwrap();
     let id_set: HashSet<_> = raw_ids.iter().cloned().collect();
     let mut trace = Vec::with_capacity((max_id - min_id + 1) as usize);
     for id in min_id..=max_id {
-        trace.push(FrameInfo { id, lost: !id_set.contains(&id) });
+        trace.push(FrameInfo {
+            id,
+            lost: !id_set.contains(&id),
+        });
     }
     let trace = Arc::new(trace);
 
@@ -3337,7 +3392,7 @@ pub async fn process_trace_two_encoders_no_loss(
     make_encoder_task(
         0,
         bitrate,
-        fps_value, 
+        fps_value,
         Arc::clone(&trace),
         tx_encoder_0.clone(),
         video.clone(),
@@ -3349,13 +3404,13 @@ pub async fn process_trace_two_encoders_no_loss(
     make_encoder_task(
         1,
         MAX_BITRATE_REFERENCE,
-        fps_value, 
+        fps_value,
         Arc::clone(&trace),
         tx_encoder_1.clone(),
         video,
         offset,
         false,
-        idr, // doesn't get used for IR, IR 100 Mbps reference for VMAF. 
+        idr, // doesn't get used for IR, IR 100 Mbps reference for VMAF.
         intra_refresh_enabled,
     );
 
@@ -3363,8 +3418,10 @@ pub async fn process_trace_two_encoders_no_loss(
     drop(tx_encoder_1);
 
     // Initialize two distinct decoders, one for each encoder's output
-    let mut dec_encoder_0 = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_0");
-    let mut dec_encoder_1 = HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_1");
+    let mut dec_encoder_0 =
+        HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_0");
+    let mut dec_encoder_1 =
+        HevcDecoder::new(60, WIDTH_ENCODER as u32, HEIGHT_ENCODER as u32, "ENC_1");
 
     // create window
     let sw = (WIDTH_ENCODER as f64 * SCALE) as usize;
@@ -3380,10 +3437,8 @@ pub async fn process_trace_two_encoders_no_loss(
     let mut seen_pairs = 0;
     // let mut vmaf_jobs = Vec::new();
 
-    let sem = Arc::new(Semaphore::new(num_cpus::get())); 
-    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> =
-        FuturesUnordered::new();
-
+    let sem = Arc::new(Semaphore::new(num_cpus::get()));
+    let mut vmaf_tasks: FuturesUnordered<tokio::task::JoinHandle<()>> = FuturesUnordered::new();
 
     let mut encoder_0_buf = HashMap::new(); // Buffer for decoded frames from encoder 0
     let mut encoder_1_buf = HashMap::new(); // Buffer for decoded frames from encoder 1
@@ -3398,7 +3453,9 @@ pub async fn process_trace_two_encoders_no_loss(
                 dec_encoder_0.process_packet(pkt, id).await;
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => { encoder_0_done = true; }
+            Err(RecvTimeoutError::Disconnected) => {
+                encoder_0_done = true;
+            }
         }
 
         // Receive packets from Encoder 1
@@ -3407,12 +3464,17 @@ pub async fn process_trace_two_encoders_no_loss(
                 dec_encoder_1.process_packet(pkt, id).await;
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => { encoder_1_done = true; }
+            Err(RecvTimeoutError::Disconnected) => {
+                encoder_1_done = true;
+            }
         }
 
         // Drain Encoder 0 decoder
         while let Some((rgb, fid, _)) = dec_encoder_0.next_decoded_frame() {
-            let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
+            let fb = FrameBuf {
+                rgb: rgb.clone(),
+                synthetic: false,
+            };
             encoder_0_buf.insert(fid, fb);
             if encoder_1_buf.contains_key(&fid) {
                 ready_ids.insert(fid);
@@ -3421,7 +3483,10 @@ pub async fn process_trace_two_encoders_no_loss(
 
         // Drain Encoder 1 decoder
         while let Some((rgb, fid, _)) = dec_encoder_1.next_decoded_frame() {
-            let fb = FrameBuf { rgb: rgb.clone(), synthetic: false };
+            let fb = FrameBuf {
+                rgb: rgb.clone(),
+                synthetic: false,
+            };
             encoder_1_buf.insert(fid, fb);
             if encoder_0_buf.contains_key(&fid) {
                 ready_ids.insert(fid);
@@ -3431,9 +3496,11 @@ pub async fn process_trace_two_encoders_no_loss(
         // pair frames and optionally run VMAF
         let mut to_remove = Vec::new();
         for &id in &ready_ids {
-            if let (Some(fb_enc0), Some(fb_enc1)) = (encoder_0_buf.remove(&id), encoder_1_buf.remove(&id)) {
+            if let (Some(fb_enc0), Some(fb_enc1)) =
+                (encoder_0_buf.remove(&id), encoder_1_buf.remove(&id))
+            {
                 // draw always, comparing the two encoder outputs
-                 if let Some(&ts) = Arc::clone(&ts_map).get(&id) {
+                if let Some(&ts) = Arc::clone(&ts_map).get(&id) {
                     draw_pair(&mut window, &fb_enc0.rgb, &fb_enc1.rgb, &scenario, id, ts)?;
                 } else {
                     eprintln!("⚠️  No timestamp for frame ID {} — skipping draw", id);
@@ -3442,29 +3509,33 @@ pub async fn process_trace_two_encoders_no_loss(
                 seen_pairs += 1;
 
                 // Run VMAF between the two encoder outputs (fb_enc0 vs fb_enc1)
-                let sem_clone   = sem.clone();
-                let logger      = metric.clone();
-                let ts_map      = ts_map.clone();
-                let ip_clone    = ip.clone();
-                let rgb_enc1    = fb_enc1.rgb.clone();
-                let rgb_enc0    = fb_enc0.rgb.clone();
+                let sem_clone = sem.clone();
+                let logger = metric.clone();
+                let ts_map = ts_map.clone();
+                let ip_clone = ip.clone();
+                let rgb_enc1 = fb_enc1.rgb.clone();
+                let rgb_enc0 = fb_enc0.rgb.clone();
                 let handle = tokio::spawn(async move {
-                       let _permit = sem_clone.acquire().await.unwrap();
-                       if let Err(e) = logger
-                           .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
-                           .await
-                       {
-                           eprintln!("VMAF job failed on #{}: {}", id, e);
-                       }
-                   });
-                   vmaf_tasks.push(handle);
+                    let _permit = sem_clone.acquire().await.unwrap();
+                    if let Err(e) = logger
+                        .process_frame_buffers(id as u64, ts_map[&id], rgb_enc1, rgb_enc0, ip_clone)
+                        .await
+                    {
+                        eprintln!("VMAF job failed on #{}: {}", id, e);
+                    }
+                });
+                vmaf_tasks.push(handle);
 
                 to_remove.push(id);
             }
         }
-        for id in to_remove { ready_ids.remove(&id); }
+        for id in to_remove {
+            ready_ids.remove(&id);
+        }
 
-        if seen_pairs >= expected || (encoder_0_done && encoder_1_done) { break; }
+        if seen_pairs >= expected || (encoder_0_done && encoder_1_done) {
+            break;
+        }
         window.update();
         // tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -3474,15 +3545,11 @@ pub async fn process_trace_two_encoders_no_loss(
             eprintln!("VMAF task panicked: {}", join_err);
         }
     }
-    
-    
-    
+
     // join_all(vmaf_jobs).await;
     metric.finalize()?;
     Ok(())
 }
-
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -3503,8 +3570,8 @@ async fn main() -> Result<()> {
         if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
             if trace_re.is_match(fname) {
                 map.entry(path.parent().unwrap().to_path_buf())
-                   .or_default()
-                   .push(path);
+                    .or_default()
+                    .push(path);
             }
         }
     }
@@ -3517,13 +3584,11 @@ async fn main() -> Result<()> {
         match fs::read_dir(&folder) {
             Ok(rd) => {
                 // consume `rd` directly—no clone()
-                let has_vmaf = rd
-                    .filter_map(Result::ok)
-                    .any(|e| {
-                        let fname_os = e.file_name();
-                        let name = fname_os.to_string_lossy().to_lowercase();
-                        name.contains("vmaf")
-                    });
+                let has_vmaf = rd.filter_map(Result::ok).any(|e| {
+                    let fname_os = e.file_name();
+                    let name = fname_os.to_string_lossy().to_lowercase();
+                    name.contains("vmaf")
+                });
                 if has_vmaf {
                     skipped += 1;
                     eprintln!("Skipping {:?} (found existing *vmaf* file)", folder);
@@ -3552,81 +3617,71 @@ async fn main() -> Result<()> {
     }
 
     // 5) Worker factory with panic-catching & retry
-    let make_worker =
-        |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
-            thread::spawn(move || -> Result<()> {
-                // We'll wrap *all* of the async work
-                // so that any panic can be caught:
-                let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                    // build your multi-threaded runtime
-                    let rt = tokio::runtime::Builder::new_multi_thread()
+    let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
+        thread::spawn(move || -> Result<()> {
+            // We'll wrap *all* of the async work
+            // so that any panic can be caught:
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                // build your multi-threaded runtime
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(num_cpus::get().saturating_sub(5).max(3))
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                rt.block_on(async {
+                    for (_folder, traces) in &group {
+                        for trace_csv in traces {
+                            process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone())
+                                .await?;
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+            }));
+
+            match result {
+                // no panic
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    // async code returned an Err
+                    Err(e)
+                }
+                Err(_) => {
+                    // we *did* panic — clean up & retry once
+                    eprintln!("Worker panicked; deleting stale vmaf files and retrying…");
+                    for (folder, _) in &group {
+                        if let Ok(rd) = fs::read_dir(folder) {
+                            for e in rd.filter_map(Result::ok) {
+                                let fname_os = e.file_name();
+                                let fname = fname_os.to_string_lossy();
+                                if fname.contains("VMAF") {
+                                    let path = e.path();
+                                    let _ = fs::remove_file(&path);
+                                    eprintln!("  deleted {}", path.display());
+                                }
+                            }
+                        }
+                    }
+
+                    // retry
+                    let rt2 = tokio::runtime::Builder::new_multi_thread()
                         .worker_threads(num_cpus::get().saturating_sub(5).max(3))
                         .enable_all()
-                        .build()
-                        .unwrap();
-
-                    rt.block_on(async {
+                        .build()?;
+                    rt2.block_on(async {
                         for (_folder, traces) in &group {
                             for trace_csv in traces {
-                                process_trace_two_encoders_no_loss(
-                                    trace_csv.clone(),
-                                    ip.clone(),
-                                )
-                                .await?;
-                            }
-                        }
-                        Ok::<(), anyhow::Error>(())
-                    })
-                }));
-
-                match result {
-                    // no panic
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => {
-                        // async code returned an Err
-                        Err(e)
-                    }
-                    Err(_) => {
-                        // we *did* panic — clean up & retry once
-                        eprintln!("Worker panicked; deleting stale vmaf files and retrying…");
-                        for (folder, _) in &group {
-                            if let Ok(rd) = fs::read_dir(folder) {
-                                for e in rd.filter_map(Result::ok) {
-                                    let fname_os = e.file_name();          
-                                    let fname = fname_os.to_string_lossy(); 
-                                    if fname.contains("VMAF") {
-                                        let path = e.path();
-                                        let _ = fs::remove_file(&path);
-                                        eprintln!(
-                                            "  deleted {}",
-                                            path.display()
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        // retry
-                        let rt2 = tokio::runtime::Builder::new_multi_thread()
-                            .worker_threads(num_cpus::get().saturating_sub(5).max(3))
-                            .enable_all()
-                            .build()?;
-                        rt2.block_on(async {
-                            for (_folder, traces) in &group {
-                                for trace_csv in traces {
-                                    process_trace_two_encoders_no_loss(
-                                        trace_csv.clone(),
-                                        ip.clone(),
-                                    )
+                                process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone())
                                     .await?;
-                                }
                             }
-                            Ok(())
-                        })
-                    }
+                        }
+                        Ok(())
+                    })
                 }
-            })
-        };
+            }
+        })
+    };
 
     // 6) Spawn all WORKERS threads
     let mut handles = Vec::with_capacity(WORKERS);
@@ -3704,7 +3759,7 @@ async fn main() -> Result<()> {
 //                 for (_folder, traces) in group {
 //                     for trace_csv in traces {
 //                         process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone()).await?;
-//                         // process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?; 
+//                         // process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?;
 //                     }
 //                 }
 //                 Ok(())
@@ -3721,7 +3776,7 @@ async fn main() -> Result<()> {
 //     // 7) Join all of them
 //     for (idx, h) in handles.into_iter().enumerate() {
 //         h.join()
-//          .unwrap_or_else(|_| panic!("worker {} panicked", idx))?; 
+//          .unwrap_or_else(|_| panic!("worker {} panicked", idx))?;
 //     }
 
 //     Ok(())

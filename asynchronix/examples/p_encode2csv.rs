@@ -1,16 +1,15 @@
-use std::{path::Path, time::Duration};
 use csv::Writer;
-use tokio::{sync::Semaphore, time::sleep};
-use tai_time::TaiTime;
 use futures::future::join_all;
-use std::sync::Arc; 
-mod lib; 
+use std::sync::Arc;
+use std::{path::Path, time::Duration};
+use tai_time::TaiTime;
+use tokio::{sync::Semaphore, time::sleep};
+mod lib;
 // bring your types into scope (adjust these paths to your project)
-use lib::alvr_stream_socket::ChunkedHevcEncoder;
-use std::path::{PathBuf};
 use crate::lib::models_XR::{HEIGHT_ENCODER, WIDTH_ENCODER};
-use std::env; 
-
+use lib::alvr_stream_socket::ChunkedHevcEncoder;
+use std::env;
+use std::path::PathBuf;
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
@@ -34,9 +33,8 @@ fn get_paths() -> (PathBuf, PathBuf) {
     }
 }
 
-
-const CHUNK_DURATION : f64 = 5.0; 
-const NUM_SEMAPHORES: usize = 5; // NUMBER OF PARALLEL TASKS. 
+const CHUNK_DURATION: f64 = 5.0;
+const NUM_SEMAPHORES: usize = 5; // NUMBER OF PARALLEL TASKS.
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -64,7 +62,18 @@ async fn main() -> anyhow::Result<()> {
             let permit = sem.clone().acquire_owned().await?;
             let task = tokio::spawn(async move {
                 let _permit = permit; // keep until task done
-                if let Err(e) = encode_one_video(video_dir, csv_dir ,width, height, gop_size, intra_refresh, framerate, bitrate_mbps).await {
+                if let Err(e) = encode_one_video(
+                    video_dir,
+                    csv_dir,
+                    width,
+                    height,
+                    gop_size,
+                    intra_refresh,
+                    framerate,
+                    bitrate_mbps,
+                )
+                .await
+                {
                     eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
                 }
             });

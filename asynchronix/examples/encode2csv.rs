@@ -1,42 +1,32 @@
-use std::{path::Path, time::Duration};
 use csv::Writer;
-use tokio::time::sleep;
+use std::{path::Path, time::Duration};
 use tai_time::TaiTime;
+use tokio::time::sleep;
 
-mod lib; 
+mod lib;
 // bring your types into scope (adjust these paths to your project)
-use lib::alvr_stream_socket::ChunkedHevcEncoder;
-use std::path::{PathBuf};
 use crate::lib::models_XR::{HEIGHT_ENCODER, WIDTH_ENCODER};
+use lib::alvr_stream_socket::ChunkedHevcEncoder;
+use std::path::PathBuf;
 
 const VIDEO_DIR: &str = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf";
-const CSV_DIR:   &str = "/home/boris/Desktop/Rust_MG1/asynchronix/csv_framesizes";
+const CSV_DIR: &str = "/home/boris/Desktop/Rust_MG1/asynchronix/csv_framesizes";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     // ---- Init encoder (tweak params to your defaults) ----
     // width/height here are examples; pick the size you want to encode to
     let width = WIDTH_ENCODER;
     let height = HEIGHT_ENCODER;
     // let framerate: f32 = 60.0;       // your source/output FPS
-    let gop_size: usize = 90;        // one GOP per second (example)
-    let intra_refresh = true;       // or true if you want PIR mode
+    let gop_size: usize = 90; // one GOP per second (example)
+    let intra_refresh = true; // or true if you want PIR mode
 
+    let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
 
-    let br_values : Vec<f32> = (5..=100)
-    .step_by(5)
-    .map(|x| x as f32)
-    .collect();
- 
-
-
-    for framerate in [60,90,120] {
-        for bitrate_mbps in br_values.iter(){
-
-            
-            let chunk_seconds = 1.0;         // encode/read in 5s chunks
-
+    for framerate in [60, 90, 120] {
+        for bitrate_mbps in br_values.iter() {
+            let chunk_seconds = 1.0; // encode/read in 5s chunks
 
             let input = "/home/boris/Desktop/Rust_MG1/asynchronix/csv_framesizes/";
             let video_name = format!("snow_{}fps.mp4", framerate);
@@ -53,17 +43,17 @@ async fn main() -> anyhow::Result<()> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("video");
-            let csv_path = Path::new(CSV_DIR).join(format!("{}_{}Mbps_framesizes.csv", stem, *bitrate_mbps));
-
+            let csv_path =
+                Path::new(CSV_DIR).join(format!("{}_{}Mbps_framesizes.csv", stem, *bitrate_mbps));
 
             let mut enc = ChunkedHevcEncoder::new(
-                &video_path.to_str().unwrap(), 
+                &video_path.to_str().unwrap(),
                 width as u32,
                 height as u32,
                 &format!("{:.2}M", bitrate_mbps),
                 chunk_seconds,
                 "[FRAME-LOGGER]".to_string(),
-                5.0,                // start at t=0s
+                5.0, // start at t=0s
                 framerate as f32,
                 gop_size,
                 intra_refresh,
@@ -85,10 +75,9 @@ async fn main() -> anyhow::Result<()> {
                 // Start a new chunk at the encoder's internal offset (it increments each time)
                 enc.start_chunking(*bitrate_mbps, now).await;
 
-                print!(" Global IDX = {}", global_idx); 
+                print!(" Global IDX = {}", global_idx);
 
-                now =  now + Duration::from_secs_f64(chunk_seconds); 
-
+                now = now + Duration::from_secs_f64(chunk_seconds);
 
                 let mut frames_this_chunk = 0usize;
                 let mut idle_streak = 0usize;
@@ -96,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
                 loop {
                     if let Some(frame) = enc.next_frame().await {
                         let sz = frame.len();
-                        // println!("Got frame of size {}. Global: {}, this chunk: {}", sz, global_idx, frames_this_chunk); 
+                        // println!("Got frame of size {}. Global: {}, this chunk: {}", sz, global_idx, frames_this_chunk);
                         wtr.write_record(&[global_idx.to_string(), sz.to_string()])?;
                         global_idx += 1;
                         frames_this_chunk += 1;
@@ -109,14 +98,13 @@ async fn main() -> anyhow::Result<()> {
                         sleep(Duration::from_millis(5)).await;
                     }
                 }
-                if global_idx % 256 == 0{
+                if global_idx % 256 == 0 {
                     wtr.flush()?;
                 }
 
-
                 if frames_this_chunk == 0 {
                     // no frames this chunk → video likely ended
-                    println!("NO FRAMEEEEES"); 
+                    println!("NO FRAMEEEEES");
                     break;
                 }
             }
@@ -125,5 +113,4 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
-
 }

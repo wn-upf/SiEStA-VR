@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 #[allow(dead_code)]
 #[allow(unused)]
-
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 
 // use rand::seq::SliceRandom;
@@ -17,11 +16,11 @@ use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 // use crate::lib::models_XR::BitrateMode;
 
 mod lib; // for calling m own local library
-// mod lib;        // <- this exposes examples/lib/* as `crate::lib`
-mod xr_entry;   // <- brings in examples/xr_entry.rs as submodule
+         // mod lib;        // <- this exposes examples/lib/* as `crate::lib`
+mod xr_entry; // <- brings in examples/xr_entry.rs as submodule
 
-use xr_entry::{ parse_cli_to_params, run_sim};
 use std::env;
+use xr_entry::{parse_cli_to_params, run_sim};
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
@@ -40,4 +39,3 @@ fn main() {
         std::process::exit(1);
     }
 }
-

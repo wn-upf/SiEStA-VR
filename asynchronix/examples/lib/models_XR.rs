@@ -1,49 +1,53 @@
 use crate::lib::alvr_control_socket::{
-    framed_recv_vec, ControlSocketReceiver, ControlSocketSender
+    framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
 };
 use crate::lib::gcc_nada_estimator::{GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
 use crate::lib::{alvr_stream_socket::StreamReceiver, BATCH_SIZE_CSV};
 // use async_std::future::pending;
-use rand::distributions::Uniform;
-use rand::rngs::StdRng;
-use rand::{Rng};
-use rand::SeedableRng;
+use crate::lib::alvr_packets::{DeviceMotion, Pose};
+use crate::lib::{get_prefix_path, render_text, AveragingStrategy, EdcaAc, HevcParser, WindowType};
 use crate::{
-    debug_debug, print_magenta, taitime_to_f64, 
+    debug_debug,
+    print_magenta,
+    taitime_to_f64,
     // print_blue, print_brown, print_dblue, print_brown
-    };
+};
+use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
+use minifb::{Window, WindowOptions};
+use rand::distributions::Uniform;
 use rand::prelude::IteratorRandom;
-use rand_distr::{Normal, Distribution};
-use crate::lib::alvr_packets::{DeviceMotion, Pose};
-use crate::lib::{get_prefix_path, AveragingStrategy, EdcaAc,  HevcParser, WindowType, render_text};
-use anyhow::Result;
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
+use rand_distr::{Distribution, Normal};
 use regex::Regex;
 use std::cell::RefCell;
-use std::fs::{OpenOptions};
-use std::io::{BufReader, Read, Write, BufWriter};
-use std::net::{Ipv4Addr};
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::net::Ipv4Addr;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread_local;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
-use std::path::Path;
-use minifb::{Window, WindowOptions};
-use std::{fs::File};
 
-use crate::lib::{models_mm1k::NetworkPattern,
-    fovoptix::{FOAimdRateControl, FovOptixStruct, * }};
-// }; 
-use crate::{format_elapsed, print_green};
+use crate::lib::{
+    fovoptix::{FOAimdRateControl, FovOptixStruct, *},
+    models_mm1k::NetworkPattern,
+};
+// };
 use crate::lib::{HeaderALVRStream, USE_FFMPEG_DEMO};
 use crate::print_pretty;
 #[allow(unused)]
 use crate::{debug_bgprint, print_prettyy, print_red};
 #[allow(unused)]
-use crate::{debug_print, print_prettyyyy, print_yellow, print_pink};
+use crate::{debug_print, print_pink, print_prettyyyy, print_yellow};
+use crate::{format_elapsed, print_green};
 
 use core::f64;
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -58,13 +62,15 @@ use std::time::{Duration, Instant};
 use std::{mem, vec};
 
 use crate::lib::alvr_control_socket::ProtoControlSocket;
-use crate::lib::alvr_packets::{ClientControlPacket, ClientStatistics, NetworkStatisticsPacket, EverestCommand, NadaStats, };
+use crate::lib::alvr_packets::{
+    ClientControlPacket, ClientStatistics, EverestCommand, NadaStats, NetworkStatisticsPacket,
+};
 use crate::lib::alvr_stream_socket::{
     parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
     SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
 };
 use crate::lib::alvr_stream_socket::{
-    AUDIO, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO, FOVOPTIX_BW_PROBE, 
+    AUDIO, FOVOPTIX_BW_PROBE, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
 };
 use crate::lib::DEBUG_PRINT_ENABLED;
 use dashmap::DashMap;
@@ -79,20 +85,17 @@ use std::f64::consts::PI;
 use std::future::Future;
 use std::sync::RwLock;
 
-use std::sync::OnceLock;
-use crate::lib::CsvTrace;
 use crate::lib::alvr_statistics::StatisticsManager;
+use crate::lib::CsvTrace;
 use crate::lib::{exponential, AmpduPacket, Coords, DebugColor, MpduPacket, SlidingWindowAverage};
+use std::sync::OnceLock;
 // use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 use super::alvr_packets::DeadlineShardlossStatPacket;
-use super::alvr_stream_socket::{
-    SocketWriter, StreamSocket,  MAX_PACKET_SIZE_RECV,
-};
+use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
 use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::get_third_octet;
 use crate::lib::gcc_nada_estimator::*;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
-
 
 ////////////////////////////////////// CONSTS////////////////////////////////////////
 
@@ -100,8 +103,8 @@ pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
 #[allow(unused)]
 pub const FRAMERATE_WINDOWS: usize = 60;
-#[allow(unused)]                                                                                    
-pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment, 
+#[allow(unused)]
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
 pub const SCALE_FACTOR_WINDOW: f64 = 0.15;
 
@@ -121,22 +124,17 @@ pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
 
 pub const DECODER_BUFFERING_FRAMES: usize = 3;
-// pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S; 
-
+// pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S;
 
 pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
 pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 
-pub const ALPHA_THROUGHPUT: f32 = 0.1; 
-pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1; 
+pub const ALPHA_THROUGHPUT: f32 = 0.1;
+pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1;
 
-const RL_WINDOW_OBSERVATION_SIZE: usize = 5; 
+const RL_WINDOW_OBSERVATION_SIZE: usize = 5;
 
 static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
-
-
-
-
 
 #[allow(unused)]
 pub struct FramePair {
@@ -147,11 +145,10 @@ pub struct FramePair {
     frame_id: usize,
 }
 #[derive(Clone)]
-pub struct PerfectInfoBitrateMessage{
-    bitrate_ladder_bps: Option<Vec<f32>>, 
-    bitrate_mbps: f32, 
+pub struct PerfectInfoBitrateMessage {
+    bitrate_ladder_bps: Option<Vec<f32>>,
+    bitrate_mbps: f32,
 }
-
 
 fn get_counter() -> &'static AtomicUsize {
     PRINT_COUNTER.get_or_init(|| AtomicUsize::new(0))
@@ -179,7 +176,6 @@ pub fn is_keyframe(frame: &[u8]) -> bool {
     }
     false
 }
-
 
 #[allow(unused)]
 fn compute_enhanced_frame_similarity(
@@ -227,9 +223,6 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
     Some(pixels)
 }
 
-
-
-
 /// Standalone function for finding the next NAL start code in a buffer
 pub fn find_next_start_code(buffer: &[u8], start_pos: usize) -> Option<usize> {
     for i in start_pos..buffer.len().saturating_sub(3) {
@@ -269,7 +262,7 @@ pub struct HevcDecoder {
     pub expected_frame_size: usize, // Expected size of decoded RGB frames
 
     max_buffered_frames: usize, // Maximum number of frames to buffer
-    min_buffered_frames: usize, 
+    min_buffered_frames: usize,
     decoder_string: String,
     // shared_params: Option<Arc<SharedParameterSetManager>>,
     last_sync_generation: u64,
@@ -296,7 +289,7 @@ impl HevcDecoder {
 
         let mut child = FfmpegCommand::new()
             // .hwaccel("cuda")
-            .args(&["-c:v", "hevc"])     // ✅ force software decoder
+            .args(&["-c:v", "hevc"]) // ✅ force software decoder
             .args(&["-f", "hevc", "-i", "-"])
             // .args(&["-c:v", "libx265"])              // force software HEVC encoder
             // .args(&["-vf", &format!("fps={}", framerate)])
@@ -427,7 +420,7 @@ impl HevcDecoder {
             priming_complete: false,
             expected_frame_size: frame_size,
             max_buffered_frames: 50,
-            min_buffered_frames: 30, 
+            min_buffered_frames: 30,
 
             decoder_string: decoder_str.to_string(),
 
@@ -440,11 +433,11 @@ impl HevcDecoder {
             initialization_phase: false, // Flag for the decoder's initialization phase
             pending_frames: VecDeque::new(),
             internal_frame_counter: 0,
-            // frame_rate_target: FRAMERATE_WINDOWS as f32, 
+            // frame_rate_target: FRAMERATE_WINDOWS as f32,
             // last_frame_time: Instant::now(),
-            // frame_interval: Duration::from_secs_f64(1.0 / FRAMERATE_WINDOWS as f64), 
-            processing_semaphore: Arc::new(Semaphore::new(3)),  
-            decoded_frame_counter: 0, 
+            // frame_interval: Duration::from_secs_f64(1.0 / FRAMERATE_WINDOWS as f64),
+            processing_semaphore: Arc::new(Semaphore::new(3)),
+            decoded_frame_counter: 0,
         }
     }
 
@@ -718,7 +711,7 @@ impl HevcDecoder {
         self.ewma_frame_size = alpha * (frame_size as f64) + (1.0 - alpha) * self.ewma_frame_size;
 
         let _permit = self.processing_semaphore.acquire();
-        
+
         // Add data to the parser
         self.parser.add_data(&packet);
 
@@ -811,7 +804,7 @@ impl HevcDecoder {
 
                     if frame.len() == self.expected_frame_size {
                         self.decoded_frames.push_back(frame);
-                        self.frames_processed += 1; 
+                        self.frames_processed += 1;
                     } else {
                         println!(
                             "{} ⚠️ Received malformed frame (size={}), expected {}",
@@ -826,8 +819,8 @@ impl HevcDecoder {
                             self.decoded_frames.push_back(frame);
                         }
                     }
-                    if self.decoded_frames.len() <= self.min_buffered_frames{
-                        break; 
+                    if self.decoded_frames.len() <= self.min_buffered_frames {
+                        break;
                     }
                     if self.decoded_frames.len() >= self.max_buffered_frames {
                         break;
@@ -989,7 +982,7 @@ impl HevcDecoder {
                     return None;
                 }
             }
-            self.decoded_frame_counter += 1; 
+            self.decoded_frame_counter += 1;
             // Frame is good
             Some((frame, inst))
         } else {
@@ -1137,7 +1130,7 @@ impl SharedParameterSetManager {
 }
 
 // #[derive(Clone)]   // TODO: Use for modelling "Adaptive" mode of ALVR. Encoding latencies are tricky to get from chunks, could be modelled directly as some distribution over T_enc_chunk/N_frames_chunk
-                      // ** Might want to look into libavcodec instead of FFMPEG. 
+// ** Might want to look into libavcodec instead of FFMPEG.
 // pub struct EncoderLatencyLimiter {
 //     pub max_saturation_multiplier: f32,
 // }
@@ -1148,93 +1141,87 @@ impl SharedParameterSetManager {
 //     pub latency_overstep_multiplier: f32,
 // }
 
-
-
 // #[derive(Clone, PartialEq, Debug)]
 #[allow(unused)]
 pub enum BitrateMode {
     ConstantMbps(f32),
-        EVeREst{
-            // d_upper: f32, 
-            // d_lower: f32, 
-            bitrate_ladder_mbps: Vec<f32>,
-        },
-        NestVr{
-            averaging_strategy: AveragingStrategy,            
-            max_bitrate_mbps: f32,
+    EVeREst {
+        // d_upper: f32,
+        // d_lower: f32,
+        bitrate_ladder_mbps: Vec<f32>,
+    },
+    NestVr {
+        averaging_strategy: AveragingStrategy,
+        max_bitrate_mbps: f32,
 
-            min_bitrate_mbps: f32,
+        min_bitrate_mbps: f32,
 
-            initial_bitrate_mbps: f32,
+        initial_bitrate_mbps: f32,
 
-            nest_vr_profile: ProfileConfig,
+        nest_vr_profile: ProfileConfig,
+    },
 
-        },
+    ReinforcementLearner {
+        bitrate_ladder_mbps: Vec<f32>,
+        // step_interval: Duration,
+        connector: Arc<Mutex<Box<dyn RLConnector + Send>>>,
+        last_action_idx: Arc<Mutex<usize>>,
+        last_decision_instant: Arc<Mutex<TaiTime<0>>>,
+        pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
+        action_space: ActionSpace,
+        nest_vr_max_mbps: f32,
+        nest_vr_min_mbps: f32,
+        nest_vr_config: ProfileConfig,
+    },
+    GCCPort {
+        gcc_estimator: GccBandwidthEstimator,
+        framerate: f64, // to reset without needing to store framerate in parent class.
+    },
 
-        ReinforcementLearner {
-            bitrate_ladder_mbps: Vec<f32>, 
-            // step_interval: Duration, 
-            connector: Arc<Mutex<Box<dyn RLConnector + Send>>>,
-            last_action_idx: Arc<Mutex<usize>>,
-            last_decision_instant: Arc<Mutex<TaiTime<0>>>,
-            pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
-            action_space: ActionSpace, 
-            nest_vr_max_mbps: f32,
-            nest_vr_min_mbps: f32,
-            nest_vr_config: ProfileConfig, 
-            
-        }, 
-        GCCPort{
-            gcc_estimator: GccBandwidthEstimator, 
-            framerate: f64 // to reset without needing to store framerate in parent class. 
-        },
+    NADACiscoPort {
+        // last_bitrate_mbps: f64,
+    },
 
-        NADACiscoPort{
-            // last_bitrate_mbps: f64, 
-        }, 
-
-        FovOptixPort{
-            last_bitrate_mbps: f32,   // FovOptix requires additional network probing, TODO. 
-        },
+    FovOptixPort {
+        last_bitrate_mbps: f32, // FovOptix requires additional network probing, TODO.
+    },
 }
 
-impl BitrateMode{
+impl BitrateMode {
     fn variant_name(&self) -> String {
         match self {
-            BitrateMode::ConstantMbps(val) =>       format!("CBR {} Mbps", val),      
-            BitrateMode::EVeREst { .. } =>                "EVeREst-Intra".to_string(),
-            BitrateMode::NestVr { .. } =>                 "NeSt-VR".to_string(), 
-            BitrateMode::ReinforcementLearner { .. } =>   "ReinforcementLearner".to_string(),
-            BitrateMode::GCCPort { .. } =>                 "GCC Port".to_string(),   
-            BitrateMode::NADACiscoPort {  } =>             "NADA Port".to_string(), 
-            BitrateMode::FovOptixPort { .. }        =>    "FovOptix Port".to_string(), 
+            BitrateMode::ConstantMbps(val) => format!("CBR {} Mbps", val),
+            BitrateMode::EVeREst { .. } => "EVeREst-Intra".to_string(),
+            BitrateMode::NestVr { .. } => "NeSt-VR".to_string(),
+            BitrateMode::ReinforcementLearner { .. } => "ReinforcementLearner".to_string(),
+            BitrateMode::GCCPort { .. } => "GCC Port".to_string(),
+            BitrateMode::NADACiscoPort {} => "NADA Port".to_string(),
+            BitrateMode::FovOptixPort { .. } => "FovOptix Port".to_string(),
         }
     }
 }
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 pub struct RLObservation {
-    pub t_elapsed_s: f32, 
-    pub last_target_bitrate_mbps: f32, 
-    pub rtt_ms_avg_s: f32, 
-    pub rtt_ms_std_s: f32, 
+    pub t_elapsed_s: f32,
+    pub last_target_bitrate_mbps: f32,
+    pub rtt_ms_avg_s: f32,
+    pub rtt_ms_std_s: f32,
 
-    // pub frame_size_mb_avg_s: f32, 
+    // pub frame_size_mb_avg_s: f32,
     pub bandwidth_mbps_avg_s: f32,
-    pub bandwidth_mbps_std_s: f32, 
-    pub frame_interarrival_avg_ms: f32, 
-    pub frame_interarrival_std_ms: f32, 
+    pub bandwidth_mbps_std_s: f32,
+    pub frame_interarrival_avg_ms: f32,
+    pub frame_interarrival_std_ms: f32,
 
-    pub flr_avg_s: f32, 
-    pub pl_sum_period: f32, 
-    pub frame_size_avg_bytes: f32, 
+    pub flr_avg_s: f32,
+    pub pl_sum_period: f32,
+    pub frame_size_avg_bytes: f32,
 
-    pub ow_delay_period_ewma: f32, 
-    pub f_ow_delay_period_ewma: f32, 
-    // pub buffer_level_avg_s: f32, 
-    pub rebuffer_event_sum: f32, 
-
+    pub ow_delay_period_ewma: f32,
+    pub f_ow_delay_period_ewma: f32,
+    // pub buffer_level_avg_s: f32,
+    pub rebuffer_event_sum: f32,
 }
-
 
 impl RLObservation {
     /// Converts the struct into a vector of f32s in a defined order.
@@ -1251,45 +1238,41 @@ impl RLObservation {
             self.frame_interarrival_std_ms,
             self.flr_avg_s,
             self.pl_sum_period as f32,
-
-            self.frame_size_avg_bytes, 
-
-            self.ow_delay_period_ewma, 
-            self.f_ow_delay_period_ewma, 
-
+            self.frame_size_avg_bytes,
+            self.ow_delay_period_ewma,
+            self.f_ow_delay_period_ewma,
             self.rebuffer_event_sum as f32, // Cast u8 to f32
         ]
     }
 }
 
-
-
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RLObservationVector{
-    observations: Vec<RLObservation>, 
-    max_len: u8, 
-    FEAT_DIM: usize, 
-    
+pub struct RLObservationVector {
+    observations: Vec<RLObservation>,
+    max_len: u8,
+    FEAT_DIM: usize,
 }
 
-impl RLObservationVector{
-    pub fn new(max_len: u8) -> Self { 
+impl RLObservationVector {
+    pub fn new(max_len: u8) -> Self {
         // debug_assert_eq!(FEAT_DIM, RLObservation::default().to_vec().len());
-        Self{ observations: Vec::new(), max_len, FEAT_DIM: 0, }}
+        Self {
+            observations: Vec::new(),
+            max_len,
+            FEAT_DIM: 0,
+        }
+    }
 
-    pub fn push(&mut self, o: RLObservation){
-        
-        if self.FEAT_DIM == 0{
-            self.FEAT_DIM = o.to_vec().len(); 
+    pub fn push(&mut self, o: RLObservation) {
+        if self.FEAT_DIM == 0 {
+            self.FEAT_DIM = o.to_vec().len();
         }
-        
-        
-        self.observations.push(o); 
+
+        self.observations.push(o);
         if self.observations.len() as u8 > self.max_len {
-            self.observations.remove(0); 
+            self.observations.remove(0);
         }
-    } 
+    }
 
     // pub fn seq_len(&self) -> usize {
     //     self.observations.len()
@@ -1305,7 +1288,7 @@ impl RLObservationVector{
         let len = self.observations.len();
         let start_row = cap.saturating_sub(len);
         for (i, o) in self.observations.iter().enumerate() {
-            let row = o.to_vec();                    // len == FEAT_DIM
+            let row = o.to_vec(); // len == FEAT_DIM
             let dst = (start_row + i) * self.FEAT_DIM;
             out[dst..dst + self.FEAT_DIM].copy_from_slice(&row[..self.FEAT_DIM]);
         }
@@ -1313,18 +1296,16 @@ impl RLObservationVector{
     }
 }
 
-
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RLTransition {
     pub sim_id: String,
-    pub prev_obs:  Vec<f32>,
-    pub action: usize,                  // snapped index (if continuous used)
+    pub prev_obs: Vec<f32>,
+    pub action: usize, // snapped index (if continuous used)
     pub reward: f32,
-    pub next_obs:  Vec<f32>,
+    pub next_obs: Vec<f32>,
     pub done: bool,
     #[serde(default)]
-    pub cont_action_mbps: Option<f32>,  // NEW: raw continuous action, if any
+    pub cont_action_mbps: Option<f32>, // NEW: raw continuous action, if any
 }
 
 pub trait RLConnector {
@@ -1333,26 +1314,29 @@ pub trait RLConnector {
     fn reset_window(&mut self);
 }
 
-
 #[derive(Debug, Clone)]
 pub struct ObsWindow {
     buf: VecDeque<Vec<f32>>,
     cap: usize,
     FEAT_DIM: usize, // keep in sync with RLObservation::to_vec().len()
-
 }
 
 impl ObsWindow {
     pub fn new(cap: usize) -> Self {
-        Self { buf: VecDeque::with_capacity(cap), cap, FEAT_DIM: 0,  }
+        Self {
+            buf: VecDeque::with_capacity(cap),
+            cap,
+            FEAT_DIM: 0,
+        }
     }
 
-    pub fn clear(&mut self) { self.buf.clear(); }
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
 
     pub fn push_obs(&mut self, obs: &RLObservation) {
-
-        if self.FEAT_DIM == 0{
-            self.FEAT_DIM = obs.to_vec().len(); 
+        if self.FEAT_DIM == 0 {
+            self.FEAT_DIM = obs.to_vec().len();
         }
 
         if self.buf.len() == self.cap {
@@ -1362,7 +1346,9 @@ impl ObsWindow {
     }
 
     /// Current logical sequence length (<= cap)
-    pub fn seq_len(&self) -> usize { self.buf.len() }
+    pub fn seq_len(&self) -> usize {
+        self.buf.len()
+    }
 
     /// Return a flattened window of size (cap * FEAT_DIM), left-padded with zeros.
     /// Layout: [o_{t-k+1}, ..., o_{t}] row-major.
@@ -1381,11 +1367,11 @@ impl ObsWindow {
 #[derive(Serialize, Deserialize)]
 pub struct RLRequestRNN {
     pub sim_id: String,
-    pub obs_flat: Vec<f32>, // length = window_len * FEAT_DIM
-    pub seq_len: u8,        // how many real steps (<= window_len)
-    pub feat_dim: u8,       // = FEAT_DIM
-    pub window_len: u8,     // fixed capacity N
-    pub action_mask: Option<Vec<u8>>, // enable masking actions 
+    pub obs_flat: Vec<f32>,           // length = window_len * FEAT_DIM
+    pub seq_len: u8,                  // how many real steps (<= window_len)
+    pub feat_dim: u8,                 // = FEAT_DIM
+    pub window_len: u8,               // fixed capacity N
+    pub action_mask: Option<Vec<u8>>, // enable masking actions
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1395,24 +1381,19 @@ pub enum RLResponse {
     Continuous { bitrate_mbps: f32 },
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActionSpace {
     /// Classic discrete ladder indices: 0..N-1
     Discrete,
 
     /// Continuous action in Mbps (with optional snapping onto the ladder)
-    Continuous {
-        min_mbps: f32,
-        max_mbps: f32,
-    },
+    Continuous { min_mbps: f32, max_mbps: f32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RLAction {
-    Discrete(usize),        // ladder index
-    ContinuousMbps(f32),    // raw Mbps
+    Discrete(usize),     // ladder index
+    ContinuousMbps(f32), // raw Mbps
 }
 fn idx_to_mbps(ladder: &[f32], idx: usize) -> (usize, f32) {
     let i = idx.min(ladder.len().saturating_sub(1));
@@ -1425,37 +1406,44 @@ fn nearest_idx(ladder: &[f32], mbps: f32) -> usize {
     for (i, &r) in ladder.iter().enumerate() {
         let d = (r - mbps).abs();
         if d < best_d {
-            best_d = d; best_i = i;
+            best_d = d;
+            best_i = i;
         }
     }
     best_i
 }
 
 fn snap_to_ladder(ladder: &[f32], mbps: f32) -> (usize, f32) {
-        let i = nearest_idx(ladder, mbps);
-        (i, ladder[i])
-        }
+    let i = nearest_idx(ladder, mbps);
+    (i, ladder[i])
+}
 // fn dump_bytes(label: &str, bytes: &[u8]) {
-    
+
 //     let binding = bytes.iter().cloned().take(200).collect::<Vec<_>>();
 //     let snippet = String::from_utf8_lossy(&binding);
-    
-//     // let bytes_clone = bytes.clone(); 
+
+//     // let bytes_clone = bytes.clone();
 //     // let snippet = String::from_utf8_lossy(&bytes_clone.iter().cloned().take(200).collect::<Vec<_>>());
 //     println!("[ZMQ-DUMP_rust] {} ({} bytes): {}", label, bytes.len(), snippet);
 // }
 
-pub struct ZmqConnector{
+pub struct ZmqConnector {
     action_socket: zmq::Socket, // REQ socket for blocking action selection
     step_socket: zmq::Socket,   // PUSH socket for sending (obs, reward, done) steps
-    sim_id: String, 
-    window: ObsWindow, 
+    sim_id: String,
+    window: ObsWindow,
 
-    last_good_action: Mutex<RLAction>, 
+    last_good_action: Mutex<RLAction>,
 }
 
 impl ZmqConnector {
-    pub fn new(action_ep: &str, reward_ep: &str, ctx: &zmq::Context, simu_id: &str, window_len: usize) -> Self {
+    pub fn new(
+        action_ep: &str,
+        reward_ep: &str,
+        ctx: &zmq::Context,
+        simu_id: &str,
+        window_len: usize,
+    ) -> Self {
         // --- Action Socket (DEALER) ---
         // This socket sends obs and receives actions
         let action_socket = ctx.socket(zmq::DEALER).unwrap();
@@ -1463,14 +1451,17 @@ impl ZmqConnector {
         action_socket.set_identity(simu_id.as_bytes()).unwrap();
         // Set a timeout for receiving actions
         action_socket.set_rcvtimeo(15_000).unwrap();
-        action_socket.set_linger(0).unwrap(); 
+        action_socket.set_linger(0).unwrap();
         action_socket.connect(action_ep).unwrap();
-        println!("[ZmqConnector] Action DEALER connected to {} as {}", action_ep, simu_id);
+        println!(
+            "[ZmqConnector] Action DEALER connected to {} as {}",
+            action_ep, simu_id
+        );
 
         // --- Step Socket (PUSH) ---
         // This socket just sends transitions (reward, done, info)
         let reward_socket = ctx.socket(zmq::PUSH).unwrap();
-        reward_socket.set_linger(0).unwrap(); 
+        reward_socket.set_linger(0).unwrap();
 
         reward_socket.connect(reward_ep).unwrap();
 
@@ -1487,16 +1478,15 @@ impl ZmqConnector {
     }
 }
 
-
-
 impl RLConnector for ZmqConnector {
     /**
      * This is the corrected request-reply flow.
      * 1. Send the observation to the Python ROUTER.
      * 2. Block and wait for the ROUTER to reply with an action.
      */
-    fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction {        // 1. Build the observation payload
-        
+    fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction {
+        // 1. Build the observation payload
+
         let feat_dim = obs.to_vec().len();
         let mut prev_flat = self.window.as_flat_padded();
 
@@ -1521,13 +1511,16 @@ impl RLConnector for ZmqConnector {
                 // println!("[ZmqConnector] DEALER Sent obs successfully");
             }
             Err(e) => {
-                eprintln!("[ZmqConnector] ❌ Failed to send obs: {}. Re-using last action.", e);
+                eprintln!(
+                    "[ZmqConnector] ❌ Failed to send obs: {}. Re-using last action.",
+                    e
+                );
                 self.window.push_obs(obs); // Still push obs to window
                 return self.last_good_action.lock().unwrap().clone();
             }
         }
         // println!("[ZMQ] Rust DEALER waiting for action reply…");
-        
+
         // 3. Wait for the action response
         // --- FIX: Use recv_multipart to consume all frames ---
         match self.action_socket.recv_multipart(0) {
@@ -1537,8 +1530,13 @@ impl RLConnector for ZmqConnector {
                 if let Some(response_bytes) = parts.last() {
                     if response_bytes.is_empty() {
                         // This catches the case where we just get [b''] or something invalid
-                        eprintln!("[ZmqConnector] ❌ Received empty payload part. Full parts: {:?}", 
-                                  parts.iter().map(|p| String::from_utf8_lossy(p)).collect::<Vec<_>>());
+                        eprintln!(
+                            "[ZmqConnector] ❌ Received empty payload part. Full parts: {:?}",
+                            parts
+                                .iter()
+                                .map(|p| String::from_utf8_lossy(p))
+                                .collect::<Vec<_>>()
+                        );
                         self.window.push_obs(obs); // Push obs
                         return self.last_good_action.lock().unwrap().clone();
                     }
@@ -1547,7 +1545,11 @@ impl RLConnector for ZmqConnector {
                     let parsed: RLResponse = match serde_json::from_slice(response_bytes) {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("[ZmqConnector] ❌ Failed to deserialize action: {}. Payload: {:?}", e, String::from_utf8_lossy(response_bytes));
+                            eprintln!(
+                                "[ZmqConnector] ❌ Failed to deserialize action: {}. Payload: {:?}",
+                                e,
+                                String::from_utf8_lossy(response_bytes)
+                            );
                             self.window.push_obs(obs); // Push obs
                             return self.last_good_action.lock().unwrap().clone();
                         }
@@ -1558,7 +1560,9 @@ impl RLConnector for ZmqConnector {
 
                     let new_action = match parsed {
                         RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
-                        RLResponse::Continuous { bitrate_mbps } => RLAction::ContinuousMbps(bitrate_mbps),
+                        RLResponse::Continuous { bitrate_mbps } => {
+                            RLAction::ContinuousMbps(bitrate_mbps)
+                        }
                     };
 
                     // Save this as the last known-good action
@@ -1591,14 +1595,15 @@ impl RLConnector for ZmqConnector {
      * This is "fire and forget" - no reply.
      */
     fn post_transition(&mut self, transition: &RLTransition) {
-        let transition_json = serde_json::to_string(transition).expect("Failed to serialize RLTransition");
+        let transition_json =
+            serde_json::to_string(transition).expect("Failed to serialize RLTransition");
         // dump_bytes("→ PUSH SEND (transition)", transition_json.as_bytes());
         match self.step_socket.send(transition_json.as_bytes(), 0) {
             Ok(_) => {
                 // println!("[ZmqConnector] Sent transition successfully");
             }
             Err(e) => {
-                 eprintln!("[ZmqConnector] ❌ Failed to send transition: {}", e);
+                eprintln!("[ZmqConnector] ❌ Failed to send transition: {}", e);
             }
         }
     }
@@ -1608,13 +1613,12 @@ impl RLConnector for ZmqConnector {
     }
 }
 
-
 #[derive(Serialize, Deserialize)]
-pub struct RLRequest{ pub obs: Vec<f32>}
+pub struct RLRequest {
+    pub obs: Vec<f32>,
+}
 // #[derive(Serialize, Deserialize)]
 // pub struct RLResponse{pub action_idx: usize}
-
-
 
 #[allow(unused)]
 #[derive(Clone, PartialEq)]
@@ -1681,7 +1685,6 @@ impl Default for ProfileConfig {
     }
 }
 
-
 #[derive(Clone)]
 struct DataPoint {
     fl_report: usize,
@@ -1709,7 +1712,10 @@ impl TimedVecFLR {
     }
 
     pub fn push_new(&mut self, fl_report: usize, sl_report: usize, time_f32: f32) {
-        let data = DataPoint { fl_report, sl_report };
+        let data = DataPoint {
+            fl_report,
+            sl_report,
+        };
         self.vec_data.push_back((time_f32, data));
 
         // Increment the running totals
@@ -1749,14 +1755,13 @@ impl TimedVecFLR {
     }
 }
 
-
 #[derive(Clone)]
-pub struct TimedVecBuffer{
-    vec_buflevel: VecDeque<(f32,usize)>,
-    period: f32, // how long to keep values 
+pub struct TimedVecBuffer {
+    vec_buflevel: VecDeque<(f32, usize)>,
+    period: f32, // how long to keep values
 }
 
-impl TimedVecBuffer{
+impl TimedVecBuffer {
     pub fn new(period: f32) -> Self {
         Self {
             vec_buflevel: VecDeque::new(),
@@ -1786,7 +1791,6 @@ impl TimedVecBuffer{
     //     let sum: f32 = self.vec_buflevel.iter().map(|&(_, v)| v as f32).sum();
     //     sum / self.vec_buflevel.len() as f32
     // }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1795,9 +1799,8 @@ pub enum ObservationConfig {
     Raw,
     /// Return values manually scaled based on observed ranges from plots.
     ManualScaledV1,
-    RunningAvg, 
+    RunningAvg,
 }
-
 
 // --- ADD THIS HELPER STRUCT (tracks stats for one feature) ---
 #[derive(Debug, Clone, Copy, Default)]
@@ -1862,34 +1865,32 @@ impl ObservationNormalizer {
     fn update_and_normalize(&mut self, obs: RLObservation) -> RLObservation {
         // This macro reduces boilerplate
         macro_rules! update_norm_clip {
-            ($field:ident) => {
-                {
-                    // 1. Update stats
-                    self.$field.update(obs.$field as f32);
-                    // 2. Normalize
-                    let mean = self.$field.get_mean();
-                    let std = self.$field.get_std();
-                    let norm: f32 = (obs.$field as f32- mean) / (std + Self::EPSILON);
-                    // 3. Clip
-                    norm.clamp(-Self::CLIP_RANGE, Self::CLIP_RANGE)
-                }
-            };
+            ($field:ident) => {{
+                // 1. Update stats
+                self.$field.update(obs.$field as f32);
+                // 2. Normalize
+                let mean = self.$field.get_mean();
+                let std = self.$field.get_std();
+                let norm: f32 = (obs.$field as f32 - mean) / (std + Self::EPSILON);
+                // 3. Clip
+                norm.clamp(-Self::CLIP_RANGE, Self::CLIP_RANGE)
+            }};
         }
 
         RLObservation {
-            t_elapsed_s: update_norm_clip!(t_elapsed_s ),
-            last_target_bitrate_mbps: update_norm_clip!(last_target_bitrate_mbps ),
-            rtt_ms_avg_s: update_norm_clip!(rtt_ms_avg_s ),
-            rtt_ms_std_s: update_norm_clip!(rtt_ms_std_s ),
-            bandwidth_mbps_avg_s: update_norm_clip!(bandwidth_mbps_avg_s ),
-            bandwidth_mbps_std_s: update_norm_clip!(bandwidth_mbps_std_s ),
-            frame_interarrival_avg_ms: update_norm_clip!(frame_interarrival_avg_ms ),
-            frame_interarrival_std_ms: update_norm_clip!(frame_interarrival_std_ms ),
-            flr_avg_s: update_norm_clip!(flr_avg_s ),
+            t_elapsed_s: update_norm_clip!(t_elapsed_s),
+            last_target_bitrate_mbps: update_norm_clip!(last_target_bitrate_mbps),
+            rtt_ms_avg_s: update_norm_clip!(rtt_ms_avg_s),
+            rtt_ms_std_s: update_norm_clip!(rtt_ms_std_s),
+            bandwidth_mbps_avg_s: update_norm_clip!(bandwidth_mbps_avg_s),
+            bandwidth_mbps_std_s: update_norm_clip!(bandwidth_mbps_std_s),
+            frame_interarrival_avg_ms: update_norm_clip!(frame_interarrival_avg_ms),
+            frame_interarrival_std_ms: update_norm_clip!(frame_interarrival_std_ms),
+            flr_avg_s: update_norm_clip!(flr_avg_s),
             pl_sum_period: update_norm_clip!(pl_sum_period),
-            frame_size_avg_bytes: update_norm_clip!(frame_size_avg_bytes ),
-            ow_delay_period_ewma: update_norm_clip!(ow_delay_period_ewma ),
-            f_ow_delay_period_ewma: update_norm_clip!(f_ow_delay_period_ewma ),
+            frame_size_avg_bytes: update_norm_clip!(frame_size_avg_bytes),
+            ow_delay_period_ewma: update_norm_clip!(ow_delay_period_ewma),
+            f_ow_delay_period_ewma: update_norm_clip!(f_ow_delay_period_ewma),
             rebuffer_event_sum: update_norm_clip!(rebuffer_event_sum),
         }
     }
@@ -1907,7 +1908,6 @@ pub struct BitrateManager {
     frame_interval_average: SlidingWindowAverage<f32>,
     // encoder_latency_average: SlidingWindowAverage<f32>,
     // network_latency_average: SlidingWindowAverage<f32>,
-
     bitrate_average_mbps: SlidingWindowAverage<f32>,
 
     update_interval_s: Duration,
@@ -1915,201 +1915,230 @@ pub struct BitrateManager {
     rtt_average: SlidingWindowAverage<f32>,
     peak_throughput_average: SlidingWindowAverage<f32>,
     frame_interarrival_average: SlidingWindowAverage<f32>,
-    everest_last_capacity: f32, 
-    everest_last_throughput: f32, 
+    everest_last_capacity: f32,
+    everest_last_throughput: f32,
 
-    everest_capacity_ewma: f32, 
-    everest_throughput_ewma: f32, 
-    everest_last_dshort: f32, 
-    everest_last_dlong: f32, 
-    everest_time_last_capacity_update: TaiTime<0>, 
-    everest_time_last_throughput_update: TaiTime<0>, 
-    everest_last_order: EverestCommand, 
+    everest_capacity_ewma: f32,
+    everest_throughput_ewma: f32,
+    everest_last_dshort: f32,
+    everest_last_dlong: f32,
+    everest_time_last_capacity_update: TaiTime<0>,
+    everest_time_last_throughput_update: TaiTime<0>,
+    everest_last_order: EverestCommand,
 
     last_target_bitrate_bps: f32,
 
-
-    bitrate_ladder_bps: Option<Vec<f32>>, 
-    bitrate_step_size_bps_nest: f32, 
-    flr_shardloss_count: TimedVecFLR,  
+    bitrate_ladder_bps: Option<Vec<f32>>,
+    bitrate_step_size_bps_nest: f32,
+    flr_shardloss_count: TimedVecFLR,
     jitbuf_avg_count: TimedVecBuffer,
-    last_rebuffer_avg_sum: u8,   
-    t_end_simulation: f64, 
-    sim_unique_string: String, 
-    
-    
-    pub last_nada_target_bitrate_mbps: Option<f64>, //updated on receive of NADA feedback data.  
+    last_rebuffer_avg_sum: u8,
+    t_end_simulation: f64,
+    sim_unique_string: String,
 
-    aimd_manager: Option<Arc<Mutex<FOAimdRateControl>>>, 
+    pub last_nada_target_bitrate_mbps: Option<f64>, //updated on receive of NADA feedback data.
 
-    framerate: f32, 
+    aimd_manager: Option<Arc<Mutex<FOAimdRateControl>>>,
 
-    ewma_fowd: f32, 
-    ewma_owd:  f32, 
-    bytes_size_avg: SlidingWindowAverage<f32>, 
+    framerate: f32,
 
-    obs_config: ObservationConfig, 
-    obs_normalizer: ObservationNormalizer, 
-    reward_stat: RunningStat, 
-    pub reward_mode: usize, 
+    ewma_fowd: f32,
+    ewma_owd: f32,
+    bytes_size_avg: SlidingWindowAverage<f32>,
 
+    obs_config: ObservationConfig,
+    obs_normalizer: ObservationNormalizer,
+    reward_stat: RunningStat,
+    pub reward_mode: usize,
 }
 
-
-
 impl BitrateManager {
-    
-     pub fn new(max_history_size: usize, initial_framerate: f32, initial_bitrate_mbps: f32, abr_enabled: usize, nest_vr_profile: &NestVrProfile, t_end_simu: f64, ip_server: IpAddr, sim_unique_string: &str, 
-                fps: f32, obs_config: ObservationConfig , t_update_abr: f32, reward_mode: usize, ) -> Self {
-        
+    pub fn new(
+        max_history_size: usize,
+        initial_framerate: f32,
+        initial_bitrate_mbps: f32,
+        abr_enabled: usize,
+        nest_vr_profile: &NestVrProfile,
+        t_end_simu: f64,
+        ip_server: IpAddr,
+        sim_unique_string: &str,
+        fps: f32,
+        obs_config: ObservationConfig,
+        t_update_abr: f32,
+        reward_mode: usize,
+    ) -> Self {
         let decrement: usize = match nest_vr_profile {
-            NestVrProfile::Anxious => {10}, 
-            NestVrProfile::Balanced => {1},
-            NestVrProfile::Speedy => {2}, 
-            NestVrProfile::Custom{..} => {1}, 
-        };         
-        
-        let mut bitrate_ladder_std_bps = Vec::new(); 
-        let bitrate_step_count: usize = 20; 
+            NestVrProfile::Anxious => 10,
+            NestVrProfile::Balanced => 1,
+            NestVrProfile::Speedy => 2,
+            NestVrProfile::Custom { .. } => 1,
+        };
+
+        let mut bitrate_ladder_std_bps = Vec::new();
+        let bitrate_step_count: usize = 20;
 
         // let bitrate_ladder_mbps: Vec<u32> = (5..=100).step_by(5).collect();
 
-        let max_mbps = MAX_MBPS_LADDER; 
-        let min_mbps = 5.0; 
+        let max_mbps = MAX_MBPS_LADDER;
+        let min_mbps = 5.0;
 
-        let (min_bps, max_bps) = ( min_mbps * 1e6, max_mbps * 1e6); 
-        // let initial_bitrate_mbps = 50.0; 
+        let (min_bps, max_bps) = (min_mbps * 1e6, max_mbps * 1e6);
+        // let initial_bitrate_mbps = 50.0;
 
         let bitrate_step_size_bps_nest = (max_bps - min_bps) / bitrate_step_count as f32;
 
+        // println!("BITRATE MODE IS: {}", abr_enabled);
 
-        // println!("BITRATE MODE IS: {}", abr_enabled); 
+        let bitrate_mode = match abr_enabled {
+            1 => {
+                // NeSt-VR
 
-        let bitrate_mode = match abr_enabled{
-            1 =>  {  // NeSt-VR
-                
-                    if max_bps != 0.0 && min_bps != 0.0 {
-                        let mut vec_bitrates = Vec::new();
+                if max_bps != 0.0 && min_bps != 0.0 {
+                    let mut vec_bitrates = Vec::new();
 
-                        let nest_bitrate_step_count = 10; 
+                    let nest_bitrate_step_count = 10;
 
-                        let bitrate_step_size_bps = (max_bps - min_bps) / nest_bitrate_step_count as f32;
+                    let bitrate_step_size_bps =
+                        (max_bps - min_bps) / nest_bitrate_step_count as f32;
 
-                        let mut last_value = min_bps;
+                    let mut last_value = min_bps;
 
-                        vec_bitrates.push(min_bps); // first bitrate is min
-                        
-                        for _ in 0..nest_bitrate_step_count {
-                            last_value += bitrate_step_size_bps;
-                            vec_bitrates.push(last_value);
-                        }
+                    vec_bitrates.push(min_bps); // first bitrate is min
 
-                        bitrate_ladder_std_bps = vec_bitrates.clone(); 
-
-                        // let bitrate_step_size_bps = bitrate_step_size_bps;
-                            
-                        // let last_target_bitrate_bps = upper_bound_bitrate(
-                        //     initial_bitrate_mbps * 1e6,
-                        //     &vec_bitrates, 
-                        // );
+                    for _ in 0..nest_bitrate_step_count {
+                        last_value += bitrate_step_size_bps;
+                        vec_bitrates.push(last_value);
                     }
-                BitrateMode::NestVr { 
+
+                    bitrate_ladder_std_bps = vec_bitrates.clone();
+
+                    // let bitrate_step_size_bps = bitrate_step_size_bps;
+
+                    // let last_target_bitrate_bps = upper_bound_bitrate(
+                    //     initial_bitrate_mbps * 1e6,
+                    //     &vec_bitrates,
+                    // );
+                }
+                BitrateMode::NestVr {
                     //     NestVr{
-                        averaging_strategy: AveragingStrategy::SimpleWindowAverage { window_type: WindowType::BySeconds { sliding_window_secs: Some(t_update_abr) } },            
+                    averaging_strategy: AveragingStrategy::SimpleWindowAverage {
+                        window_type: WindowType::BySeconds {
+                            sliding_window_secs: Some(t_update_abr),
+                        },
+                    },
+                    max_bitrate_mbps: max_mbps,
+                    min_bitrate_mbps: min_mbps,
+                    initial_bitrate_mbps,
+                    nest_vr_profile: ProfileConfig {
+                        update_interval_nestvr_s: t_update_abr as f32,
                         max_bitrate_mbps: max_mbps,
                         min_bitrate_mbps: min_mbps,
-                        initial_bitrate_mbps,
-                        nest_vr_profile: ProfileConfig {
-                                            update_interval_nestvr_s: t_update_abr as f32, 
-                                            max_bitrate_mbps: max_mbps,
-                                            min_bitrate_mbps: min_mbps,
-                                            initial_bitrate_mbps: initial_bitrate_mbps,
+                        initial_bitrate_mbps: initial_bitrate_mbps,
 
-                                            bitrate_step_count, 
-                                            bitrate_inc_steps: 1, 
-                                            bitrate_dec_steps: decrement, 
+                        bitrate_step_count,
+                        bitrate_inc_steps: 1,
+                        bitrate_dec_steps: decrement,
 
-                                            rtt_adj_prob: 1.0,
-                                            bitrate_inc_prob: 0.25, 
-                                            nfr_thresh: 0.99,
-                                            rtt_thresh_ms: 22.0, 
-                                            capacity_scaling_factor: 0.9,},            
-                    }
+                        rtt_adj_prob: 1.0,
+                        bitrate_inc_prob: 0.25,
+                        nfr_thresh: 0.99,
+                        rtt_thresh_ms: 22.0,
+                        capacity_scaling_factor: 0.9,
+                    },
                 }
-            2 => {  
-                    let values_original = [10.0, 20.0, 40.0, 60.0, 80.0, MAX_MBPS_LADDER]; 
-                    let mut bitrate_ladder_mbps = Vec::new(); 
-                    for value in values_original.iter(){
-                        bitrate_ladder_mbps.push(*value as f32); 
-                        bitrate_ladder_std_bps.push(*value * 1e6)
-                    }                 
-                    
-                    BitrateMode::EVeREst { bitrate_ladder_mbps }
+            }
+            2 => {
+                let values_original = [10.0, 20.0, 40.0, 60.0, 80.0, MAX_MBPS_LADDER];
+                let mut bitrate_ladder_mbps = Vec::new();
+                for value in values_original.iter() {
+                    bitrate_ladder_mbps.push(*value as f32);
+                    bitrate_ladder_std_bps.push(*value * 1e6)
                 }
-            3 => { // RL 
-                let ladder_mbps = (5..=MAX_MBPS_LADDER as usize).step_by(5).map(|x| x as f32).collect::<Vec<_>>();
+
+                BitrateMode::EVeREst {
+                    bitrate_ladder_mbps,
+                }
+            }
+            3 => {
+                // RL
+                let ladder_mbps = (5..=MAX_MBPS_LADDER as usize)
+                    .step_by(5)
+                    .map(|x| x as f32)
+                    .collect::<Vec<_>>();
                 let ctx = zmq::Context::new();
-                // print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps); 
+                // print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps);
 
-                let action_ep  = std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
-                let reward_ep  = std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
+                let action_ep =
+                    std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
+                let reward_ep =
+                    std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
 
-                // let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) }; 
-                let action_space = ActionSpace::Discrete;  
+                // let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) };
+                let action_space = ActionSpace::Discrete;
 
-                println!("[RUST] CONFIGURING RL on sockets | A: {action_ep}, R: {reward_ep}"); 
+                println!("[RUST] CONFIGURING RL on sockets | A: {action_ep}, R: {reward_ep}");
 
-
-                println!("Debug ladder: {:?}", ladder_mbps); 
+                println!("Debug ladder: {:?}", ladder_mbps);
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps: ladder_mbps,
                     // step_interval: Duration::from_secs_f32(t_update_abr as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(&action_ep, &reward_ep,  &ctx, sim_unique_string , RL_WINDOW_OBSERVATION_SIZE)))),
+                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(
+                        &action_ep,
+                        &reward_ep,
+                        &ctx,
+                        sim_unique_string,
+                        RL_WINDOW_OBSERVATION_SIZE,
+                    )))),
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
-                    action_space, 
+                    action_space,
                     nest_vr_max_mbps: max_mbps,
-                    nest_vr_min_mbps: min_mbps, 
-                    nest_vr_config:  ProfileConfig {
-                                            update_interval_nestvr_s: t_update_abr as f32, 
-                                            max_bitrate_mbps: max_mbps,
-                                            min_bitrate_mbps: min_mbps,
-                                            initial_bitrate_mbps: initial_bitrate_mbps,
+                    nest_vr_min_mbps: min_mbps,
+                    nest_vr_config: ProfileConfig {
+                        update_interval_nestvr_s: t_update_abr as f32,
+                        max_bitrate_mbps: max_mbps,
+                        min_bitrate_mbps: min_mbps,
+                        initial_bitrate_mbps: initial_bitrate_mbps,
 
-                                            bitrate_step_count, 
-                                            bitrate_inc_steps: 1, 
-                                            bitrate_dec_steps: decrement, 
+                        bitrate_step_count,
+                        bitrate_inc_steps: 1,
+                        bitrate_dec_steps: decrement,
 
-                                            rtt_adj_prob: 1.0,
-                                            bitrate_inc_prob: 0.25, 
-                                            nfr_thresh: 0.99,
-                                            rtt_thresh_ms: 22.0, 
-                                            capacity_scaling_factor: 0.9,
-                                        },            
-                } 
+                        rtt_adj_prob: 1.0,
+                        bitrate_inc_prob: 0.25,
+                        nfr_thresh: 0.99,
+                        rtt_thresh_ms: 22.0,
+                        capacity_scaling_factor: 0.9,
+                    },
+                }
             }
 
-            4 => { // GCC estimator. 
+            4 => {
+                // GCC estimator.
 
-                let gcc_estimator = GccBandwidthEstimator::new(initial_framerate as f64); // make period be adaptive to framerate. 
-                BitrateMode::GCCPort { gcc_estimator, framerate: initial_framerate as f64}
+                let gcc_estimator = GccBandwidthEstimator::new(initial_framerate as f64); // make period be adaptive to framerate.
+                BitrateMode::GCCPort {
+                    gcc_estimator,
+                    framerate: initial_framerate as f64,
+                }
             }
-            5 => {
-                BitrateMode::NADACiscoPort{ }
-            }
-            6 => {
-                BitrateMode::FovOptixPort { last_bitrate_mbps : initial_bitrate_mbps }
-            }
+            5 => BitrateMode::NADACiscoPort {},
+            6 => BitrateMode::FovOptixPort {
+                last_bitrate_mbps: initial_bitrate_mbps,
+            },
 
+            _ => BitrateMode::ConstantMbps(initial_bitrate_mbps),
+        };
 
-            _ => BitrateMode::ConstantMbps(initial_bitrate_mbps)
-        };          
+        print_green!(
+            "Server {} has BitrateMode => {:?}",
+            ip_server,
+            bitrate_mode.variant_name()
+        );
 
-        print_green!("Server {} has BitrateMode => {:?}", ip_server, bitrate_mode.variant_name());
-
-        let flr_vec: TimedVecFLR = TimedVecFLR::new( 1.0 as f32); // let's take FLR 1 sec sliding window. TODO: input arg 
-        let buflevel_vec =  TimedVecBuffer::new( t_update_abr as f32); 
+        let flr_vec: TimedVecFLR = TimedVecFLR::new(1.0 as f32); // let's take FLR 1 sec sliding window. TODO: input arg
+        let buflevel_vec = TimedVecBuffer::new(t_update_abr as f32);
 
         Self {
             last_frame_instant: TaiTime::EPOCH,
@@ -2117,56 +2146,59 @@ impl BitrateManager {
 
             frame_index: 0,
             frame_interval_average: SlidingWindowAverage::new(0.0, max_history_size),
-            // encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size), // Unused in this simulator. 
+            // encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size), // Unused in this simulator.
             // network_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
-
             bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
             // last_target_bitrate_mbps: initial_bitrate_mbps,
             update_interval_s: Duration::from_secs_f32(t_update_abr),
 
-            rtt_average: SlidingWindowAverage::new(Duration::from_millis(5).as_secs_f32(), max_history_size),
+            rtt_average: SlidingWindowAverage::new(
+                Duration::from_millis(5).as_secs_f32(),
+                max_history_size,
+            ),
             peak_throughput_average: SlidingWindowAverage::new(300E6, max_history_size),
             frame_interarrival_average: SlidingWindowAverage::new(
                 1. / initial_framerate,
                 max_history_size,
             ),
-            // abr_enabled_ev: abr_enabled, 
-            everest_last_capacity: 0.0, 
-            everest_last_throughput: 0.0, 
-            everest_last_dlong: 0.0, 
-            everest_last_dshort: 0.0,  
-            everest_capacity_ewma: 0.0, 
-            everest_throughput_ewma: 0.0, 
-            everest_time_last_capacity_update: TaiTime::EPOCH, 
-            everest_time_last_throughput_update: TaiTime::EPOCH, 
+            // abr_enabled_ev: abr_enabled,
+            everest_last_capacity: 0.0,
+            everest_last_throughput: 0.0,
+            everest_last_dlong: 0.0,
+            everest_last_dshort: 0.0,
+            everest_capacity_ewma: 0.0,
+            everest_throughput_ewma: 0.0,
+            everest_time_last_capacity_update: TaiTime::EPOCH,
+            everest_time_last_throughput_update: TaiTime::EPOCH,
             bitrate_mode,
             last_target_bitrate_bps: initial_bitrate_mbps * 1e6,
-            bitrate_ladder_bps: Some(bitrate_ladder_std_bps) , 
-            bitrate_step_size_bps_nest, 
-            everest_last_order: EverestCommand::Continue, 
-            flr_shardloss_count: flr_vec, 
-            jitbuf_avg_count: buflevel_vec, 
-            last_rebuffer_avg_sum: 0, 
-            t_end_simulation: t_end_simu, 
-            sim_unique_string: sim_unique_string.to_string(), 
+            bitrate_ladder_bps: Some(bitrate_ladder_std_bps),
+            bitrate_step_size_bps_nest,
+            everest_last_order: EverestCommand::Continue,
+            flr_shardloss_count: flr_vec,
+            jitbuf_avg_count: buflevel_vec,
+            last_rebuffer_avg_sum: 0,
+            t_end_simulation: t_end_simu,
+            sim_unique_string: sim_unique_string.to_string(),
 
-            last_nada_target_bitrate_mbps: None, 
-            aimd_manager: None, 
-            framerate: fps, 
+            last_nada_target_bitrate_mbps: None,
+            aimd_manager: None,
+            framerate: fps,
 
-            ewma_fowd: 0.0, 
-            ewma_owd: 0.0, 
-            bytes_size_avg: SlidingWindowAverage::new(initial_bitrate_mbps / initial_framerate * 1e6,
-                        max_history_size ),
+            ewma_fowd: 0.0,
+            ewma_owd: 0.0,
+            bytes_size_avg: SlidingWindowAverage::new(
+                initial_bitrate_mbps / initial_framerate * 1e6,
+                max_history_size,
+            ),
             obs_config,
             obs_normalizer: ObservationNormalizer::default(),
-            reward_stat: RunningStat::default(), 
-            reward_mode, 
-
+            reward_stat: RunningStat::default(),
+            reward_mode,
         }
     }
 
-      pub fn reset(&mut self) {
+    pub fn reset(&mut self) {
         // Reset timestamps and counters
         self.last_frame_instant = TaiTime::EPOCH;
         self.last_update_instant = TaiTime::EPOCH;
@@ -2180,20 +2212,23 @@ impl BitrateManager {
         self.peak_throughput_average.clear();
         self.frame_interarrival_average.clear();
         self.bitrate_average_mbps.clear();
-        self.ewma_owd = 0.0; 
-        self.ewma_fowd = 0.0; 
-        self.bytes_size_avg.clear(); 
-
+        self.ewma_owd = 0.0;
+        self.ewma_fowd = 0.0;
+        self.bytes_size_avg.clear();
 
         // Reset bitrate state
         match &mut self.bitrate_mode {
             BitrateMode::ConstantMbps(init_mbps) => {
                 self.last_target_bitrate_bps = *init_mbps * 1e6;
             }
-            BitrateMode::EVeREst { bitrate_ladder_mbps } => {
+            BitrateMode::EVeREst {
+                bitrate_ladder_mbps,
+            } => {
                 self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
             }
-            BitrateMode::NestVr { min_bitrate_mbps, .. } => {
+            BitrateMode::NestVr {
+                min_bitrate_mbps, ..
+            } => {
                 self.last_target_bitrate_bps = *min_bitrate_mbps * 1e6;
             }
             BitrateMode::ReinforcementLearner {
@@ -2208,21 +2243,23 @@ impl BitrateManager {
                 *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
                 *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
             }
-            BitrateMode::GCCPort { gcc_estimator , framerate} => {
+            BitrateMode::GCCPort {
+                gcc_estimator,
+                framerate,
+            } => {
                 self.last_target_bitrate_bps = GCC_INIT_CONFIGURED_BITRATE as f32 * 1e6;
                 *gcc_estimator = GccBandwidthEstimator::new(*framerate);
             }
 
-            BitrateMode::NADACiscoPort { ..  } => {
-
+            BitrateMode::NADACiscoPort { .. } => {
                 self.last_target_bitrate_bps = NADA_INITIAL_RATE as f32; // in bps
-                // last_order_bitrate_mbps = 
-                // }
+                                                                         // last_order_bitrate_mbps =
+                                                                         // }
             }
-            
+
             BitrateMode::FovOptixPort { .. } => {
-                if self.aimd_manager.is_none(){
-                    self.aimd_manager = Some(Arc::new(Mutex::new(FOAimdRateControl::new(true)))); 
+                if self.aimd_manager.is_none() {
+                    self.aimd_manager = Some(Arc::new(Mutex::new(FOAimdRateControl::new(true))));
                 }
             }
         }
@@ -2242,7 +2279,7 @@ impl BitrateManager {
             "[BitrateManager] Reset complete -> bitrate = {:.2} Mbps",
             self.last_target_bitrate_bps / 1e6
         );
-    }     
+    }
 
     pub fn report_encoded_frame_server(&mut self, now: TaiTime<0>) {
         print_prettyy!(
@@ -2262,159 +2299,173 @@ impl BitrateManager {
         network_rtt: Duration,
         peak_throughput_bps: f32,
         frame_interarrival_s: f32,
-        network_stats: NetworkStatisticsPacket, 
+        network_stats: NetworkStatisticsPacket,
         now: TaiTime<0>,
-        send_instant: TaiTime<0>, 
+        send_instant: TaiTime<0>,
     ) {
-
-
-        match &mut self.bitrate_mode{
-            
-            BitrateMode::GCCPort { gcc_estimator, ..} => {
-
-                let current_frame_send_timestamp = taitime_to_f64!(send_instant) * 1e6; // input units: micros 
-                let current_frame_arrival_timestamp = taitime_to_f64!(now) * 1e6;       // input units: micros 
-                let current_frame_size = network_stats.bytes_in_frame; 
-                let _target_bitrate_bps = gcc_estimator.Update(current_frame_send_timestamp , current_frame_arrival_timestamp, current_frame_size as i64, now); 
-                // target now unused, then retrieved during one_pass_abr()  
+        match &mut self.bitrate_mode {
+            BitrateMode::GCCPort { gcc_estimator, .. } => {
+                let current_frame_send_timestamp = taitime_to_f64!(send_instant) * 1e6; // input units: micros
+                let current_frame_arrival_timestamp = taitime_to_f64!(now) * 1e6; // input units: micros
+                let current_frame_size = network_stats.bytes_in_frame;
+                let _target_bitrate_bps = gcc_estimator.Update(
+                    current_frame_send_timestamp,
+                    current_frame_arrival_timestamp,
+                    current_frame_size as i64,
+                    now,
+                );
+                // target now unused, then retrieved during one_pass_abr()
             }
-            
-            _ => {}, 
+
+            _ => {}
         }
 
+        let fowd = network_stats.filtered_ow_delay;
+        let owd = network_stats.ow_delay;
 
-        let fowd = network_stats.filtered_ow_delay; 
-        let owd = network_stats.ow_delay; 
-        
-        self.ewma_fowd = ALPHA_EWMA_FOWD_OBS * fowd + (1.0 - ALPHA_EWMA_FOWD_OBS) * self.ewma_fowd;   // used for RL observations   
-        self.ewma_owd = ALPHA_EWMA_FOWD_OBS * owd + (1.0 - ALPHA_EWMA_FOWD_OBS) * self.ewma_owd;      // used for RL observations
+        self.ewma_fowd = ALPHA_EWMA_FOWD_OBS * fowd + (1.0 - ALPHA_EWMA_FOWD_OBS) * self.ewma_fowd; // used for RL observations
+        self.ewma_owd = ALPHA_EWMA_FOWD_OBS * owd + (1.0 - ALPHA_EWMA_FOWD_OBS) * self.ewma_owd; // used for RL observations
 
         self.rtt_average.submit_sample(network_rtt.as_secs_f32());
 
-        self.peak_throughput_average.submit_sample(peak_throughput_bps);
-        self.frame_interarrival_average.submit_sample(frame_interarrival_s);
-        self.bytes_size_avg.submit_sample(network_stats.bytes_in_frame as f32);
+        self.peak_throughput_average
+            .submit_sample(peak_throughput_bps);
+        self.frame_interarrival_average
+            .submit_sample(frame_interarrival_s);
+        self.bytes_size_avg
+            .submit_sample(network_stats.bytes_in_frame as f32);
 
-        self.jitbuf_avg_count.push_new(network_stats.buffer_level_decoder as usize, now.duration_since(TaiTime::EPOCH).as_secs_f32());
+        self.jitbuf_avg_count.push_new(
+            network_stats.buffer_level_decoder as usize,
+            now.duration_since(TaiTime::EPOCH).as_secs_f32(),
+        );
         self.last_rebuffer_avg_sum = network_stats.rebuffering_events_last_s; // discrete, no averaging. It's counted on the XRClient and sent over UL messages.
 
-
         /// EVEREST METRICS COMPUTE ///////
-        const T_USER_WIN : f32 = 5.0; // from original Everest paper 
+        const T_USER_WIN: f32 = 5.0; // from original Everest paper
 
-        let everest_capacity_sample = network_stats.everest_capacity_update; 
-        let everest_throughput_sample = network_stats.everest_throughput_update; 
+        let everest_capacity_sample = network_stats.everest_capacity_update;
+        let everest_throughput_sample = network_stats.everest_throughput_update;
 
-        if everest_capacity_sample > 0.0 { // we only get one or the other, which is computed is based on frame size. They are initialized to -1.0, only positive samples count 
-            self.everest_last_capacity = everest_capacity_sample;  
-            let last_c_f32 = now.duration_since(self.everest_time_last_capacity_update).as_secs_f32(); 
-            
-            self.everest_capacity_ewma = last_c_f32 / T_USER_WIN * everest_capacity_sample + (1.0 - last_c_f32 / T_USER_WIN ) * self.everest_capacity_ewma; 
-            self.everest_time_last_capacity_update = now; 
+        if everest_capacity_sample > 0.0 {
+            // we only get one or the other, which is computed is based on frame size. They are initialized to -1.0, only positive samples count
+            self.everest_last_capacity = everest_capacity_sample;
+            let last_c_f32 = now
+                .duration_since(self.everest_time_last_capacity_update)
+                .as_secs_f32();
+
+            self.everest_capacity_ewma = last_c_f32 / T_USER_WIN * everest_capacity_sample
+                + (1.0 - last_c_f32 / T_USER_WIN) * self.everest_capacity_ewma;
+            self.everest_time_last_capacity_update = now;
         }
 
-        if everest_throughput_sample > 0.0{
-            self.everest_last_throughput = everest_throughput_sample;  
-            let last_t_f32 = now.duration_since(self.everest_time_last_throughput_update).as_secs_f32(); 
-            
-            self.everest_throughput_ewma = last_t_f32 / T_USER_WIN * everest_throughput_sample + (1.0 - last_t_f32 / T_USER_WIN ) * self.everest_throughput_ewma;  
-            self.everest_time_last_throughput_update = now; 
-        } 
+        if everest_throughput_sample > 0.0 {
+            self.everest_last_throughput = everest_throughput_sample;
+            let last_t_f32 = now
+                .duration_since(self.everest_time_last_throughput_update)
+                .as_secs_f32();
 
-        self.everest_last_dshort = network_stats.everest_dshort; 
-        self.everest_last_dlong = network_stats.everest_dlong; 
-        self.everest_last_order = network_stats.everest_command; 
-        
+            self.everest_throughput_ewma = last_t_f32 / T_USER_WIN * everest_throughput_sample
+                + (1.0 - last_t_f32 / T_USER_WIN) * self.everest_throughput_ewma;
+            self.everest_time_last_throughput_update = now;
+        }
+
+        self.everest_last_dshort = network_stats.everest_dshort;
+        self.everest_last_dlong = network_stats.everest_dlong;
+        self.everest_last_order = network_stats.everest_command;
+
         // if matches!(self.bitrate_mode , BitrateMode::EVeREst{ .. }) && now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL) {
-        //     print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  ); 
+        //     print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  );
         // }
-    }   
+    }
 
-    pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32 ,){
-        
+    pub fn report_shard_and_frame_loss(&mut self, fl: usize, sl: usize, timestep_f32: f32) {
+        // println!("{}%%%%%%%% -> Pushing F: [{}], SL: {}  ", timestep_f32 , fl, sl);
 
-        // println!("{}%%%%%%%% -> Pushing F: [{}], SL: {}  ", timestep_f32 , fl, sl); 
-        
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
-        const TIME_WARMUP_ABR: u64 = 5; 
+        const TIME_WARMUP_ABR: u64 = 5;
 
-        if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR){
-            // println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name()); 
-            let bitrate_bps = self.last_target_bitrate_bps; 
-            bitrate_bps 
-        }
-        else{
-            // println!("{:.3} One pass ABR", taitime_to_f64!(now)); 
+        if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR) {
+            // println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name());
+            let bitrate_bps = self.last_target_bitrate_bps;
+            bitrate_bps
+        } else {
+            // println!("{:.3} One pass ABR", taitime_to_f64!(now));
 
-            let obs= self.build_rl_observation(now); // do it here so borrow checker is happy
+            let obs = self.build_rl_observation(now); // do it here so borrow checker is happy
 
-            let bitrate_bps: f32 = match &self.bitrate_mode { // match all other cases. 
-
-                
+            let bitrate_bps: f32 = match &self.bitrate_mode {
+                // match all other cases.
                 BitrateMode::ConstantMbps(bitrate_mbps) => {
                     self.last_target_bitrate_bps = *bitrate_mbps as f32 * 1E6;
                     // self.last_target_bitrate_mbps = *bitrate_mbps as f32;
 
-                    print_prettyy!(DebugColor::Navy, "[{}] CBR -> Bitrate = {} Mbps", ip_server ,bitrate_mbps);
+                    print_prettyy!(
+                        DebugColor::Navy,
+                        "[{}] CBR -> Bitrate = {} Mbps",
+                        ip_server,
+                        bitrate_mbps
+                    );
 
                     *bitrate_mbps as f32 * 1e6 as f32
                 }
 
-                BitrateMode::EVeREst { bitrate_ladder_mbps }
-                    => {
-                        // let mut bitrate_bps = self.last_target_bitrate_bps; 
-                        // print_red!("bitrate first: {} Mbps", bitrate_bps / 1e6);  
-                        
-                        let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
-                        let new_mbps = match self.everest_last_order {
-                            EverestCommand::Continue => {
-                                // stay on the same rung (or the closest one)
-                                bitrate_ladder_mbps
-                                    .iter()
-                                    .find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON)
-                                    .copied()
-                                    .unwrap_or(current_mbps)
-                            }
-                            EverestCommand::SpeedUp => {
-                                // first entry strictly greater than current
-                                bitrate_ladder_mbps
-                                    .iter()
-                                    .find(|&&x| x > current_mbps)
-                                    .copied()
-                                    .unwrap_or(*bitrate_ladder_mbps.last().unwrap())
-                            }
-                            EverestCommand::SlowDown => {
-                                // last entry strictly less than current
-                                bitrate_ladder_mbps
-                                    .iter()
-                                    .rfind(|&&x| x < current_mbps)
-                                    .copied()
-                                    .unwrap_or(bitrate_ladder_mbps[0])
-                            }
-                        };
-                        let mut bitrate_bps = new_mbps * 1e6; 
+                BitrateMode::EVeREst {
+                    bitrate_ladder_mbps,
+                } => {
+                    // let mut bitrate_bps = self.last_target_bitrate_bps;
+                    // print_red!("bitrate first: {} Mbps", bitrate_bps / 1e6);
 
-                        let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma ).ceil() as usize ; 
-                        let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);  
-
-                        bitrate_bps = f32::min(capacity_margin_bps, bitrate_bps ); 
-                        if let Some(ladder) = &self.bitrate_ladder_bps{
-                            bitrate_bps = upper_bound_bitrate(bitrate_bps, ladder);   
+                    let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
+                    let new_mbps = match self.everest_last_order {
+                        EverestCommand::Continue => {
+                            // stay on the same rung (or the closest one)
+                            bitrate_ladder_mbps
+                                .iter()
+                                .find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON)
+                                .copied()
+                                .unwrap_or(current_mbps)
                         }
-                        else{
-                            print_red!( "t: {:.6} -> no bitrate ladder? ", format_elapsed!(now)); 
+                        EverestCommand::SpeedUp => {
+                            // first entry strictly greater than current
+                            bitrate_ladder_mbps
+                                .iter()
+                                .find(|&&x| x > current_mbps)
+                                .copied()
+                                .unwrap_or(*bitrate_ladder_mbps.last().unwrap())
                         }
-                        // if now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL){
-                        //     print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6); 
+                        EverestCommand::SlowDown => {
+                            // last entry strictly less than current
+                            bitrate_ladder_mbps
+                                .iter()
+                                .rfind(|&&x| x < current_mbps)
+                                .copied()
+                                .unwrap_or(bitrate_ladder_mbps[0])
+                        }
+                    };
+                    let mut bitrate_bps = new_mbps * 1e6;
 
-                        // }
-                        self.last_target_bitrate_bps = bitrate_bps; 
-                        
-                        bitrate_bps
+                    let n_users =
+                        (self.everest_capacity_ewma / self.everest_throughput_ewma).ceil() as usize;
+                    let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);
+
+                    bitrate_bps = f32::min(capacity_margin_bps, bitrate_bps);
+                    if let Some(ladder) = &self.bitrate_ladder_bps {
+                        bitrate_bps = upper_bound_bitrate(bitrate_bps, ladder);
+                    } else {
+                        print_red!("t: {:.6} -> no bitrate ladder? ", format_elapsed!(now));
                     }
+                    // if now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL){
+                    //     print_pink!("[Everest {}] N_users=  == {}, Capacity_margin={}\nBitrate={:.3}", ip_server, n_users, capacity_margin_bps/1e6, bitrate_bps / 1e6);
+
+                    // }
+                    self.last_target_bitrate_bps = bitrate_bps;
+
+                    bitrate_bps
+                }
 
                 BitrateMode::NestVr {
                     max_bitrate_mbps,
@@ -2423,16 +2474,15 @@ impl BitrateManager {
                     nest_vr_profile,
                     ..
                 } => {
-                    
                     // print_pink!(
                     //     // DebugColor::Purple,
                     //     "{} ONE PASS OF NEST-VR! Bitrate: {} Mbps",
-                    //     format_elapsed!(now), self.last_target_bitrate_bps / 1e6,  
+                    //     format_elapsed!(now), self.last_target_bitrate_bps / 1e6,
                     // );
 
-                    let (max_bps, min_bps) = (max_bitrate_mbps * 1e6, min_bitrate_mbps * 1e6); 
+                    let (max_bps, min_bps) = (max_bitrate_mbps * 1e6, min_bitrate_mbps * 1e6);
 
-                    let profile_config = nest_vr_profile; 
+                    let profile_config = nest_vr_profile;
                     // Sample from uniform distribution
                     let mut rng = rand::thread_rng();
                     let uniform_dist = Uniform::new(0.0, 1.0);
@@ -2440,7 +2490,8 @@ impl BitrateManager {
                     let r_rtt = rng.sample(uniform_dist);
                     let r_inc = rng.sample(uniform_dist);
 
-                    let frame_interval_s = f32::max(self.frame_interval_average.get_average(), 1e-9);
+                    let frame_interval_s =
+                        f32::max(self.frame_interval_average.get_average(), 1e-9);
 
                     let fps_tx_avg = if frame_interval_s != 0.0 {
                         1.0 / frame_interval_s
@@ -2449,7 +2500,7 @@ impl BitrateManager {
                     };
 
                     let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 {
-                        1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average()) 
+                        1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average())
                     } else {
                         0.0
                     };
@@ -2457,23 +2508,24 @@ impl BitrateManager {
                     let nfr_avg = fps_rx_avg / fps_tx_avg;
                     let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
 
-                    let estimated_capacity_bps = f32::max(self.peak_throughput_average.get_average(), 1e-9);
+                    let estimated_capacity_bps =
+                        f32::max(self.peak_throughput_average.get_average(), 1e-9);
 
                     let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
 
-                    // print_yellow!("nfr_avg = {}, rtt_avg = {} ms, r_inc = {}, r_rtt = {}, STEP SIZE = {} Mbps", nfr_avg, rtt_avg_ms, r_inc, r_rtt, self.bitrate_step_size_bps_nest / 1e6 ); 
+                    // print_yellow!("nfr_avg = {}, rtt_avg = {} ms, r_inc = {}, r_rtt = {}, STEP SIZE = {} Mbps", nfr_avg, rtt_avg_ms, r_inc, r_rtt, self.bitrate_step_size_bps_nest / 1e6 );
 
                     if nfr_avg < profile_config.nfr_thresh {
                         // decrease
-                        // print_yellow!("decrease (nfr_thresh)",); 
+                        // print_yellow!("decrease (nfr_thresh)",);
 
-                        bitrate_bps -=
-                            profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps_nest;
+                        bitrate_bps -= profile_config.bitrate_dec_steps as f32
+                            * self.bitrate_step_size_bps_nest;
                     } else {
                         if rtt_avg_ms > profile_config.rtt_thresh_ms {
                             if r_rtt <= profile_config.rtt_adj_prob {
                                 // decrease
-                                // print_yellow!("decrease (rtt prob)",); 
+                                // print_yellow!("decrease (rtt prob)",);
 
                                 bitrate_bps -= profile_config.bitrate_dec_steps as f32
                                     * self.bitrate_step_size_bps_nest;
@@ -2481,14 +2533,14 @@ impl BitrateManager {
                         } else {
                             if r_inc <= profile_config.bitrate_inc_prob {
                                 // increase
-                                // print_yellow!("INCREASE (rtt prob)",); 
+                                // print_yellow!("INCREASE (rtt prob)",);
 
                                 bitrate_bps += profile_config.bitrate_inc_steps as f32
                                     * self.bitrate_step_size_bps_nest;
                             }
                         }
                     }
-                    // print_pink!("bitrate after Nest: {} Mbps", f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps )); 
+                    // print_pink!("bitrate after Nest: {} Mbps", f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps ));
                     // Ensure bitrate is below the estimated network capacity
                     let capacity_upper_limit =
                         profile_config.capacity_scaling_factor * estimated_capacity_bps;
@@ -2497,7 +2549,7 @@ impl BitrateManager {
                     // Ensure bitrate is always within the configured range
                     bitrate_bps = minmax_bitrate(bitrate_bps, max_bps, min_bps);
 
-                    // print_red!("bitrate ladder: {:?}", self.bitrate_ladder_bps); 
+                    // print_red!("bitrate ladder: {:?}", self.bitrate_ladder_bps);
 
                     bitrate_bps =
                         upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap());
@@ -2518,20 +2570,20 @@ impl BitrateManager {
                     //     nfr_thresh: profile_config.nfr_thresh,
                     //     rtt_thresh_ms: profile_config.rtt_thresh_ms,
                     //     requested_bitrate_mbps: bitrate_bps / 1e6,
-                    //     estimated_capacity_mbps: estimated_capacity_bps / 1e6, 
+                    //     estimated_capacity_mbps: estimated_capacity_bps / 1e6,
                     // };
 
                     // print_pink!(
                     //     // DebugColor::Purple,
                     //     "[{}]NeSt-VR STATS-------: {:#?}",
-                    //     ip_server, 
+                    //     ip_server,
                     //     heur_stats
                     // );
                     self.last_target_bitrate_bps = bitrate_bps;
-                    // self.last_target_bitrate_mbps = bitrate_bps / 1E6; 
+                    // self.last_target_bitrate_mbps = bitrate_bps / 1E6;
                     bitrate_bps
                 }
-            
+
                 BitrateMode::ReinforcementLearner {
                     bitrate_ladder_mbps,
                     // step_interval,
@@ -2543,21 +2595,19 @@ impl BitrateManager {
 
                     nest_vr_max_mbps,
                     nest_vr_min_mbps,
-                    nest_vr_config, 
+                    nest_vr_config,
                 } => {
-
                     let bitrate_ladder_mbps = &bitrate_ladder_mbps.clone();
                     let connector = connector.clone();
                     let last_action_idx = last_action_idx.clone();
                     let pending_obs = pending_obs.clone();
                     let action_space = action_space.clone();
                     let profile_config = nest_vr_config.clone();
-                    
+
                     // f32 is `Copy`, so dereferencing (`*`) creates a copy.
                     let nest_vr_max_mbps = *nest_vr_max_mbps;
                     let nest_vr_min_mbps = *nest_vr_min_mbps;
                     let last_decision_instant = last_decision_instant.clone();
-
 
                     // Respect step interval
                     // if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
@@ -2566,10 +2616,9 @@ impl BitrateManager {
                     let current_obs = obs.clone();
 
                     // Take history out, or create new
-                    let mut history = pending_obs
-                        .lock().unwrap()
-                        .take()
-                        .unwrap_or_else(|| RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+                    let mut history = pending_obs.lock().unwrap().take().unwrap_or_else(|| {
+                        RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8)
+                    });
 
                     // Window BEFORE pushing current obs
                     let prev_win_flat = history.as_flat_padded();
@@ -2579,16 +2628,30 @@ impl BitrateManager {
                     let everest_bps = {
                         let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
                         let new_mbps = match self.everest_last_order {
-                            EverestCommand::Continue => bitrate_ladder_mbps.iter().find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON).copied().unwrap_or(current_mbps),
-                            EverestCommand::SpeedUp => bitrate_ladder_mbps.iter().find(|&&x| x > current_mbps).copied().unwrap_or(*bitrate_ladder_mbps.last().unwrap()),
-                            EverestCommand::SlowDown => bitrate_ladder_mbps.iter().rfind(|&&x| x < current_mbps).copied().unwrap_or(bitrate_ladder_mbps[0]),
+                            EverestCommand::Continue => bitrate_ladder_mbps
+                                .iter()
+                                .find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON)
+                                .copied()
+                                .unwrap_or(current_mbps),
+                            EverestCommand::SpeedUp => bitrate_ladder_mbps
+                                .iter()
+                                .find(|&&x| x > current_mbps)
+                                .copied()
+                                .unwrap_or(*bitrate_ladder_mbps.last().unwrap()),
+                            EverestCommand::SlowDown => bitrate_ladder_mbps
+                                .iter()
+                                .rfind(|&&x| x < current_mbps)
+                                .copied()
+                                .unwrap_or(bitrate_ladder_mbps[0]),
                         };
-                        let mut bps = new_mbps * 1e6; 
-                        let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma ).ceil() as usize ; 
-                        let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);  
-                        bps = f32::min(capacity_margin_bps, bps); 
-                        if let Some(ladder) = &self.bitrate_ladder_bps{
-                            bps = upper_bound_bitrate(bps, ladder);   
+                        let mut bps = new_mbps * 1e6;
+                        let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma)
+                            .ceil() as usize;
+                        let capacity_margin_bps =
+                            self.everest_capacity_ewma / (n_users as f32 + 1.0);
+                        bps = f32::min(capacity_margin_bps, bps);
+                        if let Some(ladder) = &self.bitrate_ladder_bps {
+                            bps = upper_bound_bitrate(bps, ladder);
                         }
                         bps
                     };
@@ -2597,41 +2660,57 @@ impl BitrateManager {
                     // (B) Calculate Nest-VR Action (logic copied from NestVr arm)
                     // This uses the config fields passed into this enum variant.
                     let nest_vr_bps = {
-                        let (max_bps, min_bps) = (nest_vr_max_mbps * 1e6, nest_vr_min_mbps * 1e6); 
+                        let (max_bps, min_bps) = (nest_vr_max_mbps * 1e6, nest_vr_min_mbps * 1e6);
                         let mut rng = rand::thread_rng();
                         let uniform_dist = Uniform::new(0.0, 1.0);
                         let r_rtt = rng.sample(uniform_dist);
                         let r_inc = rng.sample(uniform_dist);
-                        let frame_interval_s = f32::max(self.frame_interval_average.get_average(), 1e-9);
-                        let fps_tx_avg = if frame_interval_s != 0.0 { 1.0 / frame_interval_s } else { 0.0 };
-                        let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 { 1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average()) } else { 0.0 };
+                        let frame_interval_s =
+                            f32::max(self.frame_interval_average.get_average(), 1e-9);
+                        let fps_tx_avg = if frame_interval_s != 0.0 {
+                            1.0 / frame_interval_s
+                        } else {
+                            0.0
+                        };
+                        let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 {
+                            1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average())
+                        } else {
+                            0.0
+                        };
                         let nfr_avg = fps_rx_avg / fps_tx_avg;
                         let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
-                        let estimated_capacity_bps = f32::max(self.peak_throughput_average.get_average(), 1e-9);
+                        let estimated_capacity_bps =
+                            f32::max(self.peak_throughput_average.get_average(), 1e-9);
                         let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
-                        
+
                         if nfr_avg < profile_config.nfr_thresh {
-                            bitrate_bps -= profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps_nest;
+                            bitrate_bps -= profile_config.bitrate_dec_steps as f32
+                                * self.bitrate_step_size_bps_nest;
                         } else {
                             if rtt_avg_ms > profile_config.rtt_thresh_ms {
                                 if r_rtt <= profile_config.rtt_adj_prob {
-                                    bitrate_bps -= profile_config.bitrate_dec_steps as f32 * self.bitrate_step_size_bps_nest;
+                                    bitrate_bps -= profile_config.bitrate_dec_steps as f32
+                                        * self.bitrate_step_size_bps_nest;
                                 }
                             } else {
                                 if r_inc <= profile_config.bitrate_inc_prob {
-                                    bitrate_bps += profile_config.bitrate_inc_steps as f32 * self.bitrate_step_size_bps_nest;
+                                    bitrate_bps += profile_config.bitrate_inc_steps as f32
+                                        * self.bitrate_step_size_bps_nest;
                                 }
                             }
                         }
-                        let capacity_upper_limit = profile_config.capacity_scaling_factor * estimated_capacity_bps;
+                        let capacity_upper_limit =
+                            profile_config.capacity_scaling_factor * estimated_capacity_bps;
                         bitrate_bps = f32::min(bitrate_bps, capacity_upper_limit);
                         bitrate_bps = minmax_bitrate(bitrate_bps, max_bps, min_bps);
                         // Use the main bitrate ladder for final snapping
-                        bitrate_bps = upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap()); 
+                        bitrate_bps = upper_bound_bitrate(
+                            bitrate_bps,
+                            &self.bitrate_ladder_bps.clone().unwrap(),
+                        );
                         bitrate_bps
                     };
                     let nest_vr_mbps = nest_vr_bps / 1e6;
-
 
                     // (C) Find nearest indices in the RL ladder
                     // (Assuming `nearest_idx` function is available in scope)
@@ -2642,26 +2721,28 @@ impl BitrateManager {
                     let mut mask = vec![0u8; bitrate_ladder_mbps.len()];
                     mask[everest_idx] = 1;
                     mask[nest_vr_idx] = 1; // Overwrites if indices are same (which is fine)
-                    
-                    let action_mask = Some(&mask);
-                    
-                    // println!("[RL Mask] Everest -> {:.2} Mbps (idx {}), NestVR -> {:.2} Mbps (idx {}).\n Mask: {:?}", 
-                        // everest_mbps, everest_idx, nest_vr_mbps, nest_vr_idx, mask);
 
-                    let action = connector.lock().unwrap().select_action(&current_obs, action_mask);
+                    let action_mask = Some(&mask);
+
+                    // println!("[RL Mask] Everest -> {:.2} Mbps (idx {}), NestVR -> {:.2} Mbps (idx {}).\n Mask: {:?}",
+                    // everest_mbps, everest_idx, nest_vr_mbps, nest_vr_idx, mask);
+
+                    let action = connector
+                        .lock()
+                        .unwrap()
+                        .select_action(&current_obs, action_mask);
 
                     // Reward/Done
                     // let reward = self.rl_naive_reward_function(&current_obs);
 
-                     let reward = match self.reward_mode {
-                        0 => self.rl_naive_reward_function(&current_obs), 
-                        1 => self.normalized_reward_fn(&current_obs), 
-                        _ => self.rl_naive_reward_function(&current_obs), 
-                    }; 
+                    let reward = match self.reward_mode {
+                        0 => self.rl_naive_reward_function(&current_obs),
+                        1 => self.normalized_reward_fn(&current_obs),
+                        _ => self.rl_naive_reward_function(&current_obs),
+                    };
 
-
-
-                    let done = now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
+                    let done =
+                        now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
                     let prev_idx_logged = *last_action_idx.lock().unwrap();
 
                     // Push current obs, compute next window
@@ -2684,16 +2765,19 @@ impl BitrateManager {
                             // Map ladder index to evenly-spaced value over [min,max]
                             let n = bitrate_ladder_mbps.len().max(2);
                             let alpha = (i as f32) / ((n - 1) as f32);
-                            let raw = (min_mbps + alpha * (max_mbps - min_mbps)).clamp(min_mbps, max_mbps);
+                            let raw = (min_mbps + alpha * (max_mbps - min_mbps))
+                                .clamp(min_mbps, max_mbps);
                             let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
                             (raw, idx, Some(raw))
                         }
-                        (ActionSpace::Continuous { min_mbps, max_mbps }, RLAction::ContinuousMbps(v)) => {
+                        (
+                            ActionSpace::Continuous { min_mbps, max_mbps },
+                            RLAction::ContinuousMbps(v),
+                        ) => {
                             let raw = v.clamp(min_mbps, max_mbps);
-                            
-                                let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
-                                (raw, idx, Some(raw))
-                            
+
+                            let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
+                            (raw, idx, Some(raw))
                         }
                     };
 
@@ -2711,12 +2795,11 @@ impl BitrateManager {
 
                     // Store updated history / action / instant
                     if done {
-                        *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+                        *pending_obs.lock().unwrap() =
+                            Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
                     } else {
                         *pending_obs.lock().unwrap() = Some(history);
                     }
-
-
 
                     *last_action_idx.lock().unwrap() = snapped_idx;
                     *last_decision_instant.lock().unwrap() = now;
@@ -2740,47 +2823,44 @@ impl BitrateManager {
                     self.last_target_bitrate_bps
                 }
 
-                BitrateMode::GCCPort { ref gcc_estimator , ..} =>  { 
+                BitrateMode::GCCPort {
+                    ref gcc_estimator, ..
+                } => {
                     let bitrate_bps = gcc_estimator.get_target_bitrate_bps();
                     self.last_target_bitrate_bps = bitrate_bps as f32;
-                    self.last_target_bitrate_bps       
-                }
-
-
-                BitrateMode::NADACiscoPort {} => {
-                    if let Some(last_order_bitrate_mbps ) = self.last_nada_target_bitrate_mbps{
-                        let bitrate_bps = last_order_bitrate_mbps * 1e6; 
-                        self.last_target_bitrate_bps = bitrate_bps as f32; 
-
-                        self.last_target_bitrate_bps
-                    }
-                    else{
-                        // panic!("WHATS HAPPPPPPPPPPENING CATCH!"); 
-                        
-                        // print_dblue!("NADA not configured yet, bitrate : {} Mbps ", self.last_target_bitrate_bps/1e6); 
-                        self.last_target_bitrate_bps = NADA_INITIAL_RATE as f32; 
-                        self.last_target_bitrate_bps   
-                    }
-                }, 
-
-                BitrateMode::FovOptixPort { .. } => {
-
-                    // println!("Value is configured BEFORE one pass ABR: {:.2} Mbps", self.last_target_bitrate_bps / 1e6); 
                     self.last_target_bitrate_bps
                 }
 
-                // BitrateMode::FovOptixPort { last_bitrate_mbps }{
+                BitrateMode::NADACiscoPort {} => {
+                    if let Some(last_order_bitrate_mbps) = self.last_nada_target_bitrate_mbps {
+                        let bitrate_bps = last_order_bitrate_mbps * 1e6;
+                        self.last_target_bitrate_bps = bitrate_bps as f32;
 
-                //     if let Some(guard) = self.aimd_manager.unwrap().lock().unwrap(); 
-                //     {
-                //         bitrate_bps=guard.flag_for_qp;
-                //         let nol=guard.normalize_delta;
-                //         let tps=guard.current_bitrate_/72./8.;
-                //     }
-                // }
-            //     _ => {
-            //         self.last_target_bitrate_bps
-            //     }
+                        self.last_target_bitrate_bps
+                    } else {
+                        // panic!("WHATS HAPPPPPPPPPPENING CATCH!");
+
+                        // print_dblue!("NADA not configured yet, bitrate : {} Mbps ", self.last_target_bitrate_bps/1e6);
+                        self.last_target_bitrate_bps = NADA_INITIAL_RATE as f32;
+                        self.last_target_bitrate_bps
+                    }
+                }
+
+                BitrateMode::FovOptixPort { .. } => {
+                    // println!("Value is configured BEFORE one pass ABR: {:.2} Mbps", self.last_target_bitrate_bps / 1e6);
+                    self.last_target_bitrate_bps
+                } // BitrateMode::FovOptixPort { last_bitrate_mbps }{
+
+                  //     if let Some(guard) = self.aimd_manager.unwrap().lock().unwrap();
+                  //     {
+                  //         bitrate_bps=guard.flag_for_qp;
+                  //         let nol=guard.normalize_delta;
+                  //         let tps=guard.current_bitrate_/72./8.;
+                  //     }
+                  // }
+                  //     _ => {
+                  //         self.last_target_bitrate_bps
+                  //     }
             };
             print_prettyy!(
                 DebugColor::Purple,
@@ -2791,7 +2871,6 @@ impl BitrateManager {
             bitrate_bps
         }
     }
-    
 
     pub fn build_rl_observation(&mut self, now: TaiTime<0>) -> RLObservation {
         match self.bitrate_mode {
@@ -2820,13 +2899,11 @@ impl BitrateManager {
 
         // normalize to a ratio [0.0, 1.5]
         let flr_avg_s = (frames_lost / frames_sent_expectation.max(1.0)).min(1.5); // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
-        
+
         let rebuffer_event_sum = self.last_rebuffer_avg_sum;
         let frame_size_avg_bytes = self.bytes_size_avg.get_average();
         let ow_delay_period_ewma = self.ewma_owd;
         let f_ow_delay_period_ewma = self.ewma_fowd;
-
-
 
         // Create the raw observation struct. Note casting u64 -> f32
         let raw_obs = RLObservation {
@@ -2854,7 +2931,7 @@ impl BitrateManager {
             }
             ObservationConfig::ManualScaledV1 => {
                 // Scaling constants based on plots from image_969aa9.jpg
-                
+
                 // Unipolar (scale to [0.0, 1.0])
                 const MAX_T_ELAPSED: f32 = 60.0; // obs_last/t_elapsed_s
                 const MAX_TARGET_BITRATE: f32 = 100.0; // obs_last/target_bitrate_mbps
@@ -2867,7 +2944,7 @@ impl BitrateManager {
                 const MAX_FLR_AVG: f32 = 1.5; // From your code comment
                 const MAX_PL_SUM: f32 = 1400.0; // obs_last/pl_sum_period
                 const MAX_FRAME_SIZE_AVG: f32 = 200_000.0; // obs_last/frame_size_avg_bytes
-                // const MAX_REBUFFER_SUM: f32 = 6.0; // obs_last/rebuffer_event_sum
+                                                           // const MAX_REBUFFER_SUM: f32 = 6.0; // obs_last/rebuffer_event_sum
 
                 // Bipolar (scale to [-1.0, 1.0])
                 const MAX_ABS_OW_DELAY: f32 = 0.02; // obs_last/ow_delay_period_ewma
@@ -2877,23 +2954,33 @@ impl BitrateManager {
                 RLObservation {
                     // Unipolar [0.0, 1.0]
                     t_elapsed_s: (t_elapsed_s / MAX_T_ELAPSED).clamp(0.0, 1.0),
-                    last_target_bitrate_mbps: (last_target_bitrate_mbps / MAX_TARGET_BITRATE).clamp(0.0, 1.0),
+                    last_target_bitrate_mbps: (last_target_bitrate_mbps / MAX_TARGET_BITRATE)
+                        .clamp(0.0, 1.0),
                     rtt_ms_avg_s: (rtt_ms_avg_s / MAX_RTT_AVG).clamp(0.0, 1.0),
                     rtt_ms_std_s: (rtt_ms_std_s / MAX_RTT_STD).clamp(0.0, 1.0),
-                    bandwidth_mbps_avg_s: (bandwidth_mbps_avg_s / MAX_BANDWIDTH_AVG).clamp(0.0, 1.0),
-                    bandwidth_mbps_std_s: (bandwidth_mbps_std_s / MAX_BANDWIDTH_STD).clamp(0.0, 1.0),
-                    frame_interarrival_avg_ms: (frame_interarrival_avg_ms / MAX_FRAME_INTERARRIVAL_AVG).clamp(0.0, 1.0),
-                    frame_interarrival_std_ms: (frame_interarrival_std_ms / MAX_FRAME_INTERARRIVAL_STD).clamp(0.0, 1.0),
+                    bandwidth_mbps_avg_s: (bandwidth_mbps_avg_s / MAX_BANDWIDTH_AVG)
+                        .clamp(0.0, 1.0),
+                    bandwidth_mbps_std_s: (bandwidth_mbps_std_s / MAX_BANDWIDTH_STD)
+                        .clamp(0.0, 1.0),
+                    frame_interarrival_avg_ms: (frame_interarrival_avg_ms
+                        / MAX_FRAME_INTERARRIVAL_AVG)
+                        .clamp(0.0, 1.0),
+                    frame_interarrival_std_ms: (frame_interarrival_std_ms
+                        / MAX_FRAME_INTERARRIVAL_STD)
+                        .clamp(0.0, 1.0),
                     flr_avg_s: (flr_avg_s / MAX_FLR_AVG).clamp(0.0, 1.0),
                     pl_sum_period: pl_lost_period as f32 / MAX_PL_SUM, // Keep as u64, or normalize: (pl_lost_period as f32 / MAX_PL_SUM).clamp(0.0, 1.0)
-                    frame_size_avg_bytes: (frame_size_avg_bytes / MAX_FRAME_SIZE_AVG).clamp(0.0, 1.0),
+                    frame_size_avg_bytes: (frame_size_avg_bytes / MAX_FRAME_SIZE_AVG)
+                        .clamp(0.0, 1.0),
                     // Bipolar [-1.0, 1.0]
-                    ow_delay_period_ewma: (ow_delay_period_ewma / MAX_ABS_OW_DELAY).clamp(-1.0, 1.0),
-                    f_ow_delay_period_ewma: (f_ow_delay_period_ewma / MAX_ABS_F_OW_DELAY).clamp(-1.0, 1.0),
+                    ow_delay_period_ewma: (ow_delay_period_ewma / MAX_ABS_OW_DELAY)
+                        .clamp(-1.0, 1.0),
+                    f_ow_delay_period_ewma: (f_ow_delay_period_ewma / MAX_ABS_F_OW_DELAY)
+                        .clamp(-1.0, 1.0),
                     // Unipolar [0.0, 1.0]
                     rebuffer_event_sum: rebuffer_event_sum as f32, // Keep as u64, or normalize: (rebuffer_event_sum as f32 / MAX_REBUFFER_SUM).clamp(0.0, 1.0)
                 }
-            }, 
+            }
             ObservationConfig::RunningAvg => {
                 // 1. Pre-process: Apply log transform to skewed, non-negative features
                 let pre_processed_obs = RLObservation {
@@ -2919,38 +3006,35 @@ impl BitrateManager {
                 // 2. Update stats and return normalized, clipped observation
                 self.obs_normalizer.update_and_normalize(pre_processed_obs)
             }
-
         }
     }
 
-
-
-    pub fn vmaf_manual_function( &self, bitrate_mbps: f32 ) -> f32{ // values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
-                             // Snow sample, intra-refresh against 100 Mbps (median fit)
+    pub fn vmaf_manual_function(&self, bitrate_mbps: f32) -> f32 {
+        // values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
+        // Snow sample, intra-refresh against 100 Mbps (median fit)
         100.0 - 89.40 * (-0.0615 * bitrate_mbps).exp()
     }
 
     pub fn normalized_reward_fn(&mut self, obs: &RLObservation) -> f32 {
-        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
-        let beta = 1.0;   // flr 0 to 1
-        let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
-        let gamma; 
+        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1
+        let beta = 1.0; // flr 0 to 1
+        let omega = -1.0 / 90.0; // rebuffering events: 90 -> -1 too
+        let gamma;
 
         if obs.rtt_ms_avg_s >= 50.0 {
-            gamma = -0.02;       // rtt greater than 50 ms -> 0 to -inf based on distance
-        }
-        else{
-            gamma = 0.0; 
+            gamma = -0.02; // rtt greater than 50 ms -> 0 to -inf based on distance
+        } else {
+            gamma = 0.0;
         }
 
         let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
-        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards. 
+        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards.
         let rtt_term = gamma * obs.rtt_ms_avg_s;
-        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
+        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;
 
-        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
-        reward = f32::max(reward, -1.0); // clip rewards to 0 
-        
+        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32;
+        reward = f32::max(reward, -1.0); // clip rewards to 0
+
         // 2. Update the running reward stats
         self.reward_stat.update(reward);
 
@@ -2958,40 +3042,38 @@ impl BitrateManager {
         let mean = self.reward_stat.get_mean();
         let std = self.reward_stat.get_std();
         let normalized_reward = (reward - mean) / (std + 1e-8);
-        
+
         normalized_reward
-
-
     }
 
-    pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 { // only first term is positive, others are penalties. 
+    pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 {
+        // only first term is positive, others are penalties.
 
-        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1 
-        let beta = 1.0;   // flr 0 to 1
-        let omega = - 1.0 / 90.0 ;     // rebuffering events: 90 -> -1 too 
-        let gamma; 
+        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1
+        let beta = 1.0; // flr 0 to 1
+        let omega = -1.0 / 90.0; // rebuffering events: 90 -> -1 too
+        let gamma;
 
         if obs.rtt_ms_avg_s >= 50.0 {
-            gamma = -0.02;       // rtt greater than 50 ms -> 0 to -inf based on distance
-        }
-        else{
-            gamma = 0.0; 
+            gamma = -0.02; // rtt greater than 50 ms -> 0 to -inf based on distance
+        } else {
+            gamma = 0.0;
         }
 
         let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
-        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards. 
+        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards.
         let rtt_term = gamma * obs.rtt_ms_avg_s;
-        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;  
+        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;
 
-        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32; 
-        reward = f32::max(reward, -1.0); // clip rewards to 0 
+        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32;
+        reward = f32::max(reward, -1.0); // clip rewards to 0
         reward
     }
 
     // pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
-    //     let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1 
+    //     let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1
 
-    //     println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.rtt_ms_avg_s, obs.flr_avg_s); 
+    //     println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.rtt_ms_avg_s, obs.flr_avg_s);
 
     //     let reward = if obs.flr_avg_s <= 0.05 {
     //         if obs.rtt_ms_avg_s <= 40.0 { // let's use this manual MTP threshold
@@ -3000,7 +3082,7 @@ impl BitrateManager {
     //         else{
     //             0.0}
     //     }
-    //     else{0.0}; 
+    //     else{0.0};
     //     reward
     // }
 }
@@ -3015,7 +3097,6 @@ pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 pub const fn lazy_mut_none<T>() -> OptLazy<T> {
     Lazy::new(|| Mutex::new(None))
 }
-
 
 #[derive(Default)]
 struct TrackingData {
@@ -3048,9 +3129,7 @@ impl CsvTracking {
 
         // Write header if file is empty
         if Path::new(&file_path).metadata()?.len() == 0 {
-            buf.write_all(
-                b"timestamp,device_id,pos_x,pos_y,pos_z,interarrival_ms\n",
-            )?;
+            buf.write_all(b"timestamp,device_id,pos_x,pos_y,pos_z,interarrival_ms\n")?;
             buf.flush()?;
         }
 
@@ -3119,7 +3198,6 @@ impl CsvTracking {
     }
 }
 
-
 #[derive(Debug)]
 struct TrackingLog {
     device_id: u64,
@@ -3136,8 +3214,8 @@ pub struct XRServer {
     pub bitrate_manager: BitrateManager,
     pub video_app_sender: Option<StreamSender<VideoPacketHeader>>,
     pub audio_app_sender: Option<StreamSender<()>>,
-    pub bw_probe_sender: Option<StreamSender<()>>,                  // Optional, only used by FovOptix to estimate current BW via active probing. 
-    pub bw_probe_receiver: Option<StreamReceiver<()>>, 
+    pub bw_probe_sender: Option<StreamSender<()>>, // Optional, only used by FovOptix to estimate current BW via active probing.
+    pub bw_probe_receiver: Option<StreamReceiver<()>>,
 
     pub tracking_app_receiver: Option<StreamReceiver<Tracking>>,
     pub statistics_app_receiver: Option<StreamReceiver<ClientStatistics>>,
@@ -3151,33 +3229,29 @@ pub struct XRServer {
     pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>,
     pub STATISTICS_MANAGER: StatisticsManager,
     pub name_folder: String,
-    pub network_effects: Vec<NetworkPattern>, 
+    pub network_effects: Vec<NetworkPattern>,
 
-    pub packet_size_sockets: usize, 
+    pub packet_size_sockets: usize,
 
-    pub video_sample_filename: String, 
-    pub gop_size: usize, 
-    pub intra_refresh: bool, 
-    pub abr_enabled: usize, 
+    pub video_sample_filename: String,
+    pub gop_size: usize,
+    pub intra_refresh: bool,
+    pub abr_enabled: usize,
 
-    pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>, 
-    pub last_tracking_rx_instant: TaiTime<0>, 
+    pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>,
+    pub last_tracking_rx_instant: TaiTime<0>,
 
-    pub csv_tracking: CsvTracking, 
-    pub sim_unique_string: String, 
+    pub csv_tracking: CsvTracking,
+    pub sim_unique_string: String,
 
-    pub nada_sender: Option<Arc<Mutex<NadaSender>>>, 
+    pub nada_sender: Option<Arc<Mutex<NadaSender>>>,
 
-    pub fov_optix_manager : Option<Arc<Mutex<FovOptixStruct>>> , 
+    pub fov_optix_manager: Option<Arc<Mutex<FovOptixStruct>>>,
 
-    pub reward_mode: usize, // 0 -> naive, 1->normalized, 2-> ?? For future reward shape. 
-    pub t_update_abr: f32, 
+    pub reward_mode: usize, // 0 -> naive, 1->normalized, 2-> ?? For future reward shape.
+    pub t_update_abr: f32,
 
-    pub edca_be_mode: bool,  
-
-
-
-
+    pub edca_be_mode: bool,
 }
 #[allow(unused)]
 impl XRServer {
@@ -3188,28 +3262,25 @@ impl XRServer {
         frame_rate: f32,
         initial_bitrate_mbps: f32,
         name_folder: &str,
-        effects: &[NetworkPattern], 
+        effects: &[NetworkPattern],
         file_name_video: &str,
-        gop_size: usize, 
-        intra_refresh: bool, 
-        abr_enabled: usize, 
-        nest_vr_profile: &NestVrProfile, 
-        t_end_simu: f64, 
-        sim_unique_string: &str, 
-        obs_config: ObservationConfig, 
-        reward_mode: usize ,
-        t_update_abr: f32, 
-        packet_size_sockets: usize, 
-        edca_be_mode: bool,  
-
+        gop_size: usize,
+        intra_refresh: bool,
+        abr_enabled: usize,
+        nest_vr_profile: &NestVrProfile,
+        t_end_simu: f64,
+        sim_unique_string: &str,
+        obs_config: ObservationConfig,
+        reward_mode: usize,
+        t_update_abr: f32,
+        packet_size_sockets: usize,
+        edca_be_mode: bool,
     ) -> Self {
-
         let system_time = SystemTime::UNIX_EPOCH;
-        let mut final_file; 
+        let mut final_file;
 
-        if file_name_video.contains("randomVid"){
-
-            let random_file_list = ["garp4k",  "snow", "assemble", "cut_video", "furbo"];
+        if file_name_video.contains("randomVid") {
+            let random_file_list = ["garp4k", "snow", "assemble", "cut_video", "furbo"];
             let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
             final_file = match choice_random {
                 Some(file) => file,
@@ -3218,43 +3289,38 @@ impl XRServer {
                     // println!("No files to choose from");
                 }
             };
-
-        }
-        else{
-            final_file = file_name_video; 
+        } else {
+            final_file = file_name_video;
         }
 
         let num = crate::lib::get_4_octet(ip_self);
         let history_interval = t_update_abr;
 
-        let nada_sender = if abr_enabled == 5{
+        let nada_sender = if abr_enabled == 5 {
             Some(Arc::new(Mutex::new(NadaSender::new(t0_sim))))
-        }
-        else{
+        } else {
             None
-        }; 
+        };
 
         let fovoptix_struct: Option<Arc<Mutex<FovOptixStruct>>> = if abr_enabled == 6 {
-            // let interarrival_man = FOInterArrival::new(60, 0.001);  // completely unused... 
-            let trendline_man = FOTrendlineEstimator::new(); 
-            let aimd_man =    FOAimdRateControl::new(true); 
+            // let interarrival_man = FOInterArrival::new(60, 0.001);  // completely unused...
+            let trendline_man = FOTrendlineEstimator::new();
+            let aimd_man = FOAimdRateControl::new(true);
 
-            let bitrate_est_man = FOBitrateEstimator::new(); 
-            let ratecontrol_man= FORateControlInput::new(FOBandwidthUsage::kBwNormal, Some((30. * 1024. * 1024.))); 
+            let bitrate_est_man = FOBitrateEstimator::new();
+            let ratecontrol_man =
+                FORateControlInput::new(FOBandwidthUsage::kBwNormal, Some((30. * 1024. * 1024.)));
 
-
-            Some(Arc::new(Mutex::new( FovOptixStruct::new(
-                trendline_man, 
-                aimd_man, 
-                bitrate_est_man, 
-                ratecontrol_man, 
-                initial_bitrate_mbps as f64 )
-            )))
-        }
-        else{
+            Some(Arc::new(Mutex::new(FovOptixStruct::new(
+                trendline_man,
+                aimd_man,
+                bitrate_est_man,
+                ratecontrol_man,
+                initial_bitrate_mbps as f64,
+            ))))
+        } else {
             None
-        }; 
-
+        };
 
         Self {
             ip_self,
@@ -3265,21 +3331,21 @@ impl XRServer {
                 MAX_HISTORY_SIZE,
                 frame_rate,
                 initial_bitrate_mbps,
-                abr_enabled, 
-                nest_vr_profile, 
-                t_end_simu, 
-                ip_self, 
-                sim_unique_string, 
-                frame_rate, 
+                abr_enabled,
+                nest_vr_profile,
+                t_end_simu,
+                ip_self,
+                sim_unique_string,
+                frame_rate,
                 obs_config,
-                t_update_abr,  
-                reward_mode, 
+                t_update_abr,
+                reward_mode,
             ),
 
             video_app_sender: None,
-            audio_app_sender: None, 
-            bw_probe_sender: None,  // Optional, only used by FovOptix to estimate current BW via active probing. 
-            bw_probe_receiver: None, 
+            audio_app_sender: None,
+            bw_probe_sender: None, // Optional, only used by FovOptix to estimate current BW via active probing.
+            bw_probe_receiver: None,
 
             tracking_app_receiver: None,
             statistics_app_receiver: None,
@@ -3301,25 +3367,25 @@ impl XRServer {
                 0.0,
                 name_folder,
                 ip_self,
-                frame_rate, 
+                frame_rate,
             ),
 
-            network_effects: effects.to_vec() ,  
-            packet_size_sockets, 
-            video_sample_filename: final_file.to_string(), 
-            gop_size, 
-            intra_refresh, 
-            abr_enabled, 
+            network_effects: effects.to_vec(),
+            packet_size_sockets,
+            video_sample_filename: final_file.to_string(),
+            gop_size,
+            intra_refresh,
+            abr_enabled,
             output_perfect_information_bitrate: Output::default(),
-            
-            last_tracking_rx_instant: t0_sim, 
-            csv_tracking: CsvTracking::new(name_folder, num).unwrap(), 
-            sim_unique_string: sim_unique_string.to_string(), 
-            nada_sender, 
-            fov_optix_manager: fovoptix_struct, 
-            reward_mode, 
-            t_update_abr, 
-            edca_be_mode,             
+
+            last_tracking_rx_instant: t0_sim,
+            csv_tracking: CsvTracking::new(name_folder, num).unwrap(),
+            sim_unique_string: sim_unique_string.to_string(),
+            nada_sender,
+            fov_optix_manager: fovoptix_struct,
+            reward_mode,
+            t_update_abr,
+            edca_be_mode,
         }
     }
 
@@ -3328,7 +3394,7 @@ impl XRServer {
         print_red!(
             "[XRServer {}] Ending session at {:.8}s",
             self.ip_self,
-            format_elapsed!(now), 
+            format_elapsed!(now),
         );
 
         // Stop streaming
@@ -3337,16 +3403,20 @@ impl XRServer {
         let current_obs = self.bitrate_manager.build_rl_observation(now); // only return something if RL mode activated
 
         let reward = match self.reward_mode {
-                    0 => self.bitrate_manager.rl_naive_reward_function(&current_obs), 
-                    1 => self.bitrate_manager.normalized_reward_fn(&current_obs), 
-                    _ => self.bitrate_manager.rl_naive_reward_function(&current_obs), 
-                }; 
-
+            0 => self.bitrate_manager.rl_naive_reward_function(&current_obs),
+            1 => self.bitrate_manager.normalized_reward_fn(&current_obs),
+            _ => self.bitrate_manager.rl_naive_reward_function(&current_obs),
+        };
 
         match &self.bitrate_manager.bitrate_mode {
-            BitrateMode::ReinforcementLearner { pending_obs, connector, last_action_idx, .. } => {
+            BitrateMode::ReinforcementLearner {
+                pending_obs,
+                connector,
+                last_action_idx,
+                ..
+            } => {
                 println!("SESSION ENDDD!");
-                let mut con = connector.lock().unwrap();  // lock ONCE
+                let mut con = connector.lock().unwrap(); // lock ONCE
 
                 // history
                 let mut history_opt = pending_obs.lock().unwrap().take();
@@ -3356,8 +3426,6 @@ impl XRServer {
                 // prev window BEFORE pushing current_obs
                 let prev_win_flat = history.as_flat_padded();
 
-
-                
                 let reward = self.bitrate_manager.rl_naive_reward_function(&current_obs);
                 let prev_action = *last_action_idx.lock().unwrap();
 
@@ -3374,21 +3442,21 @@ impl XRServer {
                     reward,
                     next_obs: next_win_flat,
                     done: true,
-                    cont_action_mbps: Some(self.bitrate_manager.last_target_bitrate_bps / 1e6)
+                    cont_action_mbps: Some(self.bitrate_manager.last_target_bitrate_bps / 1e6),
                 };
-                con.post_transition(&transition);     // <--- use `con`, don't re-lock
-                // print_red!("[RL] POSTING FINAL TRANSITION);
+                con.post_transition(&transition); // <--- use `con`, don't re-lock
+                                                  // print_red!("[RL] POSTING FINAL TRANSITION);
 
-                con.reset_window();                   // <--- use `con`, don't re-lock
+                con.reset_window(); // <--- use `con`, don't re-lock
 
                 // Reset history window for next episode
-                *pending_obs.lock().unwrap() = Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
+                *pending_obs.lock().unwrap() =
+                    Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
                 // println!("SESSION ENDDD3!");
                 drop(con); // releases the lock
             }
             _ => {}
         }
-
 
         // Drop or reset senders/receivers
         self.video_app_sender = None;
@@ -3405,12 +3473,9 @@ impl XRServer {
         // reset bitrate manager & statistics manager
         self.bitrate_manager.reset();
         self.STATISTICS_MANAGER.clear();
-        
     }
 
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>) {
-        
-        
         if let Some(mut protorecv) = self.control_socket_receiver.clone() {
             // let packet = protorecv.recv(STREAMING_RECV_TIMEOUT).unwrap();
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
@@ -3424,20 +3489,26 @@ impl XRServer {
                     let rtt: Duration;
                     // if let send_instant = map_clone.get(&frame_id).unwrap()
 
+                    if let Some((_, send_instant)) = map_clone.remove(&frame_id) {
+                        if let Some(foman) = self.fov_optix_manager.clone() {
+                            // equivalent to matching for FovOptix
 
-                    if let Some((_, send_instant)) = map_clone.remove(&frame_id) {  
-                        if let Some(foman) = self.fov_optix_manager.clone(){ // equivalent to matching for FovOptix
+                            let mut guard = foman.lock().unwrap();
+                            let val_rx = guard.last_reported_frame_rx_client_timestamp;
 
-                            let mut guard = foman.lock().unwrap(); 
-                            let val_rx = guard.last_reported_frame_rx_client_timestamp; 
-                            
-                            let send_instant_s = send_instant.duration_since(TaiTime::EPOCH).as_secs_f32(); 
-                            guard.report_fovoptix_stats_server(network_stats.clone(), send_instant_s, val_rx, now);
+                            let send_instant_s =
+                                send_instant.duration_since(TaiTime::EPOCH).as_secs_f32();
+                            guard.report_fovoptix_stats_server(
+                                network_stats.clone(),
+                                send_instant_s,
+                                val_rx,
+                                now,
+                            );
                         }
-                        
+
                         rtt = now.duration_since(send_instant);
                         debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
-                        let netstats= network_stats.clone(); 
+                        let netstats = network_stats.clone();
 
                         let (peak_network_throughput_bps, frame_interarrival_s) =
                             self.STATISTICS_MANAGER.report_network_statistics(
@@ -3453,34 +3524,46 @@ impl XRServer {
                             peak_network_throughput_bps,
                             frame_interarrival_s,
                             network_stats,
-                            now,  
-                            send_instant, 
+                            now,
+                            send_instant,
                         );
 
-                        if netstats.nada_stats.nada_feedback{         
+                        if netstats.nada_stats.nada_feedback {
                             // print_dblue!("{} Received feedback: {:#?}", format_elapsed!(now), netstats.nada_stats.clone());                                      // Should be equivalent to matching bitrate_mode to NADAPort
-                            let client_stats = netstats.nada_stats.clone(); 
-                            let feedback_report  =  NADAFeedbackReport::new(client_stats.nada_rmode, client_stats.nada_xcurr, client_stats.nada_recv, client_stats.d_queue, client_stats.d_tilde, client_stats.plr);
-                            if let Some(nada_sender_arc) = self.nada_sender.as_mut(){
-                                let mut guard = nada_sender_arc.lock().unwrap(); 
-                                guard.update_on_receive_feedback(now, send_instant.duration_since(TaiTime::EPOCH).as_micros() as i64, feedback_report, self.fps as f64);
-                                self.bitrate_manager.last_nada_target_bitrate_mbps = Some(guard.get_target_bitrate() as f64 / 1024.0 / 1024.0) ;
+                            let client_stats = netstats.nada_stats.clone();
+                            let feedback_report = NADAFeedbackReport::new(
+                                client_stats.nada_rmode,
+                                client_stats.nada_xcurr,
+                                client_stats.nada_recv,
+                                client_stats.d_queue,
+                                client_stats.d_tilde,
+                                client_stats.plr,
+                            );
+                            if let Some(nada_sender_arc) = self.nada_sender.as_mut() {
+                                let mut guard = nada_sender_arc.lock().unwrap();
+                                guard.update_on_receive_feedback(
+                                    now,
+                                    send_instant.duration_since(TaiTime::EPOCH).as_micros() as i64,
+                                    feedback_report,
+                                    self.fps as f64,
+                                );
+                                self.bitrate_manager.last_nada_target_bitrate_mbps =
+                                    Some(guard.get_target_bitrate() as f64 / 1024.0 / 1024.0);
                             }
-                        }
-                        else{
-                            if matches!(self.bitrate_manager.bitrate_mode, BitrateMode::NADACiscoPort{..}){
+                        } else {
+                            if matches!(
+                                self.bitrate_manager.bitrate_mode,
+                                BitrateMode::NADACiscoPort { .. }
+                            ) {
                                 // println!("NO FEEDBACK? ");
                             }
-
                         }
-                 
+
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
                         println!("frame {} RTT ZEROO!!!!!", network_stats.frame_index);
                         rtt = Duration::ZERO;
                     }
-
-                    
                 }
                 ClientControlPacket::DeadlineShardLossStat(inner) => {
                     let frames_lost = inner.frame_indexes;
@@ -3493,9 +3576,17 @@ impl XRServer {
                         //     frame,
                         //     shard
                         // );
-                        let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
-                        self.STATISTICS_MANAGER.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // parallel to the one in bitrate manager. 
-                        self.bitrate_manager.report_shard_and_frame_loss(1 as usize, *shard, time_elapsed); // report one frame lost, and nº of video shards lost
+                        let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32();
+                        self.STATISTICS_MANAGER.report_shard_and_frame_loss(
+                            1 as usize,
+                            *shard,
+                            time_elapsed,
+                        ); // parallel to the one in bitrate manager.
+                        self.bitrate_manager.report_shard_and_frame_loss(
+                            1 as usize,
+                            *shard,
+                            time_elapsed,
+                        ); // report one frame lost, and nº of video shards lost
                     }
                 }
 
@@ -3510,11 +3601,11 @@ impl XRServer {
 
         let serialized = &buf[SHARD_PREFIX_SIZE..];
         let track: Tracking = bincode::deserialize::<Tracking>(serialized)?;
-            // .unwrap()?; 
+        // .unwrap()?;
         Ok(track)
     }
     pub async fn in_from_network(&mut self, frame: TimedFrame) {
-        // println!("In from network!"); 
+        // println!("In from network!");
         let packet_vec: Vec<MpduPacket> = frame.vec;
         let now = frame.timestamp;
 
@@ -3524,7 +3615,6 @@ impl XRServer {
             // println!("XRServer IN NETWORK. Header: {:?}, buffer_len = {}", header, buffer.len());
 
             match header.stream_id {
-
                 FOVOPTIX_BW_PROBE => {
                     // The raw bytes as received from network
                     let buf = &packet.data_inner;
@@ -3539,9 +3629,10 @@ impl XRServer {
                     let hdr_size = bincode::serialized_size(&BwProbeHeader {
                         seq: 0,
                         tx_instant_us: 0,
-                        rx_instant_s_video_frame: 0., 
+                        rx_instant_s_video_frame: 0.,
                         payload_len: 0,
-                    }).unwrap() as usize;
+                    })
+                    .unwrap() as usize;
 
                     // --- Step 3: slice and deserialize ---
                     let hdr_slice = &buf[start_hdr..start_hdr + hdr_size];
@@ -3554,24 +3645,25 @@ impl XRServer {
 
                     let now_us = now.duration_since(TaiTime::EPOCH).as_micros() as i128;
                     let time_elapsed_probing: i128 = now_us - recv_hdr.tx_instant_us;
-                    
-                    let payload_size = buf.len(); 
 
-                    let bandwidth_sample_bps = (payload_size as f32 * 8.0 * 1_000_000.0) / time_elapsed_probing as f32;
+                    let payload_size = buf.len();
+
+                    let bandwidth_sample_bps =
+                        (payload_size as f32 * 8.0 * 1_000_000.0) / time_elapsed_probing as f32;
                     // println!("Available bandwidth: {} bps", bandwidth_sample_bps);
 
-                    if let Some(foman) = self.fov_optix_manager.clone().as_mut(){
-                        let mut guard = foman.lock().unwrap(); 
+                    if let Some(foman) = self.fov_optix_manager.clone().as_mut() {
+                        let mut guard = foman.lock().unwrap();
 
-                        guard.last_bw_bps = bandwidth_sample_bps as f64 ; //store last sample, as FovOptix does in global in connection loop                         
-                        guard.last_reported_frame_rx_client_timestamp = recv_hdr.rx_instant_s_video_frame; // probe from client contains absolute timestamp of last RX frame as f32 
-                        // guard.last_frame_tx_timestamp_micros =; 
-                        drop(guard); 
+                        guard.last_bw_bps = bandwidth_sample_bps as f64; //store last sample, as FovOptix does in global in connection loop
+                        guard.last_reported_frame_rx_client_timestamp =
+                            recv_hdr.rx_instant_s_video_frame; // probe from client contains absolute timestamp of last RX frame as f32
+                                                               // guard.last_frame_tx_timestamp_micros =;
+                        drop(guard);
+                    } else {
+                        panic!("UNDEFINED?");
                     }
-                    else{
-                        panic!("UNDEFINED?"); 
-                    }
-                    // calculate the inter-arrival time     
+                    // calculate the inter-arrival time
 
                     // print_red!(
                     //     "[BW_PROBE] seq={} RTT={:.3}ms payload={}B",
@@ -3586,7 +3678,7 @@ impl XRServer {
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
 
-                         match self.decode_tracking_from_bytes(&new_buffer) {
+                        match self.decode_tracking_from_bytes(&new_buffer) {
                             Ok(track) => {
                                 for (device_id, motion) in track.device_motions {
                                     let log_entry = TrackingLog {
@@ -3604,7 +3696,10 @@ impl XRServer {
                                     //     // log_entry.orientation,
                                     //     log_entry.linear_velocity
                                     // );
-                                    let interarrival_tracking_ms = now.duration_since(self.last_tracking_rx_instant).as_secs_f32() * 1000.0; 
+                                    let interarrival_tracking_ms = now
+                                        .duration_since(self.last_tracking_rx_instant)
+                                        .as_secs_f32()
+                                        * 1000.0;
                                     self.csv_tracking.update_stats(
                                         now,
                                         log_entry.device_id,
@@ -3615,9 +3710,7 @@ impl XRServer {
                                         ],
                                         interarrival_tracking_ms,
                                     );
-                                    self.last_tracking_rx_instant = now; 
-
-
+                                    self.last_tracking_rx_instant = now;
 
                                     // later: push to CSV logger
                                     // self.csv_logger.write_tracking(&log_entry);
@@ -3626,7 +3719,7 @@ impl XRServer {
                             Err(e) => {
                                 eprintln!("[TRACKING] decode error: {e:?}");
                             }
-                         }
+                        }
                         // println!("TODO: THE REST of tracking server!!");
                     }
                 }
@@ -3648,11 +3741,9 @@ impl XRServer {
                             framed_recv_vec(&packet.data_inner).unwrap();
                         // println!("STATS IS {:?}", stats);
 
-                        if let Ok(()) = sock.send(&stats){
-                            
-                        }
-                        else{
-                            print_red!("[ERROR] Socket error control stream!", ); 
+                        if let Ok(()) = sock.send(&stats) {
+                        } else {
+                            print_red!("[ERROR] Socket error control stream!",);
                         }
 
                         XRServer::handle_control_packet(self, stats, now);
@@ -3704,7 +3795,6 @@ impl XRServer {
                             stop = true;
                             break;
                         } else {
-
                             // println!("{}", DebugColor::DarkGreen.to_color_fn()(String::from("Parsed from connection output:")));
                             if let Ok((
                                 packet_length,
@@ -3721,7 +3811,7 @@ impl XRServer {
                                     2 => "Audio",
                                     3 => "Video",
                                     4 => "Statistics",
-                                    9 => "BW probe", 
+                                    9 => "BW probe",
                                     _ => "?? IDK",
                                 };
                                 elapsed = now.duration_since(self.t_0);
@@ -3747,27 +3837,22 @@ impl XRServer {
                                     // );
                                 }
                                 // if stream_id == VIDEO || stream_id == AUDIO {
-                                    
 
-                                    if !self.edca_be_mode {
-                                        if stream_id == VIDEO{
-                                            packet.edca_ac = EdcaAc::Video; 
-                                        }
-                                        else if stream_id == AUDIO {
-                                            packet.edca_ac = EdcaAc::Video; // justification: we want them to be synchronized/aggregated  
-                                                                            // together with video AMPDUs (for better efficiency).  
-                                        }
-                                        else if stream_id == FOVOPTIX_BW_PROBE{
-                                            packet.edca_ac = EdcaAc::BestEffort; 
-                                        }
+                                if !self.edca_be_mode {
+                                    if stream_id == VIDEO {
+                                        packet.edca_ac = EdcaAc::Video;
+                                    } else if stream_id == AUDIO {
+                                        packet.edca_ac = EdcaAc::Video; // justification: we want them to be synchronized/aggregated
+                                                                        // together with video AMPDUs (for better efficiency).
+                                    } else if stream_id == FOVOPTIX_BW_PROBE {
+                                        packet.edca_ac = EdcaAc::BestEffort;
                                     }
-                                    else{
-                                        packet.edca_ac = EdcaAc::BestEffort; 
-                                    }
-                                   
-                                    self.outport_videoapp_network.send(packet).await;
+                                } else {
+                                    packet.edca_ac = EdcaAc::BestEffort;
+                                }
+
+                                self.outport_videoapp_network.send(packet).await;
                                 // }
-
                             } else {
                                 println!(
                                     "{}",
@@ -3810,7 +3895,6 @@ impl XRServer {
         }
     }
 
-
     pub fn generate_audio_frame<'a>(
         &'a mut self,
         _: (),
@@ -3821,7 +3905,7 @@ impl XRServer {
 
             if let Some(mut sender) = self.audio_app_sender.clone() {
                 // 1) how big is our "two empties" payload?
-                let payload_len = (1400 + 600) * 8; 
+                let payload_len = (1400 + 600) * 8;
 
                 // 2) compute the hidden prefix so fragmentation/sharding still lines up
                 let header = VideoPacketHeader::new(Duration::from_secs(1), false);
@@ -3833,8 +3917,7 @@ impl XRServer {
 
                 // 4) (optional) encode your header into the reserved space
                 let header_bytes = bincode::serialize(&header).unwrap();
-                raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + hsize]
-                    .copy_from_slice(&header_bytes);
+                raw[SHARD_PREFIX_SIZE..SHARD_PREFIX_SIZE + hsize].copy_from_slice(&header_bytes);
 
                 // 5) wrap it—length is _only_ the payload
                 let buf = crate::lib::alvr_stream_socket::Buffer {
@@ -3845,19 +3928,17 @@ impl XRServer {
                 };
 
                 // 6) send + handle the app‐recv path
-                let _ = sender.send(buf, now); 
+                let _ = sender.send(buf, now);
                 let arc_receiver = sender.app_network_interface.clone();
                 let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
-                XRServer::read_app_send_network_interface(
-                    self, (), now, buffer, arc_receiver
-                ).await;
+                XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
+                    .await;
             }
 
             // 7) schedule next in 10 ms
             context
                 .scheduler
-                .schedule_event(Duration::from_millis(10),
-                                Self::generate_audio_frame, ())
+                .schedule_event(Duration::from_millis(10), Self::generate_audio_frame, ())
                 .unwrap();
         }
     }
@@ -3868,12 +3949,14 @@ impl XRServer {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-
             let now = context.scheduler.time();
             // print_dblue!("{} GENERATING PROBE", format_elapsed!(now));
 
             // Run only if we have the FovOptix managers AND a probe sender
-            if let (Some(fov_man), Some(mut sender)) = (self.fov_optix_manager.as_ref(), self.bw_probe_sender.clone()) {
+            if let (Some(fov_man), Some(mut sender)) = (
+                self.fov_optix_manager.as_ref(),
+                self.bw_probe_sender.clone(),
+            ) {
                 // ---- take what we need without holding the lock across await ----
                 let (seq, bw_sent_map_arc) = {
                     let mut guard = fov_man.lock().unwrap();
@@ -3890,7 +3973,7 @@ impl XRServer {
                 let hdr = BwProbeHeader {
                     seq,
                     tx_instant_us: now.duration_since(TaiTime::EPOCH).as_micros() as i128,
-                    rx_instant_s_video_frame: 0., 
+                    rx_instant_s_video_frame: 0.,
                     payload_len: payload_len as u32,
                 };
 
@@ -3903,14 +3986,14 @@ impl XRServer {
 
                 // 5) encode BwProbeHeader into hidden area
                 let hdr_bytes = bincode::serialize(&hdr).unwrap();
-                raw[SHARD_PREFIX_SIZE .. SHARD_PREFIX_SIZE + hsize].copy_from_slice(&hdr_bytes);
+                raw[SHARD_PREFIX_SIZE..SHARD_PREFIX_SIZE + hsize].copy_from_slice(&hdr_bytes);
 
-                // 6) wrap it as Buffer<()> to match StreamSender<()> 
+                // 6) wrap it as Buffer<()> to match StreamSender<()>
                 let buf = crate::lib::alvr_stream_socket::Buffer {
                     inner: raw,
                     hidden_offset,
                     length: payload_len,
-                    _phantom: std::marker::PhantomData::<()> // IMPORTANT
+                    _phantom: std::marker::PhantomData::<()>, // IMPORTANT
                 };
 
                 // 7) remember send time for RTT/goodput on echo
@@ -3924,12 +4007,16 @@ impl XRServer {
             }
 
             // 9) schedule next probe (tune period as needed)
-            context.scheduler
-                .schedule_event(std::time::Duration::from_millis(20), Self::generate_FO_bandwidth_probe, ())
+            context
+                .scheduler
+                .schedule_event(
+                    std::time::Duration::from_millis(20),
+                    Self::generate_FO_bandwidth_probe,
+                    (),
+                )
                 .unwrap();
         }
     }
-
 
     pub fn generate_video_frame<'a>(
         &'a mut self,
@@ -3941,12 +4028,13 @@ impl XRServer {
             // let map_clone: Arc<RwLock<HashMap<u32, TaiTime<0>>>> = Arc::clone(&self.map_rtt);
 
             let map_clone: Arc<DashMap<u32, TaiTime<0>>> = Arc::clone(&self.map_rtt);
-            
-            if self.video_app_sender.is_none(){ // This happens when we end a session but the next frame was already scheduled. 
-                        // println!("CATCH NO VIDEO APP SENDER");  
-                        return;
-                    }
-            
+
+            if self.video_app_sender.is_none() {
+                // This happens when we end a session but the next frame was already scheduled.
+                // println!("CATCH NO VIDEO APP SENDER");
+                return;
+            }
+
             self.video_app_sender.as_mut().unwrap().next_packet_index =
                 self.frames_sent_counter as u32;
 
@@ -3956,80 +4044,94 @@ impl XRServer {
                 let header = VideoPacketHeader::new(Duration::from_secs(1), is_idr);
 
                 // self.bitrate_manager.report_timestamp_change_bitrate(now);   // for programatically changing CBR bitrate
-                
-                let duration_abr = Duration::from_secs_f32(self.t_update_abr); 
 
-                // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32()); 
+                let duration_abr = Duration::from_secs_f32(self.t_update_abr);
+
+                // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32());
 
                 let count = get_counter().fetch_add(1, Ordering::Relaxed);
 
-
-                
                 if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || // One pass every BITRATE_UPDATE_INTERVAL
-                    !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCPort{ .. }) || !matches!(self.bitrate_manager.bitrate_mode, BitrateMode::FovOptixPort{..}) 
-                {  
-                    if (now.duration_since(self.bitrate_manager.last_update_instant) >= duration_abr){
-                       
-                        let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
+                    !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCPort{ .. }) || !matches!(self.bitrate_manager.bitrate_mode, BitrateMode::FovOptixPort{..})
+                {
+                    if (now.duration_since(self.bitrate_manager.last_update_instant)
+                        >= duration_abr)
+                    {
+                        let last_bitrate_mbps =
+                            self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                         self.bitrate_manager.last_update_instant = now;
-                        
 
-                        let perfect_info_message = PerfectInfoBitrateMessage{bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),  bitrate_mbps: last_bitrate_mbps }; 
+                        let perfect_info_message = PerfectInfoBitrateMessage {
+                            bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),
+                            bitrate_mbps: last_bitrate_mbps,
+                        };
 
-                        self.output_perfect_information_bitrate.send(perfect_info_message).await; // Client knows the bitrate ladder, needed for thresholds computing in HMD. 
-                        
-                        // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps; 
+                        self.output_perfect_information_bitrate
+                            .send(perfect_info_message)
+                            .await; // Client knows the bitrate ladder, needed for thresholds computing in HMD.
 
-                        // print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps); 
+                        // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;
+
+                        // print_green!("[{}]  Current bitrate: {} Mbps", self.ip_self, self.bitrate_manager.last_target_bitrate_mbps);
                     }
-                }                
-                else{ // EveRest classic, GCC, FovOptix are applied per-frame. 
+                } else {
+                    // EveRest classic, GCC, FovOptix are applied per-frame.
 
                     // println!()
-                    if matches!(self.bitrate_manager.bitrate_mode , BitrateMode::FovOptixPort { ..}){
+                    if matches!(
+                        self.bitrate_manager.bitrate_mode,
+                        BitrateMode::FovOptixPort { .. }
+                    ) {
                         println!("INSIDE FOVOPTIXIXXX");
-                        if let Some(man) = self.fov_optix_manager.as_mut(){
+                        if let Some(man) = self.fov_optix_manager.as_mut() {
+                            let mut guard = man.lock().unwrap();
 
-                            let mut guard = man.lock().unwrap(); 
+                            let bitrate_bps = guard.aimd.flag_for_qp;
+                            let nol = guard.aimd.normalize_delta;
+                            let tps = guard.aimd.current_bitrate_ / 72.0 / 8.0; // Is this only valid for 72 FPS? :/
 
-                            let bitrate_bps = guard.aimd.flag_for_qp; 
-                            let nol = guard.aimd.normalize_delta; 
-                            let tps =      guard.aimd.current_bitrate_ / 72.0 / 8.0 ; // Is this only valid for 72 FPS? :/      
+                            println!(
+                                "[FOVOPTIX] Bitrate Mbps : {:.2} Mbps",
+                                bitrate_bps as f32 / 1e6
+                            );
 
-                            println!("[FOVOPTIX] Bitrate Mbps : {:.2} Mbps", bitrate_bps as f32 / 1e6 ); 
-
-
-                            panic!("CHECK FovOptix paper and VideoEncoderNVENC: Actual usage of nol and tps"); 
-                            self.bitrate_manager.last_target_bitrate_bps = bitrate_bps as f32; 
+                            panic!("CHECK FovOptix paper and VideoEncoderNVENC: Actual usage of nol and tps");
+                            self.bitrate_manager.last_target_bitrate_bps = bitrate_bps as f32;
                         }
                     }
 
-                    let last_bitrate_mbps = self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
+                    let last_bitrate_mbps =
+                        self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
-                    
-                    let perfect_info_message = PerfectInfoBitrateMessage{bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),  bitrate_mbps: last_bitrate_mbps }; 
-                    self.output_perfect_information_bitrate.send(perfect_info_message).await;  // Client knows the bitrate ladder, needed for thresholds computing in HMD. 
 
-                    // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;   
+                    let perfect_info_message = PerfectInfoBitrateMessage {
+                        bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),
+                        bitrate_mbps: last_bitrate_mbps,
+                    };
+                    self.output_perfect_information_bitrate
+                        .send(perfect_info_message)
+                        .await; // Client knows the bitrate ladder, needed for thresholds computing in HMD.
+
+                    // self.bitrate_manager.last_target_bitrate_mbps = last_bitrate_mbps;
                 }
-
-
-
 
                 if count % 80 == 0 {
-                    print_green!("{} [{}]  Current bitrate: {} Mbps", format_elapsed!(now), self.ip_self, self.bitrate_manager.last_target_bitrate_bps / 1e6); 
+                    print_green!(
+                        "{} [{}]  Current bitrate: {} Mbps",
+                        format_elapsed!(now),
+                        self.ip_self,
+                        self.bitrate_manager.last_target_bitrate_bps / 1e6
+                    );
                 }
 
-               
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_bps / 1e6;
 
-                // let max_bitrate_ladder_mbps: f32 = match self.bitrate_manager.bitrate_mode { // only useful for online VQ analysis 
+                // let max_bitrate_ladder_mbps: f32 = match self.bitrate_manager.bitrate_mode { // only useful for online VQ analysis
                 //     BitrateMode::NestVr {
                 //         max_bitrate_mbps, ..
                 //     } => max_bitrate_mbps, // Extract max_bitrate_mbps
                 //     _ => 100.0,
                 // };
-
 
                 let mut buffer_emu = send_socket // generate the actual video frame data
                     .get_buffer_emu(
@@ -4040,11 +4142,11 @@ impl XRServer {
                         self.frames_sent_counter,
                         &self.name_folder,
                         // max_bitrate_ladder_mbps,
-                        &self.network_effects, 
-                        &self.video_sample_filename, 
-                        self.fps, 
-                        self.gop_size, 
-                        self.intra_refresh, 
+                        &self.network_effects,
+                        &self.video_sample_filename,
+                        self.fps,
+                        self.gop_size,
+                        self.intra_refresh,
                     )
                     .await
                     .unwrap();
@@ -4053,10 +4155,10 @@ impl XRServer {
                     self.video_app_sender.as_mut().unwrap().ffmpeg_encoder = Some(encoder_init);
                     // println!("ENCODER INITIALIZED");
                 }
-               
-                // Use DashMap's thread-safe `insert` API instead of write locks   
-                let frame_tracker_map = send_socket.get_frame_tracker_map(); 
-                    frame_tracker_map.into_iter().for_each(|(key, value)| {
+
+                // Use DashMap's thread-safe `insert` API instead of write locks
+                let frame_tracker_map = send_socket.get_frame_tracker_map();
+                frame_tracker_map.into_iter().for_each(|(key, value)| {
                     map_clone.insert(key, value);
                 });
 
@@ -4072,7 +4174,7 @@ impl XRServer {
 
                 // Update the DashMap again with any new frame tracker data
                 let cloned_socket_map = send_socket.get_frame_tracker_map();
-                    cloned_socket_map.into_iter().for_each(|(key, value)| {
+                cloned_socket_map.into_iter().for_each(|(key, value)| {
                     map_clone.insert(key, value);
                 });
 
@@ -4087,7 +4189,7 @@ impl XRServer {
                 let epsilon = normal.sample(&mut rand::thread_rng());
 
                 let ideal = 1.0 / (self.fps as f32);
-                let floor = 0.5 * ideal; 
+                let floor = 0.5 * ideal;
 
                 let dt = (ideal + epsilon).max(floor);
                 let time_until_next_frame = Duration::from_secs_f32(dt);
@@ -4115,7 +4217,7 @@ impl XRServer {
         let client_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
         let client_send_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
         let server_recv_buffer_bytes: SocketBufferSize = SocketBufferSize::Maximum;
-        let packet_size: i32 = self.packet_size_sockets as i32; 
+        let packet_size: i32 = self.packet_size_sockets as i32;
 
         if let Ok(mut stream_socket) = StreamSocketBuilder::connect_to_client_mod(
             HANDSHAKE_ACTION_TIMEOUT,
@@ -4126,22 +4228,26 @@ impl XRServer {
             server_send_buffer_bytes,
             server_recv_buffer_bytes,
             packet_size as _,
-            self.t_update_abr, 
+            self.t_update_abr,
         ) {
             // println!("{} Connection established!", client_ip);
             self.is_streaming = true;
 
             self.video_app_sender =
                 Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO, self.t_0));
-            
-            self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0)); 
 
+            self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0));
 
-            if matches!(self.bitrate_manager.bitrate_mode, BitrateMode::FovOptixPort { .. }) {
-                self.bw_probe_sender = Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0)); 
-                self.bw_probe_receiver = Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS)); 
+            if matches!(
+                self.bitrate_manager.bitrate_mode,
+                BitrateMode::FovOptixPort { .. }
+            ) {
+                self.bw_probe_sender =
+                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0));
+                self.bw_probe_receiver =
+                    Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
 
-                XRServer::generate_FO_bandwidth_probe(self, (), context).await; 
+                XRServer::generate_FO_bandwidth_probe(self, (), context).await;
             }
             self.tracking_app_receiver =
                 Some(stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS));
@@ -4165,9 +4271,8 @@ impl XRServer {
             self.control_socket_receiver = Some(control_receiver);
 
             XRServer::generate_video_frame(self, (), context).await;
-            XRServer::generate_audio_frame(self, (), context).await; 
+            XRServer::generate_audio_frame(self, (), context).await;
 
-       
             // STEP 2: DO SAME FOR HAPTICS using context.scheduler!
             // TODO!
         }
@@ -4194,12 +4299,11 @@ impl<T> DroppingVecDeque<T> {
             enqued_frame_counter: 0,
         }
     }
-    pub fn clear(&mut self){
-        self.deque.clear(); 
-        self.dropped_frame_counter  = 0; 
-        self.ok_dequed_frame_counter = 0; 
-        self.enqued_frame_counter   = 0; 
-
+    pub fn clear(&mut self) {
+        self.deque.clear();
+        self.dropped_frame_counter = 0;
+        self.ok_dequed_frame_counter = 0;
+        self.enqued_frame_counter = 0;
     }
     fn push(&mut self, item: T) {
         // If we are at capacity, pop the oldest frame from the front
@@ -4270,8 +4374,6 @@ struct FrameMetrics {
     ssim: f64,
 }
 
-
-
 #[derive(Clone)]
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
@@ -4303,8 +4405,8 @@ impl MetricsLogger {
         timestamp_ms: f64,
         ref_path: &str,
         lossy_path: &str,
-        ip_client: IpAddr, 
-    )  {
+        ip_client: IpAddr,
+    ) {
         // Create a temporary directory for processing
         let temp_dir = TempDir::new().unwrap();
 
@@ -4340,7 +4442,8 @@ impl MetricsLogger {
                 "yuv420p",
                 &ref_y4m,
             ])
-            .status().unwrap();
+            .status()
+            .unwrap();
 
         // if !ref_status.success() {
         //     return Err(anyhow::anyhow!("Failed to convert reference frame to Y4M"));
@@ -4366,14 +4469,18 @@ impl MetricsLogger {
                 "yuv420p",
                 &lossy_y4m,
             ])
-            .status().unwrap();
+            .status()
+            .unwrap();
 
         // if !lossy_status.success() {
         //     return Err(anyhow::anyhow!("Failed to convert lossy frame to Y4M"));
         // }
 
         // Create the Sink_for_video directory within the temp directory
-        let video_sink_dir = temp_dir.path().join(&self.name_folder).join("Sink_for_video");
+        let video_sink_dir = temp_dir
+            .path()
+            .join(&self.name_folder)
+            .join("Sink_for_video");
         std::fs::create_dir_all(&video_sink_dir).unwrap();
 
         // Set up paths correctly
@@ -4411,7 +4518,8 @@ impl MetricsLogger {
                 "null",
                 "-",
             ])
-            .status().unwrap();
+            .status()
+            .unwrap();
 
         // if !metrics_status.success() {
         //     return Err(anyhow::anyhow!("Failed to calculate video metrics"));
@@ -4484,8 +4592,6 @@ impl MetricsLogger {
         // Ok(())
     }
 
-    
-
     fn log_metrics(&self, metrics: &FrameMetrics) -> Result<()> {
         // Get a single mutex guard and use it for both operations
         let mut guard = self.writer.lock().unwrap();
@@ -4499,16 +4605,13 @@ impl MetricsLogger {
 }
 // Add to your struct
 
-
-
-
 #[derive(Clone)]
-pub struct TimedRebufferCounter{
-    vec_buflevel: VecDeque<(f32,usize)>,
-    period: f32, // how long to keep values 
+pub struct TimedRebufferCounter {
+    vec_buflevel: VecDeque<(f32, usize)>,
+    period: f32, // how long to keep values
 }
 
-impl TimedRebufferCounter{
+impl TimedRebufferCounter {
     pub fn new(period: f32) -> Self {
         Self {
             vec_buflevel: VecDeque::new(),
@@ -4517,7 +4620,7 @@ impl TimedRebufferCounter{
     }
     pub fn add_one(&mut self, now: TaiTime<0>) {
         // Insert new values
-        let time_f32 = now.duration_since(TaiTime::EPOCH).as_secs_f32(); 
+        let time_f32 = now.duration_since(TaiTime::EPOCH).as_secs_f32();
         self.vec_buflevel.push_back((time_f32, 1)); // one rebuffer event per call
 
         // Prune old values outside the time window
@@ -4535,7 +4638,6 @@ impl TimedRebufferCounter{
     pub fn sum_in_period(&self) -> usize {
         self.vec_buflevel.iter().map(|&(_, v)| v).sum()
     }
-
 }
 
 #[allow(unused)]
@@ -4548,22 +4650,22 @@ pub struct XRClient {
     pub input_app_audio: Option<StreamReceiver<()>>,
     pub input_app_haptics: Option<StreamReceiver<Haptics>>,
 
-    pub input_app_bw_probe: Option<StreamReceiver<()>>, 
+    pub input_app_bw_probe: Option<StreamReceiver<()>>,
 
     pub output_app_tracking_sender: Option<StreamSender<Tracking>>,
 
-    pub output_app_bw_probe_back: Option<StreamSender<()>>, 
+    pub output_app_bw_probe_back: Option<StreamSender<()>>,
 
     pub out_video_decoded: Output<Vec<u8>>,
 
     pub framerate: f32,
 
-    pub packet_size_sockets: usize, 
+    pub packet_size_sockets: usize,
 
     pub output_app_network: Output<MpduPacket>,
 
     pub current_coordinates_tracking: Vec3,
-    pub last_coordinates_tracking: Vec3, 
+    pub last_coordinates_tracking: Vec3,
     pub is_streaming: bool,
 
     pub frames_dropped_counter: usize,
@@ -4576,7 +4678,7 @@ pub struct XRClient {
 
     pub last_tracking_time: TaiTime<0>,
     pub last_decoded_frame_instant: TaiTime<0>,
-    pub last_rx_frame_instant: TaiTime<0>, 
+    pub last_rx_frame_instant: TaiTime<0>,
 
     // pub has_decoder: Option<bool>,
     // pub decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
@@ -4584,7 +4686,7 @@ pub struct XRClient {
     // pub ref_decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
     original_decoder: Option<Arc<Mutex<HevcDecoder>>>,
 
-    pub is_decoder_ready: bool, // internal of FFMPEG
+    pub is_decoder_ready: bool,           // internal of FFMPEG
     pub jitter_buffer_warmup_ready: bool, // of actual VR Client application
     // pub is_ref_decoder_ready: bool,
     // Add these new fields:
@@ -4627,47 +4729,40 @@ pub struct XRClient {
     channel_rx_vmaf: Receiver<(Vec<u8>, Vec<u8>, usize)>,
     test: String,
 
-
-    lost_ids_reference_buffer: VecDeque<u32>, 
-    lost_frames_buffer : LostFramesBuffer,
+    lost_ids_reference_buffer: VecDeque<u32>,
+    lost_frames_buffer: LostFramesBuffer,
     // pub visualize_decoder_window: Option<Window>,
-
-
     vmaf_frame_buffer: VecDeque<(Vec<u8>, Vec<u8>, TaiTime<0>, usize, IpAddr)>, // (sample, ref_sample, timestamp, frame_id, ip)
-    vmaf_batch_size: usize,      
-
-
+    vmaf_batch_size: usize,
 
     file_id_offset: i64,
     /// During init we collect a few (id, frame_data) pairs for calibration
-    init_buffer_ids:       Vec<usize>,
-    init_buffer_frames:    Vec<Vec<u8>>,
+    init_buffer_ids: Vec<usize>,
+    init_buffer_frames: Vec<Vec<u8>>,
 
+    offline_csv_trace: CsvTrace,
+    last_seen_id: usize,
 
-    offline_csv_trace: CsvTrace, 
-    last_seen_id: usize, 
-
-    last_throughput_avg: f32, 
+    last_throughput_avg: f32,
     last_bitrate_perfect_info_update_mbps: f32,
-    bitrate_ladder_perfect_info_update: Vec<f32>, 
+    bitrate_ladder_perfect_info_update: Vec<f32>,
 
-    frame_size_exp_avg: f32, 
-    d_short_exp_avg: f32, 
-    d_long_exp_avg: f32, 
+    frame_size_exp_avg: f32,
+    d_short_exp_avg: f32,
+    d_long_exp_avg: f32,
 
-    everest_enabled: bool, 
+    everest_enabled: bool,
 
-    rebuffer_event_counter: TimedRebufferCounter, 
+    rebuffer_event_counter: TimedRebufferCounter,
     sim_unique_string: String, // for logging
-    bm_string: String, 
-
+    bm_string: String,
 
     nada_receiver: Option<Arc<Mutex<NadaReceiver>>>,
 
-    abr_mode: usize, 
+    abr_mode: usize,
     t_update_abr: f32,
-    
-    edca_be_mode: bool, 
+
+    edca_be_mode: bool,
 }
 
 #[allow(unused)]
@@ -4679,42 +4774,40 @@ impl XRClient {
         name_folder: &str,
         test: &str,
         // everest_enabled: bool,  // todo, match on abr_mode == 2 instead
-        abr_mode: usize, 
+        abr_mode: usize,
         simu_id: &str, // for logging
-        bm_str: &str,  // for logging 
+        bm_str: &str,  // for logging
         t_update_abr: f32,
-        packet_size_sockets: usize, 
-        edca_be_mode: bool, 
-
-
+        packet_size_sockets: usize,
+        edca_be_mode: bool,
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
         let synchronized_throttle = Arc::new(Semaphore::new(0));
-        
-        let nada_receiver = if abr_mode == 5 { // ONLY for NADA (nest>1, everest>2, RL>3, Gcc>4,NADA>5 )
-            Some(Arc::new(Mutex::new(NadaReceiver::new())) )
-        }
-        else{
-            None
-        }; 
 
-        // let everest_enabled = abr_mode == 2; 
-        let everest_enabled = true; // to enable info on heuristics for RL mode 
-        
+        let nada_receiver = if abr_mode == 5 {
+            // ONLY for NADA (nest>1, everest>2, RL>3, Gcc>4,NADA>5 )
+            Some(Arc::new(Mutex::new(NadaReceiver::new())))
+        } else {
+            None
+        };
+
+        // let everest_enabled = abr_mode == 2;
+        let everest_enabled = true; // to enable info on heuristics for RL mode
+
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
             outport_tracking_network: Output::default(),
             input_app_video: None,
             input_app_audio: None,
             input_app_haptics: None,
-            input_app_bw_probe: None, 
-            output_app_bw_probe_back: None, 
+            input_app_bw_probe: None,
+            output_app_bw_probe_back: None,
 
             output_app_tracking_sender: None,
             out_video_decoded: Output::default(),
             framerate: fps,
-            packet_size_sockets, 
+            packet_size_sockets,
             output_app_network: Output::default(),
             // output_tracking: Output::default(),
             current_coordinates_tracking: Vec3::ZERO,
@@ -4732,9 +4825,9 @@ impl XRClient {
 
             // Add these new fields:
             initialization_buffer: Vec::new(), // Buffer to hold initial frames
-            is_decoder_ready: false, // Flag to track if FFMPEG decoder is ready
-            jitter_buffer_warmup_ready: false, // to buffer at least N frames before starting to show at first. 
-            min_buffered_frames: 20, // Minimum frames to buffer before decoding
+            is_decoder_ready: false,           // Flag to track if FFMPEG decoder is ready
+            jitter_buffer_warmup_ready: false, // to buffer at least N frames before starting to show at first.
+            min_buffered_frames: 20,           // Minimum frames to buffer before decoding
             dec_saw_keyframe: false,
             ref_saw_keyframe: false,
 
@@ -4767,67 +4860,81 @@ impl XRClient {
             channel_rx_vmaf: vmaf_rx,
             test: test.to_string(),
 
-            lost_ids_reference_buffer: VecDeque::new(), 
-            lost_frames_buffer : LostFramesBuffer::new(4),
+            lost_ids_reference_buffer: VecDeque::new(),
+            lost_frames_buffer: LostFramesBuffer::new(4),
             vmaf_frame_buffer: VecDeque::new(),
             vmaf_batch_size: 2, // Default batch size
 
-            file_id_offset:      0,
-            init_buffer_ids:       Vec::new(),
-            init_buffer_frames:    Vec::new(),
+            file_id_offset: 0,
+            init_buffer_ids: Vec::new(),
+            init_buffer_frames: Vec::new(),
 
-            offline_csv_trace: CsvTrace::default(), 
-            last_seen_id: 0, 
-            last_throughput_avg: 0.0, 
+            offline_csv_trace: CsvTrace::default(),
+            last_seen_id: 0,
+            last_throughput_avg: 0.0,
 
-            original_decoder: None, 
-            last_bitrate_perfect_info_update_mbps: 0.0, 
+            original_decoder: None,
+            last_bitrate_perfect_info_update_mbps: 0.0,
 
-            frame_size_exp_avg: 0.0, 
+            frame_size_exp_avg: 0.0,
             d_short_exp_avg: 0.0,
-            d_long_exp_avg: 0.0, 
-            bitrate_ladder_perfect_info_update: Vec::new(), 
-            everest_enabled, 
+            d_long_exp_avg: 0.0,
+            bitrate_ladder_perfect_info_update: Vec::new(),
+            everest_enabled,
 
-            rebuffer_event_counter: TimedRebufferCounter::new( t_update_abr), 
-            sim_unique_string: simu_id.to_string(), //for logging                
-            bm_string: bm_str.to_string(),          //for logging   
+            rebuffer_event_counter: TimedRebufferCounter::new(t_update_abr),
+            sim_unique_string: simu_id.to_string(), //for logging
+            bm_string: bm_str.to_string(),          //for logging
 
-            nada_receiver,  
-            abr_mode, 
-            t_update_abr,   
-            edca_be_mode, 
-           
+            nada_receiver,
+            abr_mode,
+            t_update_abr,
+            edca_be_mode,
         }
     }
 
-        pub async fn session_end(&mut self, pause_time: f64, context: &Context<Self>) {
-            let now = context.scheduler.time();
-            println!("[XRClient {}] Ending session at {:.8}s", self.server_ip, format_elapsed!(now));
+    pub async fn session_end(&mut self, pause_time: f64, context: &Context<Self>) {
+        let now = context.scheduler.time();
+        println!(
+            "[XRClient {}] Ending session at {:.8}s",
+            self.server_ip,
+            format_elapsed!(now)
+        );
 
-            self.is_streaming = false;
-            self.input_app_video = None;
-            self.input_app_audio = None;
-            self.input_app_haptics = None;
-            self.output_app_tracking_sender = None;
-            self.streamsocket_clone = None;
-            self.decoder_queue.clear();
-            self.jitter_buffer_warmup_ready = false; 
+        self.is_streaming = false;
+        self.input_app_video = None;
+        self.input_app_audio = None;
+        self.input_app_haptics = None;
+        self.output_app_tracking_sender = None;
+        self.streamsocket_clone = None;
+        self.decoder_queue.clear();
+        self.jitter_buffer_warmup_ready = false;
 
-            // Schedule reboot after pause_time
-            let delay = Duration::from_secs_f64(pause_time);
-            
-            print_magenta!("[session_end_schedule] delay: {}, now + delay: {} ", delay.as_secs_f64(), format_elapsed!(now + delay), ); 
-            
-            let epsilon = Duration::from_nanos(1);
-            let target = now + delay.max(epsilon);
+        // Schedule reboot after pause_time
+        let delay = Duration::from_secs_f64(pause_time);
 
-            context.scheduler.schedule_event(target, Self::session_reboot, ()).unwrap();
+        print_magenta!(
+            "[session_end_schedule] delay: {}, now + delay: {} ",
+            delay.as_secs_f64(),
+            format_elapsed!(now + delay),
+        );
+
+        let epsilon = Duration::from_nanos(1);
+        let target = now + delay.max(epsilon);
+
+        context
+            .scheduler
+            .schedule_event(target, Self::session_reboot, ())
+            .unwrap();
     }
 
     pub async fn session_reboot(&mut self, _: (), context: &Context<Self>) {
         let now = context.scheduler.time();
-        println!("[XRClient {}] Rebooting session at {:.7}s", self.server_ip, format_elapsed!(now));
+        println!(
+            "[XRClient {}] Rebooting session at {:.7}s",
+            self.server_ip,
+            format_elapsed!(now)
+        );
 
         let packet_size = self.packet_size_sockets;
         self.t_0 = now;
@@ -4839,16 +4946,15 @@ impl XRClient {
         self.configure_streams(packet_size, context).await;
 
         // Restart periodic tasks
-        context.scheduler
+        context
+            .scheduler
             .schedule_event(Duration::from_millis(10), Self::video_receive_thread, ())
             .unwrap();
 
-        // context.scheduler 
+        // context.scheduler
         //     .schedule_event(Duration::from_secs_f64(1.0 / self.framerate as f64), Self::vsync, () )
         //     .unwrap();
-
     }
-
 
     pub async fn configure_streams(&mut self, packet_size: usize, context: &Context<Self>) {
         // obtained by printing debug. We're using channel for purposes of mpsc for separate client and server processes, and separating the network interface of each.
@@ -4865,7 +4971,7 @@ impl XRClient {
             self.server_ip,
             stream_port,
             packet_size as _,
-            self.t_update_abr, 
+            self.t_update_abr,
         ) {
             // println!("{} Connection established!", self.server_ip,);
 
@@ -4879,16 +4985,17 @@ impl XRClient {
             self.input_app_haptics =
                 Some(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS, MAX_UNREAD_PACKETS));
 
-            if self.abr_mode == 6 { // FovOptix only
-                self.input_app_bw_probe = 
-                    Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS)); 
+            if self.abr_mode == 6 {
+                // FovOptix only
+                self.input_app_bw_probe =
+                    Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
 
-                self.output_app_bw_probe_back = 
-                    Some(stream_socket.request_stream( FOVOPTIX_BW_PROBE, self.t_0)); // way back for bw probing packets. 
+                self.output_app_bw_probe_back =
+                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0));
+                // way back for bw probing packets.
             }
 
             self.streamsocket_clone = Some(stream_socket.clone());
-
 
             self.output_app_tracking_sender =
                 Some(stream_socket.request_stream(TRACKING, self.t_0));
@@ -4905,7 +5012,7 @@ impl XRClient {
         const HEAD_ID: u64 = 555;
 
         async move {
-            let now = context.scheduler.time();        
+            let now = context.scheduler.time();
             let mut position_offset = Vec3::ZERO;
 
             // let mut loop_deadline = now;
@@ -4913,13 +5020,12 @@ impl XRClient {
 
             // if let Some(tracking_send_socket) = self.output_app_tracking_sender.clone() {
             if self.is_streaming {
-            
                 let actual_position = self.current_coordinates_tracking;
-                let last_position = self.last_coordinates_tracking;  
-                
-                let delta = actual_position - last_position; 
+                let last_position = self.last_coordinates_tracking;
 
-                let dt = now.duration_since(self.last_tracking_time); 
+                let delta = actual_position - last_position;
+
+                let dt = now.duration_since(self.last_tracking_time);
                 let linear_velocity = if dt.as_secs_f32() > 0.0 {
                     delta / dt.as_secs_f32()
                 } else {
@@ -4927,13 +5033,12 @@ impl XRClient {
                 };
 
                 let orientation = if delta.length_squared() > 1e-9 {
-                    let yaw = delta.y.atan2(delta.x); 
+                    let yaw = delta.y.atan2(delta.x);
                     Quat::from_rotation_y(yaw)
-                }
-                else{
+                } else {
                     Quat::IDENTITY
-                }; 
-                 // --- tracking packet ---
+                };
+                // --- tracking packet ---
                 let track = Tracking {
                     target_timestamp: TARGET_TIMESTAMP_TRACKING,
                     device_motions: vec![(
@@ -4949,8 +5054,7 @@ impl XRClient {
                     )],
                     ..Default::default()
                 };
-                // print_yellow!("Generating tracking packet| dt: {}, data: {:#?}", dt.as_secs_f32(), track.device_motions); 
-
+                // print_yellow!("Generating tracking packet| dt: {}, data: {:#?}", dt.as_secs_f32(), track.device_motions);
 
                 if let Some(mut sender) = self.output_app_tracking_sender.clone() {
                     let arc_inner_app_receiver = sender.app_network_interface.clone();
@@ -4971,7 +5075,7 @@ impl XRClient {
                 // println!("CLIENT FRAMERATE = {}", self.framerate);
                 let loop_deadline = Duration::from_secs_f32(1.0 / self.framerate / 3.0);
 
-                self.last_coordinates_tracking = self.current_coordinates_tracking; 
+                self.last_coordinates_tracking = self.current_coordinates_tracking;
                 self.last_tracking_time = now;
 
                 context
@@ -5008,7 +5112,6 @@ impl XRClient {
     //         .await; // FUNCTION TO HANDLE NETWORK PACKETS!
     //     }
     // }
-
 
     fn read_app_send_network_interface<'a>(
         &'a mut self,
@@ -5064,7 +5167,7 @@ impl XRClient {
                                     2 => "Audio",
                                     3 => "Video",
                                     4 => "Statistics",
-                                    9 => "BW probe", 
+                                    9 => "BW probe",
                                     _ => "?? IDK",
                                 };
                                 elapsed = now.duration_since(self.t_0);
@@ -5072,12 +5175,12 @@ impl XRClient {
                                 let elapsed_tracking =
                                     now.duration_since(self.last_tracking_time).as_secs_f32();
 
-                                // println!("[Client {} read ]: {} packet ", self.server_ip, str_id); 
+                                // println!("[Client {} read ]: {} packet ", self.server_ip, str_id);
                                 // if stream_id == TRACKING {
                                 //     print_yellow!(
                                 //         "{} UL TRACKING [{}]-> Δt_tracking:{:.4} |length: {}| Stream ID: {}|",
                                 //         format_elapsed!(now),
-                                //         self.server_ip, 
+                                //         self.server_ip,
                                 //         elapsed_tracking,
                                 //         packet_length,
                                 //         str_id,
@@ -5105,21 +5208,16 @@ impl XRClient {
                                 //     );
                                 // }
 
-
                                 if !self.edca_be_mode {
                                     if stream_id == TRACKING {
-                                        packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering. 
-
+                                        packet.edca_ac = EdcaAc::Voice; // explanation: While small, these packets are most important to be timely for rendering.
+                                    } else if stream_id == FOVOPTIX_BW_PROBE {
+                                        packet.edca_ac = EdcaAc::BestEffort; // Should not block actual VR traffic..
                                     }
-                                    else if stream_id == FOVOPTIX_BW_PROBE{
-                                        packet.edca_ac = EdcaAc::BestEffort; // Should not block actual VR traffic.. 
-                                    }
-                                }
-                                else{
-                                    packet.edca_ac = EdcaAc::BestEffort; 
+                                } else {
+                                    packet.edca_ac = EdcaAc::BestEffort;
                                 }
                                 self.outport_tracking_network.send(packet).await
-
                             } else {
                                 println!(
                                     "{}",
@@ -5176,11 +5274,10 @@ impl XRClient {
         packetz.header_alvr.stream_id = CONTROL_STREAM;
         packetz.header_alvr.next_packet_index = 2;
 
-        if matches!(packet, ClientControlPacket::NetworkStatistics(..)){
-            packetz.edca_ac = EdcaAc::Video; 
-        }
-        else if matches!(packet, ClientControlPacket::DeadlineShardLossStat(..)) {
-            packetz.edca_ac = EdcaAc::BestEffort; 
+        if matches!(packet, ClientControlPacket::NetworkStatistics(..)) {
+            packetz.edca_ac = EdcaAc::Video;
+        } else if matches!(packet, ClientControlPacket::DeadlineShardLossStat(..)) {
+            packetz.edca_ac = EdcaAc::BestEffort;
         }
 
         context
@@ -5207,12 +5304,10 @@ impl XRClient {
         // println!("output_control");
         let pack = packet.clone();
         match packet {
-
             ClientControlPacket::NetworkStatistics(inner) => {
                 // println!("sending stats packet!");
                 let result = Self::framed_send(self, &pack, context).await;
                 // println!("result of output control: {:?}", result);
-
             }
             ClientControlPacket::DeadlineShardLossStat(inner) => {
                 // println!("Shardloss packet sent");
@@ -5224,7 +5319,7 @@ impl XRClient {
     }
 
     pub fn report_frame_lost(
-        &mut self, 
+        &mut self,
         mut frames: Vec<u32>,
         mut shards_lost: Vec<usize>,
         context: &Context<Self>,
@@ -5236,14 +5331,13 @@ impl XRClient {
         let net = DeadlineShardlossStatPacket {
             frame_indexes: frames.clone(),
             shards_lost: shards_lost,
-            // edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking. 
+            // edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking.
         };
 
-        for frame in frames{
-            // print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame); 
-            self.lost_ids_reference_buffer.push_back(frame); 
-        }        
-        
+        for frame in frames {
+            // print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame);
+            self.lost_ids_reference_buffer.push_back(frame);
+        }
 
         context
             .scheduler
@@ -5253,9 +5347,7 @@ impl XRClient {
                 ClientControlPacket::DeadlineShardLossStat(net),
             )
             .unwrap();
-        
     }
-    
 
     pub fn bw_probe_receive_thread<'a>(
         &'a mut self,
@@ -5267,9 +5359,10 @@ impl XRClient {
 
             // print_dblue!("{} RECEIVING PROBE MESSAGE", format_elapsed!(now));
             // Only proceed if both ends exist
-            if let (Some(mut receiver), Some(mut sender)) =
-                (self.input_app_bw_probe.clone(), self.output_app_bw_probe_back.clone())
-            {
+            if let (Some(mut receiver), Some(mut sender)) = (
+                self.input_app_bw_probe.clone(),
+                self.output_app_bw_probe_back.clone(),
+            ) {
                 let data: ReceiverData<()> = match receiver.recv(STREAMING_RECV_TIMEOUT) {
                     Ok(d) => d,
                     Err(ConnectionError::TryAgain(_)) => return,
@@ -5277,9 +5370,9 @@ impl XRClient {
                 };
 
                 // Extract the raw bytes and meta information
-                // let (raw_bytes, hidden_offset, length) = data.get_buffer(); 
-                
-                // let buf = &packet.data_inner; 
+                // let (raw_bytes, hidden_offset, length) = data.get_buffer();
+
+                // let buf = &packet.data_inner;
                 let raw = data.get_buffer();
                 let buf_len = raw.len();
 
@@ -5290,7 +5383,8 @@ impl XRClient {
                     tx_instant_us: 0,
                     rx_instant_s_video_frame: 0.,
                     payload_len: 0,
-                }).unwrap() as usize;
+                })
+                .unwrap() as usize;
 
                 // --- Step 2: bounds check ---
                 if buf_len < start_hdr + hdr_size {
@@ -5302,18 +5396,23 @@ impl XRClient {
                 let hdr_slice = &raw[start_hdr..start_hdr + hdr_size];
                 let mut hdr: BwProbeHeader =
                     bincode::deserialize(hdr_slice).expect("Failed to deserialize BwProbeHeader");
-                
-                hdr.rx_instant_s_video_frame = self.last_rx_frame_instant.duration_since(TaiTime::EPOCH).as_secs_f32(); // TAG PROBE WITH RX_TIME of LAST VIDEO FRAME
+
+                hdr.rx_instant_s_video_frame = self
+                    .last_rx_frame_instant
+                    .duration_since(TaiTime::EPOCH)
+                    .as_secs_f32(); // TAG PROBE WITH RX_TIME of LAST VIDEO FRAME
 
                 // --- Step 5: re-serialize header ---
                 let new_hdr_bytes = bincode::serialize(&hdr).unwrap();
                 let mut updated_raw = raw.clone();
-                updated_raw[start_hdr..start_hdr + new_hdr_bytes.len()].copy_from_slice(&new_hdr_bytes);
+                updated_raw[start_hdr..start_hdr + new_hdr_bytes.len()]
+                    .copy_from_slice(&new_hdr_bytes);
 
                 // --- Step 6: (optional) extract payload slice ---
                 let payload_start = start_hdr + hdr_size;
                 let payload_end = payload_start + hdr.payload_len as usize;
-                let payload_slice = &updated_raw[payload_start.min(buf_len)..payload_end.min(buf_len)];
+                let payload_slice =
+                    &updated_raw[payload_start.min(buf_len)..payload_end.min(buf_len)];
 
                 // --- Step 7: wrap and send back ---
                 let buf = crate::lib::alvr_stream_socket::Buffer {
@@ -5354,7 +5453,7 @@ impl XRClient {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            let now = context.scheduler.time(); 
+            let now = context.scheduler.time();
             if self.is_streaming {
                 // println!("RECEIVING VIDEO!!");
                 if let Some(mut receiver) = self.input_app_video.clone() {
@@ -5368,8 +5467,8 @@ impl XRClient {
                         if !frames_lost.is_empty() {
                             // println!(
                             //     "{} [{}] - FRAMES LOST {:?}, SHARDS LOST {:?}",
-                            //     format_elapsed!(now), 
-                            //     self.server_ip, 
+                            //     format_elapsed!(now),
+                            //     self.server_ip,
                             //     &frames_lost[..],
                             //     &shards_lost[..]
                             // );
@@ -5392,131 +5491,140 @@ impl XRClient {
                         return;
                     };
 
-                    let sized_vec = nal[..20.min(nal.len())].to_vec();                    
+                    let sized_vec = nal[..20.min(nal.len())].to_vec();
 
                     ///////////////////////////////////////////////
                     // pub const EVEREST_ENABLED : bool = false; // EVEREST STATS CLIENT
-                    let mut everest_throughput: f32 = -1.0;     // initialize, if negative then on rx don't count 
-                    let mut everest_capacity: f32 = -1.0;       // (only one measure per frame of either)
+                    let mut everest_throughput: f32 = -1.0; // initialize, if negative then on rx don't count
+                    let mut everest_capacity: f32 = -1.0; // (only one measure per frame of either)
 
-                    let mut command_abr_everest = EverestCommand::Continue; 
-
+                    let mut command_abr_everest = EverestCommand::Continue;
 
                     if self.everest_enabled {
-                        pub const EVEREST_CLASSIC : bool = false; 
-                        if self.frame_size_exp_avg == 0.0 { 
-                            self.frame_size_exp_avg = data.get_bytes_in_frame() as f32; // initialize avg only on first value
+                        pub const EVEREST_CLASSIC: bool = false;
+                        if self.frame_size_exp_avg == 0.0 {
+                            self.frame_size_exp_avg = data.get_bytes_in_frame() as f32;
+                            // initialize avg only on first value
                         }
                         if self.d_short_exp_avg == 0.0 {
-                            self.d_short_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_SHORT_EVEREST_S; 
+                            self.d_short_exp_avg = data.get_frame_span()
+                                * data.get_frame_interarrival()
+                                / T_SHORT_EVEREST_S;
                         }
                         if self.d_long_exp_avg == 0.0 {
-                            self.d_long_exp_avg = data.get_frame_span() *  data.get_frame_interarrival() / T_LONG_EVEREST_S; 
+                            self.d_long_exp_avg = data.get_frame_span()
+                                * data.get_frame_interarrival()
+                                / T_LONG_EVEREST_S;
                         }
-                        pub const MPDU_MAX_SIZE: u32 = 1500; 
-                        pub const THETA_EWMA: f32 = 0.01;  // we want the long term expectation for comparison of individual frame sizes. 
+                        pub const MPDU_MAX_SIZE: u32 = 1500;
+                        pub const THETA_EWMA: f32 = 0.01; // we want the long term expectation for comparison of individual frame sizes.
 
-                        pub const T_SHORT_EVEREST_S: f32 = 1.0; 
-                        pub const T_LONG_EVEREST_S: f32 = 5.0; 
-          
-                        let frame_size_bytes = data.get_bytes_in_frame() as f32; 
-                        let frame_span = data.get_frame_span(); 
+                        pub const T_SHORT_EVEREST_S: f32 = 1.0;
+                        pub const T_LONG_EVEREST_S: f32 = 5.0;
 
-                        if frame_span != 0.0 { // prevent division by zero
-                            if EVEREST_CLASSIC { 
-                                if is_keyframe(&nal){
-                                    everest_throughput = frame_size_bytes * 8.0 / frame_span; 
-                                }
-                                else{                   
-                                    let frame_size_mtu_portion = (frame_size_bytes as u32/ MPDU_MAX_SIZE ) as f32 * MPDU_MAX_SIZE as f32; // just the part with full packets of MTU
-                                    // let remainder_size =    data.get_bytes_in_frame() % 1500 ;
+                        let frame_size_bytes = data.get_bytes_in_frame() as f32;
+                        let frame_span = data.get_frame_span();
+
+                        if frame_span != 0.0 {
+                            // prevent division by zero
+                            if EVEREST_CLASSIC {
+                                if is_keyframe(&nal) {
+                                    everest_throughput = frame_size_bytes * 8.0 / frame_span;
+                                } else {
+                                    let frame_size_mtu_portion =
+                                        (frame_size_bytes as u32 / MPDU_MAX_SIZE) as f32
+                                            * MPDU_MAX_SIZE as f32; // just the part with full packets of MTU
+                                                                    // let remainder_size =    data.get_bytes_in_frame() % 1500 ;
                                     if frame_span != 0.0 {
-                                        everest_capacity = frame_size_mtu_portion * 8.0 / frame_span; 
+                                        everest_capacity =
+                                            frame_size_mtu_portion * 8.0 / frame_span;
                                     }
                                 }
-                            }
-                            else{ // EVEREST-Intra
-                                self.frame_size_exp_avg = ( THETA_EWMA * frame_size_bytes )  + ( 1.0 - THETA_EWMA ) * self.frame_size_exp_avg ; 
-                                
-                                if frame_size_bytes > self.frame_size_exp_avg {
-                                    everest_throughput = frame_size_bytes * 8.0  / frame_span; 
-                                
-                                }
-                                else{
-                                    let frame_size_mtu_portion = (frame_size_bytes as u32/ MPDU_MAX_SIZE ) as f32 * MPDU_MAX_SIZE as f32;  // just the part with full packets of MTU
-                                    everest_capacity = (frame_size_mtu_portion * 8.0 ) / frame_span ;    
+                            } else {
+                                // EVEREST-Intra
+                                self.frame_size_exp_avg = (THETA_EWMA * frame_size_bytes)
+                                    + (1.0 - THETA_EWMA) * self.frame_size_exp_avg;
 
-                                    // print_yellow!("Capacity ev: L / deltaT = {} ({}) / {} = {}", frame_size_mtu_portion, frame_size_bytes, frame_span, everest_capacity); 
+                                if frame_size_bytes > self.frame_size_exp_avg {
+                                    everest_throughput = frame_size_bytes * 8.0 / frame_span;
+                                } else {
+                                    let frame_size_mtu_portion =
+                                        (frame_size_bytes as u32 / MPDU_MAX_SIZE) as f32
+                                            * MPDU_MAX_SIZE as f32; // just the part with full packets of MTU
+                                    everest_capacity = (frame_size_mtu_portion * 8.0) / frame_span;
+
+                                    // print_yellow!("Capacity ev: L / deltaT = {} ({}) / {} = {}", frame_size_mtu_portion, frame_size_bytes, frame_span, everest_capacity);
                                 }
                             }
                         }
 
-                        let interarrival = data.get_frame_interarrival(); 
-                        self.d_short_exp_avg = (interarrival / T_SHORT_EVEREST_S * frame_span )  + (1.0 - interarrival/ T_SHORT_EVEREST_S) * self.d_short_exp_avg; 
-                        self.d_long_exp_avg =  (interarrival / T_LONG_EVEREST_S  * frame_span ) + (1.0 - interarrival/ T_LONG_EVEREST_S) * self.d_long_exp_avg; 
-                        
-                        // let d_lower_everest =  
-                        let mut bitrate_mbps = self.last_bitrate_perfect_info_update_mbps; 
-                        let bitrate_bps_comp = bitrate_mbps * 1e6; 
+                        let interarrival = data.get_frame_interarrival();
+                        self.d_short_exp_avg = (interarrival / T_SHORT_EVEREST_S * frame_span)
+                            + (1.0 - interarrival / T_SHORT_EVEREST_S) * self.d_short_exp_avg;
+                        self.d_long_exp_avg = (interarrival / T_LONG_EVEREST_S * frame_span)
+                            + (1.0 - interarrival / T_LONG_EVEREST_S) * self.d_long_exp_avg;
 
-                        if !self.bitrate_ladder_perfect_info_update.is_empty(){
-                            
-                            let &value_b2 = self.bitrate_ladder_perfect_info_update.iter().find(|&&x| x > bitrate_bps_comp).unwrap_or_else(|| {
-                                // if nothing higher, use the highest available:
-                                self
-                                    .bitrate_ladder_perfect_info_update
-                                    .last()
-                                    .unwrap_or(&bitrate_bps_comp)
-                            });
-                            let d_lower_everest = bitrate_bps_comp / value_b2 * (1.0 / self.framerate);   // IFT in average or expectation from fps? assuming FPS
-                            
-                            // print_yellow!("b1 = {}, b2 = {} , 1/FPS = {}", bitrate_bps_comp, value_b2, 1.0/self.framerate); 
-                            
-                            let d_upper_everest = 1.0 / self.framerate; 
+                        // let d_lower_everest =
+                        let mut bitrate_mbps = self.last_bitrate_perfect_info_update_mbps;
+                        let bitrate_bps_comp = bitrate_mbps * 1e6;
 
-                            const T_LOW_EVEREST_S: f32 = 0.005; 
-                            const T_HIGH_EVEREST_S: f32 = 0.020;   
+                        if !self.bitrate_ladder_perfect_info_update.is_empty() {
+                            let &value_b2 = self
+                                .bitrate_ladder_perfect_info_update
+                                .iter()
+                                .find(|&&x| x > bitrate_bps_comp)
+                                .unwrap_or_else(|| {
+                                    // if nothing higher, use the highest available:
+                                    self.bitrate_ladder_perfect_info_update
+                                        .last()
+                                        .unwrap_or(&bitrate_bps_comp)
+                                });
+                            let d_lower_everest =
+                                bitrate_bps_comp / value_b2 * (1.0 / self.framerate); // IFT in average or expectation from fps? assuming FPS
 
+                            // print_yellow!("b1 = {}, b2 = {} , 1/FPS = {}", bitrate_bps_comp, value_b2, 1.0/self.framerate);
 
-                            if self.d_short_exp_avg >= d_upper_everest 
-                            {
-                                self.d_short_exp_avg = T_LOW_EVEREST_S; 
-                                command_abr_everest = EverestCommand::SlowDown; 
+                            let d_upper_everest = 1.0 / self.framerate;
+
+                            const T_LOW_EVEREST_S: f32 = 0.005;
+                            const T_HIGH_EVEREST_S: f32 = 0.020;
+
+                            if self.d_short_exp_avg >= d_upper_everest {
+                                self.d_short_exp_avg = T_LOW_EVEREST_S;
+                                command_abr_everest = EverestCommand::SlowDown;
                             }
-                            if self.d_long_exp_avg < d_lower_everest{
-                                self.d_long_exp_avg = T_HIGH_EVEREST_S; 
-                                command_abr_everest = EverestCommand::SpeedUp; 
+                            if self.d_long_exp_avg < d_lower_everest {
+                                self.d_long_exp_avg = T_HIGH_EVEREST_S;
+                                command_abr_everest = EverestCommand::SpeedUp;
                             }
 
                             // crate::print_blue!("[CLIENT EVEREST ]------------------------------\nIs D_short({}) >= D_upper({})? -> {}\nIs D_long({}) < D_lower({})? -> {}\nCMD={:?}",
-                            //          self.d_short_exp_avg, d_upper_everest, self.d_short_exp_avg >= d_upper_everest , self.d_long_exp_avg, d_lower_everest,  self.d_long_exp_avg < d_lower_everest, command_abr_everest ); 
-
-
+                            //          self.d_short_exp_avg, d_upper_everest, self.d_short_exp_avg >= d_upper_everest , self.d_long_exp_avg, d_lower_everest,  self.d_long_exp_avg < d_lower_everest, command_abr_everest );
                         }
                     }
-                    
-                    //////////////////////////////////////////////  // NADA rcv loop upon succesfully receiving a full frame. 
-                    let mut nada_stats: NadaStats = NadaStats::default(); 
 
-                    if let Some( nada_receiver_in) = self.nada_receiver.as_mut(){
+                    //////////////////////////////////////////////  // NADA rcv loop upon succesfully receiving a full frame.
+                    let mut nada_stats: NadaStats = NadaStats::default();
 
-                        // println!("Nada receiver exists");                             
-                        let mut nada_receiver = nada_receiver_in.lock().unwrap(); 
+                    if let Some(nada_receiver_in) = self.nada_receiver.as_mut() {
+                        // println!("Nada receiver exists");
+                        let mut nada_receiver = nada_receiver_in.lock().unwrap();
 
-                        let frame_send_timestamp =     data.get_tx_time_first();  // as secs; 
-                        let frame_recv_timestamp =     data.get_rx_time_last();  //as secs; 
-                        let size = data.get_bytes_in_frame() as usize; 
+                        let frame_send_timestamp = data.get_tx_time_first(); // as secs;
+                        let frame_recv_timestamp = data.get_rx_time_last(); //as secs;
+                        let size = data.get_bytes_in_frame() as usize;
 
                         let micros_send_ts = (frame_send_timestamp * 1_000_000.0).round() as i64;
-                        let micros_rcv_ts =  (frame_recv_timestamp * 1_000_000.0).round() as i64; 
-                        
+                        let micros_rcv_ts = (frame_recv_timestamp * 1_000_000.0).round() as i64;
+
                         nada_receiver.compute_oneway_delay(micros_send_ts, micros_rcv_ts); //inputs as micros
                         nada_receiver.update_receive_loss_rate(size);
-                        let is_feedback_on = nada_receiver.time_to_report_feedback(now, false, false);
+                        let is_feedback_on =
+                            nada_receiver.time_to_report_feedback(now, false, false);
 
                         //if there is a feedback to report
-                        if is_feedback_on{
-                            // println!("FEEDBACK IS ON"); 
+                        if is_feedback_on {
+                            // println!("FEEDBACK IS ON");
                             //send RTCP feedback report containing values of: rmode, x_curr, and r_recv
                             nada_stats.nada_feedback = true;
                             nada_stats.nada_xcurr = nada_receiver.x_curr;
@@ -5534,7 +5642,7 @@ impl XRClient {
 
                             //update t_last = t_curr
                             nada_receiver.update_t_last(now);
-                        }else{
+                        } else {
                             nada_stats.nada_feedback = false;
                         }
                     }
@@ -5551,31 +5659,33 @@ impl XRClient {
                         interarrival_jitter: data.get_interarrival_jitter(), // measure of the variability in the time between the reception of consecutive video shards
                         ow_delay: data.get_ow_delay(), // one-way delay of the received video shards
                         filtered_ow_delay: data.get_filtered_ow_delay(), // kalman filtered one-way delay of the received video shards, as GCC does
-                        frames_skipped: data.get_frames_skipped(), // number of frames skipped
+                        frames_skipped: data.get_frames_skipped(),       // number of frames skipped
                         rx_bytes: data.get_rx_bytes(), // bytes received in the interval between the consecutive frames, including any prefixes and network headers
                         rx_shard_counter: data.get_rx_shard_counter(), // non-duplicated video shards received during the interval between consecutive frames
                         duplicated_shard_counter: data.get_duplicated_shard_counter(), // duplicated video shards received during the interval between consecutive frames
                         highest_rx_frame_index: data.get_highest_rx_frame_index(), // index of the highest video frame received during the interval between consecutive frames
                         highest_rx_shard_index: data.get_highest_rx_shard_index(), // index of the highest video shard received during the interval between consecutive frames
                         lost_shards_deadline: packets_lost_deadline,
-                        everest_capacity_update: everest_capacity, 
-                        everest_throughput_update: everest_throughput, 
-                        everest_dshort: self.d_short_exp_avg, 
-                        everest_dlong: self.d_long_exp_avg, 
+                        everest_capacity_update: everest_capacity,
+                        everest_throughput_update: everest_throughput,
+                        everest_dshort: self.d_short_exp_avg,
+                        everest_dlong: self.d_long_exp_avg,
                         everest_command: command_abr_everest,
-                        buffer_level_decoder: self.decoder_queue.len() as u8,  
-                        rebuffering_events_last_s: self.rebuffer_event_counter.sum_in_period() as u8, // should be impossible to overflow unless FPS > 256 (not planned, makes no sense) 
-                        // edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.  
-                        nada_stats, 
+                        buffer_level_decoder: self.decoder_queue.len() as u8,
+                        rebuffering_events_last_s: self.rebuffer_event_counter.sum_in_period()
+                            as u8, // should be impossible to overflow unless FPS > 256 (not planned, makes no sense)
+                        // edca_ac: EdcaAc::Video, // Explanation: Given we're computing the VF-RTT of video packets based on arrivals, let's assume this AC for UL to get the same 'treatment' by EDCA.
+                        nada_stats,
                     };
 
                     if self.last_throughput_avg == 0.0 {
-                        self.last_throughput_avg = net.bytes_in_frame as f32 / net.frame_interarrival;  
+                        self.last_throughput_avg =
+                            net.bytes_in_frame as f32 / net.frame_interarrival;
+                    } else {
+                        let throughput_now = net.bytes_in_frame as f32 / net.frame_interarrival;
+                        self.last_throughput_avg = ALPHA_THROUGHPUT * throughput_now
+                            + (1.0 - ALPHA_THROUGHPUT) * self.last_throughput_avg;
                     }
-                    else{
-                        let throughput_now = net.bytes_in_frame as f32 / net.frame_interarrival;  
-                        self.last_throughput_avg = ALPHA_THROUGHPUT * throughput_now + ( 1.0  - ALPHA_THROUGHPUT ) * self.last_throughput_avg;
-                    } 
                     // println!("[CLIENT] Sending networkstats packet in UL: {:#?}", net);
 
                     // send frame and network statistics for every reconstructed video frame
@@ -5596,8 +5706,6 @@ impl XRClient {
                         .unwrap();
                     // self.output_control(ClientControlPacket::NetworkStatistics(net)).await;
 
-          
-
                     debug_print!(
                         DebugColor::Gold,
                         "[DEBUG DECODE] NAL first 20 bytes: {:?}",
@@ -5615,7 +5723,6 @@ impl XRClient {
             }
         }
     }
-
 
     // Function to convert YUV420p to RGB
     pub fn yuv420_to_rgb(yuv: &[u8], width: usize, height: usize) -> Vec<u8> {
@@ -5674,7 +5781,12 @@ impl XRClient {
         }
     }
 
-    async fn cleanup_old_frames_vmaf(&mut self, now: TaiTime<0>, current_frame_id: usize, ip: IpAddr) -> Result<()> {
+    async fn cleanup_old_frames_vmaf(
+        &mut self,
+        now: TaiTime<0>,
+        current_frame_id: usize,
+        ip: IpAddr,
+    ) -> Result<()> {
         // Only clean up frames that are at least 100 frames behind
         if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
             return Ok(());
@@ -5688,7 +5800,6 @@ impl XRClient {
         // let lossy_dir = format!("{}/{}/lossy_rgb", base_dir, ip);
 
         self.flush_vmaf_buffer(now).await?;
-
 
         // Function to remove older frames from a directory
         let remove_old_frames = |dir: &str| -> Result<()> {
@@ -5730,8 +5841,6 @@ impl XRClient {
         Ok(())
     }
 
-
-    
     pub async fn vmaf_analysis(
         &mut self,
         sample: Vec<u8>,
@@ -5752,16 +5861,20 @@ impl XRClient {
         }
 
         // Add current frame to buffer
-        self.vmaf_frame_buffer.push_back((sample, ref_sample, now, frame_id, ip));
-        
+        self.vmaf_frame_buffer
+            .push_back((sample, ref_sample, now, frame_id, ip));
+
         // Only process if we have enough frames
         if self.vmaf_frame_buffer.len() < self.vmaf_batch_size {
             return Ok(());
         }
-        
+
         // Process the accumulated frames
-        println!("Processing batch of {} frames for VMAF analysis", self.vmaf_frame_buffer.len());
-        
+        println!(
+            "Processing batch of {} frames for VMAF analysis",
+            self.vmaf_frame_buffer.len()
+        );
+
         // Ensure metrics logger is initialized
         if self.metrics_logger.is_none() {
             println!("INITIALIZING LOGGER IN FOLDER: {}", self.name_folder);
@@ -5778,11 +5891,13 @@ impl XRClient {
                 }
             }
         }
-        
+
         // Process all frames in buffer
         while !self.vmaf_frame_buffer.is_empty() {
             // Take one frame from the buffer
-            if let Some((frame_sample, frame_ref, frame_time, frame_id, frame_ip)) = self.vmaf_frame_buffer.pop_front() {
+            if let Some((frame_sample, frame_ref, frame_time, frame_id, frame_ip)) =
+                self.vmaf_frame_buffer.pop_front()
+            {
                 // Create directories for temporary storage if they don't exist
                 let base_dir = format!("Sink_for_video/{}", &self.name_folder);
                 if let Err(e) = std::fs::create_dir_all(&base_dir) {
@@ -5796,16 +5911,20 @@ impl XRClient {
                     base_dir, frame_ip, frame_id
                 );
                 let lossy_path = format!(
-                    "{}/{}/lossy_rgb/frame_{:04}.rgb", 
+                    "{}/{}/lossy_rgb/frame_{:04}.rgb",
                     base_dir, frame_ip, frame_id
                 );
-                
+
                 // Create parent directories
-                if let Err(e) = std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, frame_ip)) {
+                if let Err(e) =
+                    std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, frame_ip))
+                {
                     eprintln!("Failed to create reference directory: {}", e);
                     continue;
                 }
-                if let Err(e) = std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, frame_ip)) {
+                if let Err(e) =
+                    std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, frame_ip))
+                {
                     eprintln!("Failed to create lossy directory: {}", e);
                     continue;
                 }
@@ -5824,39 +5943,43 @@ impl XRClient {
 
                 // Process frame metrics
                 if let Some(logger) = &self.metrics_logger {
-                    logger
-                        .process_frame_metrics(
-                            frame_id as u64,
-                            timestamp_ms,
-                            &ref_path,
-                            &lossy_path,
-                            frame_ip,
-                        ); 
+                    logger.process_frame_metrics(
+                        frame_id as u64,
+                        timestamp_ms,
+                        &ref_path,
+                        &lossy_path,
+                        frame_ip,
+                    );
                 }
             }
         }
-        
+
         Ok(())
     }
 
- 
     pub async fn flush_vmaf_buffer(&mut self, now: TaiTime<0>) -> Result<()> {
         // If there are any frames left in the buffer, process them
         if !self.vmaf_frame_buffer.is_empty() {
-            println!("Flushing {} remaining frames in VMAF buffer", self.vmaf_frame_buffer.len());
-            
+            println!(
+                "Flushing {} remaining frames in VMAF buffer",
+                self.vmaf_frame_buffer.len()
+            );
+
             // Get IP from the first frame in buffer (or use a default)
             let default_ip = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
-            let ip = self.vmaf_frame_buffer.front().map(|f| f.4).unwrap_or(default_ip);
-            
+            let ip = self
+                .vmaf_frame_buffer
+                .front()
+                .map(|f| f.4)
+                .unwrap_or(default_ip);
+
             // Call vmaf_analysis with empty frames to trigger processing of buffer
-            self.vmaf_analysis(Vec::new(), Vec::new(), now , 0, ip).await?;
+            self.vmaf_analysis(Vec::new(), Vec::new(), now, 0, ip)
+                .await?;
         }
-        
+
         Ok(())
     }
-
-    
 
     pub fn vsync<'a>(
         &'a mut self,
@@ -5866,31 +5989,28 @@ impl XRClient {
         async move {
             let now = context.scheduler.time();
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-            let mut lost_frames_aux =self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
+            let mut lost_frames_aux = self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
-            if self.original_decoder.is_none() && USE_FFMPEG_DEMO{
-                self.original_decoder = Some(
-                    Arc::new( Mutex::new( HevcDecoder::new(
-                        self.framerate as u32,
-                        WIDTH_ENCODER as u32,
-                        HEIGHT_ENCODER as u32,
-                        &format!("[SINGLE DECODER {}]", self.server_ip), 
-                    )))); 
+            if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
+                self.original_decoder = Some(Arc::new(Mutex::new(HevcDecoder::new(
+                    self.framerate as u32,
+                    WIDTH_ENCODER as u32,
+                    HEIGHT_ENCODER as u32,
+                    &format!("[SINGLE DECODER {}]", self.server_ip),
+                ))));
             }
 
-            let third_octet = get_third_octet(self.server_ip).unwrap();                 
-
+            let third_octet = get_third_octet(self.server_ip).unwrap();
 
             let csv_path = get_prefix_path(&format!(
                 "Results/{}/trace_offline_video{}.csv",
                 self.name_folder,
                 third_octet,
-                // format_elapsed!(now), 
+                // format_elapsed!(now),
             ));
 
-
-            // --------------Initialize offline CSV tracker for frames ------------- 
-           if self.offline_csv_trace.writer.is_none() && USE_FFMPEG_DEMO {
+            // --------------Initialize offline CSV tracker for frames -------------
+            if self.offline_csv_trace.writer.is_none() && USE_FFMPEG_DEMO {
                 if !Path::new(&csv_path).exists() {
                     // Encoder hasn’t created the file yet – keep your wait/log if you want
                     println!("waiting until offline CSV created");
@@ -5909,26 +6029,21 @@ impl XRClient {
             let current_last_processed = self.last_processed_frame_id;
             self.missing_frames_buffer.retain(|&id, &mut processed| {
                 !processed || id.saturating_sub(current_last_processed) <= 100 // Avoid underflow
-            });         
+            });
 
             if !self.jitter_buffer_warmup_ready {
                 if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
                     // do nothing
+                } else {
+                    self.jitter_buffer_warmup_ready = true;
+                    print_yellow!("Jitter buffer ready!!",);
                 }
-                else {
-                    self.jitter_buffer_warmup_ready = true; 
-                    print_yellow!("Jitter buffer ready!!", ); 
-                }
-            }
-            else
-            {
-            // Process the next frame if available from the regular stream queue
+            } else {
+                // Process the next frame if available from the regular stream queue
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
-
-
                     // crate::print_magenta!(
                     //                 // DebugColor::Violet,
-                    //                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}", 
+                    //                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}",
                     //                 format_elapsed!(now),
                     //                 self.server_ip,
                     //                 id_f,
@@ -5937,20 +6052,21 @@ impl XRClient {
                     //                 // interarrival.as_secs_f32(),
                     //             );
 
-                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
+                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 {
+                        1
+                    } else {
+                        0
+                    };
                     self.last_seen_id = id_f;
 
-                    let timestamp = now.duration_since(self.t_0).as_secs_f64();           // TaiTime -> f64 seconds
+                    let timestamp = now.duration_since(self.t_0).as_secs_f64(); // TaiTime -> f64 seconds
 
-                    
-                    if !Path::new(&csv_path).exists()  {
+                    if !Path::new(&csv_path).exists() {
                         // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                    }
-                    else{
+                    } else {
+                        // emu effects part here?
 
-                        // emu effects part here? 
-
-                    self.offline_csv_trace
+                        self.offline_csv_trace
                             .write_record(&[
                                 "", // offset (preamble only)
                                 "", // source (preamble only)
@@ -5968,7 +6084,7 @@ impl XRClient {
                             let _ = self.offline_csv_trace.flush().await;
                         }
                     }
-                    let mut ip_client = self.server_ip; 
+                    let mut ip_client = self.server_ip;
                     if let IpAddr::V4(ip4) = ip_client {
                         let mut octets = ip4.octets();
                         if octets[3] == 2 {
@@ -5976,7 +6092,6 @@ impl XRClient {
                             ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
                         }
                     }
-                
 
                     if id_f > self.last_processed_frame_id + 1 {
                         let missing_start = self.last_processed_frame_id + 1;
@@ -5985,29 +6100,41 @@ impl XRClient {
                         print_pretty!(
                             DebugColor::Red,
                             "{} Detected missing regular frames between {} and {}",
-                            ip_client, missing_start, missing_end,
+                            ip_client,
+                            missing_start,
+                            missing_end,
                         );
 
-                        for missing_id in missing_start..=missing_end { // Iterate inclusive
+                        for missing_id in missing_start..=missing_end {
+                            // Iterate inclusive
                             if !self.missing_frames_buffer.contains_key(&missing_id) {
                                 print_pretty!(
                                     DebugColor::DarkOrange,
                                     "{} Added missing frame {} to tracking system",
-                                    ip_client, missing_id,
+                                    ip_client,
+                                    missing_id,
                                 );
-                                self.missing_frames_buffer.insert(missing_id, false); // Mark as not processed yet
+                                self.missing_frames_buffer.insert(missing_id, false);
+                                // Mark as not processed yet
                             }
 
                             // Check if already processed (e.g., by a previous recovery attempt)
-                                if *self.missing_frames_buffer.get(&missing_id).unwrap_or(&false) {
-                                print_pretty!(DebugColor::Purple, "Missing frame {} already processed, skipping", missing_id);
+                            if *self
+                                .missing_frames_buffer
+                                .get(&missing_id)
+                                .unwrap_or(&false)
+                            {
+                                print_pretty!(
+                                    DebugColor::Purple,
+                                    "Missing frame {} already processed, skipping",
+                                    missing_id
+                                );
                                 continue;
-                                }
-                                // Mark as processed in the tracking buffer *after* attempting to process
-                                self.missing_frames_buffer.insert(missing_id, true);
+                            }
+                            // Mark as processed in the tracking buffer *after* attempting to process
+                            self.missing_frames_buffer.insert(missing_id, true);
                         }
                     } // End of missing frame recovery
-
 
                     // Update last processed frame ID for the *regular* stream continuity check
                     self.last_processed_frame_id = id_f;
@@ -6023,33 +6150,41 @@ impl XRClient {
                         self.dec_saw_keyframe_last_t = now;
                     }
 
-                    if !self.is_decoder_ready && USE_FFMPEG_DEMO { 
+                    if !self.is_decoder_ready && USE_FFMPEG_DEMO {
+                        if !video_frame.is_empty() {
+                            self.initialization_buffer.push(video_frame.clone());
+                        }
 
-                        if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
-                        
-                        let has_enough_frames = self.initialization_buffer.len() >= self.min_buffered_frames;
-                        if is_keyframe(&video_frame) { self.dec_saw_keyframe = true; self.dec_saw_keyframe_last_t = now; }
+                        let has_enough_frames =
+                            self.initialization_buffer.len() >= self.min_buffered_frames;
+                        if is_keyframe(&video_frame) {
+                            self.dec_saw_keyframe = true;
+                            self.dec_saw_keyframe_last_t = now;
+                        }
 
                         if has_enough_frames && self.dec_saw_keyframe {
-                            print_pretty!(DebugColor::Cyan, "Decoder initialization criteria met! Buffered {} frames", self.initialization_buffer.len());
+                            print_pretty!(
+                                DebugColor::Cyan,
+                                "Decoder initialization criteria met! Buffered {} frames",
+                                self.initialization_buffer.len()
+                            );
 
-                            print_pretty!(DebugColor::Cyan, "Initialization processing complete.", );
+                            print_pretty!(DebugColor::Cyan, "Initialization processing complete.",);
                             self.is_decoder_ready = true;
                             self.initialization_buffer.clear();
-
-                        } else { /* ... log buffering status ... */ }
-
+                        } else { /* ... log buffering status ... */
+                        }
                     } // End of initialization logic
-
 
                     if self.is_decoder_ready && USE_FFMPEG_DEMO {
                         if !video_frame.is_empty() {
-                            
-                            if let Some(interarrival) = now.checked_duration_since(self.last_decoded_frame_instant) {
+                            if let Some(interarrival) =
+                                now.checked_duration_since(self.last_decoded_frame_instant)
+                            {
                                 let miin: usize = usize::min(video_frame.len(), 50);
                                 // crate::print_magenta!(
                                 //     // DebugColor::Violet,
-                                //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s", 
+                                //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s",
                                 //     format_elapsed!(now),
                                 //     ip_client,
                                 //     id_f,
@@ -6059,13 +6194,12 @@ impl XRClient {
                                 // );
                             }
 
-                            if let Some(decoder_arc) = self.original_decoder.clone(){
+                            if let Some(decoder_arc) = self.original_decoder.clone() {
                                 let mut decoder = decoder_arc.lock().unwrap();
 
                                 // Process the current frame pair using process_packets
                                 print_pretty!(DebugColor::Cyan, "Processing frame #{} ", id_f);
                                 decoder.process_packet(video_frame.clone());
-
 
                                 // Try to get a synchronized frame pair immediately after processing
                                 // This might yield 0, 1 or more pairs depending on internal buffering and state
@@ -6084,39 +6218,53 @@ impl XRClient {
                                     DISPLAY_WINDOWS.with(|windows_cell| {
                                         let mut windows = windows_cell.borrow_mut();
                                         // Ensure window exists (keep window creation logic)
-                                        if !windows.contains_key(&self.server_ip) { 
-                                            
-                                                let window_title = format!("{} - Frame Display [{}]", format_elapsed!(now), self.server_ip);
-                                                let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW ) as usize;
-                                                let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-                                                match Window::new(
-                                                    &window_title,
-                                                    window_width,
-                                                    window_height,
-                                                    WindowOptions::default()
-                                                ) {
-                                                    Ok(window) => {
-                                                        windows.insert(self.server_ip.clone(), window);
-                                                        print_pretty!(DebugColor::Green,
-                                                            "Created display window for {} ({} x {})", 
-                                                            self.server_ip, window_width, window_height,);
-                                                    },
-                                                    Err(e) => {
-                                                        print_pretty!(DebugColor::Red,
-                                                            "Failed to create display window: {}", 
-                                                            e,);
-                                                    }
-                                                }   
+                                        if !windows.contains_key(&self.server_ip) {
+                                            let window_title = format!(
+                                                "{} - Frame Display [{}]",
+                                                format_elapsed!(now),
+                                                self.server_ip
+                                            );
+                                            let window_width = (WIDTH_ENCODER as f64
+                                                * SCALE_FACTOR_WINDOW)
+                                                as usize;
+                                            let window_height = (HEIGHT_ENCODER as f64
+                                                * SCALE_FACTOR_WINDOW)
+                                                as usize;
+                                            match Window::new(
+                                                &window_title,
+                                                window_width,
+                                                window_height,
+                                                WindowOptions::default(),
+                                            ) {
+                                                Ok(window) => {
+                                                    windows.insert(self.server_ip.clone(), window);
+                                                    print_pretty!(
+                                                        DebugColor::Green,
+                                                        "Created display window for {} ({} x {})",
+                                                        self.server_ip,
+                                                        window_width,
+                                                        window_height,
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    print_pretty!(
+                                                        DebugColor::Red,
+                                                        "Failed to create display window: {}",
+                                                        e,
+                                                    );
+                                                }
                                             }
+                                        }
 
                                         if let Some(window) = windows.get_mut(&self.server_ip) {
                                             // Calculate similarity (keep calculation)
-                                        
-                                            let bitrate_sample_mbps = extract_br_value(&self.name_folder).unwrap_or(0.0);
+
+                                            let bitrate_sample_mbps =
+                                                extract_br_value(&self.name_folder).unwrap_or(0.0);
 
                                             // Pass the current SyncState to the display function
-                                            self.lost_ids_reference_buffer = VecDeque::new(); 
-                                            
+                                            self.lost_ids_reference_buffer = VecDeque::new();
+
                                             // let slice: &[u32] = lost_frames_aux.make_contiguous();
                                             let display_result = display_single_frame_with_info(
                                                 &frame,
@@ -6128,68 +6276,84 @@ impl XRClient {
                                                 lost_frames_aux.clone(),
                                                 &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
                                                 &self.test,
-                                                &self.bm_string, 
-                                                &self.sim_unique_string, 
-
+                                                &self.bm_string,
+                                                &self.sim_unique_string,
                                             );
-                                        
-                                            lost_frames_aux = VecDeque::new(); 
 
-                                            if display_result {      
-                                                print_pretty!(DebugColor::Green,
-                                                "Successfully displayed frame #{}", 
-                                                decoder.decoded_frame_counter);                             
+                                            lost_frames_aux = VecDeque::new();
+
+                                            if display_result {
+                                                print_pretty!(
+                                                    DebugColor::Green,
+                                                    "Successfully displayed frame #{}",
+                                                    decoder.decoded_frame_counter
+                                                );
+                                            } else {
+                                                print_pretty!(
+                                                    DebugColor::Red,
+                                                    "Failed to display frame #{}",
+                                                    decoder.decoded_frame_counter,
+                                                );
                                             }
-                                            else {
-                                                print_pretty!(DebugColor::Red,
-                                                "Failed to display frame #{}", 
-                                                decoder.decoded_frame_counter,);
-                                        }                                            
                                         } // End if let Some(window)
                                     }); // End DISPLAY_WINDOWS.with
                                 } // End while let Some(frame_pair)
-
                             } else {
-                                print_pretty!(DebugColor::Red, "Synchronized decoder not initialized!", );
+                                print_pretty!(
+                                    DebugColor::Red,
+                                    "Synchronized decoder not initialized!",
+                                );
                             }
                         } else {
                             // Log cases where frames might be empty if unexpected
-                            if video_frame.is_empty() { print_pretty!(DebugColor::Yellow, "Received empty regular frame #{}", id_f); }
+                            if video_frame.is_empty() {
+                                print_pretty!(
+                                    DebugColor::Yellow,
+                                    "Received empty regular frame #{}",
+                                    id_f
+                                );
+                            }
                         }
                     } // End if self.is_decoder_ready
 
                     // Update timestamp and send placeholder output (keep as is)
                     self.last_decoded_frame_instant = now;
-                    self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
-
-                } else { // Decoder queue was empty
-                    // print_brown!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip ); 
-                    self.rebuffer_event_counter.add_one(now); 
-
+                    self.out_video_decoded
+                        .send(video_frame[0..10.min(video_frame.len())].to_vec())
+                        .await;
+                } else {
+                    // Decoder queue was empty
+                    // print_brown!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip );
+                    self.rebuffer_event_counter.add_one(now);
                 } // End if let Some((id_f, video_frame))
             }
 
             // print_red!("{} - Scheduling VSYNC at {}", format_elapsed!(now), format_elapsed!(now + T_vsync));
-            context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
+            context
+                .scheduler
+                .schedule_event(T_vsync, Self::vsync, ())
+                .unwrap();
         }
-    }  
-
-    pub async fn input_perfect_information_bitrate(&mut self, bitrate_msg: PerfectInfoBitrateMessage, context: &Context<Self>) {
-        
-        let now = context.scheduler.time(); 
-
-        let bitrate = bitrate_msg.bitrate_mbps; 
-        // if self.bitrate_ladder_perfect_info_update.is_none(){
-        if let Some(veccc) = bitrate_msg.bitrate_ladder_bps{
-            self.bitrate_ladder_perfect_info_update = veccc; 
-        }
-        // crate::print_brown!("{} - perfect bitrate input: {} | Bitrate ladder : {:#?}", format_elapsed!(now), bitrate, self.bitrate_ladder_perfect_info_update); 
-        self.last_bitrate_perfect_info_update_mbps = bitrate; 
     }
 
+    pub async fn input_perfect_information_bitrate(
+        &mut self,
+        bitrate_msg: PerfectInfoBitrateMessage,
+        context: &Context<Self>,
+    ) {
+        let now = context.scheduler.time();
 
-    pub async fn input_coordinates_STA(&mut self, coords: Coords, context: &Context<Self>){
-        self.current_coordinates_tracking = self.coords_to_vec3(coords); // not much else to do, tracking output will just use the last value 3*FPS. Angular velocities might be considered in future, but not yet; TODO 
+        let bitrate = bitrate_msg.bitrate_mbps;
+        // if self.bitrate_ladder_perfect_info_update.is_none(){
+        if let Some(veccc) = bitrate_msg.bitrate_ladder_bps {
+            self.bitrate_ladder_perfect_info_update = veccc;
+        }
+        // crate::print_brown!("{} - perfect bitrate input: {} | Bitrate ladder : {:#?}", format_elapsed!(now), bitrate, self.bitrate_ladder_perfect_info_update);
+        self.last_bitrate_perfect_info_update_mbps = bitrate;
+    }
+
+    pub async fn input_coordinates_STA(&mut self, coords: Coords, context: &Context<Self>) {
+        self.current_coordinates_tracking = self.coords_to_vec3(coords); // not much else to do, tracking output will just use the last value 3*FPS. Angular velocities might be considered in future, but not yet; TODO
     }
 
     pub async fn in_from_network(&mut self, frame: TimedFrame, context: &Context<Self>) {
@@ -6218,11 +6382,10 @@ impl XRClient {
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                         // println!("receiver: {:?}", receiver);
-                        
-                        // println!("Received audio packet: {:?}", header); // We do nothing with received audio packets at time,
-                                                                            // it's just empty data being sent every 10ms following structure of ALVR game audio transmissions. 
-                    }
 
+                        // println!("Received audio packet: {:?}", header); // We do nothing with received audio packets at time,
+                        // it's just empty data being sent every 10ms following structure of ALVR game audio transmissions.
+                    }
                 }
                 VIDEO => {
                     if let Some(sock) = self.input_app_video.clone() {
@@ -6230,9 +6393,8 @@ impl XRClient {
                         let _sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
 
                         if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
-                            
-                            self.last_rx_frame_instant = now; 
-                            
+                            self.last_rx_frame_instant = now;
+
                             let _resulllt = StreamSocket::recv(
                                 &mut ssocket,
                                 self.server_ip,
@@ -6246,23 +6408,27 @@ impl XRClient {
                 }
 
                 FOVOPTIX_BW_PROBE => {
-                    // println!("Client: RECEIVED PROBE!"); 
+                    // println!("Client: RECEIVED PROBE!");
                     if let Some(sock) = self.input_app_bw_probe.clone() {
-                        let _sender = sock.network_app_interface.lock().unwrap().send(&buffer); 
+                        let _sender = sock.network_app_interface.lock().unwrap().send(&buffer);
 
                         if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
-
                             let _resulllt = StreamSocket::recv(
                                 &mut ssocket,
                                 self.server_ip,
                                 sock.inner,
-                                context); 
-                        
-                            // println!("Client: RECEIVED PROBE!"); 
+                                context,
+                            );
+
+                            // println!("Client: RECEIVED PROBE!");
                             context
                                 .scheduler
-                                .schedule_event(Duration::from_nanos(10), Self::bw_probe_receive_thread, ())
-                                .unwrap();                        
+                                .schedule_event(
+                                    Duration::from_nanos(10),
+                                    Self::bw_probe_receive_thread,
+                                    (),
+                                )
+                                .unwrap();
                         }
                     }
                 }
@@ -6310,13 +6476,12 @@ impl LostFramesBuffer {
         }
     }
 
-
     fn add_message(&mut self, message: String) {
         if self.messages.len() >= self.max_size {
             // Remove the oldest message
             self.messages.remove(0);
         }
-        
+
         // Add the new message with the current timestamp
         self.messages.push(LostFramesMessage {
             text: message,
@@ -6324,29 +6489,27 @@ impl LostFramesBuffer {
             fade_duration: Duration::from_secs(5),
         });
     }
-    
-
 }
 
 // Function to calculate alpha (opacity) based on message age
 fn calculate_opacity(message: &LostFramesMessage) -> u32 {
     let now = Instant::now();
     let age = now.duration_since(message.timestamp);
-    
+
     // If message is newer than fade_duration, full opacity
     if age <= message.fade_duration {
         return 255;
     }
-    
+
     // Calculate fading over the next 2 seconds after fade_duration
     let fade_time = Duration::from_secs(40);
     let fade_age = age - message.fade_duration;
-    
+
     if fade_age >= fade_time {
         // Message is completely faded out
         return 0;
     }
-    
+
     // Linear fade from 255 to 0 over fade_time
     let fade_ratio = 1.0 - (fade_age.as_millis() as f64 / fade_time.as_millis() as f64);
     (fade_ratio * 255.0) as u32
@@ -6358,12 +6521,12 @@ fn apply_alpha(color: u32, alpha: u32) -> u32 {
     let r = (color >> 16) & 0xFF;
     let g = (color >> 8) & 0xFF;
     let b = color & 0xFF;
-    
+
     // Apply alpha (simple linear blending with black background)
     let r = (r * alpha) / 255;
     let g = (g * alpha) / 255;
     let b = (b * alpha) / 255;
-    
+
     // Recompose color
     (r << 16) | (g << 8) | b
 }
@@ -6381,7 +6544,7 @@ fn render_text_with_alpha(
 ) {
     // Apply alpha to the color
     let alpha_color = apply_alpha(color, alpha);
-    
+
     // Call the original render_text function with the modified color
     render_text(buffer, text, x, y, stride, alpha_color, scale);
 }
@@ -6404,8 +6567,8 @@ pub fn display_single_frame_with_info(
     lost_frames: VecDeque<u32>,
     lost_frames_buffer: &mut LostFramesBuffer,
     test: &str,
-    bm: &str, 
-    string_id: &str, 
+    bm: &str,
+    string_id: &str,
 ) -> bool {
     // 1) Convert raw RGB bytes → u32 pixel buffer
     let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
@@ -6435,16 +6598,17 @@ pub fn display_single_frame_with_info(
     // 5) Draw text overlays (frame index and bitrate)
     let margin = 10;
     let line_h = 20;
-    let line_hh = 40; 
-    
-    render_text(&mut buffer, 
-        &format!("FRAME #{}", 
-        frame_id), 
+    let line_hh = 40;
+
+    render_text(
+        &mut buffer,
+        &format!("FRAME #{}", frame_id),
         margin,
         margin,
         scaled_w,
         0x00FF00,
-        2);
+        2,
+    );
     render_text(
         &mut buffer,
         &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
@@ -6456,20 +6620,21 @@ pub fn display_single_frame_with_info(
     );
     render_text(
         &mut buffer,
-        &format!("{}", bm ),
+        &format!("{}", bm),
         margin,
         margin + line_hh,
         scaled_w,
         0x00FF00,
         2,
     );
-     
-
-
 
     // 6) Handle new lost-frames and add to buffer
     if !lost_frames.is_empty() {
-        let msg = format!("T: {:5.5} LOST FRAMES: {:?}", format_elapsed!(now), lost_frames);
+        let msg = format!(
+            "T: {:5.5} LOST FRAMES: {:?}",
+            format_elapsed!(now),
+            lost_frames
+        );
         lost_frames_buffer.add_message(msg);
     }
 
@@ -6497,7 +6662,7 @@ pub fn display_single_frame_with_info(
     // 8) Update title with timestamp and test identifier
     let title = format!(
         "{} | {} -- Frame #{} @ {:.2}s - Test: {}",
-        string_id, 
+        string_id,
         server_ip,
         frame_id,
         now.duration_since(TaiTime::EPOCH).as_secs_f64(),
@@ -6514,7 +6679,6 @@ pub fn display_single_frame_with_info(
         }
     }
 }
-
 
 #[allow(unused)] //Looks useless, is mainly defined for type matching compatibility between XRServer/XRclient for StreamSocket
 pub trait XRDevice {
@@ -6535,7 +6699,7 @@ impl XRDevice for XRServer {
 #[derive(Clone)]
 pub struct TimedFrame {
     vec: Vec<MpduPacket>,
-    timestamp: TaiTime<0>,  // this timestamp corresponds to the receive instant of an A-MPDU by any STA
+    timestamp: TaiTime<0>, // this timestamp corresponds to the receive instant of an A-MPDU by any STA
 }
 
 #[allow(non_camel_case_types)]
@@ -6545,7 +6709,7 @@ pub struct STA_extended {
     // extended class to PoissonGen
     pub output_network_port: Output<MpduPacket>,
 
-    pub outport_coords_xrclient: Output<Coords>, // only used so the XRClient can know its coordinates in real time, will be input in Tracking packets! 
+    pub outport_coords_xrclient: Output<Coords>, // only used so the XRClient can know its coordinates in real time, will be input in Tracking packets!
 
     pub to_app_socket: Output<TimedFrame>,
     // pub to_app_socket_end_ampdu: Output<bool>,
@@ -6558,14 +6722,14 @@ pub struct STA_extended {
     pub received_packet_counter: usize,
 
     pub sta_coordinates: Coords,
-    pub orig_sta_coordinates: Coords, 
+    pub orig_sta_coordinates: Coords,
     pub does_sta_tx: bool,
 
     pub is_bg_sta: bool,
 
     pub t_0: TaiTime<0>,
-    pub is_ul_bg: usize, // 3 modes: 0 -> DL only, 1 -> UL, 2 -> DL/UL 
-    pub random_seed: StdRng, 
+    pub is_ul_bg: usize, // 3 modes: 0 -> DL only, 1 -> UL, 2 -> DL/UL
+    pub random_seed: StdRng,
     pub ap_coords: Coords, // used for BG DL traffic in TX
 }
 #[allow(unused)]
@@ -6580,18 +6744,18 @@ impl STA_extended {
         t0_sim: TaiTime<0>,
         is_bg_sta: bool,
         arrival_rate_BG: f64,
-        is_ul_bg: usize, 
-        ap_coords: Coords, 
+        is_ul_bg: usize,
+        ap_coords: Coords,
     ) -> Self {
         let arrival_rate_BG_packets = arrival_rate_BG / mean_length_BG;
 
         println!("\n*************************************************");
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3}, RATE_BG: {:.3} Mbps, is_BG_STA {}",
                             src, coordinates, dest, mean_length_BG,   arrival_rate_BG / 1e6, is_bg_sta);
-        let mut random_seed = StdRng::seed_from_u64(42); 
+        let mut random_seed = StdRng::seed_from_u64(42);
         Self {
             output_network_port: Default::default(),
-            outport_coords_xrclient: Default::default(),  
+            outport_coords_xrclient: Default::default(),
             to_app_socket: Default::default(),
             // to_app_socket_end_ampdu: Default::default(),
             sta_id: src,
@@ -6600,36 +6764,35 @@ impl STA_extended {
             mean_length_packets_BG: mean_length_BG,
             num_packets_sent: 0,
             sta_coordinates: coordinates,
-            orig_sta_coordinates: coordinates, 
+            orig_sta_coordinates: coordinates,
             received_packet_counter: 0,
             does_sta_tx: does_sta_transmit,
             t_0: t0_sim,
             is_bg_sta,
-            is_ul_bg, 
+            is_ul_bg,
             random_seed,
-            ap_coords, 
+            ap_coords,
         }
     }
-
 
     // To simulate the channel changes, simulate the HMD moving at a
     // constant speed of 5 m/s according to a random direction model within 1m² around
     // initial position. In this way, we approximate the channel changes caused
-    // by a VR gamer standing still but rapidly moving around. src: How to model cloud VR, khorov et al. 
- pub fn move_coordinates_everest<'a>(&'a mut self,
+    // by a VR gamer standing still but rapidly moving around. src: How to model cloud VR, khorov et al.
+    pub fn move_coordinates_everest<'a>(
+        &'a mut self,
         _: (),
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
-        async move{
-
-            const LIMIT_MOVEMENT_RADIUS :f64 = 1.0; // circle of 1m radius. 
-            let delta_t = 0.01; //  is reasonable? 
+        async move {
+            const LIMIT_MOVEMENT_RADIUS: f64 = 1.0; // circle of 1m radius.
+            let delta_t = 0.01; //  is reasonable?
 
             // Step length = speed * delta_t
             let step = 5.0 * delta_t;
 
-            {              
-                let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth. 
+            {
+                let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth.
 
                 // Pick a random direction in 2D plane (azimuth only)
                 let theta = rng.gen_range(0.0..2.0 * PI);
@@ -6667,16 +6830,21 @@ impl STA_extended {
             }
             // z stays constant (HMD height)
             // println!("Coordinates After dt: {:?}", self.sta_coordinates);
-            
-            self.outport_coords_xrclient.send( self.sta_coordinates.clone()).await; 
+
+            self.outport_coords_xrclient
+                .send(self.sta_coordinates.clone())
+                .await;
 
             context
                 .scheduler
-                .schedule_event(Duration::from_secs_f64(delta_t), Self::move_coordinates_everest, () , )
+                .schedule_event(
+                    Duration::from_secs_f64(delta_t),
+                    Self::move_coordinates_everest,
+                    (),
+                )
                 .unwrap();
         }
     }
-
 
     pub fn move_coordinates(&mut self, distance_to_move: f64) {
         // brownian movement for STA
@@ -6704,7 +6872,7 @@ impl STA_extended {
         // do everything else to the packet:
 
         packet.length_packet_bits = (packet.header_alvr.packet_length * 8 + 100 * 8) as usize; // convert length (bytes) to bits + App header (100 bytes)
-        // println!("Length packet XR {}", packet.length_packet);
+                                                                                               // println!("Length packet XR {}", packet.length_packet);
         packet.packet_id = self.num_packets_sent;
 
         packet.sta_src_id = self.sta_id;
@@ -6768,74 +6936,73 @@ impl STA_extended {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-                // let mut rng = rand::thread_rng();
+            // let mut rng = rand::thread_rng();
 
-
-            // let mut sta_coordinates = self.sta_coordinates; 
+            // let mut sta_coordinates = self.sta_coordinates;
             if self.does_sta_tx && self.is_bg_sta {
                 // if STA is "TX type"         (and not "RX only")
                 let (packet_src, packet_dest, sta_coords) = match self.is_ul_bg {
-                    0 => { 
+                    0 => {
                         // Mode 0: DL Only
                         // Packet comes FROM the AP (self.destination_id) TO this STA (self.sta_id)
-                        (self.sta_id, self.destination_id,self.sta_coordinates)
-                    },
-                    1 => { 
-                        // Mode 1: UL Only.  UL packets have src and dest flipped by the Queue when building AMPDUs. 
+                        (self.sta_id, self.destination_id, self.sta_coordinates)
+                    }
+                    1 => {
+                        // Mode 1: UL Only.  UL packets have src and dest flipped by the Queue when building AMPDUs.
                         // Packet comes FROM this STA (self.sta_id) TO the AP (self.destination_id).
-                        (  self.destination_id, self.sta_id,   self.sta_coordinates )
-                    },
-                    2 => { 
+                        (self.destination_id, self.sta_id, self.sta_coordinates)
+                    }
+                    2 => {
                         // Mode 2: Both (50/50 chance)
-                        if self.random_seed.gen::<bool>()  { // 50/50 chance
+                        if self.random_seed.gen::<bool>() {
+                            // 50/50 chance
                             // Send UL
-                            // print_magenta!("Mode 2 -> UL: {} {}", self.destination_id, self.sta_id); 
+                            // print_magenta!("Mode 2 -> UL: {} {}", self.destination_id, self.sta_id);
 
-                             ( self.destination_id, self.sta_id,  self.sta_coordinates )
-                            
+                            (self.destination_id, self.sta_id, self.sta_coordinates)
                         } else {
                             // Send DL
-                            // print_pink!("Mode 2 -> DL: {} {}", self.destination_id, self.sta_id); 
-                            (self.sta_id, self.destination_id,self.sta_coordinates)
+                            // print_pink!("Mode 2 -> DL: {} {}", self.destination_id, self.sta_id);
+                            (self.sta_id, self.destination_id, self.sta_coordinates)
                         }
-                    },
-                    _ => { 
-                        // Unknown mode, just stop.
-                        return; 
                     }
-                }; 
+                    _ => {
+                        // Unknown mode, just stop.
+                        return;
+                    }
+                };
 
                 let mut packet = MpduPacket::new();
 
+                let mut time_interarrival = Duration::from_secs_f64(exponential(
+                    1.0 / self.arrival_rate_BG,
+                    &mut self.random_seed,
+                ));
 
-                let mut time_interarrival =
-                    Duration::from_secs_f64(exponential(1.0 / self.arrival_rate_BG, &mut self.random_seed));
-
-                // if self.is_ul_bg==2 {time_interarrival /= 2 }; // If DL + UL, since traffic is "split" we do ·2 the frequency on each, still sampled from same Poisson. 
+                // if self.is_ul_bg==2 {time_interarrival /= 2 }; // If DL + UL, since traffic is "split" we do ·2 the frequency on each, still sampled from same Poisson.
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
-                // let len_random = exponential(self.mean_length_packets_BG as f64) as usize; // RANDOM SIZE 
-                let len_random = self.mean_length_packets_BG as usize;                 // DETERMINISTIC SIZE
+                // let len_random = exponential(self.mean_length_packets_BG as f64) as usize; // RANDOM SIZE
+                let len_random = self.mean_length_packets_BG as usize; // DETERMINISTIC SIZE
 
                 packet.length_packet_bits = cmp::max(1, len_random);
                 packet.packet_id = self.num_packets_sent;
 
-
                 packet.sta_src_id = packet_src;
                 packet.sta_dest_id = packet_dest;
                 packet.sta_src_coords = sta_coords;
-                // println!("src coords: {:?}", sta_coords); 
+                // println!("src coords: {:?}", sta_coords);
 
                 // print_dblue!(
                 //     "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
                 //     format_elapsed!(context.scheduler.time()),
                 //     self.sta_id,
                 //     packet.packet_id,
-                //     packet.sta_src_id, 
+                //     packet.sta_src_id,
                 //     packet.sta_dest_id,
                 //     self.sta_coordinates,
-                //     packet.edca_ac, 
+                //     packet.edca_ac,
                 // );
 
                 // self.output_network_port.send(packet).await;
@@ -6857,7 +7024,6 @@ impl STA_extended {
 
 impl Model for STA_extended {}
 
-
 pub fn extract_br_value(input: &str) -> Option<f32> {
     let re = Regex::new(r"Br(\d+\.\d+)").unwrap(); // Regex to match "Br" followed by a float.
 
@@ -6869,37 +7035,31 @@ pub fn extract_br_value(input: &str) -> Option<f32> {
 }
 
 pub fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
-                    // Perform binary search to find the largest value less than or equal to `bitrate_bps`
-                    match bitrate_ladder
-                        .binary_search_by(|x| x.partial_cmp(&bitrate_bps).unwrap_or(std::cmp::Ordering::Less))
-                    {
-                        Ok(index) => bitrate_ladder[index], // Exact match found
-                        Err(index) => {
-                            // If not found, `index` is where the value would be inserted to maintain sorted order
-                            if index == 0 {
-                                // If `bitrate_bps` is smaller than the first element, return the first element
-                                bitrate_ladder.first().copied().unwrap_or(bitrate_bps)
-                            } else {
-                                // Otherwise, return the element just before the insertion point (i.e., the largest <= bitrate_bps)
-                                bitrate_ladder[index - 1]
-                            }
-                        }
-                    }
-                }
-                
- 
-pub fn minmax_bitrate(
-    bitrate_bps: f32,
-    max_bitrate_bps: f32,
-    min_bitrate_bps: f32,
-) -> f32 {
+    // Perform binary search to find the largest value less than or equal to `bitrate_bps`
+    match bitrate_ladder.binary_search_by(|x| {
+        x.partial_cmp(&bitrate_bps)
+            .unwrap_or(std::cmp::Ordering::Less)
+    }) {
+        Ok(index) => bitrate_ladder[index], // Exact match found
+        Err(index) => {
+            // If not found, `index` is where the value would be inserted to maintain sorted order
+            if index == 0 {
+                // If `bitrate_bps` is smaller than the first element, return the first element
+                bitrate_ladder.first().copied().unwrap_or(bitrate_bps)
+            } else {
+                // Otherwise, return the element just before the insertion point (i.e., the largest <= bitrate_bps)
+                bitrate_ladder[index - 1]
+            }
+        }
+    }
+}
+
+pub fn minmax_bitrate(bitrate_bps: f32, max_bitrate_bps: f32, min_bitrate_bps: f32) -> f32 {
     let mut bitrate = bitrate_bps;
     bitrate = f32::min(bitrate, max_bitrate_bps);
     bitrate = f32::max(bitrate, min_bitrate_bps);
 
-
-    // println!("minmax: bitrate_mbps_orig: {}, final {}", bitrate_bps/1e6, bitrate/1e6); 
-
+    // println!("minmax: bitrate_mbps_orig: {}, final {}", bitrate_bps/1e6, bitrate/1e6);
 
     bitrate
 }
