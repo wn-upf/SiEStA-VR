@@ -3456,8 +3456,12 @@ impl QueueModule {
                     if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                         medium.occupy_collision(now + T_col_dur);
                     }
+
+                    let first_contender_key = contenders.first().unwrap(); 
+
                     if let Ok(mut map) = self.array_dcf_values.lock() {
                         // Apply backoff to all contenders on this link
+                        
                         for key in contenders.clone() {
                             if let Some(st) = map.get_mut(&key) {
                                 let old_cw = st.cw;
@@ -3473,7 +3477,7 @@ impl QueueModule {
                                 );
                             }
                         }
-                        debug_edca_r!(
+                        print_red!(
                             "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
                             format_elapsed!(now),
                             link_id,
@@ -3488,6 +3492,42 @@ impl QueueModule {
                                 st.medium_free_since = now + T_col_dur;
                             }
                         }
+                    }
+
+                    if let Some(stats_tx) = &self.stats_tx {
+                        // Deconstruct key. Assuming key is (sta_id, ac, link_id) based on your debug print
+                        let (src_id, _ac, _lid) = *first_contender_key; 
+
+                        // We don't know the exact destination from the DCF key alone, 
+                        // but strictly speaking, we only need 'src_id' for your Python DL/UL split.
+                        // We'll set dest_id to 0 (or -1) as a placeholder.
+                        let dummy_dest_id = if src_id == -1 { 1 } else { -1 }; 
+
+                        let stats_update = StatsUpdate {
+                            // -- Timing & collision info --
+                            now,
+                            is_collision: true,
+                            collision_backoff: T_col as f64,
+                            
+                            // -- IDs --
+                            sta_src_id: src_id as usize,    // Python uses this to determine DL vs UL
+                            sta_dest_id: dummy_dest_id as usize,
+                            link_id: link_id,
+
+                            // -- Dummy / Empty values for non-packet fields --
+                            T_s: 0.0,
+                            T_q: 0.0,
+                            blocked_packet_counter: self.blocked_packet_counter,
+                            arrived_packet_counter: self.arrived_packet_counter,
+                            queue_length_when_out: 0,
+                            packet_id: 0,
+                            length_packet: 0,
+                            ampdu_id: self.ampdu_id, 
+                        };
+
+                        stats_tx
+                            .send(stats_update)
+                            .expect("Failed to send stats update");                    
                     }
 
                     // CRITICAL FIX: Schedule wake-up after collision resolves
