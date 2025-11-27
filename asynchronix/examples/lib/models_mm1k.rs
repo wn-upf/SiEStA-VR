@@ -3477,13 +3477,13 @@ impl QueueModule {
                                 );
                             }
                         }
-                        print_red!(
-                            "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
-                            format_elapsed!(now),
-                            link_id,
-                            contenders.len(),
-                            T_col * 1000.0
-                        );
+                        // print_red!(
+                        //     "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
+                        //     format_elapsed!(now),
+                        //     link_id,
+                        //     contenders.len(),
+                        //     T_col * 1000.0
+                        // );
 
                         // Freeze all MACs on this link
                         for ((_, _, lid), st) in map.iter_mut() {

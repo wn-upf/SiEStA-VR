@@ -1,3 +1,4 @@
+use crate::lib::alvr_stream_socket::ALVR_ORIGINAL_SOCKETRX_BEHAVIOR;
 // asynchronix/examples/xr_entry.rs
 use crate::lib::models_mm1k::{
     EmulatedLink, NetworkPattern, QueueModule, MAX_EMULATED_QUEUE_PACKETS,
@@ -468,8 +469,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.0}_Br{:.1}Mbps_PL{:.1}_NXR{:.0}_NBG{:.0}_BGThr{:.0}Mbps_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in/1e6 ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string()
+        "sim_T{:.0}_D{:.0}_Br{:.1}Mbps_PL{:.1}_NXR{:.0}_NBG{:.0}_BGThr{:.0}Mbps_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
+        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in/1e6 ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,  
     );
 
     let output_path = format!("Results/{}", name_folder);
