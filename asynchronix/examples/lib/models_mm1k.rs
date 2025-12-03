@@ -2623,7 +2623,14 @@ impl QueueModule {
                 //     "Opportunistic: Both links busy, defaulting to LINK-{}",
                 //     link_a_id
                 // );
-                Some(link_a_id)
+                // Some(link_a_id) // WHOOPSIE! Should be RANDOM. 
+
+                let random_choice = if rand::thread_rng().gen_bool(0.5) {
+                    link_a_id
+                } else {
+                    link_b_id
+                };
+                Some(random_choice)
             }
         }
     }
