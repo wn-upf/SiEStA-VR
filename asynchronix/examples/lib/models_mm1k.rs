@@ -3078,10 +3078,6 @@ impl QueueModule {
     ) -> (AmpduPacket, Duration) {
         let mut success_indices: Vec<usize> = Vec::new();
         let (sta_src_id, sta_dest_id) = (first_packet.sta_src_id, first_packet.sta_dest_id);
-        // Get the link_id from the first packet
-        // let link_id = first_packet
-        //     .assigned_link_id
-        //     .expect("Packet must have assigned_link_id before building AMPDU");
 
         let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
 
@@ -3133,11 +3129,11 @@ impl QueueModule {
                 // 2. Are unassigned OR assigned to the SAME link
                 if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
                     || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                    || (current_packet.assigned_link_id.is_some() && current_packet.assigned_link_id != Some(link_id))
-                {
-                    packet_index += 1;
-                    continue;
-                }
+                    || (current_packet.assigned_link_id.is_some() && current_packet.assigned_link_id != Some(link_id)) 
+                        {
+                            packet_index += 1;
+                            continue;
+                        }
 
                 let new_total_length =
                     self.aux_ampdu_serviced.total_length + current_packet.length_packet_bits;
@@ -3577,8 +3573,7 @@ impl QueueModule {
                     let p_sta = if is_ul { p.sta_src_id } else { -1 };
                     p_sta == sta_id 
                         && p.edca_ac == ac 
-                        && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))
-                    // p_sta == sta_id 
+                        && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))                    // p_sta == sta_id 
                     //     && p.edca_ac == ac
                     //     && p.assigned_link_id == Some(winner_link_id)
                 }) {
@@ -3666,7 +3661,8 @@ impl QueueModule {
                             };
                             p_sta == sta_id
                                 && p.edca_ac == ac
-                                && p.assigned_link_id == Some(link_id)
+                                && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(link_id))
+                                // && p.assigned_link_id == Some(link_id)
                         });
 
                         if !has_packets {
