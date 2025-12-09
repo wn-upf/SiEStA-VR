@@ -9,6 +9,7 @@ use tai_time::TaiTime;
 
 use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
+use crate::lib::models_mm1k::{STR_PLUS_MODE_MLO};
 use colored::Colorize;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -1698,8 +1699,15 @@ impl MpduPacket {
     }
 
     pub fn assign_link(&mut self, link_id: u8) {
-        assert!(self.assigned_link_id.is_none(), "Link already assigned");
-        self.assigned_link_id = Some(link_id);
+
+        if STR_PLUS_MODE_MLO{
+            self.assigned_link_id = None; 
+        }
+        else{
+            assert!(self.assigned_link_id.is_none(), "Link already assigned");  // make extra sure we don't assign links to packets more than once
+            self.assigned_link_id = Some(link_id);
+        }
+   
     }
 
     pub fn print(&self, color: DebugColor) -> String {

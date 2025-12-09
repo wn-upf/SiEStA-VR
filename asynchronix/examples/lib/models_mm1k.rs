@@ -68,6 +68,7 @@ pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
 pub const DEBUG_EDCA: bool = false;
 pub const DEBUG_MLO: bool = false;
 
+pub const STR_PLUS_MODE_MLO: bool = true; // Set to true for STR+ mode, running backoffs and assigning traffic to link in last moment. 
 
 // pub const DEBUG_SCHEDULING: bool = false;
 // pub const SOFTMAX_POLICY: bool = false;
@@ -104,7 +105,7 @@ macro_rules! debug_schedule {
         // }
     };
 }
-
+#[macro_export]
 macro_rules! log_mlo {
     ($now:expr, $($arg:tt)*) => {
         if DEBUG_MLO {
@@ -114,7 +115,7 @@ macro_rules! log_mlo {
         }
     };
 }
-
+#[macro_export]
 macro_rules! log_link_selection {
     ($now:expr, $($arg:tt)*) => {
         if DEBUG_MLO {
@@ -2801,12 +2802,21 @@ impl QueueModule {
 
                         // Trigger scheduling if medium is idle
 
+                        // [STR+] Trigger scheduling if ANY link is idle (start race on all links), else just check the link_id of the current packet. 
+                        // Instead of checking only the assigned 'link_id', we check if any link is free to start the backoff process.
+                        let any_link_idle = if STR_PLUS_MODE_MLO {
+                            self.link_is_transmitting.values().any(|&tx| !tx)
+                        }
+                        else{
+                            *self.link_is_transmitting.get(&link_id).unwrap() == false
+                        }; 
+
+
                         if self.queue.len() == 1
-                            && *self.link_is_transmitting.get(&link_id).unwrap() == false
+                            && any_link_idle
                         {
                             // We schedule it one slot time in the future.
-                            // This prevents the immediate call bug and starts the
-                            // 9µs timer loop correctly.
+                            // This prevents an immediate call and starts the 9µs slot timer loop correctly.
                             ctx.scheduler
                                 .schedule_event(
                                     Duration::from_secs_f64(SLOT), // SLOT = 9e-6
@@ -2882,8 +2892,15 @@ impl QueueModule {
                         self.queue.len()
                     );
 
+                    let any_link_idle = if STR_PLUS_MODE_MLO {
+                        self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy 
+                    }
+                    else{
+                        *self.link_is_transmitting.get(&link_id).unwrap() == false
+                    }; 
+
                     if self.queue.len() == 1
-                        && *self.link_is_transmitting.get(&link_id).unwrap() == false
+                        && any_link_idle
                     {
                         context
                             .scheduler
@@ -3056,14 +3073,15 @@ impl QueueModule {
     fn build_new_ampdu<'a>(
         &mut self,
         first_packet: &MpduPacket,
+        link_id: u8, 
         now: TaiTime<0>,
     ) -> (AmpduPacket, Duration) {
         let mut success_indices: Vec<usize> = Vec::new();
         let (sta_src_id, sta_dest_id) = (first_packet.sta_src_id, first_packet.sta_dest_id);
         // Get the link_id from the first packet
-        let link_id = first_packet
-            .assigned_link_id
-            .expect("Packet must have assigned_link_id before building AMPDU");
+        // let link_id = first_packet
+        //     .assigned_link_id
+        //     .expect("Packet must have assigned_link_id before building AMPDU");
 
         let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
 
@@ -3112,10 +3130,10 @@ impl QueueModule {
             if let Some(current_packet) = self.queue.get(packet_index) {
                 //  Only aggregate packets that:
                 // 1. Match the same flow (src/dest)
-                // 2. Are assigned to the SAME link
+                // 2. Are unassigned OR assigned to the SAME link
                 if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
                     || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                    || current_packet.assigned_link_id != Some(link_id)
+                    || (current_packet.assigned_link_id.is_some() && current_packet.assigned_link_id != Some(link_id))
                 {
                     packet_index += 1;
                     continue;
@@ -3557,7 +3575,12 @@ impl QueueModule {
                 let first_ix = match self.queue.iter().position(|p| {
                     let is_ul = p.sta_src_id > p.sta_dest_id;
                     let p_sta = if is_ul { p.sta_src_id } else { -1 };
-                    p_sta == sta_id && p.edca_ac == ac && p.assigned_link_id == Some(winner_link_id)
+                    p_sta == sta_id 
+                        && p.edca_ac == ac 
+                        && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))
+                    // p_sta == sta_id 
+                    //     && p.edca_ac == ac
+                    //     && p.assigned_link_id == Some(winner_link_id)
                 }) {
                     Some(ix) => ix,
                     None => {
@@ -3573,7 +3596,7 @@ impl QueueModule {
                 let first_packet = self.queue.get(first_ix).cloned().unwrap();
 
                 // Build AMPDU for this link
-                let (mut ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, now);
+                let (mut ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, link_id, now);
                 ampdu_to_send.link_id = link_id; // Tag AMPDU with link
 
                 if ampdu_to_send.mpdu_packets.is_empty() || ampdu_airtime == Duration::ZERO {
