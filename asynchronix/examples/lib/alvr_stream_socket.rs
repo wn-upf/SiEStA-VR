@@ -1002,11 +1002,12 @@ impl StreamSocket {
 
         // Drain empties the map while yielding (key, value) pairs.
         for (frame_deadlined, lost_in_frame) in self.lost_shards_deadline_map.drain() {
-            crate::print_red!(
-                "[Flush deadline] Packets lost in frame {}: {:?}",
-                frame_deadlined,
-                lost_in_frame
-            );
+            // crate::print_red!(
+            //     "[Flush deadline {}] Packets lost in frame {}: {:?}",
+            //     self.
+            //     frame_deadlined,
+            //     lost_in_frame
+            // );
             vec_keys.push(frame_deadlined);
             vec_lost.push(lost_in_frame);
         }

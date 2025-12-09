@@ -3570,12 +3570,12 @@ impl XRServer {
                     let shards_lost = inner.shards_lost;
 
                     for (frame, shard) in frames_lost.iter().zip(shards_lost.iter()) {
-                        // print_red!(
-                        //     "[Deadline Server {}] Frame {} lost {} shards",
-                        //     self.ip_self,
-                        //     frame,
-                        //     shard
-                        // );
+                        print_red!(
+                            "[Deadline Server {}] Frame {} lost {} shards",
+                            self.ip_self,
+                            frame,
+                            shard
+                        );
                         let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32();
                         self.STATISTICS_MANAGER.report_shard_and_frame_loss(
                             1 as usize,
