@@ -2365,67 +2365,7 @@ impl QueueModule {
         winner.into_values().collect()
     }
 
-    /// ## A snippet from previous code that optimized a similar problem:
-    ///  let mut selected_sta = None;
-    // if LYAPUNOV_POLICY == true {
-    //     let mut min_priority = f64::MAX;
-    //     debug_schedule!(
-    //         "T {:.5} LYAPUNOV Drift-plus-Penalty scheduling policy:",
-    //         format_elapsed!(now)
-    //     );
-    //     for (key, info) in sta_packets.iter() {
-    //         let lhs = LYAPUNOV_V * info.per_packet_channel_access_efficiency;
-    //         let rhs = info.expected_queue_delivery_ms;
-    //         let priority: f64 = if info.packet_count >= MAX_AMPDU_SIZE as usize {
-    //             lhs - rhs
-    //         } else {
-    //             1E12 as f64
-    //         };
-    //         let is_ul = if key.0 > key.1 {1} else {0};
-    //         debug_schedule!(
-    //             "Q_{:.0} = {} -> Priority STA{:.0} = ({:.3}) == {} - {} | is_ul = {} (src: {} dest: {}) ",
-    //             key.0,
-    //             info.packet_count,
-    //             key.0,
-    //             priority,
-    //             lhs,
-    //             rhs,
-    //             is_ul,
-    //             key.0,
-    //             key.1,
-    //         );
-    //         if priority < min_priority {
-    //             min_priority = priority;
-    //             selected_sta = Some(*key);
-    //         }
-    //     }
-    // } else if SOFTMAX_POLICY == true {
-    //     debug_schedule!("SOFTMAX POLICY", );
-    //     let mut softmax_values: Vec<f64> = Vec::new();
-    //     let mut softmax_keys: Vec<(i32, i32)> = Vec::new();
-    //     for ((sta_src, sta_dest), packets) in sta_packets.iter() {
-    //         let _is_ul = if sta_src > sta_dest {1} else {0};
-    //         debug_schedule!(
-    //             "IS_UL = {} | ( src: {}, dest: {} )",
-    //             _is_ul,
-    //             sta_src,
-    //             sta_dest
-    //         );
-    //         softmax_values.push(packets.expected_queue_delivery_ms);
-    //         softmax_keys.push((*sta_src, *sta_dest));
-    //     }
-    //     pub const SOFTMAX_TEMP: f64 = 1000.0;
-    //     let softmax_probs = softmax_with_temperature(&softmax_values, SOFTMAX_TEMP);
-    //     let mut rng = rand::thread_rng();
-    //     let selected_index = softmax_probs
-    //         .iter()
-    //         .position(|&p| (1.0 - p) > rng.gen::<f64>())
-    //         .unwrap_or(softmax_probs.len() - 1);
-    //     let selected_key = softmax_keys[selected_index];
-    //     selected_sta = Some(selected_key);
-    // } else {
-    //     // NORMAL POLICY: FIFO
-    // }
+
 
     #[inline]
     fn select_link_for_packet(&mut self, pkt: &MpduPacket, now: TaiTime<0>) -> Option<u8> {

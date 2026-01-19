@@ -6721,7 +6721,7 @@ pub struct STA_extended {
     pub sta_id: i32,
     pub destination_id: i32,
 
-    pub arrival_rate_BG: f64,
+    pub arrival_rate_BG_packs_per_s: f64,
     pub mean_length_packets_BG: f64,
     pub num_packets_sent: usize,
     pub received_packet_counter: usize,
@@ -6748,15 +6748,15 @@ impl STA_extended {
         does_sta_transmit: bool,
         t0_sim: TaiTime<0>,
         is_bg_sta: bool,
-        arrival_rate_BG: f64,
+        arrival_rate_BG_lambda_packets_per_s: f64,
         is_ul_bg: usize,
         ap_coords: Coords,
     ) -> Self {
-        let arrival_rate_BG_packets = arrival_rate_BG / mean_length_BG;
+        let arrival_rate_BG_Mbps = (arrival_rate_BG_lambda_packets_per_s / mean_length_BG )/ 1e6;
 
         println!("\n*************************************************");
-        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3}, RATE_BG: {:.3} Mbps, is_BG_STA {}",
-                            src, coordinates, dest, mean_length_BG,   arrival_rate_BG / 1e6, is_bg_sta);
+        println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3} ->  RATE_BG_packs_per_s: {:.3}| Rate = {:.3} Mbps |  is_BG_STA {}",
+                            src, coordinates, dest, mean_length_BG, arrival_rate_BG_lambda_packets_per_s / 1e6, arrival_rate_BG_Mbps,  is_bg_sta);
         let mut random_seed = StdRng::seed_from_u64(42);
         Self {
             output_network_port: Default::default(),
@@ -6765,7 +6765,7 @@ impl STA_extended {
             // to_app_socket_end_ampdu: Default::default(),
             sta_id: src,
             destination_id: dest,
-            arrival_rate_BG: arrival_rate_BG_packets,
+            arrival_rate_BG_packs_per_s: arrival_rate_BG_lambda_packets_per_s,
             mean_length_packets_BG: mean_length_BG,
             num_packets_sent: 0,
             sta_coordinates: coordinates,
