@@ -6980,7 +6980,7 @@ impl STA_extended {
                 let mut packet = MpduPacket::new();
 
                 let mut time_interarrival = Duration::from_secs_f64(exponential(
-                    1.0 / self.arrival_rate_BG,
+                    1.0 / self.arrival_rate_BG_packs_per_s,
                     &mut self.random_seed,
                 ));
 

@@ -35,8 +35,10 @@ simTime=35.0
 EMU_TEST_TYPE=("STD") #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 
 k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
-RANDOM_SEEDS=({1..3})
-MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
+# RANDOM_SEEDS=({1..3})
+# MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
+RANDOM_SEEDS=(1)
+MLO_policies=(1) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 
 ############################################################################# <- BG Traffic
 N_BGs=( 1 3 5 )                ## Nº of BG STAs
