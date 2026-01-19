@@ -96,7 +96,7 @@ async fn encode_one_video(
     framerate: u32,
     bitrate_mbps: f32,
 ) -> anyhow::Result<()> {
-    let video_name = format!("snow_{}fps.mp4", framerate);
+    let video_name = format!("swordsmith_{}fps.mp4", framerate);
     let video_path = video_dir.join(&video_name);
 
     if !video_path.exists() {

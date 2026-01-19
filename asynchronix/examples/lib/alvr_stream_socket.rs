@@ -1975,7 +1975,7 @@ impl<H: Serialize> StreamSender<H> {
         // Compose filename with suffix
         let file_with_fps;
 
-        if final_file == "snow" {
+        if final_file == "snow" || final_file == "swordsmith" {
             file_with_fps = format!("{final_file}{fps_suffix}");
         } else {
             file_with_fps = final_file.to_string();

@@ -1880,20 +1880,11 @@ pub fn collision_delay() -> f32 {
 
     let SF = 16.0;
     let TB = 18.0;
-    // let _MD = 32.0;
-    // let _MAC_H_size = 240.0;
 
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
-    // let _T_DATA: f64 =
-    //     PHY_DURATION + ((SF + n_mpdus as f64 * (_MD + _MAC_H_size + _L) + TB) / _ORate).ceil() * 16E-6;
-    // let _T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
-
-    // let T = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_BACKOFF;
 
     let T_collision = T_RTS + SIFS + T_CTS;
-    //  + DIFS + SLOT + T_DETERMINISTIC_BACKOFF; //
-
     T_collision as f32
 }
 
