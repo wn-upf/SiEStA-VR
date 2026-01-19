@@ -6752,11 +6752,11 @@ impl STA_extended {
         is_ul_bg: usize,
         ap_coords: Coords,
     ) -> Self {
-        let arrival_rate_BG_Mbps = (arrival_rate_BG_lambda_packets_per_s / mean_length_BG )/ 1e6;
+        let arrival_rate_BG_bps = arrival_rate_BG_lambda_packets_per_s * mean_length_BG;
 
         println!("\n*************************************************");
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3} ->  RATE_BG_packs_per_s: {:.3}| Rate = {:.3} Mbps |  is_BG_STA {}",
-                            src, coordinates, dest, mean_length_BG, arrival_rate_BG_lambda_packets_per_s / 1e6, arrival_rate_BG_Mbps,  is_bg_sta);
+                            src, coordinates, dest, mean_length_BG, arrival_rate_BG_lambda_packets_per_s, arrival_rate_BG_bps / 1e6,  is_bg_sta);
         let mut random_seed = StdRng::seed_from_u64(42);
         Self {
             output_network_port: Default::default(),
