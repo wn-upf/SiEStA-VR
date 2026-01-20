@@ -19,9 +19,10 @@ module load x264
 export PATH=$HOME/.local/bin:$PATH
 
 NUMBER_OF_JOBS=12
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 
 DEBUG_PROFILE_FLAMEGRAPH=0
+DEBUG_LOGS=0
 
 #############################################################################
 # RL params: 
@@ -30,7 +31,7 @@ reward_mode=0
 T_ABR=0.3
 #############################################################################
 
-simTime=35.0
+simTime=10.0
 
 EMU_TEST_TYPE=("STD") #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 
@@ -119,35 +120,31 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                         for MLO_policy in "${MLO_policies[@]}"; do 
 
                                                                             NAME_ABR="ABR_${ABR}"
-                                                                            # Create the folder for results saving
-                                                                            # name_folder=$(printf "sim_T%.0f_D%.0f_Br%.1f_PL%.1f_NXR%.0f_NBG%.0f_BGThr%.2f_UL%.0f_%s_%s_FPS%.0f_Nclose%d_dclose%.1f_S%.0f_GoP%.0f_IR%.0f_ABR%.0f_nest%.0f_obs%.0f_Tabr%.3f_%s_%s_EDCAbe%.0f" \
-                                                                            #             "$simTime" "$distance" "$bitrate" "$PL" "$nxr" "$nbg" "$rate_BG" "$is_ul" "$test" "$video_sample" "$FPS" "$close_users" "$close_distance" "$seed" "$gop" "$intrarefresh" "$ABR" "$nest_profile" "$observation_type" "$T_ABR" "$NAME_ABR" "$MLO_config" "$edca_be")
-                                                                    
                                                                             (( SIM_COUNT++ ))  # ← increment
 
                                                                             echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
 
-
-                                                                            # rm out_log.ans
-                                                                            # script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy" "out_log.ans"
-                                                                            # sleep 5
-
+                                                                            if DEBUG_LOGS
+                                                                                rm out_log.ans
+                                                                                script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy" "out_log.ans"
+                                                                                sleep 5
+                                                                            fi
 
                                                                             # --- Profiling Block using samply ---
-                                                                            # if DEBUG_PROFILE_FLAMEGRAPH
-                                                                            #     echo "--- Starting Profiling Run for XR_sim with samply ---"
+                                                                            if DEBUG_PROFILE_FLAMEGRAPH
+                                                                                echo "--- Starting Profiling Run for XR_sim with samply ---"
 
-                                                                            #     # Define the output file
-                                                                            #     PROFILE_HTML_FILE="XR_sim_profile.html"
+                                                                                # Define the output file
+                                                                                PROFILE_HTML_FILE="XR_sim_profile.html"
 
-                                                                            #     # Run samply against your binary and arguments. 
-                                                                            #     # The -o flag tells samply where to save the profile.
-                                                                            #     samply record -o $PROFILE_HTML_FILE -- \
-                                                                            #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy
+                                                                                # Run samply against your binary and arguments. 
+                                                                                # The -o flag tells samply where to save the profile.
+                                                                                samply record -o $PROFILE_HTML_FILE -- \
+                                                                                    ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy
 
-                                                                            #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
-                                                                            #     exit 0 # Exit the job after generating the profile
-                                                                            # fi 
+                                                                                echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
+                                                                                exit 0 # Exit the job after generating the profile
+                                                                            fi 
                                                                         done
                                                                     done
                                                                 done 
