@@ -25,51 +25,48 @@ DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
-# RL params: 
-observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in expected bounds, 2-> Running Normalization. 
-reward_mode=0
-T_ABR=0.3
-#############################################################################
 
-simTime=10.0
+simTime=1.0
 
 EMU_TEST_TYPE=("STD") #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
-
 k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
-# RANDOM_SEEDS=({1..3})
-# MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 RANDOM_SEEDS=(1)
 MLO_policies=(1) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 
+# RANDOM_SEEDS=({1..3})
+# MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
+
 ############################################################################# <- BG Traffic
-N_BGs=( 1 3 5 )                ## Nº of BG STAs
+N_BGs=( 1 )                ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
 rates_bps_BGtraffic=( 1000 10000 100000 )  ## Packets per second 
-
 IS_UL_BG=( 0 1 2 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL 
-############################################################################# <- VR streaming params
 
-N_XR=( 0 ) 
-initial_bitrate_mbps=( 100.0 ) # VR Only
-fps_list=( 90.0 )              # VR Only
+############################################################################# <- 802.11 Parameters
 
-ABR_ENABLED=( 0 ) ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3->RL, 4-> GCC, 5-> NADA, 6-> FoVOptix 
-nest_profiles=( 1 ) ## balanced and that's it 
-video_samples=("swordsmith")
-intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
-GoP_sizes=(90)
-############################################################################# 
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
 MLO_CONFIGS=( "MLO1" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
-
-distance_list=( 1.5 3.3 6.0) ## Distance to AP of users
+distance_list=( 2.5) ## Distance to AP of users
 num_close_users=( 0 )         ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 )  ## to have heterogeneous distances            (if num_close_users > 0)
 everest_tests=0             ## Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 PL=0.1
-# IS_UL_BG=(  2 )
 
+############################################################################# <- VR streaming Parameters
 
+N_XR=( 0 ) 
+initial_bitrate_mbps=( 100.0 ) # VR Only
+fps_list=( 90.0 )              # VR Only
+ABR_ENABLED=( 0 ) ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+T_ABR=0.3         ## Time between updates of ABR, also affects RL mode. 
+nest_profiles=( 1 ) ## balanced and that's it 
+video_samples=("swordsmith")
+intrarefresh_choice=( 1 ) ## let's always assume intra-refresh
+GoP_sizes=(90)
+############################################################################# <- RL training Parameters
+
+observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 
+reward_mode=0
 temp_file=$(mktemp)
 SHUFFLED_CMDS=$(mktemp)
 # N_STEPS_RL=7_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced with the python script.   
@@ -123,15 +120,17 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                             (( SIM_COUNT++ ))  # ← increment
 
                                                                             echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
-
-                                                                            if DEBUG_LOGS
+                                                                            
+                                                                            
+                                                                            
+                                                                            if [ "$DEBUG_LOGS" = 1 ]; then
                                                                                 rm out_log.ans
                                                                                 script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy" "out_log.ans"
                                                                                 sleep 5
                                                                             fi
 
                                                                             # --- Profiling Block using samply ---
-                                                                            if DEBUG_PROFILE_FLAMEGRAPH
+                                                                            if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
                                                                                 echo "--- Starting Profiling Run for XR_sim with samply ---"
 
                                                                                 # Define the output file
