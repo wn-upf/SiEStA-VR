@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 30;
+pub const NUM_INPUT_ARGS_SIM: usize = 31;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 /// Draw a uniform random starting point inside the room.
@@ -352,6 +352,7 @@ pub struct SimParams {
     pub mlo_channel_config: String,
     pub edca_be: usize,
     pub mlo_link_sel_policy: usize,
+    pub packs_per_ampdu: usize, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -389,6 +390,7 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         mlo_channel_config: args[27].parse().unwrap(),
         edca_be: args[28].parse().unwrap(),
         mlo_link_sel_policy: args[29].parse().unwrap(),
+        packs_per_ampdu: args[30].parse().unwrap(), 
     }
 }
 
@@ -428,6 +430,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         mlo_channel_config,
         edca_be,
         mlo_link_sel_policy,
+        packs_per_ampdu, 
     } = params;
 
     let sim_unique_string = format!("Simu_{}", sim_id);
@@ -469,8 +472,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_PL{:.1}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
-        stoptime, distance, initial_bitrate, pl_prob, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,  
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
+        stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,  
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -522,6 +525,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
         link_configs,
         mlo_policy,
+        packs_per_ampdu, 
     );
 
     for sta_id in &all_sta_ids {

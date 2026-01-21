@@ -32,11 +32,11 @@ const SIFS: f64 = 16E-6;
 // const DIFS: f64 = 2.0 * SLOT + SIFS; // unused with EDCA
 
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
-pub const MAX_AMPDU_SIZE: i32 = 64;
+// pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab 
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
-pub const UPLINK_QUEUE_SIZE: usize = 128;
-pub const DOWNLINK_QUEUE_SIZE: usize = 1000;
+pub const UPLINK_QUEUE_SIZE: usize = 1024;
+pub const DOWNLINK_QUEUE_SIZE: usize = 1024;
 
 pub const NUMBER_OF_RANDOM_EVENTS: usize = 20;
 

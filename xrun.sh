@@ -26,21 +26,21 @@ DEBUG_LOGS=0
 
 #############################################################################
 
-simTime=1.0
+simTime=15.0
 
 EMU_TEST_TYPE=("STD") #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
-RANDOM_SEEDS=(1)
+# RANDOM_SEEDS=(1)
 MLO_policies=(1) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 
-# RANDOM_SEEDS=({1..3})
+RANDOM_SEEDS=({1..3})
 # MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 
 ############################################################################# <- BG Traffic
 N_BGs=( 1 )                ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
-rates_bps_BGtraffic=( 1000 10000 100000 )  ## Packets per second 
-IS_UL_BG=( 0 1 2 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL 
+rates_bps_BGtraffic=( 100000 200000 500000 )  ## Packets per second 
+IS_UL_BG=( 0 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 
 ############################################################################# <- 802.11 Parameters
 
@@ -51,6 +51,8 @@ num_close_users=( 0 )         ## number of users with alternate AP distance (to 
 distance_close_users=( 1.5 )  ## to have heterogeneous distances            (if num_close_users > 0)
 everest_tests=0             ## Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 PL=0.1
+
+packs_per_ampdu=( 64 128 256 1024)
 
 ############################################################################# <- VR streaming Parameters
 
@@ -115,35 +117,35 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                 for rate_BG in "${rates_bps_BGtraffic[@]}"; do 
                                                                     for edca_be in "${EDCA_BE_MODE[@]}"; do 
                                                                         for MLO_policy in "${MLO_policies[@]}"; do 
+                                                                            for ampdu_packs in "${packs_per_ampdu[@]}"; do 
 
-                                                                            NAME_ABR="ABR_${ABR}"
-                                                                            (( SIM_COUNT++ ))  # ← increment
+                                                                                NAME_ABR="ABR_${ABR}"
+                                                                                (( SIM_COUNT++ ))  # ← increment
 
-                                                                            echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
-                                                                            
-                                                                            
-                                                                            
-                                                                            if [ "$DEBUG_LOGS" = 1 ]; then
-                                                                                rm out_log.ans
-                                                                                script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy" "out_log.ans"
-                                                                                sleep 5
-                                                                            fi
+                                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
+                                                                                                                                                            
+                                                                                if [ "$DEBUG_LOGS" = 1 ]; then
+                                                                                    rm out_log.ans
+                                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs" "out_log.ans"
+                                                                                    sleep 5
+                                                                                fi
 
-                                                                            # --- Profiling Block using samply ---
-                                                                            if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
-                                                                                echo "--- Starting Profiling Run for XR_sim with samply ---"
+                                                                                # --- Profiling Block using samply ---
+                                                                                if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
+                                                                                    echo "--- Starting Profiling Run for XR_sim with samply ---"
 
-                                                                                # Define the output file
-                                                                                PROFILE_HTML_FILE="XR_sim_profile.html"
+                                                                                    # Define the output file
+                                                                                    PROFILE_HTML_FILE="XR_sim_profile.html"
 
-                                                                                # Run samply against your binary and arguments. 
-                                                                                # The -o flag tells samply where to save the profile.
-                                                                                samply record -o $PROFILE_HTML_FILE -- \
-                                                                                    ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy
+                                                                                    # Run samply against your binary and arguments. 
+                                                                                    # The -o flag tells samply where to save the profile.
+                                                                                    samply record -o $PROFILE_HTML_FILE -- \
+                                                                                        ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $everest_tests $SIM_COUNT $observation_type $reward_mode $T_ABR $NAME_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs
 
-                                                                                echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
-                                                                                exit 0 # Exit the job after generating the profile
-                                                                            fi 
+                                                                                    echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
+                                                                                    exit 0 # Exit the job after generating the profile
+                                                                                fi 
+                                                                            done
                                                                         done
                                                                     done
                                                                 done 
@@ -193,7 +195,7 @@ elif [ "$SERIAL_EXECUTION" -eq 0 ]; then
     echo "Starting randomized PARALLEL execution of $SIM_COUNT simulations with $NUMBER_OF_JOBS threads..."
     # Use GNU parallel on the shuffled list
     parallel -j "$NUMBER_OF_JOBS" < "$SHUFFLED_CMDS"
-    fi
+fi
 # done 
 
 

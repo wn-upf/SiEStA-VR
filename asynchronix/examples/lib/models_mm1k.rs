@@ -31,7 +31,8 @@ use tai_time::TaiTime;
 
 use crate::lib::{
     airtime_ampdu, collision_delay, exponential, perStaLockStats, AmpduPacket, Coords, CsvType,
-    CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, MAX_AMPDU_SIZE,
+    CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG,
+    //MAX_AMPDU_SIZE,
     NUMBER_OF_RANDOM_EVENTS, P_TX,
 };
 
@@ -2098,6 +2099,8 @@ pub struct QueueModule {
     pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
 
     pub mlo_linkselection_strat: LinkSelectionStrategy,
+    pub packs_per_ampdu: usize, 
+
 }
 #[allow(unused)]
 impl QueueModule {
@@ -2110,6 +2113,7 @@ impl QueueModule {
         emulated_tests: Option<(bool, bool, bool, bool)>,
         link_configs: Vec<LinkConfig>, // NEW: Configure available links
         mlo_linkselection_strat: LinkSelectionStrategy,
+        packs_per_ampdu: usize, 
     ) -> Self {
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
         let mut dcf_stats_vec = HashMap::new();
@@ -2197,6 +2201,7 @@ impl QueueModule {
             link_queue_depths,
             sta_capabilities: HashMap::new(),
             mlo_linkselection_strat,
+            packs_per_ampdu, 
         }
     }
 
@@ -2644,7 +2649,7 @@ impl QueueModule {
 
             // Binary search
             let mut low = 1;
-            let mut high = MAX_AMPDU_SIZE;
+            let mut high = self.packs_per_ampdu as i32;
             let mut optimal_n_packets = 0;
             let mut resultz_full_ampdu = airtime_ampdu(
                 packet.length_packet_bits as f64 * high as f64,
@@ -3115,13 +3120,13 @@ impl QueueModule {
                 let cap_s_edca = self.txop_cap_secs(&mac_key);
 
                 // Check if adding this packet would exceed limits
-                if resultz >= DEFAULT_TMAX_AGG || new_size > MAX_AMPDU_SIZE || resultz >= cap_s_edca
+                if resultz >= DEFAULT_TMAX_AGG || new_size > self.packs_per_ampdu as i32 || resultz >= cap_s_edca
                 {
                     log_mlo!(
                         now,
                         "  AMPDU limit reached: size={}/{}, airtime={:.3}ms/{:.3}ms",
                         new_size,
-                        MAX_AMPDU_SIZE,
+                        self.packs_per_ampdu,
                         resultz * 1000.0,
                         f64::min(DEFAULT_TMAX_AGG * 1000.0, cap_s_edca * 1000.0)
                     );
