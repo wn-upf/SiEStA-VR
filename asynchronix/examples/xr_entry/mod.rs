@@ -858,7 +858,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         crate::print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i, sessions);
         let mut sessions = sessions;
         sessions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
+        
         let mut has_scheduled_vsync: bool = false;
 
         for (idx, (start, end)) in sessions.iter().copied().enumerate() {

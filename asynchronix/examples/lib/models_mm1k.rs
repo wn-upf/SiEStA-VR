@@ -2672,7 +2672,7 @@ impl QueueModule {
                 );
 
                 // Use the pre-calculated cap_s_edca variable
-                if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca {
+                if test_resultz <= DEFAULT_TMAX_AGG || test_resultz <= cap_s_edca || packet.length_packet_bits * mid as usize >= crate::lib::AMPDU_BYTES_CAP  {
                     optimal_n_packets = mid;
                     resultz_full_ampdu = test_resultz;
                     low = mid + 1;
@@ -3120,7 +3120,7 @@ impl QueueModule {
                 let cap_s_edca = self.txop_cap_secs(&mac_key);
 
                 // Check if adding this packet would exceed limits
-                if resultz >= DEFAULT_TMAX_AGG || new_size > self.packs_per_ampdu as i32 || resultz >= cap_s_edca
+                if resultz >= DEFAULT_TMAX_AGG || new_size > self.packs_per_ampdu as i32 || new_total_length >= crate::lib::AMPDU_BYTES_CAP ||  resultz >= cap_s_edca
                 {
                     log_mlo!(
                         now,

@@ -33,6 +33,7 @@ const SIFS: f64 = 16E-6;
 
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
 // pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab 
+pub const AMPDU_BYTES_CAP: usize = 65535; // byte limit for AMPDUs (source: matlab)
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
 pub const UPLINK_QUEUE_SIZE: usize = 1024;
@@ -2044,25 +2045,25 @@ pub fn airtime_ampdu(
 
     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
 
-    let (bits_symbol, coding_rate) = match Pr {
-        _ if Pr < -82.0 => (1, 1.0 / 2.0),
-        _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0),
-        _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0),
-        _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0),
-        _ if Pr >= -74.0 && Pr < -70.0 => (4, 1.0 / 2.0),
-        _ if Pr >= -70.0 && Pr < -66.0 => (4, 3.0 / 4.0),
-        _ if Pr >= -66.0 && Pr < -65.0 => (6, 1.0 / 2.0),
-        _ if Pr >= -65.0 && Pr < -64.0 => (6, 2.0 / 3.0),
-        _ if Pr >= -64.0 && Pr < -59.0 => (6, 3.0 / 4.0),
-        _ if Pr >= -59.0 && Pr < -57.0 => (8, 3.0 / 4.0),
-        _ if Pr >= -57.0 && Pr < -55.0 => (8, 5.0 / 6.0),
-        _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
-        _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
-        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
-        _ if Pr >= -46.0 => (12, 5.0 / 6.0),               // MCS 13
-        _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
+    let (bits_symbol, coding_rate, _mcs_val) = match Pr {
+        _ if Pr < -82.0 => (1, 1.0 / 2.0,                1), // Could add additional PER in this case
+        _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0, 1),
+        _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0, 1),
+        _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0, 2),
+        _ if Pr >= -74.0 && Pr < -70.0 => (4, 1.0 / 2.0, 3),
+        _ if Pr >= -70.0 && Pr < -66.0 => (4, 3.0 / 4.0, 4),
+        _ if Pr >= -66.0 && Pr < -65.0 => (6, 1.0 / 2.0, 5),
+        _ if Pr >= -65.0 && Pr < -64.0 => (6, 2.0 / 3.0, 6),
+        _ if Pr >= -64.0 && Pr < -59.0 => (6, 3.0 / 4.0, 7),
+        _ if Pr >= -59.0 && Pr < -57.0 => (8, 3.0 / 4.0, 8),
+        _ if Pr >= -57.0 && Pr < -55.0 => (8, 5.0 / 6.0, 9),
+        _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0, 10),
+        _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0, 11),
+        _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0, 12), // MCS 12, TODO: find a good reference for 802.11be SNR
+        _ if Pr >= -46.0 => (12, 5.0 / 6.0, 13),               // MCS 13
+        _ => (1, 1.0 / 2.0, 1),                               // Catch-all for Pr out of range
     };
-
+    // print_dblue!("distance = {:.1} ----> MCS = {:.0}",distance,  _mcs_val); 
     // println!("P_rx = {}", Pr);
 
     let Subcarriers = match channel_width {
@@ -2088,7 +2089,7 @@ pub fn airtime_ampdu(
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
     let T_DATA: f64 =
-        PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6;
+        PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6; // 802.11ax symbol time 4 times greates for 16E-6 s
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
     // let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
