@@ -69,7 +69,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = false;
+pub const USE_FFMPEG_DEMO: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -749,6 +749,108 @@ pub struct NalUnit {
     pub nal_type: u8,
     pub data: Vec<u8>,
     pub is_keyframe: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObuUnit {
+    pub obu_type: u8,
+    pub data: Vec<u8>,
+    pub is_sequence_header: bool,
+}
+
+pub struct Av1Parser {
+    buffer: Vec<u8>,
+    sequence_header: Option<Vec<u8>>,
+}
+
+impl Av1Parser {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            sequence_header: None,
+        }
+    }
+
+    pub fn add_data(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    pub fn update_sequence_header(&mut self, data: &[u8]) {
+        self.sequence_header = Some(data.to_vec());
+    }
+
+    pub fn get_sequence_header(&self) -> Option<&Vec<u8>> {
+        self.sequence_header.as_ref()
+    }
+
+    fn parse_leb128(&self, offset: usize) -> Option<(usize, usize)> {
+        let mut value: usize = 0;
+        let mut bytes_read = 0;
+        let mut shift = 0;
+
+        loop {
+            if offset + bytes_read >= self.buffer.len() { return None; }
+            let byte = self.buffer[offset + bytes_read];
+            value |= ((byte & 0x7F) as usize) << shift;
+            bytes_read += 1;
+            shift += 7;
+            if (byte & 0x80) == 0 { break; }
+            if bytes_read > 8 { return None; } // Safety
+        }
+        Some((value, bytes_read))
+    }
+
+    pub fn next_obu(&mut self) -> Option<ObuUnit> {
+        if self.buffer.is_empty() { return None; }
+
+        // OBU Header parsing
+        let header_byte = self.buffer[0];
+        let obu_type = (header_byte >> 3) & 0xF;
+        let extension_flag = (header_byte >> 2) & 1;
+        let has_size_field = (header_byte >> 1) & 1;
+
+        if has_size_field == 0 {
+            // Without size fields, we can't parse a stream easily.
+            // ffmpeg -f obu usually includes them.
+            self.buffer.clear();
+            return None;
+        }
+
+        let mut offset = 1;
+        if extension_flag == 1 {
+            offset += 1;
+            if self.buffer.len() < offset { return None; }
+        }
+
+        let (payload_size, leb_bytes) = self.parse_leb128(offset)?;
+        offset += leb_bytes;
+
+        let total_size = offset + payload_size;
+        if self.buffer.len() < total_size { return None; }
+
+        let obu_data = self.buffer[0..total_size].to_vec();
+        self.buffer.drain(0..total_size);
+
+        // OBU Type 1 is Sequence Header
+        let is_sequence_header = obu_type == 1;
+        if is_sequence_header {
+            self.sequence_header = Some(obu_data.clone());
+        }
+
+        Some(ObuUnit {
+            obu_type,
+            data: obu_data,
+            is_sequence_header,
+        })
+    }
+
+    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        while let Some(obu) = self.next_obu() {
+            frames.push(obu.data);
+        }
+        frames
+    }
 }
 
 pub struct HevcParser {

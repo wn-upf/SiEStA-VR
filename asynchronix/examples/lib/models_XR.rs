@@ -2,7 +2,7 @@ use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
 };
 use crate::lib::gcc_nada_estimator::{GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
-use crate::lib::{alvr_stream_socket::StreamReceiver, BATCH_SIZE_CSV};
+use crate::lib::{alvr_stream_socket::{StreamReceiver, VideoCodec }, BATCH_SIZE_CSV};
 // use async_std::future::pending;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::{get_prefix_path, render_text, AveragingStrategy, EdcaAc, HevcParser, WindowType};
@@ -12,6 +12,8 @@ use crate::{
     taitime_to_f64,
     // print_blue, print_brown, print_dblue, print_brown
 };
+
+use std::thread;
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
@@ -26,7 +28,7 @@ use regex::Regex;
 use std::cell::RefCell;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write, BufRead};
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command;
@@ -66,8 +68,7 @@ use crate::lib::alvr_packets::{
     ClientControlPacket, ClientStatistics, EverestCommand, NadaStats, NetworkStatisticsPacket,
 };
 use crate::lib::alvr_stream_socket::{
-    parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
-    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
+    ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize, SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader, parse_shard_data
 };
 use crate::lib::alvr_stream_socket::{
     AUDIO, FOVOPTIX_BW_PROBE, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
@@ -98,6 +99,39 @@ use crate::lib::gcc_nada_estimator::*;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 
 ////////////////////////////////////// CONSTS////////////////////////////////////////
+
+
+use std::process::{Command as altCommand, Stdio};
+
+// Wrapper for Command to match your syntax
+pub struct altFfmpegCommand {
+    cmd: altCommand,
+}
+impl altFfmpegCommand {
+    pub fn new() -> Self {
+        Self { cmd: altCommand::new("ffmpeg") }
+    }
+    pub fn args(mut self, args: &[&str]) -> Self {
+        self.cmd.args(args);
+        self
+    }
+    pub fn hwaccel(mut self, _hw: &str) -> Self {
+        self.cmd.args(&["-hwaccel", "cuda"]); // hardcoded for this example
+        self
+    }
+    pub fn input(mut self, input: &str) -> Self {
+        self.cmd.arg("-i").arg(input);
+        self
+    }
+    pub fn spawn(mut self) -> std::io::Result<std::process::Child> {
+        self.cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    }
+}
+
 
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
@@ -239,6 +273,199 @@ pub fn find_next_start_code(buffer: &[u8], start_pos: usize) -> Option<usize> {
     }
     None
 }
+
+pub struct Av1Decoder {
+    frame_rx: Receiver<Vec<u8>>,
+    packet_tx: Sender<Vec<u8>>,
+    _stdin_handle: thread::JoinHandle<()>,
+    _stderr_handle: thread::JoinHandle<()>,
+    pub width: u32,
+    pub height: u32,
+    parser: crate::lib::Av1Parser,
+    frame_buffer: VecDeque<Vec<u8>>,
+    decoded_frames: VecDeque<Vec<u8>>,
+    
+    // Metrics
+    pub frames_processed: usize,
+    pub keyframes_seen: usize,
+    pub expected_frame_size: usize,
+    pub total_bytes_processed: f64,
+    
+    // Control
+    decoder_string: String,
+    priming_complete: bool,
+    processing_semaphore: Arc<Semaphore>,
+    
+    // Sync
+    // id_queue: VecDeque<u32>,
+    decoded_frame_counter: usize,
+
+    // pub metadata_queue: VecDeque<FrameMetadata>, 
+}
+
+impl Av1Decoder {
+    pub fn new(width: u32, height: u32, decoder_str: &str) -> Self {
+        let frame_size = (width as usize) * (height as usize) * 3; // RGB24
+        let decoder_string = decoder_str.to_string();
+
+        //  - We construct the FFmpeg pipe here
+        let mut child = altFfmpegCommand::new()
+            .args(&["-threads", &format!("{}", 4)])
+            // .hwaccel("cuda") // Enable if you have RTX 30/40 series
+            .args(&["-hide_banner", "-loglevel", "error"])
+            .args(&["-f", "obu"]) // Input format is raw OBU
+            .args(&["-i", "-"])   // Read from stdin
+            .args(&["-vsync", "0"])
+            .args(&["-s", &format!("{}x{}", width, height)]) 
+            .args(&["-pix_fmt", "rgb24"]) // Output format
+            .args(&["-f", "rawvideo", "-"]) // Write to stdout
+            .spawn()
+            .expect("Failed to spawn ffmpeg decoder");
+
+        let stdout = child.stdout.take().unwrap();
+        let stdin =  child.stdin.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
+        let (packet_tx, packet_rx) = bounded::<Vec<u8>>(100);
+
+        // 1. STDOUT Reader (Decoded Frames)
+        let decoder_str_clone = decoder_string.clone();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut buffer = Vec::with_capacity(frame_size * 2);
+            let mut chunk = vec![0u8; 8192];
+
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&chunk[..n]);
+                        while buffer.len() >= frame_size {
+                            let frame = buffer.drain(..frame_size).collect::<Vec<u8>>();
+                            if let Err(_) = frame_tx.send(frame) { return; }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{} Read Error: {}", decoder_str_clone, e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 2. STDIN Writer (Encoded Packets)
+        let decoder_str_clone2 = decoder_string.clone();
+        let stdin_handle = thread::spawn(move || {
+            let mut writer = stdin;
+            for packet in packet_rx {
+                if let Err(e) = writer.write_all(&packet) {
+                    eprintln!("{} Write Error: {}", decoder_str_clone2, e);
+                    break;
+                }
+                let _ = writer.flush();
+            }
+        });
+
+        // 3. STDERR Handler
+        let decoder_str_clone3 = decoder_string.clone();
+        let stderr_handle = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    println!("{} [FFMPEG]: {}", decoder_str_clone3, l);
+                }
+            }
+        });
+
+        Self {
+            frame_rx,
+            packet_tx,
+            _stdin_handle: stdin_handle,
+            _stderr_handle: stderr_handle,
+            width,
+            height,
+            parser: crate::lib::Av1Parser::new(),
+            frame_buffer: VecDeque::new(),
+            decoded_frames: VecDeque::new(),
+            frames_processed: 0,
+            keyframes_seen: 0,
+            expected_frame_size: frame_size,
+            total_bytes_processed: 0.0,
+            decoder_string: decoder_string,
+            priming_complete: false,
+            processing_semaphore: Arc::new(Semaphore::new(10)),
+            // id_queue: VecDeque::new(),
+            decoded_frame_counter: 0,
+        }
+    }
+
+    pub fn process_packet(&mut self, packet: Vec<u8> ) {
+        // let _permit = self.processing_semaphore.acquire().await.unwrap();
+
+        // Add to parser
+        self.parser.add_data(&packet);
+
+
+        // In AV1, we don't need to manually extract "Frames" as strictly as HEVC NALs
+        // for the decoder pipe, but we do it to maintain your logic structure.
+        let obus = self.parser.get_frames();
+        
+        for obu_data in obus {
+            // Detect Sequence Header (Keyframe-ish)
+            if obu_data.len() > 1 {
+                let obu_type = (obu_data[0] >> 3) & 0xF;
+                let is_display_frame = obu_type == 6 || obu_type == 3;
+
+                if is_display_frame {
+                    // self.metadata_queue.push_back(packet.meta);
+                    self.frames_processed += 1;
+                } else if obu_type == 1 {
+                    // Sequence header - do not push metadata, it produces no output frame
+                    self.keyframes_seen += 1;
+                    print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header", self.decoder_string);
+                }
+
+            }
+
+            self.frames_processed += 1;
+            
+            // Send to FFmpeg
+            if let Err(e) = self.packet_tx.send(obu_data) {
+                 eprintln!("Failed to send to ffmpeg: {}", e);
+            }
+            
+            // Keep ID sync
+            // self.id_queue.push_back(id);
+        }
+    }
+
+    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>)> {
+        // Poll the receiver channel
+        loop {
+            match self.frame_rx.try_recv() {
+                Ok(frame) => {
+                    if frame.len() == self.expected_frame_size {
+                        self.decoded_frames.push_back(frame);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return None,
+            }
+        }
+
+        if let Some(frame) = self.decoded_frames.pop_front() {
+            // In a real scenario, you handle ID queue sync carefully. 
+            // For this visualization, we just pop.
+            // let id = self.id_queue.pop_front().unwrap_or(0);
+            // let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default()); 
+            return Some((frame));
+        }
+        None
+    }
+}
+
+
 #[allow(non_camel_case_types, unused)]
 pub struct HevcDecoder {
     frame_rx: crossbeam::channel::Receiver<Vec<u8>>,
@@ -280,6 +507,7 @@ pub struct HevcDecoder {
 
     decoded_frame_counter: usize,
 }
+
 #[allow(non_camel_case_types, unused)]
 impl HevcDecoder {
     pub fn new(framerate: u32, width: u32, height: u32, decoder_str: &str) -> Self {
@@ -297,6 +525,7 @@ impl HevcDecoder {
             .args(&["-tune", "zerolatency"])
             // .args(&["-preset", "ultrafast"])
             .args(&["-vsync", "passthrough"])
+            .args(&["-s", &format!("{}x{}", width, height)]) 
             .args(&["-f", "rawvideo", "-"])
             .spawn()
             .unwrap();
@@ -3252,6 +3481,7 @@ pub struct XRServer {
     pub t_update_abr: f32,
 
     pub edca_be_mode: bool,
+    pub codec_selection: VideoCodec
 }
 #[allow(unused)]
 impl XRServer {
@@ -3275,6 +3505,7 @@ impl XRServer {
         t_update_abr: f32,
         packet_size_sockets: usize,
         edca_be_mode: bool,
+        codec_selection: VideoCodec, 
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         let mut final_file;
@@ -3340,6 +3571,7 @@ impl XRServer {
                 obs_config,
                 t_update_abr,
                 reward_mode,
+                
             ),
 
             video_app_sender: None,
@@ -3386,6 +3618,7 @@ impl XRServer {
             reward_mode,
             t_update_abr,
             edca_be_mode,
+            codec_selection, 
         }
     }
 
@@ -4239,16 +4472,16 @@ impl XRServer {
             self.is_streaming = true;
 
             self.video_app_sender =
-                Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO, self.t_0));
+                Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO, self.t_0, self.codec_selection));
 
-            self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0));
+            self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0, self.codec_selection, ));
 
             if matches!(
                 self.bitrate_manager.bitrate_mode,
                 BitrateMode::FovOptixPort { .. }
             ) {
                 self.bw_probe_sender =
-                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0));
+                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0, self.codec_selection, ));
                 self.bw_probe_receiver =
                     Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
 
@@ -4645,6 +4878,79 @@ impl TimedRebufferCounter {
     }
 }
 
+
+pub enum VideoDecoder {
+    Hevc(HevcDecoder),
+    Av1(Av1Decoder),
+}
+
+impl VideoDecoder {
+
+   /// Unified Async Process Packet
+    pub fn process_packet(&mut self, packet: Vec<u8>) {
+        match self {
+            VideoDecoder::Hevc(d) => {
+                // HEVC is currently sync and doesn't explicitly use ID in the snippet
+                d.process_packet(packet);
+            },
+            VideoDecoder::Av1(d) => {
+                d.process_packet(packet);
+            }
+        }
+    }
+
+    pub fn get_frame_counter(&self) -> usize {
+
+        match self {
+            VideoDecoder::Hevc(d) => {
+                // HEVC is currently sync and doesn't explicitly use ID in the snippet
+                d.decoded_frame_counter
+            },
+            VideoDecoder::Av1(d) => {
+                d.decoded_frame_counter
+            }
+        }
+
+
+    }
+
+    /// Unified Frame Retrieval
+    pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
+        match self {
+            VideoDecoder::Hevc(d) => {
+                // 1. Pump the internal channel to the deque
+                d.process_decoded_frames();
+                
+                // 2. Pop from the deque
+                d.decoded_frames.pop_front()
+            },
+            VideoDecoder::Av1(d) => {
+                // AV1 implementation already handles channel polling inside this method
+                d.next_decoded_frame()
+            }
+        }
+    }
+
+    /// Helper to access common metrics (Optional)
+    pub fn frames_processed(&self) -> usize {
+        match self {
+            VideoDecoder::Hevc(d) => d.frames_processed,
+            VideoDecoder::Av1(d) => d.frames_processed,
+        }
+    }
+
+    pub fn decoder_string(&self) -> &str {
+        match self {
+            VideoDecoder::Hevc(d) => &d.decoder_string,
+            VideoDecoder::Av1(d) => &d.decoder_string,
+        }
+    }
+
+
+
+}
+
+
 #[allow(unused)]
 pub struct XRClient {
     pub decoder_queue: DroppingVecDeque<(usize, Vec<u8>)>,
@@ -4689,7 +4995,7 @@ pub struct XRClient {
     // pub decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
 
     // pub ref_decoder_arc: Option<Arc<tokMutex<HevcDecoder>>>,
-    original_decoder: Option<Arc<Mutex<HevcDecoder>>>,
+    original_decoder: Option<Arc<Mutex<VideoDecoder>>>,
 
     pub is_decoder_ready: bool,           // internal of FFMPEG
     pub jitter_buffer_warmup_ready: bool, // of actual VR Client application
@@ -4768,6 +5074,8 @@ pub struct XRClient {
     t_update_abr: f32,
 
     edca_be_mode: bool,
+
+    codec_selection: VideoCodec, 
 }
 
 #[allow(unused)]
@@ -4785,6 +5093,7 @@ impl XRClient {
         t_update_abr: f32,
         packet_size_sockets: usize,
         edca_be_mode: bool,
+        codec_selection: VideoCodec, 
     ) -> Self {
         let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
@@ -4895,6 +5204,7 @@ impl XRClient {
             abr_mode,
             t_update_abr,
             edca_be_mode,
+            codec_selection, 
         }
     }
 
@@ -4996,14 +5306,14 @@ impl XRClient {
                     Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
 
                 self.output_app_bw_probe_back =
-                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0));
+                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0, self.codec_selection));
                 // way back for bw probing packets.
             }
 
             self.streamsocket_clone = Some(stream_socket.clone());
 
             self.output_app_tracking_sender =
-                Some(stream_socket.request_stream(TRACKING, self.t_0));
+                Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection, ));
 
             XRClient::generate_tracking_data(self, (), context).await;
         }
@@ -5996,13 +6306,30 @@ impl XRClient {
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
             let mut lost_frames_aux = self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
-            if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
-                self.original_decoder = Some(Arc::new(Mutex::new(HevcDecoder::new(
+
+
+            let decoder = match self.codec_selection{
+                VideoCodec::HEVC => {VideoDecoder::Hevc(HevcDecoder::new(
                     self.framerate as u32,
                     WIDTH_ENCODER as u32,
                     HEIGHT_ENCODER as u32,
-                    &format!("[SINGLE DECODER {}]", self.server_ip),
-                ))));
+                    &format!("[HEVC DECODER {}]", self.server_ip),
+                    )
+                 )
+
+                }, 
+                VideoCodec::AV1 => {VideoDecoder::Av1(Av1Decoder::new(
+                    //  self.framerate as u32,
+                    WIDTH_ENCODER as u32,
+                    HEIGHT_ENCODER as u32,
+                    &format!("[AV1 DECODER {}]", self.server_ip),
+                    )
+                )
+                },
+            };
+
+            if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
+                self.original_decoder = Some(Arc::new(Mutex::new(decoder)));
             }
 
             let third_octet = get_third_octet(self.server_ip).unwrap();
@@ -6202,13 +6529,15 @@ impl XRClient {
                             if let Some(decoder_arc) = self.original_decoder.clone() {
                                 let mut decoder = decoder_arc.lock().unwrap();
 
+
+
                                 // Process the current frame pair using process_packets
                                 print_pretty!(DebugColor::Cyan, "Processing frame #{} ", id_f);
                                 decoder.process_packet(video_frame.clone());
 
                                 // Try to get a synchronized frame pair immediately after processing
                                 // This might yield 0, 1 or more pairs depending on internal buffering and state
-                                while let Some((frame, _)) = decoder.next_decoded_frame() {
+                                while let Some((frame)) = decoder.next_decoded_frame() {
                                     // print_pretty!(
                                     //     DebugColor::Green,
                                     //     "Retrieved frame #{}",
@@ -6270,11 +6599,12 @@ impl XRClient {
                                             // Pass the current SyncState to the display function
                                             self.lost_ids_reference_buffer = VecDeque::new();
 
+
                                             // let slice: &[u32] = lost_frames_aux.make_contiguous();
                                             let display_result = display_single_frame_with_info(
                                                 &frame,
                                                 &self.server_ip,
-                                                decoder.decoded_frame_counter,
+                                                decoder.get_frame_counter(),
                                                 window,
                                                 now,
                                                 self.last_bitrate_perfect_info_update_mbps,
@@ -6291,13 +6621,13 @@ impl XRClient {
                                                 print_pretty!(
                                                     DebugColor::Green,
                                                     "Successfully displayed frame #{}",
-                                                    decoder.decoded_frame_counter
+                                                    decoder.get_frame_counter(), 
                                                 );
                                             } else {
                                                 print_pretty!(
                                                     DebugColor::Red,
                                                     "Failed to display frame #{}",
-                                                    decoder.decoded_frame_counter,
+                                                    decoder.get_frame_counter(),
                                                 );
                                             }
                                         } // End if let Some(window)

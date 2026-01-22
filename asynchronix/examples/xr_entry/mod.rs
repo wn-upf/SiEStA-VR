@@ -1,4 +1,4 @@
-use crate::lib::alvr_stream_socket::ALVR_ORIGINAL_SOCKETRX_BEHAVIOR;
+use crate::lib::alvr_stream_socket::{ALVR_ORIGINAL_SOCKETRX_BEHAVIOR, VideoCodec};
 // asynchronix/examples/xr_entry.rs
 use crate::lib::models_mm1k::{
     EmulatedLink, NetworkPattern, QueueModule, MAX_EMULATED_QUEUE_PACKETS,
@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 31;
+pub const NUM_INPUT_ARGS_SIM: usize = 32;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 /// Draw a uniform random starting point inside the room.
@@ -82,6 +82,7 @@ impl VRPair {
         t_update_abr: f32,
         ap_coords: Coords,
         edca_be_mode: bool,
+        codec_selection: VideoCodec, 
     ) -> Self {
         let mut initial_bitrate = initial_bitrate_orig;
 
@@ -159,6 +160,7 @@ impl VRPair {
             t_update_abr,
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
+            codec_selection, 
         );
 
         let mut xr_client = XRClient::new(
@@ -173,6 +175,7 @@ impl VRPair {
             t_update_abr,
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
+            codec_selection, 
         );
 
         let mut sta_server = STA_extended::new(
@@ -353,6 +356,7 @@ pub struct SimParams {
     pub edca_be: usize,
     pub mlo_link_sel_policy: usize,
     pub packs_per_ampdu: usize, 
+    pub codec_input_arg: String, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -391,6 +395,8 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         edca_be: args[28].parse().unwrap(),
         mlo_link_sel_policy: args[29].parse().unwrap(),
         packs_per_ampdu: args[30].parse().unwrap(), 
+        codec_input_arg: args[31].parse().unwrap(), 
+
     }
 }
 
@@ -431,9 +437,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         edca_be,
         mlo_link_sel_policy,
         packs_per_ampdu, 
+        codec_input_arg, 
     } = params;
 
-    let sim_unique_string = format!("Simu_{}", sim_id);
+    let sim_unique_string = format!("Simu_{} | {codec_input_arg}", sim_id);
     let test_distances_everest_bool = test_distances_everest != 0;
     let edca_be_bool = edca_be != 0;
 
@@ -580,6 +587,16 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         BANDWIDTH_EMU_LINK,
     );
 
+    let codec_selection = match codec_input_arg.as_str(){
+        "AV1" => {VideoCodec::AV1}
+        "HEVC" => {VideoCodec::HEVC}
+        _ => {
+                crate::print_red!("Unspecified codec WARNING! Default: HEVC", );
+                VideoCodec::HEVC 
+            }
+
+    }; 
+
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
     let obs_config = match observation_type {
@@ -615,6 +632,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             t_update_abr,
             ap_coords,
             edca_be_bool,
+            codec_selection, 
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);
@@ -652,6 +670,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             t_update_abr,
             ap_coords,
             edca_be_bool,
+            codec_selection, 
+
         );
         // all_sta_ids.push(100 + i as i32);
         // all_sta_ids.push(200 + i as i32);

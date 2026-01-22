@@ -25,10 +25,10 @@ pub const NUM_PARALLEL_THREADS_DECODE: usize = 4;
 ////////////////////// VIDEO SETTINGS ///////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
-pub const VIDEO_WINDOW_SCALE_FACTOR: f64 = 0.34; 
+pub const VIDEO_WINDOW_SCALE_FACTOR: f64 = 0.44; 
 pub const VIDEO_PATH: &str = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/swordsmith_90fps.mp4";
 pub const VIDEO_FPS : f32 = 90.0; 
-pub const VIDEO_LOOP_DURATION_SECONDS: f32 = 30.0; // loop the video after 30 secs 
+pub const VIDEO_LOOP_DURATION_SECONDS: f32 = 80.0; // loop the video after 30 secs 
 pub const VIDEO_GOP_SIZE: usize = 60; // Group of Pictures size, I-P frame frequency
 
 pub const VIDEO_BOOL_RANDOM_OFFSET: bool = false; 
