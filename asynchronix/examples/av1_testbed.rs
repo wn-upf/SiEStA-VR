@@ -11,6 +11,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tai_time::TaiTime;
+
+use std::collections::BTreeMap;
+use tokio::sync::mpsc;
+
+
 // --- 1. Helpers & Mocks for your custom types ---
 
 // Mocking your print_prettyy macro
@@ -109,14 +114,15 @@ impl ChunkedAv1Encoder {
             // .hwaccel("cuda")
             .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-t", &self.chunk_duration.to_string()])
-            .args(&["-threads", "4"])
+            .args(&["-threads", "8"])
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .input(&self.input)
             .args(&["-vf", &format!( "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p"         // Video Filter
                                     ,self.width, self.height)])
             .args(&["-c:v", "libsvtav1"]) 
             .args(&["-preset", "9"]) // 9 is highest for 4k, so choosing it for XR RTC. 
-            .args(&["-svtav1-params", "rc=1:lookahead=0:pred-struct=2"]) // rc=1 (VBR), lookahead=0 , pred-struct=2 (Low Delay P, no future encoded frames for XR)
+            // .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1"]) // rc=1 (VBR), lookahead=0 , pred-struct=2 (Low Delay P, no future encoded frames for XR)
+            .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=2:tile-columns=2:tile-rows=1:fast-decode=1"]) // Tiling for fastness, lp: level of parallelism,
             .args(&["-b:v", &self.bitrate ])
             .args(&["-bufsize", &self.bitrate])
             .args(&["-g", &format!("{}", self.gop_size)])
@@ -520,53 +526,77 @@ async fn main() {
 
     // 3. Setup Source Thread (FFmpeg)
     thread::spawn(move || {
-        // Create a runtime for the async encoder inside this thread
         let rt = tokio::runtime::Runtime::new().unwrap();
         
         rt.block_on(async {
-            let chunk_len = 2.5; // Seconds per chunk
-            let mut encoder = ChunkedAv1Encoder::new(
-                input_file,
-                width as u32,
-                height as u32,
-                "10M", 
-                chunk_len,
-                "AV1_Enc_Test".to_string(),
-                0.0, // Start offset
-                90.0, // FPS
-                60,   // GOP
-                false // Intra refresh
-            );
+            let chunk_len = 2.5; 
+            let max_parallel_chunks = 1; // How many FFmpeg instances to run at once
+            let (result_tx, mut result_rx) = mpsc::channel(100);
+            
+            let mut next_offset_to_encode = 0.0;
+            let mut next_offset_to_send = 0.0;
+            let mut reorder_buffer: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+            let mut active_workers = 0;
 
             let start_time = Instant::now();
-            let mut current_bitrate = 100.0;
-            
+
             loop {
-                // Time-based Logic: Switch every 5 seconds
-                let elapsed = start_time.elapsed().as_secs();
-                let cycle_phase = (elapsed / 5) % 2; // 0 or 1
-                
-                if cycle_phase == 0 {
-                    current_bitrate = 100.0; // High quality
-                } else {
-                    current_bitrate = 1.0;   // Low quality (artifacts expected)
+                // A. SPAWN WORKERS: Fill the pipeline until we hit max_parallel_chunks
+                while active_workers < max_parallel_chunks {
+                    let offset = next_offset_to_encode;
+                    let tx = result_tx.clone();
+                    let input = input_file.to_string();
+                    
+                    // Determine bitrate for this specific chunk
+                    let elapsed = start_time.elapsed().as_secs();
+                    let bitrate = if (elapsed / 5) % 2 == 0 { 100.0 } else { 1.0 };
+
+                    tokio::spawn(async move {
+                        // Create a fresh encoder for this chunk
+                        let mut encoder = ChunkedAv1Encoder::new(
+                            &input, 3840, 2160, "10M", chunk_len,
+                            "AV1_Parallel_Worker".to_string(),
+                            offset, 90.0, 60, false
+                        );
+
+                        // --- CRITICAL OPTIMIZATION ---
+                        // Since we are running 3 encoders, we restrict each to use 
+                        // only a portion of the CPU to prevent thrashing.
+                        // Preset 12 is essential for real-time 4K software encoding.
+                        encoder.start_chunking(bitrate, Instant::now()).await;
+
+                        let mut frames = Vec::new();
+                        while let Some(f) = encoder.next_frame().await {
+                            frames.push(f);
+                        }
+                        
+                        // Send frames back with the offset as a key (converted to u64 for BTreeMap)
+                        let _ = tx.send(((offset * 1000.0) as u64, frames)).await;
+                    });
+
+                    next_offset_to_encode += chunk_len;
+                    active_workers += 1;
+
+                    // Loop video logic
+                    if next_offset_to_encode > 30.0 {
+                        next_offset_to_encode = 0.0;
+                    }
                 }
 
-                // Run the chunking process (blocks until ffmpeg finishes this chunk)
-                // FIX: Pass TaiTime::now() directly to match the signature TaiTime<0>
-                encoder.start_chunking(current_bitrate, Instant::now()).await;
-
-                // Push all generated frames to the main thread
-                while let Some(frame) = encoder.next_frame().await {
-                   if let Err(_) = tx_source.send(frame) {
-                       return; // Channel closed
-                   }
+                // B. COLLECT RESULTS: Wait for any worker to finish
+                if let Some((offset_key, frames)) = result_rx.recv().await {
+                    reorder_buffer.insert(offset_key, frames);
+                    active_workers -= 1;
                 }
-                
-                // If we run out of video, maybe reset offset?
-                if encoder.current_offset > 30.0 {
-                    encoder.current_offset = 0.0;
-                    println!("Looping video...");
+
+                // C. DISPATCH: Send chunks to the main thread in the correct order
+                let current_key = (next_offset_to_send * 1000.0) as u64;
+                while let Some(frames) = reorder_buffer.remove(&current_key) {
+                    for frame in frames {
+                        if let Err(_) = tx_source.send(frame) { return; }
+                    }
+                    next_offset_to_send += chunk_len;
+                    if next_offset_to_send > 30.0 { next_offset_to_send = 0.0; }
                 }
             }
         });
@@ -586,43 +616,292 @@ async fn main() {
     let mut frame_count = 0;
     let mut last_log = Instant::now();
 
-    // 5. Main Render Loop
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    let target_fps = 24.0; // Absolute cinema (the encoder is too slow for real time 90FPS@4K processing demo) 
+    let target_frame_time = Duration::from_secs_f64(1.0 / target_fps);
+    let mut next_frame_time = Instant::now();
+
+
+   while window.is_open() && !window.is_key_down(Key::Escape) {
         
-        // Ingest packets
+        // A. ALWAYS Ingest packets as fast as they arrive
+        // We do this continuously so the UDP/channel buffer doesn't overflow
         while let Ok(packet) = rx_source.try_recv() {
             decoder.process_packet(packet, 0).await;
         }
 
-        // Process Decoded Frame
-        if let Some((rgb_data, _id)) = decoder.next_decoded_frame() {
-            frame_count += 1;
+        // B. PACE the Rendering (VSync Logic)
+        let now = Instant::now();
+        if now >= next_frame_time {
             
-            for y in 0..scaled_h {
-                for x in 0..scaled_w {
-                    let sx = (x * width as usize) / scaled_w;
-                    let sy = (y * height as usize) / scaled_h;
-                    let src_idx = (sy * width as usize + sx) * 3;
-                    
-                    if src_idx + 2 < rgb_data.len() {
-                        let r = rgb_data[src_idx] as u32;
-                        let g = rgb_data[src_idx + 1] as u32;
-                        let b = rgb_data[src_idx + 2] as u32;
-                        scaled_buffer[y * scaled_w + x] = (r << 16) | (g << 8) | b;
+            // Try to get ONE decoded frame
+            if let Some((rgb_data, _id)) = decoder.next_decoded_frame() {
+                frame_count += 1;
+                
+                // Optimized Scaling (Same as before)
+                for y in 0..scaled_h {
+                    for x in 0..scaled_w {
+                        let sx = (x * width as usize) / scaled_w;
+                        let sy = (y * height as usize) / scaled_h;
+                        let src_idx = (sy * width as usize + sx) * 3;
+                        
+                        if src_idx + 2 < rgb_data.len() {
+                            let r = rgb_data[src_idx] as u32;
+                            let g = rgb_data[src_idx + 1] as u32;
+                            let b = rgb_data[src_idx + 2] as u32;
+                            scaled_buffer[y * scaled_w + x] = (r << 16) | (g << 8) | b;
+                        }
                     }
                 }
+                
+                // Update window
+                window.update_with_buffer(&scaled_buffer, scaled_w, scaled_h).unwrap();
+                
+                // Schedule next frame time. 
+                // If we are lagging, reset to 'now' to catch up, otherwise add target duration.
+                if now > next_frame_time + target_frame_time {
+                    next_frame_time = now + target_frame_time;
+                } else {
+                    next_frame_time += target_frame_time;
+                }
+            } else {
+                // Buffer underflow (no frame ready yet), just keep window open
+                window.update();
             }
-            window.update_with_buffer(&scaled_buffer, scaled_w, scaled_h).unwrap();
         } else {
-            window.update();
+            // If we have time to spare, sleep a tiny bit to save CPU
+            // (But keep it short to keep polling network packets)
+            thread::sleep(Duration::from_millis(1));
+            window.update(); // Keep window responsive
         }
 
+        // FPS Logging
         if last_log.elapsed().as_secs() >= 1 {
             println!("FPS: {} | Keyframes: {}", frame_count, decoder.keyframes_seen);
             frame_count = 0;
             last_log = Instant::now();
         }
-        
-        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+
+#[allow(unused)]
+// Renders ASCII text into the minifb window with coordinates.
+pub fn render_text(
+    buffer: &mut [u32],
+    text: &str,
+    x: usize,
+    y: usize,
+    stride: usize,
+    color: u32,
+    scale: usize,
+) {
+    // Simple 5x7 pixel font (common for basic bitmap fonts)
+    // Each character is represented as an array of 7 bytes, where each byte represents a row
+    // and the bits in each byte represent the pixels in that row
+    const FONT_WIDTH: usize = 5;
+    const FONT_HEIGHT: usize = 7;
+    const CHAR_SPACING: usize = 1;
+
+    // Apply scaling
+    let scaled_font_width = FONT_WIDTH * scale;
+    let scaled_char_spacing = CHAR_SPACING * scale;
+
+    // Define a simple bitmap font (only uppercase letters and some basic characters)
+    // Each character is 5x7 pixels
+    let font = [
+        // Space
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        // !
+        [0x04, 0x04, 0x04, 0x04, 0x00, 0x04, 0x00],
+        // "
+        [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00],
+        // #
+        [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
+        // $
+        [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
+        // %
+        [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
+        // &
+        [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
+        // '
+        [0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
+        // (
+        [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+        // )
+        [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        // *
+        [0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00],
+        // +
+        [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        // ,
+        [0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08],
+        // -
+        [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        // .
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
+        // /
+        [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
+        // 0
+        [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        // 1
+        [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        // 2
+        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        // 3
+        [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
+        // 4
+        [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        // 5
+        [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+        // 6
+        [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        // 7
+        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        // 8
+        [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        // 9
+        [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+        // :
+        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
+        // ;
+        [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08],
+        // <
+        [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
+        // =
+        [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
+        // >
+        [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+        // ?
+        [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        // @
+        [0x0E, 0x11, 0x01, 0x0D, 0x15, 0x15, 0x0E],
+        // A
+        [0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11],
+        // B
+        [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+        // C
+        [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
+        // D
+        [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
+        // E
+        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        // F
+        [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+        // G
+        [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
+        // H
+        [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        // I
+        [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        // J
+        [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+        // K
+        [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        // L
+        [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+        // M
+        [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+        // N
+        [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
+        // O
+        [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        // P
+        [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+        // Q
+        [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+        // R
+        [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+        // S
+        [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+        // T
+        [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        // U
+        [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        // V
+        [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+        // W
+        [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
+        // X
+        [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+        // Y
+        [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
+        // Z
+        [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        // [
+        [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
+        // \
+        [0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00],
+        // ]
+        [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
+        // ^
+        [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
+        // _
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
+    ];
+
+    let mut char_x = x;
+
+    for c in text.chars() {
+        let index = match c {
+            ' ' => 0,
+            '!' => 1,
+            '"' => 2,
+            '#' => 3,
+            '$' => 4,
+            '%' => 5,
+            '&' => 6,
+            '\'' => 7,
+            '(' => 8,
+            ')' => 9,
+            '*' => 10,
+            '+' => 11,
+            ',' => 12,
+            '-' => 13,
+            '.' => 14,
+            '/' => 15,
+            '0'..='9' => (c as usize) - ('0' as usize) + 16,
+            ':' => 26,
+            ';' => 27,
+            '<' => 28,
+            '=' => 29,
+            '>' => 30,
+            '?' => 31,
+            '@' => 32,
+            'A'..='Z' => (c as usize) - ('A' as usize) + 33,
+            'a'..='z' => (c as usize) - ('a' as usize) + 33, // Map lowercase to uppercase
+            '[' => 59,
+            '\\' => 60,
+            ']' => 61,
+            '^' => 62,
+            '_' => 63,
+            _ => 0, // Default to space for unknown characters
+        };
+
+        // Draw the character with scaling
+        for row in 0..FONT_HEIGHT {
+            for scaled_row in 0..scale {
+                let buffer_y = y + (row * scale) + scaled_row;
+
+                for col in 0..FONT_WIDTH {
+                    // Check if the current pixel is set in the font bitmap
+                    if (font[index][row] & (1 << (FONT_WIDTH - 1 - col))) != 0 {
+                        for scaled_col in 0..scale {
+                            let buffer_x = char_x + (col * scale) + scaled_col;
+
+                            // Calculate buffer index and check bounds
+                            if buffer_y < buffer.len() / stride && buffer_x < stride {
+                                let buffer_index = buffer_y * stride + buffer_x;
+                                if buffer_index < buffer.len() {
+                                    buffer[buffer_index] = color;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Move to the next character position
+        char_x += scaled_font_width + scaled_char_spacing;
     }
 }
