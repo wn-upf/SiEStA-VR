@@ -1,4 +1,5 @@
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use image::Frame;
 use minifb::{Key, Window, WindowOptions};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -16,6 +17,14 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 
+
+pub const NUM_PARALLEL_THREADS_ENCODE: usize = 8; 
+pub const NUM_PARALLEL_THREADS_DECODE: usize = 4; 
+
+pub const FPS_VIDEO : f32 = 90.0; 
+pub const LOOP_DURATION_SECONDS: f32 = 30.0; 
+
+pub const DURATION_BITRATE_CHANGE: f32 = 3.0; 
 // --- 1. Helpers & Mocks for your custom types ---
 
 // Mocking your print_prettyy macro
@@ -38,6 +47,19 @@ pub enum DebugColor {
     Red, Green, Blue, Magenta, Teal,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameMetadata {
+    pub bitrate_mbps: f32,
+    pub video_timestamp: f64, // Exact presentation time in seconds
+    pub chunk_id: usize,      // Which 2.5s segment this belongs to
+}
+
+// What travels over the network/channels
+pub struct TaggedPacket {
+    data: Vec<u8>,
+    meta: FrameMetadata,
+}
+
 // --- CHUNKED AV1 ENCODER ---
 
 pub struct ChunkedAv1Encoder {
@@ -47,15 +69,17 @@ pub struct ChunkedAv1Encoder {
     bitrate: String,
     chunk_duration: f64,
     current_offset: f64,
-    frame_tx: Sender<Vec<u8>>,
-    frame_rx: Receiver<Vec<u8>>,
-    frame_queue: VecDeque<Vec<u8>>,
+    frame_tx: Sender<TaggedPacket>,
+    frame_rx: Receiver<TaggedPacket>,
+    frame_queue: VecDeque<TaggedPacket>,
     parser: Av1Parser, // Uses the new Av1Parser
     encoder_str: String,
     gop_size: usize,
     intra_refresh: bool,
     framerate: f32, // Added to allow FPS control
     start_instant: Instant, 
+    frame_count_in_chunk: usize, // Track how many frames we've emitted for this chunk
+    chunk_start_timestamp: f64,  // The 'offset' passed in new()
 }
 
 impl ChunkedAv1Encoder {
@@ -90,6 +114,8 @@ impl ChunkedAv1Encoder {
             intra_refresh,
             framerate,
             start_instant: Instant::now(), 
+            frame_count_in_chunk: 0,
+            chunk_start_timestamp: offset_video, 
         }
     }
 
@@ -114,7 +140,7 @@ impl ChunkedAv1Encoder {
             // .hwaccel("cuda")
             .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-t", &self.chunk_duration.to_string()])
-            .args(&["-threads", "8"])
+            .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)])
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .input(&self.input)
             .args(&["-vf", &format!( "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p"         // Video Filter
@@ -147,6 +173,7 @@ impl ChunkedAv1Encoder {
         // --- FIX ENDS HERE ---
 
         let mut buf = [0u8; 4096];
+        let mut frame_count_in_chunk = 0;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -154,7 +181,19 @@ impl ChunkedAv1Encoder {
                     self.parser.add_data(&buf[..n]);
                     let frames = self.parser.get_frames();
                     for frame in frames {
-                        if let Err(e) = self.frame_tx.send(frame) {
+
+                        let pts = self.chunk_start_timestamp + (self.frame_count_in_chunk as f64 / self.framerate as f64);
+                        
+                        let tagged = TaggedPacket {
+                            data: frame,
+                            meta: FrameMetadata {
+                                bitrate_mbps: bitrate_mbps,
+                                video_timestamp: pts,
+                                chunk_id: self.current_offset as usize,
+                            }
+                        };
+                        if let Err(e) = self.frame_tx.send(tagged)
+                         {
                             eprintln!("{} Error sending AV1 frame: {}", e, self.encoder_str);
                         }
                     }
@@ -169,7 +208,7 @@ impl ChunkedAv1Encoder {
         self.current_offset += self.chunk_duration;
     }
 
-    pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
+    pub async fn next_frame(&mut self) -> Option<TaggedPacket> {
         // 1. Priority: Check if we have frames in the local queue
         if let Some(frame) = self.frame_queue.pop_front() {
             return Some(frame);
@@ -348,6 +387,8 @@ pub struct Av1Decoder {
     // Sync
     id_queue: VecDeque<u32>,
     decoded_frame_counter: usize,
+
+    pub metadata_queue: VecDeque<FrameMetadata>, 
 }
 
 impl Av1Decoder {
@@ -357,7 +398,7 @@ impl Av1Decoder {
 
         //  - We construct the FFmpeg pipe here
         let mut child = FfmpegCommand::new()
-            .args(&["-threads", "4"])
+            .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_DECODE)])
             // .hwaccel("cuda") // Enable if you have RTX 30/40 series
             .args(&["-hide_banner", "-loglevel", "error"])
             .args(&["-f", "obu"]) // Input format is raw OBU
@@ -443,15 +484,18 @@ impl Av1Decoder {
             processing_semaphore: Arc::new(Semaphore::new(10)),
             id_queue: VecDeque::new(),
             decoded_frame_counter: 0,
+
+            metadata_queue: VecDeque::new(), 
         }
     }
 
-    pub async fn process_packet(&mut self, packet: Vec<u8>, id: u32) {
+    pub async fn process_packet(&mut self, packet: TaggedPacket, id: u32) {
         let _permit = self.processing_semaphore.acquire().await.unwrap();
-        
+
         // Add to parser
-        self.parser.add_data(&packet);
-        
+        self.parser.add_data(&packet.data);
+
+
         // In AV1, we don't need to manually extract "Frames" as strictly as HEVC NALs
         // for the decoder pipe, but we do it to maintain your logic structure.
         let obus = self.parser.get_frames();
@@ -460,10 +504,17 @@ impl Av1Decoder {
             // Detect Sequence Header (Keyframe-ish)
             if obu_data.len() > 1 {
                 let obu_type = (obu_data[0] >> 3) & 0xF;
-                if obu_type == 1 {
+                let is_display_frame = obu_type == 6 || obu_type == 3;
+
+                if is_display_frame {
+                    self.metadata_queue.push_back(packet.meta);
+                    self.frames_processed += 1;
+                } else if obu_type == 1 {
+                    // Sequence header - do not push metadata, it produces no output frame
                     self.keyframes_seen += 1;
-                    print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header Detected", self.decoder_string);
+                    print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header", self.decoder_string);
                 }
+
             }
 
             self.frames_processed += 1;
@@ -478,7 +529,7 @@ impl Av1Decoder {
         }
     }
 
-    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, u32)> {
+    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, FrameMetadata)> {
         // Poll the receiver channel
         loop {
             match self.frame_rx.try_recv() {
@@ -496,7 +547,8 @@ impl Av1Decoder {
             // In a real scenario, you handle ID queue sync carefully. 
             // For this visualization, we just pop.
             let id = self.id_queue.pop_front().unwrap_or(0);
-            return Some((frame, id));
+            let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default()); 
+            return Some((frame, meta));
         }
         None
     }
@@ -520,7 +572,7 @@ async fn main() {
 
     // 2. Setup Decoder and Channels
     let mut decoder = Av1Decoder::new(width, height, "AV1_DEC_01");
-    let (tx_source, rx_source) = unbounded::<Vec<u8>>();
+    let (tx_source, rx_source) = unbounded::<TaggedPacket>();
     
     // Removed the incorrect 'let now: f64 = ...' definition here
 
@@ -535,7 +587,7 @@ async fn main() {
             
             let mut next_offset_to_encode = 0.0;
             let mut next_offset_to_send = 0.0;
-            let mut reorder_buffer: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+            let mut reorder_buffer: BTreeMap<u64, Vec<TaggedPacket>> = BTreeMap::new();
             let mut active_workers = 0;
 
             let start_time = Instant::now();
@@ -549,14 +601,14 @@ async fn main() {
                     
                     // Determine bitrate for this specific chunk
                     let elapsed = start_time.elapsed().as_secs();
-                    let bitrate = if (elapsed / 5) % 2 == 0 { 100.0 } else { 1.0 };
+                    let bitrate = if (elapsed  / DURATION_BITRATE_CHANGE as u64) % 2 == 0 { 100.0 } else { 1.0 };
 
                     tokio::spawn(async move {
                         // Create a fresh encoder for this chunk
                         let mut encoder = ChunkedAv1Encoder::new(
                             &input, 3840, 2160, "10M", chunk_len,
                             "AV1_Parallel_Worker".to_string(),
-                            offset, 90.0, 60, false
+                            offset, FPS_VIDEO, 60, false
                         );
 
                         // --- CRITICAL OPTIMIZATION ---
@@ -578,7 +630,7 @@ async fn main() {
                     active_workers += 1;
 
                     // Loop video logic
-                    if next_offset_to_encode > 30.0 {
+                    if next_offset_to_encode > LOOP_DURATION_SECONDS as f64 {
                         next_offset_to_encode = 0.0;
                     }
                 }
@@ -596,7 +648,7 @@ async fn main() {
                         if let Err(_) = tx_source.send(frame) { return; }
                     }
                     next_offset_to_send += chunk_len;
-                    if next_offset_to_send > 30.0 { next_offset_to_send = 0.0; }
+                    if next_offset_to_send > LOOP_DURATION_SECONDS as f64{ next_offset_to_send = 0.0; }
                 }
             }
         });
@@ -620,13 +672,16 @@ async fn main() {
     let target_frame_time = Duration::from_secs_f64(1.0 / target_fps);
     let mut next_frame_time = Instant::now();
 
+    let mut frame_count_timing = 0; 
 
    while window.is_open() && !window.is_key_down(Key::Escape) {
         
         // A. ALWAYS Ingest packets as fast as they arrive
         // We do this continuously so the UDP/channel buffer doesn't overflow
-        while let Ok(packet) = rx_source.try_recv() {
-            decoder.process_packet(packet, 0).await;
+        while let Ok(tagpacket) = rx_source.try_recv() {
+
+            // let packet = tagpacket.data; 
+            decoder.process_packet(tagpacket, 0).await;
         }
 
         // B. PACE the Rendering (VSync Logic)
@@ -636,7 +691,9 @@ async fn main() {
             // Try to get ONE decoded frame
             if let Some((rgb_data, _id)) = decoder.next_decoded_frame() {
                 frame_count += 1;
-                
+                frame_count_timing += 1; 
+
+                let rawdog_video_time = frame_count_timing as f32 / FPS_VIDEO;
                 // Optimized Scaling (Same as before)
                 for y in 0..scaled_h {
                     for x in 0..scaled_w {
@@ -652,6 +709,18 @@ async fn main() {
                         }
                     }
                 }
+
+                render_text(
+                    &mut scaled_buffer,
+                    &format!("Bitrate: {:.1} Mbps", _id.bitrate_mbps),
+                    10, 10, scaled_w, 0x00FF00, 3 
+                );
+
+                render_text(
+                    &mut scaled_buffer,
+                    &format!("Video Time: {:.3}s", rawdog_video_time % LOOP_DURATION_SECONDS),
+                    10, 40, scaled_w, 0xFFCC00, 3 
+                );
                 
                 // Update window
                 window.update_with_buffer(&scaled_buffer, scaled_w, scaled_h).unwrap();
