@@ -44,6 +44,8 @@ pub const DEMO_DURATION_BITRATE_SWITCH: f32 = 3.0;
 ////////////////////// GRAPH FOR FRAME SIZES ////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
+pub const DISPLAY_GRAPH_HUD_HEIGTH: usize = 260; 
+
 pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 140; 
 pub const DISPLAY_GRAPH_SCALE_HEIGHT: f32 = 180.0; 
 pub const DISPLAY_GRAPH_UPPER_KB_BOUND: f32 = 800.0; 
@@ -726,6 +728,7 @@ async fn main() {
     let scaled_w = (width as f64 * scale_factor) as usize;
     let scaled_h = (height as f64 * scale_factor) as usize;
 
+    let window_h = scaled_h + DISPLAY_GRAPH_HUD_HEIGTH; 
     let input_file = VIDEO_PATH; 
 
     println!("Initializing {}x{} display (scaled from 4K)...", scaled_w, scaled_h);
@@ -831,13 +834,13 @@ async fn main() {
     let mut window = Window::new(
         &format!("AV1 Realtime Decode - Scaled View ({:.2}:1)", VIDEO_WINDOW_SCALE_FACTOR),
         scaled_w,
-        scaled_h,
+        window_h,
         WindowOptions::default(),
     ).unwrap_or_else(|e| {
         panic!("{}", e);
     });
 
-    let mut scaled_buffer = vec![0u32; scaled_w * scaled_h];
+    let mut scaled_buffer = vec![0u32; scaled_w * window_h];
     let mut frame_count = 0;
     let mut last_log = Instant::now();
 
@@ -883,6 +886,13 @@ async fn main() {
                     }
                 }
 
+                let hud_bg_color = 0x101010; // Very dark grey
+                for y in scaled_h..window_h {
+                    for x in 0..scaled_w {
+                        scaled_buffer[y * scaled_w + x] = hud_bg_color;
+                    }
+                }
+
                 size_history.pop_front();
                 size_history.push_back(_id.frame_size_bytes as f32);
 
@@ -892,9 +902,9 @@ async fn main() {
                 render_graph(
                     &mut scaled_buffer,
                     &size_history,
-                    85,
-                    scaled_h - (g_height + 20.0) as usize, // 30.0 is the 'y margin' with bottom
-                    scaled_w,
+                    85,                                  // x_offset
+                    scaled_h + 60,                       // y_offset (Below video)
+                    scaled_w,                            // stride
                     (_id.bitrate_mbps * 1_000_000.0), 
                     DISPLAY_TARGET_FRAMES_PER_SECOND,
                     g_height as usize,
@@ -911,20 +921,20 @@ async fn main() {
                 render_text(
                     &mut scaled_buffer,
                     &format!("Bitrate: {:.1} Mbps", _id.bitrate_mbps),
-                    10, 70, scaled_w, 0x00FF00, 3 
+                    10, 80, scaled_w, 0x00FF00, 3 
                 );
 
                 render_text(
                     &mut scaled_buffer,
                     &format!("Video playback: {:.3}s", rawdog_video_time % VIDEO_LOOP_DURATION_SECONDS),
-                    10, 40, scaled_w, 0x00FF00, 3 
+                    10, 45, scaled_w, 0x00FF00, 3 
                 );
 
                
                 
                 
                 // Update window
-                window.update_with_buffer(&scaled_buffer, scaled_w, scaled_h).unwrap();
+                window.update_with_buffer(&scaled_buffer, scaled_w, window_h).unwrap();
                 
                 // Schedule next frame time. 
                 // If we are lagging, reset to 'now' to catch up, otherwise add target duration.
