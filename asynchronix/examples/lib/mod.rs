@@ -812,7 +812,7 @@ impl Av1Parser {
         if has_size_field == 0 {
             // Without size fields, we can't parse a stream easily.
             // ffmpeg -f obu usually includes them.
-            self.buffer.clear();
+            // self.buffer.clear();
             return None;
         }
 

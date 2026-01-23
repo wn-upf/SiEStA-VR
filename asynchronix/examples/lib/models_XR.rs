@@ -140,7 +140,7 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 #[allow(unused)]
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.15;
+pub const SCALE_FACTOR_WINDOW: f64 = 0.35;
 
 pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
@@ -257,23 +257,6 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
     Some(pixels)
 }
 
-/// Standalone function for finding the next NAL start code in a buffer
-pub fn find_next_start_code(buffer: &[u8], start_pos: usize) -> Option<usize> {
-    for i in start_pos..buffer.len().saturating_sub(3) {
-        // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
-        if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1)
-            || (i < buffer.len() - 4
-                && buffer[i] == 0
-                && buffer[i + 1] == 0
-                && buffer[i + 2] == 0
-                && buffer[i + 3] == 1)
-        {
-            return Some(i);
-        }
-    }
-    None
-}
-
 pub struct Av1Decoder {
     frame_rx: Receiver<Vec<u8>>,
     packet_tx: Sender<Vec<u8>>,
@@ -315,8 +298,8 @@ impl Av1Decoder {
             .args(&["-hide_banner", "-loglevel", "error"])
             .args(&["-f", "obu"]) // Input format is raw OBU
             .args(&["-i", "-"])   // Read from stdin
-            .args(&["-vsync", "0"])
             .args(&["-s", &format!("{}x{}", width, height)]) 
+            .args(&["-vsync", "0"])
             .args(&["-pix_fmt", "rgb24"]) // Output format
             .args(&["-f", "rawvideo", "-"]) // Write to stdout
             .spawn()
@@ -370,12 +353,12 @@ impl Av1Decoder {
         // 3. STDERR Handler
         let decoder_str_clone3 = decoder_string.clone();
         let stderr_handle = thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(l) = line {
-                    println!("{} [FFMPEG]: {}", decoder_str_clone3, l);
-                }
-            }
+            // let reader = BufReader::new(stderr);
+            // for line in reader.lines() {
+            //     if let Ok(l) = line {
+            //         println!("{} [FFMPEG DECODER ERROR]: {}", decoder_str_clone3, l);
+            //     }
+            // }
         });
 
         Self {
@@ -471,7 +454,7 @@ pub struct HevcDecoder {
     frame_rx: crossbeam::channel::Receiver<Vec<u8>>,
     packet_tx: crossbeam::channel::Sender<Vec<u8>>,
     _stdin_handle: std::thread::JoinHandle<()>,
-    _stderr_handle: std::thread::JoinHandle<()>,
+    _stderr_handle: Option<std::thread::JoinHandle<()>>,
     width: u32,
     height: u32,
     parser: HevcParser,
@@ -516,8 +499,9 @@ impl HevcDecoder {
         let decoder_string = decoder_str.to_string();
 
         let mut child = FfmpegCommand::new()
-            // .hwaccel("cuda")
+            .hwaccel("cuda")
             .args(&["-c:v", "hevc"]) // ✅ force software decoder
+            // .args(&["-hide_banner", "-loglevel", "error"]) // Clean up logs
             .args(&["-f", "hevc", "-i", "-"])
             // .args(&["-c:v", "libx265"])              // force software HEVC encoder
             // .args(&["-vf", &format!("fps={}", framerate)])
@@ -600,31 +584,38 @@ impl HevcDecoder {
                     break;
                 }
             }
-            println!("{decoder_str_clone2} Decoder stdin writer thread exit");
+            // println!("{decoder_str_clone2} Decoder stdin writer thread exit");
         });
 
         let decoder_string3 = decoder_string.clone(); // Stderr handler with improved debug output
-        let stderr_handle = std::thread::spawn(move || {
+        
+        
+        
+        const LOG_ERRORS_HEVC_DECODER: bool = true; 
+
+        let mut stderr_container; 
+        if LOG_ERRORS_HEVC_DECODER {
+            let stderr_handle = std::thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match reader.read_to_string(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if !buf.trim().is_empty() {
-                            println!("{decoder_string3} Decoder stderr: {} bytes", n);
-                            eprint!("{}", buf);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("{decoder_string3} Decoder stderr read error: {}", e);
-                        break;
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => eprintln!("[{} HEVC]: {}", decoder_string3, l),
+                        Err(_) => break,
                     }
                 }
-            }
-            println!("{decoder_string3} Decoder stderr reader thread exit");
-        });
+
+                println!("{decoder_string3} Decoder stderr reader thread exit");
+
+
+            });
+            stderr_container = Some(stderr_handle); 
+
+        }
+
+        else{
+            stderr_container = None; 
+        }
+        
         println!(
             "{decoder_str} 📹 HevcDecoder initialized with {}x{} resolution",
             width, height
@@ -634,7 +625,7 @@ impl HevcDecoder {
             frame_rx,
             packet_tx,
             _stdin_handle: stdin_handle,
-            _stderr_handle: stderr_handle,
+            _stderr_handle: stderr_container,
             width,
             height,
             parser: HevcParser::new(),
@@ -711,6 +702,8 @@ impl HevcDecoder {
 
         false
     }
+
+    
 
     pub fn inject_parameter_sets(
         &mut self,
@@ -822,6 +815,27 @@ impl HevcDecoder {
     /// Extract complete parameter set packets from a buffer
     /// This is useful when you want to extract the parameter sets as complete NAL units
     /// including the start code, which is necessary for feeding to another decoder
+    
+        
+    /// Standalone function for finding the next NAL start code in a buffer
+    pub fn find_next_start_code(&self, buffer: &[u8], start_pos: usize) -> Option<usize> {
+        for i in start_pos..buffer.len().saturating_sub(3) {
+            // Look for 0x000001 or 0x00000001 (3 or 4 byte start codes)
+            if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 1)
+                || (i < buffer.len() - 4
+                    && buffer[i] == 0
+                    && buffer[i + 1] == 0
+                    && buffer[i + 2] == 0
+                    && buffer[i + 3] == 1)
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    
+    
     pub fn extract_complete_parameter_sets(
         &self,
         buffer: &[u8],
@@ -836,7 +850,7 @@ impl HevcDecoder {
         let mut start_pos = 0;
 
         // Extract complete NAL units with start codes
-        while let Some(pos) = find_next_start_code(buffer, start_pos) {
+        while let Some(pos) = self.find_next_start_code(buffer, start_pos) {
             // Determine start code length (3 or 4 bytes)
             let start_code_len =
                 if pos + 3 < buffer.len() && buffer[pos + 2] == 0 && buffer[pos + 3] == 1 {
@@ -856,7 +870,7 @@ impl HevcDecoder {
 
             // Find the end of this NAL unit (next start code or end of buffer)
             let next_pos =
-                find_next_start_code(buffer, pos + start_code_len).unwrap_or(buffer.len());
+                self.find_next_start_code(buffer, pos + start_code_len).unwrap_or(buffer.len());
 
             // Extract the complete NAL unit with start code
             match nal_type {
@@ -6308,27 +6322,29 @@ impl XRClient {
 
 
 
-            let decoder = match self.codec_selection{
-                VideoCodec::HEVC => {VideoDecoder::Hevc(HevcDecoder::new(
-                    self.framerate as u32,
-                    WIDTH_ENCODER as u32,
-                    HEIGHT_ENCODER as u32,
-                    &format!("[HEVC DECODER {}]", self.server_ip),
-                    )
-                 )
-
-                }, 
-                VideoCodec::AV1 => {VideoDecoder::Av1(Av1Decoder::new(
-                    //  self.framerate as u32,
-                    WIDTH_ENCODER as u32,
-                    HEIGHT_ENCODER as u32,
-                    &format!("[AV1 DECODER {}]", self.server_ip),
-                    )
-                )
-                },
-            };
+            
 
             if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
+
+                let decoder = match self.codec_selection{
+                    VideoCodec::HEVC => {VideoDecoder::Hevc(HevcDecoder::new(
+                        self.framerate as u32,
+                        WIDTH_ENCODER as u32,
+                        HEIGHT_ENCODER as u32,
+                        &format!("[HEVC DECODER {}]", self.server_ip),
+                        )
+                    )
+
+                    }, 
+                    VideoCodec::AV1 => {VideoDecoder::Av1(Av1Decoder::new(
+                        //  self.framerate as u32,
+                        WIDTH_ENCODER as u32,
+                        HEIGHT_ENCODER as u32,
+                        &format!("[AV1 DECODER {}]", self.server_ip),
+                        )
+                    )
+                    },
+                };
                 self.original_decoder = Some(Arc::new(Mutex::new(decoder)));
             }
 

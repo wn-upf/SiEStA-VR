@@ -822,7 +822,7 @@ pub struct HevcDecoder {
     frame_rx: crossbeam::channel::Receiver<Vec<u8>>,
     packet_tx: crossbeam::channel::Sender<Vec<u8>>,
     _stdin_handle: std::thread::JoinHandle<()>,
-    _stderr_handle: std::thread::JoinHandle<()>,
+    _stderr_handle: Option<std::thread::JoinHandle<()>>,
     width: u32,
     height: u32,
     parser: HevcParser,
@@ -870,6 +870,7 @@ impl HevcDecoder {
 
         let mut child = FfmpegCommand::new()
             .args(&["-threads", "1"])
+            .args(&["-hide_banner", "-loglevel", "error"]) // Clean up logs
             .hwaccel("cuda")
             .args(&[
                 "-skip_frame",
@@ -967,27 +968,33 @@ impl HevcDecoder {
         });
 
         let decoder_string3 = decoder_string.clone(); // Stderr handler with improved debug output
-        let stderr_handle = std::thread::spawn(move || {
+
+
+        const LOG_ERRORS_HEVC_DECODER: bool = false; 
+
+        let mut stderr_container; 
+        if LOG_ERRORS_HEVC_DECODER {
+            let stderr_handle = std::thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
-            let mut buf = String::new();
-            loop {
-                buf.clear();
-                match reader.read_to_string(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if !buf.trim().is_empty() {
-                            println!("{decoder_string3} Decoder stderr: {} bytes", n);
-                            eprint!("{}", buf);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("{decoder_string3} Decoder stderr read error: {}", e);
-                        break;
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => eprintln!("[{} HEVC]: {}", decoder_string3, l),
+                        Err(_) => break,
                     }
                 }
-            }
-            println!("{decoder_string3} Decoder stderr reader thread exit");
-        });
+
+                println!("{decoder_string3} Decoder stderr reader thread exit");
+
+
+            });
+            stderr_container = Some(stderr_handle); 
+
+        }
+
+        else{
+            stderr_container = None; 
+        }
+        
         println!(
             "{decoder_str} 📹 HevcDecoder initialized with {}x{} resolution",
             width, height
@@ -997,7 +1004,7 @@ impl HevcDecoder {
             frame_rx,
             packet_tx,
             _stdin_handle: stdin_handle,
-            _stderr_handle: stderr_handle,
+            _stderr_handle: stderr_container,
             width,
             height,
             parser: HevcParser::new(),

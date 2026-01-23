@@ -53,7 +53,7 @@ pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring this from
 pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
                                         // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(100);
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(300);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 0.0;
 
@@ -376,11 +376,14 @@ impl ChunkedHevcEncoder {
         if self.intra_refresh {
             command
                 .hwaccel("cuda")
+                .args(&["-analyzeduration", "200M"]) 
+                .args(&["-probesize", "200M"])
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "8"])
+           
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
@@ -392,6 +395,8 @@ impl ChunkedHevcEncoder {
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
+                .args(&["-fps_mode", "passthrough"])
+
                 // .args(&["-preset", "llhq"])
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
@@ -407,12 +412,17 @@ impl ChunkedHevcEncoder {
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]); // output raw HEVC
+
+
+
         } else {
             command
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
                 // .args(&["-re"]) // read at realtime speed
+                .args(&["-analyzeduration", "100M"]) 
+                .args(&["-probesize", "100M"])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "5"])
@@ -426,7 +436,13 @@ impl ChunkedHevcEncoder {
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"]) // TODO : llhq is preferrable but deprecated on some of the HPC GPUs.
-                // .args(&["-preset", "llhq"])
+                .args(&["-fps_mode", "passthrough"])
+                .args(&["-s", &format!("{}x{}", self.width, self.height)]) // Force input resolution
+                
+                .args(&["-flags", "+cgop"])       // 1. Force Closed GOP (No referencing frames outside the GOP)
+                // .args(&["-forced-idr", "1"])                     // 2. NVENC specific: Force the start to be an IDR frame. NOTE: not using this, better to make GoP frequency match T_abr
+                .args(&["-sc_threshold", "0"])    // 3. Disable scene change detection (keeps GOP strict)
+
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-bufsize", &self.bitrate]) // 1-second VBV window (optional but keeps it tight)
@@ -1239,34 +1255,6 @@ impl StreamSocket {
         (vec_keys, vec_lost)
     }
 
-    // pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
-    //     let mut total_lost_deadline = 0;
-    //     // Collect keys into a vector before modifying the map
-    //     let keys: Vec<_> = self.lost_shards_deadline_map.keys().cloned().collect();
-
-    //     let mut vec_keys = vec![];
-    //     let mut vec_lost = vec![];
-
-    //     // Now you can iterate over the keys and remove them from the map
-    //     for frame_deadlined in keys {
-    //         vec_keys.push(frame_deadlined);
-
-    //         let lost_in_frame = self
-    //             .lost_shards_deadline_map
-    //             .remove(&frame_deadlined)
-    //             .unwrap();
-    //         // println!("LOST {} packets in frame {}", self.lost_shards_deadline_map.get(&frame_deadlined).unwrap(), frame_deadlined);
-    //         debug_bgprint!(
-    //             DebugColor::Red,
-    //             "[Flush deadline] Packets lost in frame {}: {:?}",
-    //             frame_deadlined,
-    //             lost_in_frame
-    //         );
-    //         vec_lost.push(lost_in_frame);
-    //         total_lost_deadline += lost_in_frame;
-    //     }
-    //     (vec_keys, vec_lost)
-    // }
 
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
