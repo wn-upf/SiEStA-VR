@@ -41,8 +41,6 @@ N_BGs=( 0 )                ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
 rates_bps_BGtraffic=( 20000 50000 80000 )  ## Packets per second 
 IS_UL_BG=( 0 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL 
-
-CODEC_CHOICES=("AV1") ## can be "HEVC" or "AV1"
 ############################################################################# <- 802.11 Parameters
 
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
@@ -52,20 +50,20 @@ num_close_users=( 0 )         ## number of users with alternate AP distance (to 
 distance_close_users=( 1.5 )  ## to have heterogeneous distances            (if num_close_users > 0)
 everest_tests=0             ## Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 PL=0.1
-
-packs_per_ampdu=( 128 )
-
+packs_per_ampdu=( 64 )
 ############################################################################# <- VR streaming Parameters
+CODEC_CHOICES=("AV1") ## can be "HEVC" or "AV1"
 
 N_XR=( 1 ) 
-initial_bitrate_mbps=( 100.0 ) # VR Only
+initial_bitrate_mbps=( 20.0 ) # VR Only
 fps_list=( 90.0 )              # VR Only
 ABR_ENABLED=( 0 ) ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
-T_ABR=2.5         ## Time between updates of ABR, also affects RL mode. 
+T_ABR=1.0         ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 ) ## balanced and that's it 
-video_samples=("swordsmith")
+# video_samples=("swordsmith" )
+video_samples=("snow")
 intrarefresh_choice=( 0 ) ## intra-refresh enabled if true
-GoP_sizes=(90)
+GoP_sizes=(30)            ## Make sure GoP size is always less than (T_abr·FPS), and a common divisor 
 ############################################################################# <- RL training Parameters
 
 observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 
@@ -73,7 +71,6 @@ reward_mode=0
 temp_file=$(mktemp)
 SHUFFLED_CMDS=$(mktemp)
 # N_STEPS_RL=7_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced with the python script.   
-
 
 #########################################################################################################################
 SWEEP_ID="wn-upf/asynchronix-python_RL/i9igunmc" # ID for the W&B sweep for the agent.

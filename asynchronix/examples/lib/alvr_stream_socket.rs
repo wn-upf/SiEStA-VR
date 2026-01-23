@@ -123,6 +123,9 @@ pub struct ChunkedAv1Encoder {
     gop_size: usize,
     intra_refresh: bool,
     framerate: f32,
+
+
+    aggregation_buffer: Vec<u8>, // to aggregate multiple OBUs into full frame.  
 }
 
 impl ChunkedAv1Encoder {
@@ -156,6 +159,7 @@ impl ChunkedAv1Encoder {
             gop_size,
             intra_refresh,
             framerate,
+            aggregation_buffer: Vec::new(), 
         }
     }
 
@@ -229,32 +233,47 @@ impl ChunkedAv1Encoder {
                     if let Ok(l) = line { println!("ffmpeg stderr: {}", l); }
                 }
             });
-        }
+        }  
 
+
+        self.aggregation_buffer.clear();
         let mut buf = [0u8; 4096];
 
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break, 
+                Ok(0) => {
+                    // EOF: Flush any remaining data in the aggregation buffer
+                    if !self.aggregation_buffer.is_empty() {
+                        if let Err(e) = self.frame_tx.send(self.aggregation_buffer.clone()) {
+                            eprintln!("Error sending last AV1 frame: {}", e);
+                        }
+                        self.aggregation_buffer.clear();
+                    }
+                    break; 
+                }, 
                 Ok(n) => {
                     self.parser.add_data(&buf[..n]);
-                    // Assuming Av1Parser.get_frames() returns Vec<TaggedPacket> or similar,
-                    // map it to Vec<u8> for compatibility.
-                    let frames = self.parser.get_frames();
-                    for frame in frames {
-                        // If 'frame' is a TaggedPacket struct, use frame.data. 
-                        // If Av1Parser was modified to return Vec<u8>, use frame directly.
-                        // Below assumes 'frame' works like the HevcParser output or acts as payload.
-                        // Adjust extraction logic here if needed:
-                        let payload = frame; // or frame.data if it's a struct
-                        
-                        if let Err(e) = self.frame_tx.send(payload) {
-                            eprintln!("{} Error sending AV1 frame: {}", e, self.encoder_str);
+                    
+                    let units = self.parser.get_obu_units();
+                    for unit in units {
+                        // OBU Type 2 is OBU_TEMPORAL_DELIMITER.
+                        // It marks the beginning of a NEW Temporal Unit (Frame).
+                        if unit.obu_type == 2 {
+                            // If we have data accumulated, it means the *previous* frame is done.
+                            if !self.aggregation_buffer.is_empty() {
+                                if let Err(e) = self.frame_tx.send(self.aggregation_buffer.clone()) {
+                                    eprintln!("Error sending AV1 frame: {}", e);
+                                }
+                                self.aggregation_buffer.clear();
+                            }
                         }
+                        
+                        // Add current OBU to the buffer (it belongs to the frame starting now)
+                        self.aggregation_buffer.extend_from_slice(&unit.data);
                     }
                 }
                 Err(e) => {
-                    eprintln!("{} Error reading AV1 ffmpeg chunk: {}", e, self.encoder_str);
+                    eprintln!("Error reading AV1 ffmpeg chunk: {}", e);
                     break;
                 }
             }

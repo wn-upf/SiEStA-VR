@@ -803,18 +803,12 @@ impl Av1Parser {
     pub fn next_obu(&mut self) -> Option<ObuUnit> {
         if self.buffer.is_empty() { return None; }
 
-        // OBU Header parsing
         let header_byte = self.buffer[0];
         let obu_type = (header_byte >> 3) & 0xF;
         let extension_flag = (header_byte >> 2) & 1;
         let has_size_field = (header_byte >> 1) & 1;
 
-        if has_size_field == 0 {
-            // Without size fields, we can't parse a stream easily.
-            // ffmpeg -f obu usually includes them.
-            // self.buffer.clear();
-            return None;
-        }
+        if has_size_field == 0 { return None; } // Simple safety check
 
         let mut offset = 1;
         if extension_flag == 1 {
@@ -831,25 +825,24 @@ impl Av1Parser {
         let obu_data = self.buffer[0..total_size].to_vec();
         self.buffer.drain(0..total_size);
 
-        // OBU Type 1 is Sequence Header
-        let is_sequence_header = obu_type == 1;
-        if is_sequence_header {
-            self.sequence_header = Some(obu_data.clone());
-        }
-
         Some(ObuUnit {
             obu_type,
             data: obu_data,
-            is_sequence_header,
+            is_sequence_header: obu_type == 1,
         })
     }
 
-    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
-        let mut frames = Vec::new();
-        while let Some(obu) = self.next_obu() {
-            frames.push(obu.data);
+    pub fn get_obu_units(&mut self) -> Vec<ObuUnit> {
+        let mut units = Vec::new();
+        while let Some(unit) = self.next_obu() {
+            units.push(unit);
         }
-        frames
+        units
+    }
+
+
+    pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
+        self.get_obu_units().into_iter().map(|u| u.data).collect()
     }
 }
 

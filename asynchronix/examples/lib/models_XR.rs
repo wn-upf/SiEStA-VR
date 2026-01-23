@@ -188,23 +188,46 @@ fn get_counter() -> &'static AtomicUsize {
     PRINT_COUNTER.get_or_init(|| AtomicUsize::new(0))
 }
 
-pub fn is_keyframe(frame: &[u8]) -> bool {
-    // Check for start code
-    for i in 0..frame.len().saturating_sub(5) {
-        if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
-            || (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
-        {
-            let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
-            let nal_header_pos = i + start_code_len;
+pub fn is_keyframe(frame: &[u8], codec_type: VideoCodec) -> bool {
+    if frame.len() < 3 { return false; }
 
-            if nal_header_pos < frame.len() {
-                let nal_header = frame[nal_header_pos];
-                let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
+    match codec_type {
+        VideoCodec::HEVC => {
+            // ... (Your existing HEVC logic) ...
+             for i in 0..frame.len().saturating_sub(5) {
+                if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+                    || (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
+                {
+                    let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
+                    let nal_header_pos = i + start_code_len;
 
-                // In HEVC, NAL types 16-21 represent IRAP (Intra Random Access Point) pictures
-                if (16..=21).contains(&nal_type) {
-                    return true;
+                    if nal_header_pos < frame.len() {
+                        let nal_header = frame[nal_header_pos];
+                        let nal_type = (nal_header >> 1) & 0x3F; 
+                        if (16..=21).contains(&nal_type) { return true; }
+                    }
                 }
+            }
+        }
+        VideoCodec::AV1 => {
+            // Check the first OBU
+            let obu0_type = (frame[0] >> 3) & 0xF;
+            if obu0_type == 1 { return true; } // Starts directly with Seq Header
+
+            // Check if first OBU is a Temporal Delimiter (Type 2)
+            // [TD Header (1B)] [Size (1B, usually 0)] -> Next OBU starts at index 2
+            if obu0_type == 2 && frame.len() > 2 {
+                let obu1_type = (frame[2] >> 3) & 0xF;
+                if obu1_type == 1 { 
+                    return true; // Found Seq Header after TD
+                }
+            }
+            
+            // Debug print to help you see what IS arriving
+            // Only print if it's big enough to potentially be a keyframe to reduce spam
+            if frame.len() > 5000 { 
+                println!("[AV1 CHECK] Frame len: {}, Type0: {}, Type1 (at idx2): {}", 
+                    frame.len(), obu0_type, (frame[2] >> 3) & 0xF);
             }
         }
     }
@@ -353,12 +376,12 @@ impl Av1Decoder {
         // 3. STDERR Handler
         let decoder_str_clone3 = decoder_string.clone();
         let stderr_handle = thread::spawn(move || {
-            // let reader = BufReader::new(stderr);
-            // for line in reader.lines() {
-            //     if let Ok(l) = line {
-            //         println!("{} [FFMPEG DECODER ERROR]: {}", decoder_str_clone3, l);
-            //     }
-            // }
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    println!("{} [FFMPEG DECODER ERROR]: {}", decoder_str_clone3, l);
+                }
+            }
         });
 
         Self {
@@ -384,43 +407,47 @@ impl Av1Decoder {
     }
 
     pub fn process_packet(&mut self, packet: Vec<u8> ) {
-        // let _permit = self.processing_semaphore.acquire().await.unwrap();
-
-        // Add to parser
-        self.parser.add_data(&packet);
-
-
-        // In AV1, we don't need to manually extract "Frames" as strictly as HEVC NALs
-        // for the decoder pipe, but we do it to maintain your logic structure.
-        let obus = self.parser.get_frames();
         
-        for obu_data in obus {
-            // Detect Sequence Header (Keyframe-ish)
-            if obu_data.len() > 1 {
-                let obu_type = (obu_data[0] >> 3) & 0xF;
-                let is_display_frame = obu_type == 6 || obu_type == 3;
-
-                if is_display_frame {
-                    // self.metadata_queue.push_back(packet.meta);
-                    self.frames_processed += 1;
-                } else if obu_type == 1 {
-                    // Sequence header - do not push metadata, it produces no output frame
-                    self.keyframes_seen += 1;
-                    print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header", self.decoder_string);
-                }
-
-            }
-
-            self.frames_processed += 1;
-            
-            // Send to FFmpeg
-            if let Err(e) = self.packet_tx.send(obu_data) {
-                 eprintln!("Failed to send to ffmpeg: {}", e);
-            }
-            
-            // Keep ID sync
-            // self.id_queue.push_back(id);
+        
+        self.frames_processed += 1;
+        if let Err(e) = self.packet_tx.send(packet) {  // has already been packetized in encoding
+                    eprintln!("Failed to send to ffmpeg: {}", e);
         }
+        
+        // let _permit = self.processing_semaphore.acquire().await.unwrap();
+        // Add to parser
+        // self.parser.add_data(&packet);
+        // // In AV1, we don't need to manually extract "Frames" as strictly as HEVC NALs
+        // // for the decoder pipe, but we do it to maintain your logic structure.
+        // let obus = self.parser.get_frames();
+        
+        // for obu_data in obus {
+        //     // Detect Sequence Header (Keyframe-ish)
+        //     if obu_data.len() > 1 {
+        //         let obu_type = (obu_data[0] >> 3) & 0xF;
+        //         let is_display_frame = obu_type == 6 || obu_type == 3;
+
+        //         if is_display_frame {
+        //             // self.metadata_queue.push_back(packet.meta);
+        //             self.frames_processed += 1;
+        //         } else if obu_type == 1 {
+        //             // Sequence header - do not push metadata, it produces no output frame
+        //             self.keyframes_seen += 1;
+        //             print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header", self.decoder_string);
+        //         }
+
+        //     }
+
+        //     self.frames_processed += 1;
+            
+        //     // Send to FFmpeg
+        //     if let Err(e) = self.packet_tx.send(obu_data) {
+        //          eprintln!("Failed to send to ffmpeg: {}", e);
+        //     }
+            
+        //     // Keep ID sync
+        //     // self.id_queue.push_back(id);
+        // }
     }
 
     pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>)> {
@@ -703,7 +730,6 @@ impl HevcDecoder {
         false
     }
 
-    
 
     pub fn inject_parameter_sets(
         &mut self,
@@ -833,8 +859,6 @@ impl HevcDecoder {
         }
         None
     }
-
-    
     
     pub fn extract_complete_parameter_sets(
         &self,
@@ -5857,7 +5881,8 @@ impl XRClient {
                         if frame_span != 0.0 {
                             // prevent division by zero
                             if EVEREST_CLASSIC {
-                                if is_keyframe(&nal) {
+                                if is_keyframe(&nal, self.codec_selection) 
+                                {
                                     everest_throughput = frame_size_bytes * 8.0 / frame_span;
                                 } else {
                                     let frame_size_mtu_portion =
@@ -6320,10 +6345,6 @@ impl XRClient {
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
             let mut lost_frames_aux = self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
-
-
-            
-
             if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
 
                 let decoder = match self.codec_selection{
@@ -6487,8 +6508,11 @@ impl XRClient {
                     // Update last processed frame ID for the *regular* stream continuity check
                     self.last_processed_frame_id = id_f;
 
+
+
+
                     // Keyframe detection (keep as is)
-                    if is_keyframe(&video_frame) {
+                    if is_keyframe(&video_frame, self.codec_selection) {
                         self.dec_saw_keyframe = true;
                         print_pretty!(
                             DebugColor::Magenta,
@@ -6505,7 +6529,7 @@ impl XRClient {
 
                         let has_enough_frames =
                             self.initialization_buffer.len() >= self.min_buffered_frames;
-                        if is_keyframe(&video_frame) {
+                        if is_keyframe(&video_frame, self.codec_selection) {
                             self.dec_saw_keyframe = true;
                             self.dec_saw_keyframe_last_t = now;
                         }
@@ -6530,35 +6554,29 @@ impl XRClient {
                                 now.checked_duration_since(self.last_decoded_frame_instant)
                             {
                                 let miin: usize = usize::min(video_frame.len(), 50);
-                                // crate::print_magenta!(
-                                //     // DebugColor::Violet,
-                                //     "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s",
-                                //     format_elapsed!(now),
-                                //     ip_client,
-                                //     id_f,
-                                //     video_frame.len(),
-                                //     self.decoder_queue.len(),
-                                //     interarrival.as_secs_f32(),
-                                // );
+                                crate::print_magenta!(
+                                    // DebugColor::Violet,
+                                    "{} - [DBG VSYNC {} FFMPEG DECODE] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s",
+                                    format_elapsed!(now),
+                                    ip_client,
+                                    id_f,
+                                    video_frame.len(),
+                                    self.decoder_queue.len(),
+                                    interarrival.as_secs_f32(),
+                                );
                             }
 
                             if let Some(decoder_arc) = self.original_decoder.clone() {
                                 let mut decoder = decoder_arc.lock().unwrap();
 
-
-
                                 // Process the current frame pair using process_packets
-                                print_pretty!(DebugColor::Cyan, "Processing frame #{} ", id_f);
+                                print_yellow!("Processing frame #{} ({:.2} kBytes)", id_f, video_frame.len() as f32 / 1000.0 );
                                 decoder.process_packet(video_frame.clone());
+                                
 
                                 // Try to get a synchronized frame pair immediately after processing
                                 // This might yield 0, 1 or more pairs depending on internal buffering and state
                                 while let Some((frame)) = decoder.next_decoded_frame() {
-                                    // print_pretty!(
-                                    //     DebugColor::Green,
-                                    //     "Retrieved frame #{}",
-                                    //     decoder.decoded_frame_counter,
-                                    // );
 
                                     // Display synchronized frame pair (keep display logic)
                                     thread_local! {
