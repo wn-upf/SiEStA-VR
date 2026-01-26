@@ -115,6 +115,7 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
 
 pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false; 
 pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100; 
+pub const SPINNER_LOSS_THRESHOLD: usize = 10; // "N" frames
 
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
@@ -4954,6 +4955,7 @@ pub struct XRClient {
     codec_selection: VideoCodec, 
     frame_size_history_vec: VecDeque<usize>,
     window_tx: Option<UnboundedSender<WindowCommand>>, // The handle to talk to the window 
+    consecutive_lost_counter: usize, 
 }
 
 #[allow(unused)]
@@ -5092,6 +5094,8 @@ impl XRClient {
 
             frame_size_history_vec: VecDeque::from(vec![0; DISPLAY_GRAPH_MAX_FRAMES]), 
             window_tx: Some(tx), // Store the tokio sender
+            consecutive_lost_counter: 0, 
+            
         }
     }
 
@@ -5105,35 +5109,44 @@ impl XRClient {
             let mut window = Window::new(&initial_title, width, height, WindowOptions::default()).unwrap();
             window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
 
+            // 1. Create a buffer to hold the last valid image (Persistent State)
+            let mut last_valid_buffer = vec![0u32; width * height];
+            
+            // Initialize with a simple background or spinner
             let mut spinner_buffer = vec![0u32; width * height];
             let start_time = std::time::Instant::now();
-            let mut has_received_first_frame = false; // <--- FLAG
+            let mut has_received_first_frame = false;
 
             while window.is_open() {
-                // Check for update
                 match rx.try_recv() {
+                    // CASE: New Frame Arrived (Video or Spinner update)
                     Ok(WindowCommand::Update { buffer, width: w, height: h, title }) => {
-                        has_received_first_frame = true; // Stop spinning
+                        has_received_first_frame = true;
                         window.set_title(&title);
+                        
+                        // Update the window
                         window.update_with_buffer(&buffer, w, h).unwrap();
+                        
+                        // 2. CACHE IT: Save this buffer as the "Last Known Good" state
+                        if buffer.len() == last_valid_buffer.len() {
+                            last_valid_buffer.copy_from_slice(&buffer);
+                        }
                     }
+                    
                     Ok(WindowCommand::Quit) => break,
+                    
+                    // CASE: No New Data (Freeze Mode)
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                         if !has_received_first_frame {
-                            // RENDER SPINNER (Only during init)
-                            for pixel in spinner_buffer.iter_mut() { *pixel = 0x101010; }
+                            // ... (Your existing Init Spinner logic) ...
                             let elapsed = start_time.elapsed().as_secs_f32();
-                            
-                            // Assuming render_loading_spinner expects specific hud offset logic, 
-                            // you might need to adjust 'height' passed here if it includes HUD.
                             crate::lib::render_loading_spinner(&mut spinner_buffer, width, height, elapsed);
-                            
                             window.update_with_buffer(&spinner_buffer, width, height).unwrap();
                         } else {
-                            // If we have started streaming but the channel is temporarily empty,
-                            // usually we just wait (maintain last image) or call update() 
-                            // to keep window events processing.
-                            window.update_with_buffer(&[], width, height).unwrap_or(()); 
+                            // 3. PERSISTENCE: Redraw the cached frame!
+                            // Instead of sending &[], we send the last valid pixels.
+                            // This prevents black screens/flickering on some OS backends.
+                            window.update_with_buffer(&last_valid_buffer, width, height).unwrap();
                         }
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
@@ -5141,7 +5154,6 @@ impl XRClient {
             }
         });
     }
-
 
     pub async fn session_end(&mut self, pause_time: f64, context: &Context<Self>) {
         let now = context.scheduler.time();
@@ -6247,6 +6259,7 @@ impl XRClient {
 
             // Allocate the buffer for this frame (Backbuffer)
             let mut display_buffer = vec![0u32; window_width * total_window_height];
+            let mut should_update_window = false;
 
             // 2. Decoder Initialization (Run once)
             if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
@@ -6395,43 +6408,70 @@ impl XRClient {
 
                 // Reset tracking
                 self.lost_ids_reference_buffer.clear(); 
+                should_update_window = true;
             } 
             // CASE B: No frame (Rebuffering/Spinning)
             else {
                 // Calculate elapsed time for animation
-                let elapsed = now.duration_since(self.t_0).as_secs_f32();
-                
-                crate::lib::render_loading_spinner(&mut display_buffer, window_width, window_height, elapsed);
-                
-                // Manually fill HUD background since display_single_frame isn't running
-                let hud_color = 0x101010;
-                for y in window_height..total_window_height {
-                    for x in 0..window_width {
-                        display_buffer[y * window_width + x] = hud_color;
+                let is_start = self.last_seen_id == 0;
+    
+                // Condition 2: Loss Threshold Exceeded
+                let is_network_bad = self.consecutive_lost_counter >= SPINNER_LOSS_THRESHOLD;
+
+                if is_start || is_network_bad {
+                    // --- SPINNING MODE ---
+                    let elapsed = now.duration_since(self.t_0).as_secs_f32();
+                    
+                    // Draw spinner on top of the EXISTING display_buffer 
+                    // (which currently holds the last valid frame)
+                    crate::lib::render_loading_spinner(&mut display_buffer, window_width, window_height, elapsed);
+                    
+                    // Optional: Black out the HUD area if you want, or leave it
+                    let hud_color = 0x101010;
+                    for y in window_height..total_window_height {
+                        for x in 0..window_width {
+                            display_buffer[y * window_width + x] = hud_color;
+                        }
                     }
+                    if let Some( tx)  = &self.window_tx {
+                        let _ = tx.send(WindowCommand::Update {
+                        buffer: display_buffer.clone(),
+                        width: window_width,
+                        height: total_window_height,
+                        title: "Buffering...".to_string(),
+                    });
+                    }
+                    should_update_window = true;
+                    
+                    
+                } else {
+                    // --- FREEZE MODE ---
+
+                    
+
                 }
-                
-                // Optional: Draw "Buffering" text here if you have a helper
             }
 
             // ---------------------------------------------------------
             // SEND TO DISPLAY THREAD
             // ---------------------------------------------------------
-            if let Some(tx) = &self.window_tx {
-                let title = format!("{} - [{}]", format_elapsed!(now), self.server_ip);
-                
-                let cmd = WindowCommand::Update {
-                    buffer: display_buffer, // Moves the vector to the other thread
-                    width: window_width,
-                    height: total_window_height,
-                    title,
-                };
+            if should_update_window {
+                if let Some(tx) = &self.window_tx {
+                    let title = format!("{} - [{}]", format_elapsed!(now), self.server_ip);
+                    
+                    let cmd = WindowCommand::Update {
+                        buffer: display_buffer, // Moves the vector to the other thread
+                        width: window_width,
+                        height: total_window_height,
+                        title,
+                    };
 
-                // Non-blocking send
-                if let Err(e) = tx.send(cmd) {
-                    // This usually means the window was closed by the user
-                    print_red!("Display thread channel closed (Window closed?): {}", e);
-                    self.window_tx = None; // Stop trying to send
+                    // Non-blocking send
+                    if let Err(e) = tx.send(cmd) {
+                        // This usually means the window was closed by the user
+                        print_red!("Display thread channel closed (Window closed?): {}", e);
+                        self.window_tx = None; // Stop trying to send
+                    }
                 }
             }
 
@@ -6662,196 +6702,6 @@ fn render_text_with_alpha(
 /// Display one decoded RGB frame, plus bitrate and lost-packets info.
 /// Display exactly one decoded RGB frame (with sync/state info, bitrate, and lost-frames overlay)
 
-
-pub fn display_single_frame_with_info(
-    raw_frame: &[u8],
-    server_ip: &IpAddr,
-    frame_id: usize,
-    window: &mut Window,
-    now: TaiTime<0>,
-    bitrate_mbps: f32,
-    lost_frames: VecDeque<u32>,
-    lost_frames_buffer: &mut LostFramesBuffer,
-    test: &str,
-    bm: &str,
-    string_id: &str,
-    size_history: &VecDeque<usize>, 
-    hud_height: usize,
-    framerate: f32, 
-    codec_type: VideoCodec, 
-) -> bool {
-    // 1) Convert raw RGB bytes → u32 pixel buffer
-    let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
-        Some(p) => p,
-        None => {
-            eprintln!("ERROR: Failed to convert RGB for frame #{}", frame_id);
-            return false;
-        }
-    };
-
-    // 2) Compute scaled dimensions
-    let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-    let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-
-    let total_h = scaled_h + hud_height;
-
-    // 3) Allocate window buffer
-    let mut buffer = vec![0u32; scaled_w * total_h];
-
-    // 4) Nearest-neighbor resize
-    for y in 0..scaled_h {
-        for x in 0..scaled_w {
-            let sx = x * WIDTH_ENCODER as usize / scaled_w;
-            let sy = y * HEIGHT_ENCODER as usize / scaled_h;
-            buffer[y * scaled_w + x] = pixels[sy * WIDTH_ENCODER as usize + sx];
-        }
-    }
-
-    // 5) Draw text overlays (frame index and bitrate)
-    let margin = 10;
-    
-
-
-    // 6) Fill the bottom HUD area with a dark background
-    let hud_bg_color = 0x101010; // Dark Grey
-    for y in scaled_h..total_h {
-        for x in 0..scaled_w {
-            buffer[y * scaled_w + x] = hud_bg_color;
-        }
-    }
-
-    // 7) Render the Graph
-    // Convert usize history to f32 if your render_graph expects f32, 
-    // otherwise pass directly. Assumes conversion is needed based on reference.
-    let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
-    
-    let target_graph_height = 250; 
-    
-    // 2. Define space from the very bottom of the window (for the "0" label)
-    let bottom_padding = 60; 
-
-    // 3. Calculate Y-Offset: Total Height - Padding - Graph Height
-    // This ensures the graph ends exactly at (total_h - bottom_padding)
-    let graph_y_pos = total_h.saturating_sub(bottom_padding + target_graph_height);
-    
-    // 4. Scale logic (500KB ceiling)
-    let max_graph_scale_kb = 500.0;
-
-
-
-    crate::lib::render_graph(
-        &mut buffer,
-        &history_f32,
-        85,              // x_offset
-        graph_y_pos,     // y_offset (in the new HUD area)
-        scaled_w,         // stride (window width)
-        bitrate_mbps * 1_000_000.0, // target value
-        framerate,              // target FPS (or pass as arg)
-        target_graph_height,
-        200_000.0,       // Ceiling (e.g. 250kB)
-        true,            // Log scale
-    );
-
-    // render_text(
-    //     &mut buffer,
-    //     &format!("FRAME #{}", frame_id),
-    //     margin,
-    //     margin,
-    //     scaled_w,
-    //     0x00FF00,
-    //     3,
-    // );
-
-    let line_h = 25;
-    let line_hh = 100;
-
-    const SCALE_TEXT_WINDOW: usize = 4; 
-    render_text(
-        &mut buffer,
-        &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
-        margin,
-        margin + line_h,
-        scaled_w,
-        0x00FF00,
-        SCALE_TEXT_WINDOW,
-    );
-    render_text(
-        &mut buffer,
-        &format!("{}", bm),
-        margin,
-        margin + line_hh,
-        scaled_w,
-        0x00FF00,
-        SCALE_TEXT_WINDOW,
-    );
-
-    let right_margin = 600; 
-    let text_x = scaled_w.saturating_sub(right_margin);
-
-
-    let first_y = scaled_h + 30; 
-    let second_y =  first_y + 60; 
-
-    render_text(
-        &mut buffer,
-        &format!("Codec: {}", codec_type ),
-        text_x,
-        first_y,
-        scaled_w,
-        0x00FF00,
-        SCALE_TEXT_WINDOW,
-    );
-    // 6) Handle new lost-frames and add to buffer
-    if !lost_frames.is_empty() {
-        let msg = format!(
-            "T: {:5.5} LOST FRAMES: {:?}",
-            format_elapsed!(now),
-            lost_frames
-        );
-        lost_frames_buffer.add_message(msg);
-    }
-
-    // 7) Render the rolling lost-frames messages (up to 3) with fading
-    for (i, entry) in lost_frames_buffer.messages.iter().rev().enumerate() {
-        let opacity = calculate_opacity(entry);
-        if opacity == 0 {
-            continue;
-        }
-        // stack from bottom
-        let y_pos = scaled_h as i32 - 80 + (i as i32 * 22);
-        if y_pos > 0 {
-            render_text_with_alpha(
-                &mut buffer,
-                &entry.text,
-                margin,
-                y_pos as usize,
-                scaled_w,
-                0xFF0000,
-                2,
-                opacity,
-            );
-        }
-    }
-    // 8) Update title with timestamp and test identifier
-    let title = format!(
-        "{} | {} -- Frame #{} @ {:.2}s - Test: {}",
-        string_id,
-        server_ip,
-        frame_id,
-        now.duration_since(TaiTime::EPOCH).as_secs_f64(),
-        test,
-    );
-    window.set_title(&title);
-
-    // 9) Blit to screen
-    match window.update_with_buffer(&buffer, scaled_w, total_h) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("Window update failed for frame #{}: {}", frame_id, e);
-            false
-        }
-    }
-}
 pub fn display_single_frame_with_info_buffered(
     raw_frame: &[u8],
     frame_id: usize,
@@ -6916,7 +6766,7 @@ pub fn display_single_frame_with_info_buffered(
     // 5) Render the Graph
     let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
     let target_graph_height = (250.0 * graph_scale_factor) as usize; 
-    let bottom_padding = 60; 
+    let bottom_padding = 20; 
     let graph_y_pos = total_h.saturating_sub(bottom_padding + target_graph_height);
     
     crate::lib::render_graph(
@@ -6936,40 +6786,112 @@ pub fn display_single_frame_with_info_buffered(
     let margin = 10;
     let line_h = 25;
     let line_hh = 100;
-    const SCALE_TEXT_WINDOW: usize = 4; 
 
-    render_text(
-        display_buffer,
-        &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
-        margin,
-        margin + line_h,
-        stride,
-        0x00FF00,
-        SCALE_TEXT_WINDOW,
-    );
-    render_text(
-        display_buffer,
-        &format!("{}", bm),
-        margin,
-        margin + line_hh,
-        stride,
-        0x00FF00,
-        SCALE_TEXT_WINDOW,
-    );
-
+    const SCALE_TEXT_WINDOW: usize = 3; 
+        // --- RIGHT SIDE ELEMENTS ---
     let right_margin = 600; 
-    let text_x = scaled_w.saturating_sub(right_margin);
-    let first_y = scaled_h + 30; 
+    let right_x = scaled_w.saturating_sub(right_margin);
 
-    render_text(
+    // let right_margin = 600; 
+    // let text_x = scaled_w.saturating_sub(right_margin);
+    // let first_y = scaled_h + 30; 
+
+    // // Existing Codec position
+    // let right_margin = 600; 
+    // let text_x = scaled_w.saturating_sub(right_margin);
+    // let line_spacing = 50; // Vertical distance between lines
+
+    // // 1. Render Codec (Already in your code)
+    // // --- Step 6: Render Text (Unified HUD) ---
+    // let flashy_yellow = 0xFFFF00;
+    
+    // // Vertical Alignment Variables
+    // let first_y = scaled_h + 30;  // Same starting Y for both sides
+    // let line_spacing = 33;        // Same spacing for both sides
+
+
+
+    // // 1. Codec
+    // render_text(
+    //     display_buffer,
+    //     &format!("Codec: {}", codec_type),
+    //     right_x,
+    //     first_y,
+    //     stride,
+    //     flashy_yellow,
+    //     SCALE_TEXT_WINDOW,
+    // );
+
+    // // 2. Last Seen Frame ID
+    // render_text(
+    //     display_buffer,
+    //     &format!("Frame ID: {}", frame_id),
+    //     right_x,
+    //     first_y + line_spacing,
+    //     stride,
+    //     flashy_yellow,
+    //     SCALE_TEXT_WINDOW,
+    // );
+
+    // // 3. Video Timestep
+    // render_text(
+    //     display_buffer,
+    //     &format!("Time:  {:5.5}", format_elapsed!(now)),
+    //     right_x,
+    //     first_y + (line_spacing * 2),
+    //     stride,
+    //     flashy_yellow,
+    //     SCALE_TEXT_WINDOW,
+    // );
+    //   // 1. Bitrate (now in flashy yellow, aligned with Codec)
+    // render_text(
+    //     display_buffer,
+    //     &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
+    //     right_x,
+    //     first_y + (line_spacing * 3),
+    //     stride,
+    //     flashy_yellow,
+    //     SCALE_TEXT_WINDOW,
+    // );
+
+    // // 2. ABR Mode (now in flashy yellow, aligned with Frame ID)
+    // render_text(
+    //     display_buffer,
+    //     &format!("{}", bm),
+    //     right_x,
+    //     first_y + (line_spacing * 4),
+    //     stride,
+    //     flashy_yellow,
+    //     SCALE_TEXT_WINDOW,
+    // );
+    let first_y: usize = scaled_h + 30; 
+    let flashy_yellow = 0xFFFF00;
+    let row_height = 33;    // Vertical spacing between rows
+    let cell_width = 450;   // Total width for the Key-Value pair block
+    let bar_position = Some(180); // Pixels from the left of the cell
+    // --- HUD GRID RENDERING ---
+    
+    let time_str = format!("{:.6}", format_elapsed!(now)); 
+    crate::render_hud_grid!(
         display_buffer,
-        &format!("Codec: {}", codec_type ),
-        text_x,
-        first_y,
         stride,
-        0x00FF00,
+        right_x,
+        first_y,
+        flashy_yellow,
         SCALE_TEXT_WINDOW,
+        cell_width,
+        row_height,
+        true,            // Enable Box
+        bar_position,    // Enable Bar at 180px
+        [   
+            ("Time", &time_str),
+            ("Frame ID", frame_id),
+            ("Codec", codec_type),
+            ("ABR Mode", bm), 
+            ("Bitrate", format!("{:.2} Mbps", bitrate_mbps))
+        ]
     );
+
 
     // 7) Handle lost-frames buffer updates
     if !lost_frames.is_empty() {
@@ -6985,23 +6907,39 @@ pub fn display_single_frame_with_info_buffered(
         }       
     }
 
-    // 8) Render rolling messages
+
+    // 8) Render rolling messages in the gap between video and graph
+    let message_margin = 10;
+    let message_line_height = 25;
+    
+    // The "ceiling" is the bottom of the video
+    let gap_start_y = scaled_h + message_margin;
+    // The "floor" is the top of the graph
+    let gap_end_y = graph_y_pos.saturating_sub(message_margin);
+
     for (i, entry) in lost_frames_buffer.messages.iter().rev().enumerate() {
         let opacity = calculate_opacity(entry);
         if opacity == 0 { continue; }
 
-        let y_pos = scaled_h as i32 - 80 + (i as i32 * 22);
-        if y_pos > 0 {
+        // Calculate Y: Start at gap_start_y and move down for each message
+        let y_pos = gap_start_y + (i * message_line_height);
+
+        // Check if we are about to overlap the graph
+        if y_pos + message_line_height < gap_end_y {
             render_text_with_alpha(
                 display_buffer,
                 &entry.text,
-                margin,
-                y_pos as usize,
+                margin, // Keep left margin
+                y_pos,
                 stride,
-                0xFF0000,
-                2,
+                0xFF0000, // Red for errors
+                2,        // Scale
                 opacity,
             );
+        } else {
+            // Optional: break if we run out of space to avoid 
+            // drawing messages over the graph
+            break; 
         }
     }
 

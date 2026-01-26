@@ -48,7 +48,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 // use std::env;
 
 pub const DEBUG_FFMPEG_AV1_LOGS: bool = false; 
-pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring this from input args to simulator
+pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring this from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages

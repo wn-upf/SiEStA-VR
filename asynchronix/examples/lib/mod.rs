@@ -426,6 +426,106 @@ fn get_4_octet(ip: IpAddr) -> u8 {
 #[allow(unused)]
 
 
+#[allow(unused)]
+fn draw_v_line(buffer: &mut [u32], x: usize, y_start: usize, y_end: usize, stride: usize, color: u32) {
+    for y in y_start..y_end {
+        if y * stride + x < buffer.len() {
+            buffer[y * stride + x] = color;
+        }
+    }
+}
+
+#[allow(unused)]
+fn draw_h_line(buffer: &mut [u32], y: usize, x_start: usize, x_end: usize, stride: usize, color: u32) {
+    let start = y * stride + x_start;
+    let end = y * stride + x_end;
+    for idx in start..end {
+        if idx < buffer.len() {
+            buffer[idx] = color;
+        }
+    }
+}#[allow(unused)]
+pub fn render_kv_cell(
+    buffer: &mut [u32],
+    label: &str,
+    value: &str,
+    x: usize,
+    y: usize,
+    stride: usize,
+    color: u32,
+    scale: usize,
+    total_width_px: usize,
+    separator_offset: Option<usize>, // New: Option to draw a vertical bar
+) {
+    const CHAR_BASE_W: usize = 6; 
+    const FONT_HEIGHT: usize = 7;
+    let char_width = CHAR_BASE_W * scale;
+
+    // 1. Render Label
+    render_text(buffer, label, x, y, stride, color, scale);
+
+    // 2. Render Separator Bar
+    if let Some(offset) = separator_offset {
+        let bar_x = x + offset;
+        draw_v_line(buffer, bar_x, y, y + (FONT_HEIGHT * scale), stride, color);
+    }
+
+    // 3. Render Value (Right-aligned)
+    let value_len_px = value.chars().count() * char_width;
+    let value_x = if value_len_px < total_width_px {
+        x + (total_width_px - value_len_px)
+    } else {
+        x + (label.chars().count() * char_width) + char_width
+    };
+
+    render_text(buffer, value, value_x, y, stride, color, scale);
+}
+
+#[macro_export]
+macro_rules! render_hud_grid {
+    (
+        $buffer:expr, $stride:expr, $x:expr, $y:expr, $color:expr, $scale:expr, $width:expr, $spacing:expr,
+        $draw_box:expr,           // New: Bool for border
+        $separator_pos:expr,      // New: Option<usize> for bar position
+        [ $( ($label:expr, $value:expr) ),* ]
+    ) => {
+        {
+            let mut current_y = $y;
+            let items_count = [ $( $label ),* ].len();
+            let padding = 10;
+            
+            // Draw Box Around Area
+            if $draw_box {
+                let box_h = items_count * $spacing + padding;
+                let x_start = $x.saturating_sub(padding);
+                let x_end = $x + $width + padding;
+                let y_start = $y.saturating_sub(padding);
+                let y_end = $y + box_h;
+
+                crate::lib::draw_h_line($buffer, y_start, x_start, x_end, $stride, $color); // Top
+                crate::lib::draw_h_line($buffer, y_end, x_start, x_end, $stride, $color);   // Bottom
+                crate::lib::draw_v_line($buffer, x_start, y_start, y_end, $stride, $color); // Left
+                crate::lib::draw_v_line($buffer, x_end, y_start, y_end + 1, $stride, $color); // Right
+            }
+
+            $(
+                crate::lib::render_kv_cell(
+                    $buffer, 
+                    $label, 
+                    &format!("{}", $value), 
+                    $x, 
+                    current_y, 
+                    $stride, 
+                    $color, 
+                    $scale, 
+                    $width,
+                    $separator_pos
+                );
+                current_y += $spacing;
+            )*
+        }
+    };
+}
 // Renders ASCII text into the minifb window with coordinates.
 pub fn render_text(
     buffer: &mut [u32],
@@ -752,7 +852,7 @@ pub fn render_graph(
         y_offset.saturating_sub(title_margin), 
         stride,
         0xFFFFFF, 
-        4, // Increased Title Size
+        3, // Increased Title Size
     );
     
     render_text(
