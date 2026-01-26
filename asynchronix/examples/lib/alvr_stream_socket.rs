@@ -55,7 +55,7 @@ pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(300);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 0.0;
+pub const OFFSET_VIDEO: f64 = 10.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -76,6 +76,15 @@ pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 pub enum VideoCodec {
     HEVC,
     AV1,
+}
+
+impl fmt::Display for VideoCodec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VideoCodec::HEVC => write!(f, "HEVC"),
+            VideoCodec::AV1 => write!(f, "AV1"),
+        }
+    }
 }
 
 pub enum ChunkedEncoder {
@@ -211,13 +220,14 @@ impl ChunkedAv1Encoder {
             .args(&["-c:v", "libsvtav1"]) // Using SVT-AV1
             .args(&["-preset", "9"])      // High speed preset for RTC
             .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1"]) // Tiling for fastness, lp: level of parallelism,
+            // .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
             .args(&["-b:v", &self.bitrate, ])
             .args(&["-bufsize", &self.bitrate])
             .args(&["-g", &format!("{}", self.gop_size)])
             // .args(&["-f", "ivf", "-"]) // IVF is standard for raw AV1 piping
             // .args(&["-intra-refresh", &format!("{}", self.intra_refresh as i32)]) // TODO: Test IR on AV1, don't have access to nvenc GPU 
-
-            .args(&["-f", "obu", "-"])
+            .args(&["-f", "obu", "-"]) 
+            // .args(&["-f", "ivf", "-"]) // ivf is container for single frames, woth 12 byte header per frame
 
             .spawn()
             .unwrap();
@@ -306,8 +316,8 @@ impl ChunkedAv1Encoder {
             return Some(frame);
         }
 
-        None
-    }
+    None
+}
 }
 pub struct ChunkedHevcEncoder {
     input: String,
@@ -2348,15 +2358,6 @@ impl<H: Serialize> StreamSender<H> {
 
                 // Wrap the encoder in an Arc<Mutex<_>>
                 let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
-
-                // let maxencoder_arc: Arc<async_std::sync::Mutex<ChunkedHevcEncoder>> = Arc::new(async_std::sync::Mutex::new(max_encoder));
-
-                // Initialize the encoder BEFORE storing it
-                // {
-                //     print_prettyy!(DebugColor::Coral, "Initializing MAXENCODER",);
-                //     let mut maxencoder = maxencoder_arc.lock().await;
-                //     maxencoder.start_chunking(max_bitrate_ladder_mbps).await;
-                // }
                 {
                     let mut encoder: async_std::sync::MutexGuard<'_, ChunkedEncoder> =
                         encoder_arc.lock().await;

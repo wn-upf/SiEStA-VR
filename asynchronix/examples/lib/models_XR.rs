@@ -97,11 +97,48 @@ use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
 use super::get_third_octet;
 use crate::lib::gcc_nada_estimator::*;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
-
-////////////////////////////////////// CONSTS////////////////////////////////////////
-
-
 use std::process::{Command as altCommand, Stdio};
+
+////////////////////////////////////// CONSTS//////////////////////////////////////// TODO: STANDARDIZE AND GROUP CONSTS 
+pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false; 
+pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 140; 
+
+pub const WIDTH_ENCODER: usize = 3840;
+pub const HEIGHT_ENCODER: usize = 2160;
+#[allow(unused)]
+pub const FRAMERATE_WINDOWS: usize = 60;
+#[allow(unused)]
+pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
+
+pub const SCALE_FACTOR_WINDOW: f64 = 0.35;  // X:1 scaling for 4k visuals in lower res screens
+
+pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
+    + mem::size_of::<u16>() // stream ID
+    + mem::size_of::<u32>() // packet index
+    + mem::size_of::<u32>() // shards count
+    + mem::size_of::<u32>() // shards index
+    + mem::size_of::<f32>(); // tx relative timestamp
+
+// pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
+pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
+
+pub const CAPACITY_RX_BUFFER: usize = 2000;
+pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
+
+pub const DECODER_BUFFERING_FRAMES: usize = 3;
+// pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S;
+
+pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
+pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
+
+pub const ALPHA_THROUGHPUT: f32 = 0.1;
+pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1;
+const RL_WINDOW_OBSERVATION_SIZE: usize = 5;
+const GRAPH_HUD_HEIGHT: usize = 470;
+
+static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
 // Wrapper for Command to match your syntax
 pub struct altFfmpegCommand {
@@ -131,44 +168,6 @@ impl altFfmpegCommand {
             .spawn()
     }
 }
-
-
-pub const WIDTH_ENCODER: usize = 3840;
-pub const HEIGHT_ENCODER: usize = 2160;
-#[allow(unused)]
-pub const FRAMERATE_WINDOWS: usize = 60;
-#[allow(unused)]
-pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
-
-pub const SCALE_FACTOR_WINDOW: f64 = 0.35;
-
-pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
-    + mem::size_of::<u16>() // stream ID
-    + mem::size_of::<u32>() // packet index
-    + mem::size_of::<u32>() // shards count
-    + mem::size_of::<u32>() // shards index
-    + mem::size_of::<f32>(); // tx relative timestamp
-
-// pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
-pub const MAX_UNREAD_PACKETS: usize = 5; // Applies per stream
-
-pub const CAPACITY_RX_BUFFER: usize = 2000;
-pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(10);
-pub const FRAMED_PREFIX_CONTROL_LENGTH: usize = mem::size_of::<u32>();
-
-pub const DECODER_BUFFERING_FRAMES: usize = 3;
-// pub const BITRATE_UPDATE_INTERVAL: f64 = CHUNK_DURATION_F64_S;
-
-pub const TARGET_TIMESTAMP_TRACKING: Duration = Duration::from_millis(10);
-pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
-
-pub const ALPHA_THROUGHPUT: f32 = 0.1;
-pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1;
-
-const RL_WINDOW_OBSERVATION_SIZE: usize = 5;
-
-static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
 #[allow(unused)]
 pub struct FramePair {
@@ -225,10 +224,10 @@ pub fn is_keyframe(frame: &[u8], codec_type: VideoCodec) -> bool {
             
             // Debug print to help you see what IS arriving
             // Only print if it's big enough to potentially be a keyframe to reduce spam
-            if frame.len() > 5000 { 
-                println!("[AV1 CHECK] Frame len: {}, Type0: {}, Type1 (at idx2): {}", 
-                    frame.len(), obu0_type, (frame[2] >> 3) & 0xF);
-            }
+            // if frame.len() > 5000 { 
+            //     println!("[AV1 CHECK] Frame len: {}, Type0: {}, Type1 (at idx2): {}", 
+            //         frame.len(), obu0_type, (frame[2] >> 3) & 0xF);
+            // }
         }
     }
     false
@@ -316,7 +315,7 @@ impl Av1Decoder {
 
         //  - We construct the FFmpeg pipe here
         let mut child = altFfmpegCommand::new()
-            .args(&["-threads", &format!("{}", 4)])
+            .args(&["-threads", &format!("{}", 2)])
             // .hwaccel("cuda") // Enable if you have RTX 30/40 series
             .args(&["-hide_banner", "-loglevel", "error"])
             .args(&["-f", "obu"]) // Input format is raw OBU
@@ -413,41 +412,7 @@ impl Av1Decoder {
         if let Err(e) = self.packet_tx.send(packet) {  // has already been packetized in encoding
                     eprintln!("Failed to send to ffmpeg: {}", e);
         }
-        
-        // let _permit = self.processing_semaphore.acquire().await.unwrap();
-        // Add to parser
-        // self.parser.add_data(&packet);
-        // // In AV1, we don't need to manually extract "Frames" as strictly as HEVC NALs
-        // // for the decoder pipe, but we do it to maintain your logic structure.
-        // let obus = self.parser.get_frames();
-        
-        // for obu_data in obus {
-        //     // Detect Sequence Header (Keyframe-ish)
-        //     if obu_data.len() > 1 {
-        //         let obu_type = (obu_data[0] >> 3) & 0xF;
-        //         let is_display_frame = obu_type == 6 || obu_type == 3;
-
-        //         if is_display_frame {
-        //             // self.metadata_queue.push_back(packet.meta);
-        //             self.frames_processed += 1;
-        //         } else if obu_type == 1 {
-        //             // Sequence header - do not push metadata, it produces no output frame
-        //             self.keyframes_seen += 1;
-        //             print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header", self.decoder_string);
-        //         }
-
-        //     }
-
-        //     self.frames_processed += 1;
-            
-        //     // Send to FFmpeg
-        //     if let Err(e) = self.packet_tx.send(obu_data) {
-        //          eprintln!("Failed to send to ffmpeg: {}", e);
-        //     }
-            
-        //     // Keep ID sync
-        //     // self.id_queue.push_back(id);
-        // }
+   
     }
 
     pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>)> {
@@ -1268,145 +1233,6 @@ impl HevcDecoder {
     }
 }
 
-#[allow(non_camel_case_types, unused)]
-pub struct SharedParameterSetManager {
-    // Core parameter sets
-    vps: RwLock<Option<Vec<u8>>>,
-    sps: RwLock<Option<Vec<u8>>>,
-    pps: RwLock<Option<Vec<u8>>>,
-
-    // Metadata for synchronization
-    generation: AtomicU64,
-    primary_decoder: String,
-
-    // Keyframe tracking
-    last_keyframe_size: AtomicUsize,
-    last_keyframe_timestamp: RwLock<Instant>,
-    keyframe_count: AtomicUsize,
-}
-#[allow(non_camel_case_types, unused)]
-impl SharedParameterSetManager {
-    pub fn new(primary_decoder: &str) -> Self {
-        Self {
-            vps: RwLock::new(None),
-            sps: RwLock::new(None),
-            pps: RwLock::new(None),
-            generation: AtomicU64::new(0),
-            primary_decoder: primary_decoder.to_string(),
-            last_keyframe_size: AtomicUsize::new(0),
-            last_keyframe_timestamp: RwLock::new(Instant::now()),
-            keyframe_count: AtomicUsize::new(0),
-        }
-    }
-
-    // Update parameter sets from a specific decoder
-    pub fn update_from_decoder(
-        &self,
-        decoder_id: &str,
-        vps: Option<Vec<u8>>,
-        sps: Option<Vec<u8>>,
-        pps: Option<Vec<u8>>,
-    ) -> bool {
-        // Only accept updates from primary decoder or if we have no sets yet
-        let is_primary = decoder_id == self.primary_decoder;
-        let should_update = is_primary
-            || (self.vps.read().unwrap().is_none()
-                && self.sps.read().unwrap().is_none()
-                && self.pps.read().unwrap().is_none());
-
-        if should_update {
-            let mut updated = false;
-
-            if let Some(vps_data) = vps {
-                if vps_data.len() > 8 {
-                    // Reasonable minimum size
-                    *self.vps.write().unwrap() = Some(vps_data);
-                    updated = true;
-                }
-            }
-
-            if let Some(sps_data) = sps {
-                if sps_data.len() > 8 {
-                    *self.sps.write().unwrap() = Some(sps_data);
-                    updated = true;
-                }
-            }
-
-            if let Some(pps_data) = pps {
-                if pps_data.len() > 4 {
-                    *self.pps.write().unwrap() = Some(pps_data);
-                    updated = true;
-                }
-            }
-
-            if updated {
-                // Increment generation to notify all decoders
-                self.generation.fetch_add(1, Ordering::SeqCst);
-                return true;
-            }
-        }
-
-        false
-    }
-
-    // Record a keyframe observation
-    pub fn record_keyframe(&self, decoder_id: &str, keyframe_size: usize) {
-        // Only primary decoder or first keyframe seen updates the size
-        let current_size = self.last_keyframe_size.load(Ordering::SeqCst);
-        let should_update = decoder_id == self.primary_decoder || current_size == 0;
-
-        if should_update {
-            self.last_keyframe_size
-                .store(keyframe_size, Ordering::SeqCst);
-            *self.last_keyframe_timestamp.write().unwrap() = Instant::now();
-            self.keyframe_count.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    // Get current parameter sets for a decoder to synchronize with
-    pub fn get_parameter_sets(&self) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
-        let vps = self.vps.read().unwrap().clone();
-        let sps = self.sps.read().unwrap().clone();
-        let pps = self.pps.read().unwrap().clone();
-
-        (vps, sps, pps)
-    }
-
-    // Get current generation number (increments with each update)
-    pub fn get_generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
-    }
-
-    // Validate a keyframe observation
-    pub fn validate_keyframe(&self, keyframe_size: usize) -> bool {
-        let reference_size = self.last_keyframe_size.load(Ordering::SeqCst);
-
-        // If we have no reference yet, accept anything
-        if reference_size == 0 {
-            return true;
-        }
-
-        // Check if size is within reasonable bounds
-        let size_ratio = keyframe_size as f64 / reference_size as f64;
-        if size_ratio < 0.5 || size_ratio > 2.0 {
-            return false;
-        }
-
-        true
-    }
-}
-
-// #[derive(Clone)]   // TODO: Use for modelling "Adaptive" mode of ALVR. Encoding latencies are tricky to get from chunks, could be modelled directly as some distribution over T_enc_chunk/N_frames_chunk
-// ** Might want to look into libavcodec instead of FFMPEG.
-// pub struct EncoderLatencyLimiter {
-//     pub max_saturation_multiplier: f32,
-// }
-// #[derive(Clone)]
-// pub struct DecoderLatencyLimiter {
-//     pub max_decoder_latency_ms: u64,
-//     pub latency_overstep_frames: usize,
-//     pub latency_overstep_multiplier: f32,
-// }
 
 // #[derive(Clone, PartialEq, Debug)]
 #[allow(unused)]
@@ -4461,15 +4287,21 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-                let normal: Normal<f32> = Normal::new(0.0, 0.001).unwrap(); // σ = 0.001s
-                let epsilon = normal.sample(&mut rand::thread_rng());
 
                 let ideal = 1.0 / (self.fps as f32);
                 let floor = 0.5 * ideal;
-
-                let dt = (ideal + epsilon).max(floor);
-                let time_until_next_frame = Duration::from_secs_f32(dt);
-
+                
+                let time_until_next_frame = if FPS_RANDOMIZED_EPSILON_RENDERING_SERVER {
+                    let normal: Normal<f32> = Normal::new(0.0, 0.001).unwrap(); // σ = 0.001s
+                    let epsilon = normal.sample(&mut rand::thread_rng());
+                    let dt = (ideal + epsilon).max(floor);
+                    Duration::from_secs_f32(dt)
+                }
+                else{
+                    let dt = ideal;
+                    Duration::from_secs_f32(dt)
+                }; 
+                
                 self.bitrate_manager.report_encoded_frame_server(now);
 
                 context
@@ -5070,12 +4902,11 @@ pub struct XRClient {
     last_keyframe_id: usize,
 
     name_folder: String,
-    frame_batch: Vec<(usize, Vec<u8>, Vec<u8>, f64)>, // (frame_id, sample, ref_sample, timestamp)
-    last_batch_process_time: TaiTime<0>,
+    // frame_batch: Vec<(usize, Vec<u8>, Vec<u8>, f64)>, // (frame_id, sample, ref_sample, timestamp)
 
-    shared_params: Option<Arc<SharedParameterSetManager>>,
-    channel_tx_vmaf: Sender<(Vec<u8>, Vec<u8>, usize)>,
-    channel_rx_vmaf: Receiver<(Vec<u8>, Vec<u8>, usize)>,
+    // last_batch_process_time: TaiTime<0>,
+
+
     test: String,
 
     lost_ids_reference_buffer: VecDeque<u32>,
@@ -5114,6 +4945,7 @@ pub struct XRClient {
     edca_be_mode: bool,
 
     codec_selection: VideoCodec, 
+    frame_size_history_vec: VecDeque<usize>, 
 }
 
 #[allow(unused)]
@@ -5133,7 +4965,7 @@ impl XRClient {
         edca_be_mode: bool,
         codec_selection: VideoCodec, 
     ) -> Self {
-        let (vmaf_tx, vmaf_rx) = bounded(10);
+        // let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
         let synchronized_throttle = Arc::new(Semaphore::new(0));
 
@@ -5143,6 +4975,14 @@ impl XRClient {
         } else {
             None
         };
+
+        {
+            // Display code: Initialize once, update with message reader (with frame info)
+
+
+        }
+
+
 
         // let everest_enabled = abr_mode == 2;
         let everest_enabled = true; // to enable info on heuristics for RL mode
@@ -5204,12 +5044,6 @@ impl XRClient {
             last_keyframe_id: 0,
             name_folder: name_folder.to_string(),
 
-            frame_batch: Vec::new(),
-            last_batch_process_time: TaiTime::EPOCH,
-            shared_params: None,
-
-            channel_tx_vmaf: vmaf_tx,
-            channel_rx_vmaf: vmaf_rx,
             test: test.to_string(),
 
             lost_ids_reference_buffer: VecDeque::new(),
@@ -5243,6 +5077,8 @@ impl XRClient {
             t_update_abr,
             edca_be_mode,
             codec_selection, 
+
+            frame_size_history_vec: VecDeque::from(vec![0; DISPLAY_GRAPH_MAX_FRAMES]), 
         }
     }
 
@@ -6342,10 +6178,63 @@ impl XRClient {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time();
+
+            // Display synchronized frame pair (keep display logic)
+            thread_local! {
+                static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
+            }
+
+            DISPLAY_WINDOWS.with(|windows_cell| {
+
+                let mut windows: std::cell::RefMut<'_, HashMap<IpAddr, Window>> = windows_cell.borrow_mut();
+
+                if !windows.contains_key(&self.server_ip) {
+                    let window_title = format!(
+                        "{} - Frame Display [{}]",
+                        format_elapsed!(now),
+                        self.server_ip
+                    );
+                    let window_width = (WIDTH_ENCODER as f64
+                        * SCALE_FACTOR_WINDOW)
+                        as usize;
+                    let window_height = (HEIGHT_ENCODER as f64
+                        * SCALE_FACTOR_WINDOW)
+                        as usize;                     
+                    let total_window_height = window_height + GRAPH_HUD_HEIGHT;
+
+                    match Window::new(
+                        &window_title,
+                        window_width,
+                        total_window_height,
+                        WindowOptions::default(),
+                    ) {
+                        Ok(window) => {
+                            windows.insert(self.server_ip.clone(), window);
+                            print_red!(
+                                // DebugColor::Green,
+                                "Created display window for {} ({} x {} + Graph)",
+                                self.server_ip,
+                                window_width,
+                                window_height,
+                            );
+                        }
+                        Err(e) => {
+                            print_red!(
+                                // DebugColor::Red,
+                                "Failed to create display window: {}",
+                                e,
+                            );
+                        }
+                    }
+                }
+            }); 
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
             let mut lost_frames_aux = self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
 
             if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
+
+              
+
 
                 let decoder = match self.codec_selection{
                     VideoCodec::HEVC => {VideoDecoder::Hevc(HevcDecoder::new(
@@ -6509,6 +6398,8 @@ impl XRClient {
                     self.last_processed_frame_id = id_f;
 
 
+                    self.frame_size_history_vec.pop_front(); 
+                    self.frame_size_history_vec.push_back(video_frame.len()); 
 
 
                     // Keyframe detection (keep as is)
@@ -6570,59 +6461,19 @@ impl XRClient {
                                 let mut decoder = decoder_arc.lock().unwrap();
 
                                 // Process the current frame pair using process_packets
-                                print_yellow!("Processing frame #{} ({:.2} kBytes)", id_f, video_frame.len() as f32 / 1000.0 );
+                                // print_yellow!("Processing frame #{} ({:.2} kBytes)", id_f, video_frame.len() as f32 / 1000.0 );
                                 decoder.process_packet(video_frame.clone());
                                 
-
+                          
                                 // Try to get a synchronized frame pair immediately after processing
                                 // This might yield 0, 1 or more pairs depending on internal buffering and state
                                 while let Some((frame)) = decoder.next_decoded_frame() {
 
-                                    // Display synchronized frame pair (keep display logic)
-                                    thread_local! {
-                                        static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
-                                    }
+                                 
 
-                                    DISPLAY_WINDOWS.with(|windows_cell| {
-                                        let mut windows = windows_cell.borrow_mut();
+                                 DISPLAY_WINDOWS.with(|windows_cell| {
                                         // Ensure window exists (keep window creation logic)
-                                        if !windows.contains_key(&self.server_ip) {
-                                            let window_title = format!(
-                                                "{} - Frame Display [{}]",
-                                                format_elapsed!(now),
-                                                self.server_ip
-                                            );
-                                            let window_width = (WIDTH_ENCODER as f64
-                                                * SCALE_FACTOR_WINDOW)
-                                                as usize;
-                                            let window_height = (HEIGHT_ENCODER as f64
-                                                * SCALE_FACTOR_WINDOW)
-                                                as usize;
-                                            match Window::new(
-                                                &window_title,
-                                                window_width,
-                                                window_height,
-                                                WindowOptions::default(),
-                                            ) {
-                                                Ok(window) => {
-                                                    windows.insert(self.server_ip.clone(), window);
-                                                    print_pretty!(
-                                                        DebugColor::Green,
-                                                        "Created display window for {} ({} x {})",
-                                                        self.server_ip,
-                                                        window_width,
-                                                        window_height,
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    print_pretty!(
-                                                        DebugColor::Red,
-                                                        "Failed to create display window: {}",
-                                                        e,
-                                                    );
-                                                }
-                                            }
-                                        }
+                                            let mut windows: std::cell::RefMut<'_, HashMap<IpAddr, Window>> = windows_cell.borrow_mut();
 
                                         if let Some(window) = windows.get_mut(&self.server_ip) {
                                             // Calculate similarity (keep calculation)
@@ -6632,7 +6483,6 @@ impl XRClient {
 
                                             // Pass the current SyncState to the display function
                                             self.lost_ids_reference_buffer = VecDeque::new();
-
 
                                             // let slice: &[u32] = lost_frames_aux.make_contiguous();
                                             let display_result = display_single_frame_with_info(
@@ -6647,6 +6497,10 @@ impl XRClient {
                                                 &self.test,
                                                 &self.bm_string,
                                                 &self.sim_unique_string,
+                                                &self.frame_size_history_vec, 
+                                                GRAPH_HUD_HEIGHT, 
+                                                self.framerate, 
+                                                self.codec_selection, 
                                             );
 
                                             lost_frames_aux = VecDeque::new();
@@ -6926,6 +6780,8 @@ fn render_text_with_alpha(
 /// - `now`: timestamp, if you need it in the title (optional)
 /// Display one decoded RGB frame, plus bitrate and lost-packets info.
 /// Display exactly one decoded RGB frame (with sync/state info, bitrate, and lost-frames overlay)
+
+
 pub fn display_single_frame_with_info(
     raw_frame: &[u8],
     server_ip: &IpAddr,
@@ -6938,6 +6794,10 @@ pub fn display_single_frame_with_info(
     test: &str,
     bm: &str,
     string_id: &str,
+    size_history: &VecDeque<usize>, 
+    hud_height: usize,
+    framerate: f32, 
+    codec_type: VideoCodec, 
 ) -> bool {
     // 1) Convert raw RGB bytes → u32 pixel buffer
     let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
@@ -6952,8 +6812,10 @@ pub fn display_single_frame_with_info(
     let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
     let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
 
+    let total_h = scaled_h + hud_height;
+
     // 3) Allocate window buffer
-    let mut buffer = vec![0u32; scaled_w * scaled_h];
+    let mut buffer = vec![0u32; scaled_w * total_h];
 
     // 4) Nearest-neighbor resize
     for y in 0..scaled_h {
@@ -6966,18 +6828,63 @@ pub fn display_single_frame_with_info(
 
     // 5) Draw text overlays (frame index and bitrate)
     let margin = 10;
-    let line_h = 20;
-    let line_hh = 40;
+    
 
-    render_text(
+
+    // 6) Fill the bottom HUD area with a dark background
+    let hud_bg_color = 0x101010; // Dark Grey
+    for y in scaled_h..total_h {
+        for x in 0..scaled_w {
+            buffer[y * scaled_w + x] = hud_bg_color;
+        }
+    }
+
+    // 7) Render the Graph
+    // Convert usize history to f32 if your render_graph expects f32, 
+    // otherwise pass directly. Assumes conversion is needed based on reference.
+    let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
+    
+    let target_graph_height = 250; 
+    
+    // 2. Define space from the very bottom of the window (for the "0" label)
+    let bottom_padding = 60; 
+
+    // 3. Calculate Y-Offset: Total Height - Padding - Graph Height
+    // This ensures the graph ends exactly at (total_h - bottom_padding)
+    let graph_y_pos = total_h.saturating_sub(bottom_padding + target_graph_height);
+    
+    // 4. Scale logic (500KB ceiling)
+    let max_graph_scale_kb = 500.0;
+
+
+
+    crate::lib::render_graph(
         &mut buffer,
-        &format!("FRAME #{}", frame_id),
-        margin,
-        margin,
-        scaled_w,
-        0x00FF00,
-        2,
+        &history_f32,
+        85,              // x_offset
+        graph_y_pos,     // y_offset (in the new HUD area)
+        scaled_w,         // stride (window width)
+        bitrate_mbps * 1_000_000.0, // target value
+        framerate,              // target FPS (or pass as arg)
+        target_graph_height,
+        200_000.0,       // Ceiling (e.g. 250kB)
+        true,            // Log scale
     );
+
+    // render_text(
+    //     &mut buffer,
+    //     &format!("FRAME #{}", frame_id),
+    //     margin,
+    //     margin,
+    //     scaled_w,
+    //     0x00FF00,
+    //     3,
+    // );
+
+    let line_h = 25;
+    let line_hh = 100;
+
+    const SCALE_TEXT_WINDOW: usize = 4; 
     render_text(
         &mut buffer,
         &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
@@ -6985,7 +6892,7 @@ pub fn display_single_frame_with_info(
         margin + line_h,
         scaled_w,
         0x00FF00,
-        2,
+        SCALE_TEXT_WINDOW,
     );
     render_text(
         &mut buffer,
@@ -6994,9 +6901,25 @@ pub fn display_single_frame_with_info(
         margin + line_hh,
         scaled_w,
         0x00FF00,
-        2,
+        SCALE_TEXT_WINDOW,
     );
 
+    let right_margin = 600; 
+    let text_x = scaled_w.saturating_sub(right_margin);
+
+
+    let first_y = scaled_h + 30; 
+    let second_y =  first_y + 60; 
+
+    render_text(
+        &mut buffer,
+        &format!("Codec: {}", codec_type ),
+        text_x,
+        first_y,
+        scaled_w,
+        0x00FF00,
+        SCALE_TEXT_WINDOW,
+    );
     // 6) Handle new lost-frames and add to buffer
     if !lost_frames.is_empty() {
         let msg = format!(
@@ -7040,7 +6963,7 @@ pub fn display_single_frame_with_info(
     window.set_title(&title);
 
     // 9) Blit to screen
-    match window.update_with_buffer(&buffer, scaled_w, scaled_h) {
+    match window.update_with_buffer(&buffer, scaled_w, total_h) {
         Ok(_) => true,
         Err(e) => {
             eprintln!("Window update failed for frame #{}: {}", frame_id, e);

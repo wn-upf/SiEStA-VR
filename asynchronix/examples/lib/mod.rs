@@ -424,6 +424,8 @@ fn get_4_octet(ip: IpAddr) -> u8 {
 } // get the 4th octet of IpAddr (for tagging CSVs)
 
 #[allow(unused)]
+
+
 // Renders ASCII text into the minifb window with coordinates.
 pub fn render_text(
     buffer: &mut [u32],
@@ -434,148 +436,126 @@ pub fn render_text(
     color: u32,
     scale: usize,
 ) {
-    // Simple 5x7 pixel font (common for basic bitmap fonts)
-    // Each character is represented as an array of 7 bytes, where each byte represents a row
-    // and the bits in each byte represent the pixels in that row
     const FONT_WIDTH: usize = 5;
     const FONT_HEIGHT: usize = 7;
     const CHAR_SPACING: usize = 1;
 
-    // Apply scaling
     let scaled_font_width = FONT_WIDTH * scale;
     let scaled_char_spacing = CHAR_SPACING * scale;
 
-    // Define a simple bitmap font (only uppercase letters and some basic characters)
-    // Each character is 5x7 pixels
+    // Extended font with lowercase letters
     let font = [
-        // Space
+        // Space (0)
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        // !
+        // ! (1)
         [0x04, 0x04, 0x04, 0x04, 0x00, 0x04, 0x00],
-        // "
+        // " (2)
         [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00],
-        // #
+        // # (3)
         [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
-        // $
+        // $ (4)
         [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
-        // %
+        // % (5)
         [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
-        // &
+        // & (6)
         [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
-        // '
+        // ' (7)
         [0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
-        // (
+        // ( (8)
         [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-        // )
+        // ) (9)
         [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-        // *
+        // * (10)
         [0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00],
-        // +
+        // + (11)
         [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
-        // ,
+        // , (12)
         [0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08],
-        // -
+        // - (13)
         [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
-        // .
+        // . (14)
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
-        // /
+        // / (15)
         [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
-        // 0
+        // 0-9 (16-25)
         [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        // 1
         [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        // 2
         [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
-        // 3
         [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
-        // 4
         [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        // 5
         [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        // 6
         [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-        // 7
         [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        // 8
         [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        // 9
         [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
-        // :
+        // : ; < = > ? @ (26-32)
         [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
-        // ;
         [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x04, 0x08],
-        // <
         [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
-        // =
         [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
-        // >
         [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
-        // ?
         [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
-        // @
         [0x0E, 0x11, 0x01, 0x0D, 0x15, 0x15, 0x0E],
-        // A
+        // A-Z (33-58)
         [0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11],
-        // B
         [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        // C
         [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        // D
         [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
-        // E
         [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        // F
         [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        // G
         [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        // H
         [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        // I
         [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        // J
         [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-        // K
         [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        // L
         [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        // M
         [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        // N
         [0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11],
-        // O
         [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        // P
         [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        // Q
         [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        // R
         [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        // S
         [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-        // T
         [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        // U
         [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        // V
         [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        // W
         [0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A],
-        // X
         [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        // Y
         [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
-        // Z
         [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        // [
+        // [ \ ] ^ _ (59-63)
         [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
-        // \
         [0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00],
-        // ]
         [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
-        // ^
         [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
-        // _
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
+        // a-z (64-89) - lowercase letters
+        [0x00, 0x00, 0x0E, 0x01, 0x0F, 0x11, 0x0F],  // a
+        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x1E],  // b
+        [0x00, 0x00, 0x0E, 0x10, 0x10, 0x11, 0x0E],  // c
+        [0x01, 0x01, 0x0D, 0x13, 0x11, 0x11, 0x0F],  // d
+        [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E],  // e
+        [0x06, 0x09, 0x08, 0x1C, 0x08, 0x08, 0x08],  // f
+        [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x0E],  // g
+        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11],  // h
+        [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E],  // i
+        [0x02, 0x00, 0x06, 0x02, 0x02, 0x12, 0x0C],  // j
+        [0x10, 0x10, 0x12, 0x14, 0x18, 0x14, 0x12],  // k
+        [0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],  // l
+        [0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11],  // m
+        [0x00, 0x00, 0x16, 0x19, 0x11, 0x11, 0x11],  // n
+        [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E],  // o
+        [0x00, 0x00, 0x1E, 0x11, 0x1E, 0x10, 0x10],  // p
+        [0x00, 0x00, 0x0D, 0x13, 0x0F, 0x01, 0x01],  // q
+        [0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10],  // r
+        [0x00, 0x00, 0x0E, 0x10, 0x0E, 0x01, 0x1E],  // s
+        [0x08, 0x08, 0x1C, 0x08, 0x08, 0x09, 0x06],  // t
+        [0x00, 0x00, 0x11, 0x11, 0x11, 0x13, 0x0D],  // u
+        [0x00, 0x00, 0x11, 0x11, 0x11, 0x0A, 0x04],  // v
+        [0x00, 0x00, 0x11, 0x11, 0x15, 0x15, 0x0A],  // w
+        [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11],  // x
+        [0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E],  // y
+        [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F],  // z
     ];
 
     let mut char_x = x;
@@ -607,13 +587,13 @@ pub fn render_text(
             '?' => 31,
             '@' => 32,
             'A'..='Z' => (c as usize) - ('A' as usize) + 33,
-            'a'..='z' => (c as usize) - ('a' as usize) + 33, // Map lowercase to uppercase
             '[' => 59,
             '\\' => 60,
             ']' => 61,
             '^' => 62,
             '_' => 63,
-            _ => 0, // Default to space for unknown characters
+            'a'..='z' => (c as usize) - ('a' as usize) + 64,  // Now maps to lowercase glyphs
+            _ => 0,
         };
 
         // Draw the character with scaling
@@ -622,12 +602,10 @@ pub fn render_text(
                 let buffer_y = y + (row * scale) + scaled_row;
 
                 for col in 0..FONT_WIDTH {
-                    // Check if the current pixel is set in the font bitmap
                     if (font[index][row] & (1 << (FONT_WIDTH - 1 - col))) != 0 {
                         for scaled_col in 0..scale {
                             let buffer_x = char_x + (col * scale) + scaled_col;
 
-                            // Calculate buffer index and check bounds
                             if buffer_y < buffer.len() / stride && buffer_x < stride {
                                 let buffer_index = buffer_y * stride + buffer_x;
                                 if buffer_index < buffer.len() {
@@ -640,10 +618,389 @@ pub fn render_text(
             }
         }
 
-        // Move to the next character position
         char_x += scaled_font_width + scaled_char_spacing;
     }
 }
+
+
+
+pub fn render_graph(
+    buffer: &mut [u32],
+    history: &VecDeque<f32>,
+    x_offset: usize,
+    y_offset: usize,
+    stride: usize,
+    target_bps: f32,
+    fps: f32,
+    graph_height: usize,
+    max_size_kb: f32,
+    use_log: bool, 
+) {
+    // 1. MADE WIDER: Increased width and spacing
+    let bar_width = 9; 
+    let spacing = 2;
+    let graph_width = history.len() * (bar_width + spacing);
+    
+    // --- CONFIGURATION ---
+    // 2. INCREASED FONT SIZE: Changed from 2 to 3
+    const DISPLAY_GRAPH_SCALE_TEXT: usize = 3; 
+
+    const COL_RED: u32 = 0xEE6666;    
+    const COL_YELLOW: u32 = 0xF0E68C; 
+    const COL_GREEN: u32 = 0x8FBC8F;  
+    const COL_GRID: u32 = 0x555555;   
+    const COL_TEXT: u32 = 0xCCCCCC;   
+    const COL_TGT: u32 = 0x87CEFA;    
+
+    // Layout Offsets
+    // Increased margins to handle larger text size
+    let label_margin = 75; 
+    let title_margin = 55; 
+
+    // --- 0. DRAW BACKGROUND PLATE ---
+    let bg_y_start = y_offset.saturating_sub(title_margin + 10); 
+    // Extended bottom margin significantly to fit the "0" and bottom padding
+    let bg_y_end = y_offset + graph_height + 40; 
+    let bg_x_start = x_offset.saturating_sub(label_margin + 20); 
+    let bg_x_end = x_offset + graph_width + 220;    
+
+    for y in bg_y_start..bg_y_end {
+        if y >= buffer.len() / stride { continue; }
+        for x in bg_x_start..bg_x_end {
+            if x >= stride { continue; }
+            
+            let pixel_idx = y * stride + x;
+            let current_pixel = buffer[pixel_idx];
+            
+            // Dimming logic
+            let r = ((current_pixel >> 16) & 0xFF) / 2;
+            let g = ((current_pixel >> 8) & 0xFF) / 2;
+            let b = (current_pixel & 0xFF) / 2;
+            buffer[pixel_idx] = (r << 16) | (g << 8) | b;
+        }
+    }
+
+    // --- LOG SCALE HELPERS ---
+    let min_log_kb = 1.0f32;
+    let log_min = min_log_kb.ln();
+    let log_max = max_size_kb.max(min_log_kb + 0.1).ln();
+    let log_range = log_max - log_min;
+
+    let get_normalized_height = |kb_val: f32| -> f32 {
+        if use_log {
+            if kb_val < min_log_kb {
+                0.0
+            } else {
+                ((kb_val.ln() - log_min) / log_range).min(1.0).max(0.0)
+            }
+        } else {
+            (kb_val / max_size_kb).min(1.0).max(0.0)
+        }
+    };
+
+    let current_target_kb = (target_bps / (8.0 * fps)) / 1024.0;
+
+    // --- 1. TITLE & INFO ---
+    render_text(
+        buffer,
+        &format!(" Frame size ({} window) in kBytes", history.len()), 
+        x_offset,
+        y_offset.saturating_sub(title_margin), 
+        stride,
+        0xFFFFFF, 
+        4, // Increased Title Size
+    );
+    
+    render_text(
+        buffer, 
+        "[kB]", 
+        x_offset.saturating_sub(label_margin), 
+        y_offset.saturating_sub(title_margin), 
+        stride, 
+        COL_TEXT, 
+        3,  // Keep unit small
+    );
+
+    // --- 2. DRAW Y-AXIS MARKERS & GRID ---
+    // Added 0 to the range to ensure the bottom line is drawn
+    for i in 0..=4 {
+        let visual_percentage = i as f32 * 0.25;
+        let marker_y = y_offset + graph_height - (visual_percentage * graph_height as f32) as usize;
+        
+        let label_val = if i == 0 {
+            0.0 // Force 0 for the bottom line
+        } else if use_log {
+            (visual_percentage * log_range + log_min).exp()
+        } else {
+            max_size_kb * visual_percentage
+        };
+
+        if marker_y < buffer.len() / stride {
+            for px in x_offset..(x_offset + graph_width) {
+                if px < stride {
+                    buffer[marker_y * stride + px] = COL_GRID; 
+                }
+            }
+        }
+
+        // Label
+        // Adjusted y-offset (-10) to center larger text vertically on the grid line
+        render_text(
+            buffer,
+            &format!("{:.0}", label_val),
+            x_offset.saturating_sub(label_margin), 
+            marker_y.saturating_sub(10), 
+            stride,
+            COL_TEXT,
+            DISPLAY_GRAPH_SCALE_TEXT,
+        );
+    }
+
+    // --- 3. DRAW THE DATA BARS ---
+    for (i, &size_bytes) in history.iter().enumerate() {
+        let size_kb = size_bytes / 1024.0;
+        let norm_h = get_normalized_height(size_kb);
+        let bar_height = (norm_h * graph_height as f32) as usize;
+
+        let color = if size_kb > current_target_kb * 1.5 {
+            0xFF5555 
+        } else if size_kb > current_target_kb {
+            let intensity = ((size_kb / (current_target_kb * 1.5)) * 255.0) as u32;
+            0xFF0000 | (intensity << 8) 
+        } else {
+            let health = (size_kb / current_target_kb).min(1.0);
+            let g = (150.0 + (105.0 * health)) as u32; 
+            (g << 8) | 100 
+        };
+
+        // Render Bar
+        for bh in 0..bar_height {
+            let py = y_offset + graph_height - bh;
+            if py < buffer.len() / stride {
+                for bw in 0..bar_width {
+                    let px = x_offset + (i * (bar_width + spacing)) + bw;
+                    if px < stride {
+                        buffer[py * stride + px] = color;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 4. DRAW DYNAMIC TARGET LINE ---
+    let target_norm = get_normalized_height(current_target_kb);
+    let target_y = y_offset + graph_height - (target_norm * graph_height as f32) as usize;
+
+    if target_y < (buffer.len() / stride) {
+        for px in x_offset..(x_offset + graph_width) {
+            if px < stride {
+                buffer[target_y * stride + px] = COL_TGT;
+            }
+        }
+        
+        render_text(
+            buffer, 
+            &format!("TGT: {:.1} kB", current_target_kb), 
+            x_offset + graph_width + 10, 
+            target_y - 8, 
+            stride, 
+            COL_TGT, 
+            DISPLAY_GRAPH_SCALE_TEXT
+        );
+    }
+}
+
+
+pub fn render_graph_overlaps_wrong(
+    buffer: &mut [u32],
+    history: &VecDeque<f32>,
+    x_offset: usize,
+    y_offset: usize,
+    stride: usize,
+    target_bps: f32,
+    fps: f32,
+    graph_height: usize,
+    max_size_kb: f32,
+    use_log: bool, 
+) {
+    let bar_width = 5;
+    let spacing = 1;
+    let graph_width = history.len() * (bar_width + spacing);
+    
+    // --- CONFIGURATION ---
+    // Define pastel colors for less saturation
+
+    const DISPLAY_GRAPH_SCALE_TEXT: usize = 4; 
+
+    const COL_RED: u32 = 0xEE6666;    // Soft Pastel Red
+    const COL_YELLOW: u32 = 0xF0E68C; // Khaki/Soft Yellow
+    const COL_GREEN: u32 = 0x8FBC8F;  // Dark Sea Green (Soft Green)
+    const COL_GRID: u32 = 0x555555;   // Slightly lighter grid for visibility
+    const COL_TEXT: u32 = 0xCCCCCC;   // Light Grey text (not pure white)
+    const COL_TGT: u32 = 0x87CEFA;    // Light Sky Blue (softer Cyan)
+
+    // Layout Offsets
+    let label_margin = 55; // Increased from 40 to add distance
+    let title_margin = 45; // Increased from 13 to move title up
+
+    // --- 0. DRAW BACKGROUND PLATE ---
+    let bg_y_start = y_offset.saturating_sub(title_margin + 10); // Expanded top
+    let bg_y_end = y_offset + graph_height + 20;
+    let bg_x_start = x_offset.saturating_sub(label_margin + 20); // Expanded left
+    let bg_x_end = x_offset + graph_width + 170;    
+
+    for y in bg_y_start..bg_y_end {
+        if y >= buffer.len() / stride { continue; }
+        for x in bg_x_start..bg_x_end {
+            if x >= stride { continue; }
+            
+            let pixel_idx = y * stride + x;
+            let current_pixel = buffer[pixel_idx];
+            
+            // Dimming logic (50% opacity)
+            let r = ((current_pixel >> 16) & 0xFF) / 2;
+            let g = ((current_pixel >> 8) & 0xFF) / 2;
+            let b = (current_pixel & 0xFF) / 2;
+            buffer[pixel_idx] = (r << 16) | (g << 8) | b;
+        }
+    }
+
+    // --- LOG SCALE HELPERS ---
+    let min_log_kb = 1.0f32;
+    let log_min = min_log_kb.ln();
+    let log_max = max_size_kb.max(min_log_kb + 0.1).ln();
+    let log_range = log_max - log_min;
+
+    let get_normalized_height = |kb_val: f32| -> f32 {
+        if use_log {
+            if kb_val < min_log_kb {
+                0.0
+            } else {
+                ((kb_val.ln() - log_min) / log_range).min(1.0).max(0.0)
+            }
+        } else {
+            (kb_val / max_size_kb).min(1.0).max(0.0)
+        }
+    };
+
+    let current_target_kb = (target_bps / (8.0 * fps)) / 1024.0;
+
+    // --- 1. TITLE & INFO ---
+    render_text(
+        buffer,
+        &format!(" Frame size ({} window) in kBytes", history.len()), // Shortened text for cleaner look
+        x_offset,
+        y_offset.saturating_sub(title_margin), 
+        stride,
+        0xFFFFFF, 
+        3,
+    );
+    
+    // Axis Unit Label (Moved slightly left to align with numbers)
+    render_text(
+        buffer, 
+        "[kB]", 
+        x_offset.saturating_sub(label_margin), 
+        y_offset.saturating_sub(title_margin), 
+        stride, 
+        COL_TEXT, 
+        2
+    );
+
+    // --- 2. DRAW Y-AXIS MARKERS & GRID ---
+    for i in 1..=4 {
+        let visual_percentage = i as f32 * 0.25;
+        let marker_y = y_offset + graph_height - (visual_percentage * graph_height as f32) as usize;
+        
+        let label_val = if use_log {
+            (visual_percentage * log_range + log_min).exp()
+        } else {
+            max_size_kb * visual_percentage
+        };
+
+        if marker_y < buffer.len() / stride {
+            for px in x_offset..(x_offset + graph_width) {
+                if px < stride {
+                    buffer[marker_y * stride + px] = COL_GRID; 
+                }
+            }
+        }
+
+        // Label: Pushed further left via `label_margin`
+        render_text(
+            buffer,
+            &format!("{:.0}", label_val),
+            x_offset.saturating_sub(label_margin), 
+            marker_y - 4,
+            stride,
+            COL_TEXT,
+            DISPLAY_GRAPH_SCALE_TEXT,
+        );
+    }
+
+    // --- 3. DRAW THE DATA BARS ---
+    for (i, &size_bytes) in history.iter().enumerate() {
+        let size_kb = size_bytes / 1024.0;
+        let norm_h = get_normalized_height(size_kb);
+        let bar_height = (norm_h * graph_height as f32) as usize;
+
+        // "Alive" Color Logic: Adjust brightness based on proximity to target
+        let color = if size_kb > current_target_kb * 1.5 {
+            0xFF5555 // Danger: High Intensity Red
+        } else if size_kb > current_target_kb {
+            // Alert: Brighten the yellow if it's way over target
+            let intensity = ((size_kb / (current_target_kb * 1.5)) * 255.0) as u32;
+            0xFF0000 | (intensity << 8) // Shifts from Orange to Yellow
+        } else {
+            // Healthy: The closer to target, the "greener" it gets
+            let health = (size_kb / current_target_kb).min(1.0);
+            let g = (150.0 + (105.0 * health)) as u32; // 150 to 255
+            (g << 8) | 100 // Emerald Green with a hint of Blue
+        };
+
+
+        let base_y = y_offset + graph_height; 
+
+
+        
+
+        // Render Bar
+        for bh in 0..bar_height {
+            let py = y_offset + graph_height - bh;
+            if py < buffer.len() / stride {
+                for bw in 0..bar_width {
+                    let px = x_offset + (i * (bar_width + spacing)) + bw;
+                    if px < stride {
+                        buffer[py * stride + px] = color;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 4. DRAW DYNAMIC TARGET LINE ---
+    let target_norm = get_normalized_height(current_target_kb);
+    let target_y = y_offset + graph_height - (target_norm * graph_height as f32) as usize;
+
+    if target_y < (buffer.len() / stride) {
+        for px in x_offset..(x_offset + graph_width) {
+            if px < stride {
+                buffer[target_y * stride + px] = COL_TGT;
+            }
+        }
+        
+        render_text(
+            buffer, 
+            &format!("TGT: {:.1} kB", current_target_kb), 
+            x_offset + graph_width + 5, 
+            target_y - 4, 
+            stride, 
+            COL_TGT, 
+            DISPLAY_GRAPH_SCALE_TEXT
+        );
+    }
+}
+
 
 impl SlidingWindowWeighted<f32> {
     pub fn weighted_sum(&self) -> f32 {

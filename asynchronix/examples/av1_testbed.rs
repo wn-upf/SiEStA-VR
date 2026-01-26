@@ -31,7 +31,7 @@ pub const VIDEO_FPS : f32 = 90.0;
 pub const VIDEO_LOOP_DURATION_SECONDS: f32 = 80.0; // loop the video after 30 secs 
 pub const VIDEO_GOP_SIZE: usize = 60; // Group of Pictures size, I-P frame frequency
 
-pub const VIDEO_BOOL_RANDOM_OFFSET: bool = false; 
+pub const VIDEO_BOOL_RANDOM_OFFSET: bool = true; 
 /////////////////////////////////////////////////////////////////////////////////////
 //////////////////////  ABR DEMO ////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
@@ -849,6 +849,7 @@ async fn main() {
     let mut next_frame_time = Instant::now();
 
     let mut frame_count_timing = 0; 
+    let mut start_app_time = Instant::now(); 
 
    while window.is_open() && !window.is_key_down(Key::Escape) {
         
@@ -914,24 +915,28 @@ async fn main() {
 
                 render_text(
                     &mut scaled_buffer,
-                    &format!("Sampled FPS: {:.0} ({} in window)", VIDEO_FPS, DISPLAY_TARGET_FRAMES_PER_SECOND),
+                        
+                    &format!("Sampled FPS:     {:.0}", VIDEO_FPS,),
                     10, 10, scaled_w, 0xFFCC00, 3 
+                );
+                render_text(
+                    &mut scaled_buffer,
+                        
+                    &format!("Window  FPS:     {:.0}", DISPLAY_TARGET_FRAMES_PER_SECOND),
+                    10, 45, scaled_w, 0xFFCC00, 3 
                 );
 
                 render_text(
                     &mut scaled_buffer,
-                    &format!("Bitrate: {:.1} Mbps", _id.bitrate_mbps),
+                    &format!("Video playback:  {:.3}s", rawdog_video_time % VIDEO_LOOP_DURATION_SECONDS),
                     10, 80, scaled_w, 0x00FF00, 3 
                 );
 
                 render_text(
                     &mut scaled_buffer,
-                    &format!("Video playback: {:.3}s", rawdog_video_time % VIDEO_LOOP_DURATION_SECONDS),
-                    10, 45, scaled_w, 0x00FF00, 3 
-                );
-
-               
-                
+                    &format!("Bitrate:         {:.1} Mbps", _id.bitrate_mbps),
+                    10, 115, scaled_w, 0x00FF00, 3 
+                );                
                 
                 // Update window
                 window.update_with_buffer(&scaled_buffer, scaled_w, window_h).unwrap();
@@ -944,8 +949,23 @@ async fn main() {
                     next_frame_time += target_frame_time;
                 }
             } else {
-                // Buffer underflow (no frame ready yet), just keep window open
-                window.update();
+    
+                // No frame ready? Spin the wheel.
+                let elapsed = start_app_time.elapsed().as_secs_f32();
+                
+                render_loading_spinner(&mut scaled_buffer, scaled_w, scaled_h, elapsed);
+                
+                // Still render the HUD background so it doesn't flicker
+                let hud_bg_color = 0x101010;
+                for y in scaled_h..window_h {
+                    for x in 0..scaled_w {
+                        scaled_buffer[y * scaled_w + x] = hud_bg_color;
+                    }
+                }
+
+                render_text(&mut scaled_buffer, "Buffering Stream...", 10, 10, scaled_w, 0xAAAAAA, 5);
+                
+                window.update_with_buffer(&scaled_buffer, scaled_w, window_h).unwrap();
             }
         } else {
             // If we have time to spare, sleep a tiny bit to save CPU
@@ -963,6 +983,50 @@ async fn main() {
     }
 }
 
+
+fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time: f32) {
+    let center_x = width as f32 / 2.0;
+    let center_y = height as f32 / 2.0;
+    let radius = 80.0;
+    let dot_count: i32 = 12;
+    let dot_radius = 8.0; 
+
+    // Clear the video area to a dark background
+    for pixel in buffer.iter_mut().take(width * height) {
+        *pixel = 0x050505; 
+    }
+
+    for i in 0..dot_count {
+        // Angle for this specific dot
+        let angle = (i as f32 / dot_count as f32) * std::f32::consts::TAU;
+        
+        // Calculate position
+        let x = (center_x + angle.cos() * radius) as usize;
+        let y = (center_y + angle.sin() * radius) as usize;
+
+        // Animation: intensity varies based on time and the dot's index
+        // This creates the "chase" effect
+        let intensity_factor = ((time * 5.0 - (i as f32 * 0.5)).sin() + 1.0) / 2.0;
+        let brightness = (intensity_factor * 255.0) as u32;
+        let color = (brightness << 16) | (brightness << 8) | brightness;
+
+        // Draw a small 3x3 square for each "dot"
+        let r_int = dot_radius as isize;
+        for dy in -r_int..r_int {
+            for dx in -r_int..r_int {
+                // Distance check: x^2 + y^2 <= r^2
+                if (dx * dx + dy * dy) as f32 <= dot_radius * dot_radius {
+                    let px = (x as isize + dx) as usize;
+                    let py = (y as isize + dy) as usize;
+                    
+                    if px < width && py < height {
+                        buffer[py * width + px] = color;
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[allow(unused)]
 // Renders ASCII text into the minifb window with coordinates.
@@ -1160,7 +1224,6 @@ pub fn render_text(
         char_x += scaled_font_width + scaled_char_spacing;
     }
 }
-
 
 pub fn render_graph(
     buffer: &mut [u32],

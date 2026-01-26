@@ -893,6 +893,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 .unwrap();
 
             if !has_scheduled_vsync {
+                crate::print_red!("SIM START - Scheduling VSYNC at {} (ends at {}) ", start, end);
+
                 scheduler
                     .schedule_event(
                         // ALREADY SCHEDULED BY session_reboot at start/end, do not schedule twice!!
