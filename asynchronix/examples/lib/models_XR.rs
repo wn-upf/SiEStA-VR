@@ -8,9 +8,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::{get_prefix_path, render_text, AveragingStrategy, EdcaAc, HevcParser, WindowType};
 use crate::{
     // debug_debug,
-    print_magenta,
-    taitime_to_f64,
-    // print_blue, print_brown, print_dblue, print_brown
+    print_magenta, taitime_to_f64,     // print_blue, print_brown, print_dblue, print_brown
 };
 
 use std::thread;
@@ -37,20 +35,10 @@ use std::sync::{Arc, Mutex};
 use std::thread_local;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
-
 use crate::lib::{
     fovoptix::{FOAimdRateControl, FovOptixStruct, *},
     models_mm1k::NetworkPattern,
 };
-// };
-use crate::lib::{HeaderALVRStream, USE_FFMPEG_DEMO};
-use crate::print_pretty;
-#[allow(unused)]
-use crate::{debug_bgprint, print_prettyy, print_red};
-#[allow(unused)]
-use crate::{debug_print, print_pink, print_prettyyyy, print_yellow};
-use crate::{format_elapsed, print_green};
-
 use core::f64;
 use ffmpeg_sidecar::command::FfmpegCommand;
 use glam::{Quat, Vec3};
@@ -63,6 +51,13 @@ use std::time::SystemTime;
 use std::time::{Duration, Instant};
 use std::{mem, vec};
 
+use crate::lib::{HeaderALVRStream, USE_FFMPEG_DEMO};
+use crate::print_pretty;
+#[allow(unused)]
+use crate::{debug_bgprint, print_prettyy, print_red};
+#[allow(unused)]
+use crate::{debug_print, print_pink, print_prettyyyy, print_yellow};
+use crate::{format_elapsed, print_green};
 use crate::lib::alvr_control_socket::ProtoControlSocket;
 use crate::lib::alvr_packets::{
     ClientControlPacket, ClientStatistics, EverestCommand, NadaStats, NetworkStatisticsPacket,
@@ -76,7 +71,6 @@ use crate::lib::alvr_stream_socket::{
 use crate::lib::DEBUG_PRINT_ENABLED;
 use dashmap::DashMap;
 use tai_time::TaiTime;
-
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use std::cmp::{self, max};
@@ -99,9 +93,28 @@ use crate::lib::gcc_nada_estimator::*;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use std::process::{Command as altCommand, Stdio};
 
+use tokio::sync::mpsc::UnboundedSender;
+
 ////////////////////////////////////// CONSTS//////////////////////////////////////// TODO: STANDARDIZE AND GROUP CONSTS 
+pub enum WindowCommand {
+    Update {
+        buffer: Vec<u32>, // The rendered pixels
+        width: usize,
+        height: usize,
+        title: String,
+    },
+    Quit,
+}
+pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
+    + mem::size_of::<u16>() // stream ID
+    + mem::size_of::<u32>() // packet index
+    + mem::size_of::<u32>() // shards count
+    + mem::size_of::<u32>() // shards index
+    + mem::size_of::<f32>(); // tx relative timestamp
+
+
 pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false; 
-pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 140; 
+pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100; 
 
 pub const WIDTH_ENCODER: usize = 3840;
 pub const HEIGHT_ENCODER: usize = 2160;
@@ -111,13 +124,7 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
 pub const SCALE_FACTOR_WINDOW: f64 = 0.35;  // X:1 scaling for 4k visuals in lower res screens
-
-pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
-    + mem::size_of::<u16>() // stream ID
-    + mem::size_of::<u32>() // packet index
-    + mem::size_of::<u32>() // shards count
-    + mem::size_of::<u32>() // shards index
-    + mem::size_of::<f32>(); // tx relative timestamp
+pub const SCALE_FACTOR_GRAPH: f32 = 0.6; 
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -4909,7 +4916,7 @@ pub struct XRClient {
 
     test: String,
 
-    lost_ids_reference_buffer: VecDeque<u32>,
+    lost_ids_reference_buffer: VecDeque<(u32, u32)>,
     lost_frames_buffer: LostFramesBuffer,
     // pub visualize_decoder_window: Option<Window>,
     vmaf_frame_buffer: VecDeque<(Vec<u8>, Vec<u8>, TaiTime<0>, usize, IpAddr)>, // (sample, ref_sample, timestamp, frame_id, ip)
@@ -4945,7 +4952,8 @@ pub struct XRClient {
     edca_be_mode: bool,
 
     codec_selection: VideoCodec, 
-    frame_size_history_vec: VecDeque<usize>, 
+    frame_size_history_vec: VecDeque<usize>,
+    window_tx: Option<UnboundedSender<WindowCommand>>, // The handle to talk to the window 
 }
 
 #[allow(unused)]
@@ -4976,14 +4984,18 @@ impl XRClient {
             None
         };
 
-        {
-            // Display code: Initialize once, update with message reader (with frame info)
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // 3. Calculate Window Dimensions
+        let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+        let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+        let total_height = window_height + GRAPH_HUD_HEIGHT;
+        
+        let initial_title = format!("Client [{}] - Waiting for Stream...", server_ip);
 
-        }
-
-
-
+        // 4. Spawn the Window Actor
+        Self::spawn_display_thread(rx, initial_title, window_width, total_height);
+            
         // let everest_enabled = abr_mode == 2;
         let everest_enabled = true; // to enable info on heuristics for RL mode
 
@@ -5079,8 +5091,57 @@ impl XRClient {
             codec_selection, 
 
             frame_size_history_vec: VecDeque::from(vec![0; DISPLAY_GRAPH_MAX_FRAMES]), 
+            window_tx: Some(tx), // Store the tokio sender
         }
     }
+
+    fn spawn_display_thread(
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<WindowCommand>,
+        initial_title: String,
+        width: usize,
+        height: usize
+    ) {
+        std::thread::spawn(move || {
+            let mut window = Window::new(&initial_title, width, height, WindowOptions::default()).unwrap();
+            window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
+
+            let mut spinner_buffer = vec![0u32; width * height];
+            let start_time = std::time::Instant::now();
+            let mut has_received_first_frame = false; // <--- FLAG
+
+            while window.is_open() {
+                // Check for update
+                match rx.try_recv() {
+                    Ok(WindowCommand::Update { buffer, width: w, height: h, title }) => {
+                        has_received_first_frame = true; // Stop spinning
+                        window.set_title(&title);
+                        window.update_with_buffer(&buffer, w, h).unwrap();
+                    }
+                    Ok(WindowCommand::Quit) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        if !has_received_first_frame {
+                            // RENDER SPINNER (Only during init)
+                            for pixel in spinner_buffer.iter_mut() { *pixel = 0x101010; }
+                            let elapsed = start_time.elapsed().as_secs_f32();
+                            
+                            // Assuming render_loading_spinner expects specific hud offset logic, 
+                            // you might need to adjust 'height' passed here if it includes HUD.
+                            crate::lib::render_loading_spinner(&mut spinner_buffer, width, height, elapsed);
+                            
+                            window.update_with_buffer(&spinner_buffer, width, height).unwrap();
+                        } else {
+                            // If we have started streaming but the channel is temporarily empty,
+                            // usually we just wait (maintain last image) or call update() 
+                            // to keep window events processing.
+                            window.update_with_buffer(&[], width, height).unwrap_or(()); 
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+        });
+    }
+
 
     pub async fn session_end(&mut self, pause_time: f64, context: &Context<Self>) {
         let now = context.scheduler.time();
@@ -5519,13 +5580,13 @@ impl XRClient {
         // println!("REPORT FRAME LOSt");
         let net = DeadlineShardlossStatPacket {
             frame_indexes: frames.clone(),
-            shards_lost: shards_lost,
+            shards_lost: shards_lost.clone(),
             // edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking.
         };
 
-        for frame in frames {
+        for (i, frame)  in frames.iter().enumerate() {
             // print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame);
-            self.lost_ids_reference_buffer.push_back(frame);
+            self.lost_ids_reference_buffer.push_back((*frame, shards_lost[i] as u32));
         }
 
         context
@@ -6178,384 +6239,204 @@ impl XRClient {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time();
-
-            // Display synchronized frame pair (keep display logic)
-            thread_local! {
-                static DISPLAY_WINDOWS: RefCell<HashMap<IpAddr, Window>> = RefCell::new(HashMap::new());
-            }
-
-            DISPLAY_WINDOWS.with(|windows_cell| {
-
-                let mut windows: std::cell::RefMut<'_, HashMap<IpAddr, Window>> = windows_cell.borrow_mut();
-
-                if !windows.contains_key(&self.server_ip) {
-                    let window_title = format!(
-                        "{} - Frame Display [{}]",
-                        format_elapsed!(now),
-                        self.server_ip
-                    );
-                    let window_width = (WIDTH_ENCODER as f64
-                        * SCALE_FACTOR_WINDOW)
-                        as usize;
-                    let window_height = (HEIGHT_ENCODER as f64
-                        * SCALE_FACTOR_WINDOW)
-                        as usize;                     
-                    let total_window_height = window_height + GRAPH_HUD_HEIGHT;
-
-                    match Window::new(
-                        &window_title,
-                        window_width,
-                        total_window_height,
-                        WindowOptions::default(),
-                    ) {
-                        Ok(window) => {
-                            windows.insert(self.server_ip.clone(), window);
-                            print_red!(
-                                // DebugColor::Green,
-                                "Created display window for {} ({} x {} + Graph)",
-                                self.server_ip,
-                                window_width,
-                                window_height,
-                            );
-                        }
-                        Err(e) => {
-                            print_red!(
-                                // DebugColor::Red,
-                                "Failed to create display window: {}",
-                                e,
-                            );
-                        }
-                    }
-                }
-            }); 
+            // 1. Setup Timing & Dimensions
             let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-            let mut lost_frames_aux = self.lost_ids_reference_buffer.clone(); // Keep for passing to display, but its population logic might need review
+            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+            let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+            let total_window_height = window_height + GRAPH_HUD_HEIGHT;
 
+            // Allocate the buffer for this frame (Backbuffer)
+            let mut display_buffer = vec![0u32; window_width * total_window_height];
+
+            // 2. Decoder Initialization (Run once)
             if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
-
-              
-
-
-                let decoder = match self.codec_selection{
-                    VideoCodec::HEVC => {VideoDecoder::Hevc(HevcDecoder::new(
+                let decoder = match self.codec_selection {
+                    VideoCodec::HEVC => VideoDecoder::Hevc(HevcDecoder::new(
                         self.framerate as u32,
                         WIDTH_ENCODER as u32,
                         HEIGHT_ENCODER as u32,
                         &format!("[HEVC DECODER {}]", self.server_ip),
-                        )
-                    )
-
-                    }, 
-                    VideoCodec::AV1 => {VideoDecoder::Av1(Av1Decoder::new(
-                        //  self.framerate as u32,
+                    )),
+                    VideoCodec::AV1 => VideoDecoder::Av1(Av1Decoder::new(
                         WIDTH_ENCODER as u32,
                         HEIGHT_ENCODER as u32,
                         &format!("[AV1 DECODER {}]", self.server_ip),
-                        )
-                    )
-                    },
+                    )),
                 };
                 self.original_decoder = Some(Arc::new(Mutex::new(decoder)));
             }
 
+            // 3. CSV Setup (Async)
             let third_octet = get_third_octet(self.server_ip).unwrap();
-
             let csv_path = get_prefix_path(&format!(
                 "Results/{}/trace_offline_video{}.csv",
-                self.name_folder,
-                third_octet,
-                // format_elapsed!(now),
+                self.name_folder, third_octet
             ));
 
-            // --------------Initialize offline CSV tracker for frames -------------
             if self.offline_csv_trace.writer.is_none() && USE_FFMPEG_DEMO {
-                if !Path::new(&csv_path).exists() {
-                    // Encoder hasn’t created the file yet – keep your wait/log if you want
-                    println!("waiting until offline CSV created");
-                } else {
+                if Path::new(&csv_path).exists() {
                     print_green!("Read from: {}", csv_path);
-
-                    // just set the path and let CsvTrace open (append) with BufWriter
                     self.offline_csv_trace.path = csv_path.clone().into();
-                    self.offline_csv_trace
-                        .init_writer()
-                        .expect("CSV trace created by encoder is missing!");
+                    self.offline_csv_trace.init_writer().expect("CSV trace missing!");
                 }
             }
 
-            // Clean up older processed frames from tracking buffer
+            // 4. Clean Buffer logic
             let current_last_processed = self.last_processed_frame_id;
             self.missing_frames_buffer.retain(|&id, &mut processed| {
-                !processed || id.saturating_sub(current_last_processed) <= 100 // Avoid underflow
+                !processed || id.saturating_sub(current_last_processed) <= 100
             });
 
+            // ---------------------------------------------------------
+            // PROCESSING BLOCK
+            // ---------------------------------------------------------
+            let mut decoded_frame_candidate = None;
+            let mut frame_id_processed = 0;
+
+            // Check Jitter Buffer Warmup
             if !self.jitter_buffer_warmup_ready {
-                if self.decoder_queue.len() < TARGET_FRAMES_DECODER_QUEUE {
-                    // do nothing
-                } else {
+                if self.decoder_queue.len() >= TARGET_FRAMES_DECODER_QUEUE {
                     self.jitter_buffer_warmup_ready = true;
                     print_yellow!("Jitter buffer ready!!",);
                 }
             } else {
-                // Process the next frame if available from the regular stream queue
+                // Attempt to pop frame from queue
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
-                    // crate::print_magenta!(
-                    //                 // DebugColor::Violet,
-                    //                 "{} - [DBG VSYNC {}] Frame id {} processing. Size: {}, Queue len: {}",
-                    //                 format_elapsed!(now),
-                    //                 self.server_ip,
-                    //                 id_f,
-                    //                 video_frame.len(),
-                    //                 self.decoder_queue.len(),
-                    //                 // interarrival.as_secs_f32(),
-                    //             );
-
-                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 {
-                        1
-                    } else {
-                        0
-                    };
+                    frame_id_processed = id_f;
+                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
                     self.last_seen_id = id_f;
+                    let timestamp = now.duration_since(self.t_0).as_secs_f64();
 
-                    let timestamp = now.duration_since(self.t_0).as_secs_f64(); // TaiTime -> f64 seconds
-
-                    if !Path::new(&csv_path).exists() {
-                        // panic!("CSV trace still missing after {}ms: {}", max_wait_ms, csv_path);
-                    } else {
-                        // emu effects part here?
-
-                        self.offline_csv_trace
-                            .write_record(&[
-                                "", // offset (preamble only)
-                                "", // source (preamble only)
-                                "", // IDR_freq (preamble only)
-                                &format!("{:.6}", timestamp),
-                                &id_f.to_string(),
-                                &lost.to_string(),
-                                &format!("{:.3}", self.last_throughput_avg),
-                            ])
-                            .await
-                            .expect("failed to append offline csv row");
-
-                        // Optional cheap periodic flush (avoid flushing every row)
+                    // CSV Logging
+                    if Path::new(&csv_path).exists() {
+                        self.offline_csv_trace.write_record(&[
+                            "", "", "", 
+                            &format!("{:.6}", timestamp),
+                            &id_f.to_string(),
+                            &lost.to_string(),
+                            &format!("{:.3}", self.last_throughput_avg),
+                        ]).await.expect("failed to append offline csv row");
+                        
                         if id_f % BATCH_SIZE_CSV == 0 {
                             let _ = self.offline_csv_trace.flush().await;
                         }
                     }
-                    let mut ip_client = self.server_ip;
-                    if let IpAddr::V4(ip4) = ip_client {
-                        let mut octets = ip4.octets();
-                        if octets[3] == 2 {
-                            octets[3] = 1; // Change last byte from 2 to 1
-                            ip_client = IpAddr::V4(std::net::Ipv4Addr::from(octets));
-                        }
-                    }
 
-                    if id_f > self.last_processed_frame_id + 1 {
-                        let missing_start = self.last_processed_frame_id + 1;
-                        let missing_end = id_f - 1; // Inclusive end
-
-                        print_pretty!(
-                            DebugColor::Red,
-                            "{} Detected missing regular frames between {} and {}",
-                            ip_client,
-                            missing_start,
-                            missing_end,
-                        );
-
-                        for missing_id in missing_start..=missing_end {
-                            // Iterate inclusive
-                            if !self.missing_frames_buffer.contains_key(&missing_id) {
-                                print_pretty!(
-                                    DebugColor::DarkOrange,
-                                    "{} Added missing frame {} to tracking system",
-                                    ip_client,
-                                    missing_id,
-                                );
-                                self.missing_frames_buffer.insert(missing_id, false);
-                                // Mark as not processed yet
-                            }
-
-                            // Check if already processed (e.g., by a previous recovery attempt)
-                            if *self
-                                .missing_frames_buffer
-                                .get(&missing_id)
-                                .unwrap_or(&false)
-                            {
-                                print_pretty!(
-                                    DebugColor::Purple,
-                                    "Missing frame {} already processed, skipping",
-                                    missing_id
-                                );
-                                continue;
-                            }
-                            // Mark as processed in the tracking buffer *after* attempting to process
-                            self.missing_frames_buffer.insert(missing_id, true);
-                        }
-                    } // End of missing frame recovery
-
-                    // Update last processed frame ID for the *regular* stream continuity check
+                    // Update Stats
                     self.last_processed_frame_id = id_f;
+                    self.frame_size_history_vec.pop_front();
+                    self.frame_size_history_vec.push_back(video_frame.len());
 
-
-                    self.frame_size_history_vec.pop_front(); 
-                    self.frame_size_history_vec.push_back(video_frame.len()); 
-
-
-                    // Keyframe detection (keep as is)
+                    // Keyframe logic
                     if is_keyframe(&video_frame, self.codec_selection) {
                         self.dec_saw_keyframe = true;
-                        print_pretty!(
-                            DebugColor::Magenta,
-                            "*** KEYFRAME DETECTED IN REGULAR STREAM *** Size: {} bytes",
-                            video_frame.len(),
-                        );
                         self.dec_saw_keyframe_last_t = now;
                     }
 
+                    // Decoder Ready Check
                     if !self.is_decoder_ready && USE_FFMPEG_DEMO {
-                        if !video_frame.is_empty() {
-                            self.initialization_buffer.push(video_frame.clone());
-                        }
-
-                        let has_enough_frames =
-                            self.initialization_buffer.len() >= self.min_buffered_frames;
-                        if is_keyframe(&video_frame, self.codec_selection) {
-                            self.dec_saw_keyframe = true;
-                            self.dec_saw_keyframe_last_t = now;
-                        }
-
-                        if has_enough_frames && self.dec_saw_keyframe {
-                            print_pretty!(
-                                DebugColor::Cyan,
-                                "Decoder initialization criteria met! Buffered {} frames",
-                                self.initialization_buffer.len()
-                            );
-
-                            print_pretty!(DebugColor::Cyan, "Initialization processing complete.",);
+                        if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
+                        let has_enough = self.initialization_buffer.len() >= self.min_buffered_frames;
+                        
+                        if has_enough && self.dec_saw_keyframe {
                             self.is_decoder_ready = true;
                             self.initialization_buffer.clear();
-                        } else { /* ... log buffering status ... */
+                            print_pretty!(DebugColor::Cyan, "Decoder initialization complete.", );
                         }
-                    } // End of initialization logic
+                    }
 
+                    // Actual Decoding
                     if self.is_decoder_ready && USE_FFMPEG_DEMO {
-                        if !video_frame.is_empty() {
-                            if let Some(interarrival) =
-                                now.checked_duration_since(self.last_decoded_frame_instant)
-                            {
-                                let miin: usize = usize::min(video_frame.len(), 50);
-                                crate::print_magenta!(
-                                    // DebugColor::Violet,
-                                    "{} - [DBG VSYNC {} FFMPEG DECODE] Frame id {} processing. Size: {}, Queue len: {}, Interarrival: {:.4}s",
-                                    format_elapsed!(now),
-                                    ip_client,
-                                    id_f,
-                                    video_frame.len(),
-                                    self.decoder_queue.len(),
-                                    interarrival.as_secs_f32(),
-                                );
-                            }
-
-                            if let Some(decoder_arc) = self.original_decoder.clone() {
-                                let mut decoder = decoder_arc.lock().unwrap();
-
-                                // Process the current frame pair using process_packets
-                                // print_yellow!("Processing frame #{} ({:.2} kBytes)", id_f, video_frame.len() as f32 / 1000.0 );
-                                decoder.process_packet(video_frame.clone());
-                                
-                          
-                                // Try to get a synchronized frame pair immediately after processing
-                                // This might yield 0, 1 or more pairs depending on internal buffering and state
-                                while let Some((frame)) = decoder.next_decoded_frame() {
-
-                                 
-
-                                 DISPLAY_WINDOWS.with(|windows_cell| {
-                                        // Ensure window exists (keep window creation logic)
-                                            let mut windows: std::cell::RefMut<'_, HashMap<IpAddr, Window>> = windows_cell.borrow_mut();
-
-                                        if let Some(window) = windows.get_mut(&self.server_ip) {
-                                            // Calculate similarity (keep calculation)
-
-                                            let bitrate_sample_mbps =
-                                                extract_br_value(&self.name_folder).unwrap_or(0.0);
-
-                                            // Pass the current SyncState to the display function
-                                            self.lost_ids_reference_buffer = VecDeque::new();
-
-                                            // let slice: &[u32] = lost_frames_aux.make_contiguous();
-                                            let display_result = display_single_frame_with_info(
-                                                &frame,
-                                                &self.server_ip,
-                                                decoder.get_frame_counter(),
-                                                window,
-                                                now,
-                                                self.last_bitrate_perfect_info_update_mbps,
-                                                lost_frames_aux.clone(),
-                                                &mut self.lost_frames_buffer, // Pass mutable lost frames buffer if needed
-                                                &self.test,
-                                                &self.bm_string,
-                                                &self.sim_unique_string,
-                                                &self.frame_size_history_vec, 
-                                                GRAPH_HUD_HEIGHT, 
-                                                self.framerate, 
-                                                self.codec_selection, 
-                                            );
-
-                                            lost_frames_aux = VecDeque::new();
-
-                                            if display_result {
-                                                print_pretty!(
-                                                    DebugColor::Green,
-                                                    "Successfully displayed frame #{}",
-                                                    decoder.get_frame_counter(), 
-                                                );
-                                            } else {
-                                                print_pretty!(
-                                                    DebugColor::Red,
-                                                    "Failed to display frame #{}",
-                                                    decoder.get_frame_counter(),
-                                                );
-                                            }
-                                        } // End if let Some(window)
-                                    }); // End DISPLAY_WINDOWS.with
-                                } // End while let Some(frame_pair)
-                            } else {
-                                print_pretty!(
-                                    DebugColor::Red,
-                                    "Synchronized decoder not initialized!",
-                                );
-                            }
-                        } else {
-                            // Log cases where frames might be empty if unexpected
-                            if video_frame.is_empty() {
-                                print_pretty!(
-                                    DebugColor::Yellow,
-                                    "Received empty regular frame #{}",
-                                    id_f
-                                );
+                        if let Some(decoder_arc) = self.original_decoder.clone() {
+                            let mut decoder = decoder_arc.lock().unwrap();
+                            decoder.process_packet(video_frame.clone());
+                            
+                            // Try to get the frame
+                            if let Some(frame) = decoder.next_decoded_frame() {
+                                decoded_frame_candidate = Some(frame);
                             }
                         }
-                    } // End if self.is_decoder_ready
+                    }
 
-                    // Update timestamp and send placeholder output (keep as is)
                     self.last_decoded_frame_instant = now;
-                    self.out_video_decoded
-                        .send(video_frame[0..10.min(video_frame.len())].to_vec())
-                        .await;
+                    self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
+
                 } else {
-                    // Decoder queue was empty
-                    // print_brown!("{} - [{}] REBUFFER EVENT!!", format_elapsed!(now), self.server_ip );
+                    // REBUFFER EVENT (Queue empty)
                     self.rebuffer_event_counter.add_one(now);
-                } // End if let Some((id_f, video_frame))
+                }
             }
 
-            // print_red!("{} - Scheduling VSYNC at {}", format_elapsed!(now), format_elapsed!(now + T_vsync));
-            context
-                .scheduler
-                .schedule_event(T_vsync, Self::vsync, ())
-                .unwrap();
+            // ---------------------------------------------------------
+            // RENDERING BLOCK (Prepare buffer for thread)
+            // ---------------------------------------------------------
+            
+            // CASE A: We have a decoded frame ready
+            if let Some(frame) = decoded_frame_candidate {
+                let lost_frames_aux = self.lost_ids_reference_buffer.clone(); 
+                
+                // Render video to buffer
+                display_single_frame_with_info_buffered(
+                    &frame,
+                    frame_id_processed as usize, // Pass as usize
+                    &mut display_buffer,         // Pass the buffer
+                    window_width,                // Pass the stride
+                    now,
+                    self.last_bitrate_perfect_info_update_mbps,
+                    lost_frames_aux,
+                    &mut self.lost_frames_buffer,
+                    &self.bm_string,
+                    &self.frame_size_history_vec,
+                    GRAPH_HUD_HEIGHT,
+                    self.framerate,
+                    self.codec_selection,
+                    SCALE_FACTOR_GRAPH, 
+                );
+
+                // Reset tracking
+                self.lost_ids_reference_buffer.clear(); 
+            } 
+            // CASE B: No frame (Rebuffering/Spinning)
+            else {
+                // Calculate elapsed time for animation
+                let elapsed = now.duration_since(self.t_0).as_secs_f32();
+                
+                crate::lib::render_loading_spinner(&mut display_buffer, window_width, window_height, elapsed);
+                
+                // Manually fill HUD background since display_single_frame isn't running
+                let hud_color = 0x101010;
+                for y in window_height..total_window_height {
+                    for x in 0..window_width {
+                        display_buffer[y * window_width + x] = hud_color;
+                    }
+                }
+                
+                // Optional: Draw "Buffering" text here if you have a helper
+            }
+
+            // ---------------------------------------------------------
+            // SEND TO DISPLAY THREAD
+            // ---------------------------------------------------------
+            if let Some(tx) = &self.window_tx {
+                let title = format!("{} - [{}]", format_elapsed!(now), self.server_ip);
+                
+                let cmd = WindowCommand::Update {
+                    buffer: display_buffer, // Moves the vector to the other thread
+                    width: window_width,
+                    height: total_window_height,
+                    title,
+                };
+
+                // Non-blocking send
+                if let Err(e) = tx.send(cmd) {
+                    // This usually means the window was closed by the user
+                    print_red!("Display thread channel closed (Window closed?): {}", e);
+                    self.window_tx = None; // Stop trying to send
+                }
+            }
+
+            // Schedule Next VSYNC
+            context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
         }
     }
 
@@ -6970,6 +6851,164 @@ pub fn display_single_frame_with_info(
             false
         }
     }
+}
+pub fn display_single_frame_with_info_buffered(
+    raw_frame: &[u8],
+    frame_id: usize,
+    display_buffer: &mut [u32], // <--- Change 1: Pass the slice
+    stride: usize,              // <--- Change 2: Need width for indexing
+    now: TaiTime<0>,
+    bitrate_mbps: f32,
+    lost_frames: VecDeque<(u32, u32)>,
+    lost_frames_buffer: &mut LostFramesBuffer,
+    bm: &str,
+    size_history: &VecDeque<usize>, 
+    hud_height: usize,
+    framerate: f32, 
+    codec_type: VideoCodec, 
+    graph_scale_factor: f32, 
+) -> bool {
+    
+    // 1) Compute scaled dimensions
+    let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let total_h = scaled_h + hud_height;
+
+    // Safety check
+    if display_buffer.len() < scaled_w * total_h {
+        eprintln!("Error: Display buffer too small");
+        return false;
+    }
+
+    // 2) Convert raw RGB bytes → u32 pixel buffer (keep existing logic)
+    let pixels = match convert_rgb_to_u32(raw_frame, WIDTH_ENCODER, HEIGHT_ENCODER) {
+        Some(p) => p,
+        None => {
+            eprintln!("ERROR: Failed to convert RGB for frame #{}", frame_id);
+            return false;
+        }
+    };
+
+    // 3) Nearest-neighbor resize WRITING TO EXTERNAL BUFFER
+    for y in 0..scaled_h {
+        for x in 0..scaled_w {
+            let sx = x * WIDTH_ENCODER as usize / scaled_w;
+            let sy = y * HEIGHT_ENCODER as usize / scaled_h;
+            
+            // Calculate index in source and dest
+            let src_idx = sy * WIDTH_ENCODER as usize + sx;
+            let dst_idx = y * stride + x; // Use 'stride', not scaled_w (safer)
+
+            if src_idx < pixels.len() && dst_idx < display_buffer.len() {
+                display_buffer[dst_idx] = pixels[src_idx];
+            }
+        }
+    }
+
+    // 4) Fill the bottom HUD area with a dark background
+    let hud_bg_color = 0x101010; 
+    for y in scaled_h..total_h {
+        for x in 0..scaled_w {
+            display_buffer[y * stride + x] = hud_bg_color;
+        }
+    }
+
+    // 5) Render the Graph
+    let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
+    let target_graph_height = (250.0 * graph_scale_factor) as usize; 
+    let bottom_padding = 60; 
+    let graph_y_pos = total_h.saturating_sub(bottom_padding + target_graph_height);
+    
+    crate::lib::render_graph(
+        display_buffer,     // <--- Pass external buffer
+        &history_f32,
+        85,              
+        graph_y_pos,     
+        stride,             // <--- Pass stride
+        bitrate_mbps * 1_000_000.0, 
+        framerate,              
+        target_graph_height,
+        200_000.0,       
+        true,            
+    );
+
+    // 6) Render Text
+    let margin = 10;
+    let line_h = 25;
+    let line_hh = 100;
+    const SCALE_TEXT_WINDOW: usize = 4; 
+
+    render_text(
+        display_buffer,
+        &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
+        margin,
+        margin + line_h,
+        stride,
+        0x00FF00,
+        SCALE_TEXT_WINDOW,
+    );
+    render_text(
+        display_buffer,
+        &format!("{}", bm),
+        margin,
+        margin + line_hh,
+        stride,
+        0x00FF00,
+        SCALE_TEXT_WINDOW,
+    );
+
+    let right_margin = 600; 
+    let text_x = scaled_w.saturating_sub(right_margin);
+    let first_y = scaled_h + 30; 
+
+    render_text(
+        display_buffer,
+        &format!("Codec: {}", codec_type ),
+        text_x,
+        first_y,
+        stride,
+        0x00FF00,
+        SCALE_TEXT_WINDOW,
+    );
+
+    // 7) Handle lost-frames buffer updates
+    if !lost_frames.is_empty() {
+
+        for (frames,shards) in lost_frames{
+            let msg = format!(
+                "T: {:5.5} Frame lost: {} - Missing shards: {}",
+                format_elapsed!(now),
+                frames,
+                shards, 
+            );
+            lost_frames_buffer.add_message(msg);
+        }       
+    }
+
+    // 8) Render rolling messages
+    for (i, entry) in lost_frames_buffer.messages.iter().rev().enumerate() {
+        let opacity = calculate_opacity(entry);
+        if opacity == 0 { continue; }
+
+        let y_pos = scaled_h as i32 - 80 + (i as i32 * 22);
+        if y_pos > 0 {
+            render_text_with_alpha(
+                display_buffer,
+                &entry.text,
+                margin,
+                y_pos as usize,
+                stride,
+                0xFF0000,
+                2,
+                opacity,
+            );
+        }
+    }
+
+    // Note: Window Title update is removed. 
+    // The caller must construct the title string and pass it to the Window Actor.
+
+    true
 }
 
 #[allow(unused)] //Looks useless, is mainly defined for type matching compatibility between XRServer/XRclient for StreamSocket

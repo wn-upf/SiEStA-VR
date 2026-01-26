@@ -622,6 +622,49 @@ pub fn render_text(
     }
 }
 
+fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time: f32) {
+    let center_x = width as f32 / 2.0;
+    let center_y = height as f32 / 2.0;
+    let radius = 80.0;
+    let dot_count: i32 = 12;
+    let dot_radius = 8.0; 
+
+    // Clear the video area to a dark background
+    for pixel in buffer.iter_mut().take(width * height) {
+        *pixel = 0x050505; 
+    }
+
+    for i in 0..dot_count {
+        // Angle for this specific dot
+        let angle = (i as f32 / dot_count as f32) * std::f32::consts::TAU;
+        
+        // Calculate position
+        let x = (center_x + angle.cos() * radius) as usize;
+        let y = (center_y + angle.sin() * radius) as usize;
+
+        // Animation: intensity varies based on time and the dot's index
+        // This creates the "chase" effect
+        let intensity_factor = ((time * 5.0 - (i as f32 * 0.5)).sin() + 1.0) / 2.0;
+        let brightness = (intensity_factor * 255.0) as u32;
+        let color = (brightness << 16) | (brightness << 8) | brightness;
+
+        // Draw a small 3x3 square for each "dot"
+        let r_int = dot_radius as isize;
+        for dy in -r_int..r_int {
+            for dx in -r_int..r_int {
+                // Distance check: x^2 + y^2 <= r^2
+                if (dx * dx + dy * dy) as f32 <= dot_radius * dot_radius {
+                    let px = (x as isize + dx) as usize;
+                    let py = (y as isize + dy) as usize;
+                    
+                    if px < width && py < height {
+                        buffer[py * width + px] = color;
+                    }
+                }
+            }
+        }
+    }
+}
 
 
 pub fn render_graph(
@@ -637,7 +680,7 @@ pub fn render_graph(
     use_log: bool, 
 ) {
     // 1. MADE WIDER: Increased width and spacing
-    let bar_width = 9; 
+    let bar_width = 7; 
     let spacing = 2;
     let graph_width = history.len() * (bar_width + spacing);
     
@@ -650,7 +693,8 @@ pub fn render_graph(
     const COL_GREEN: u32 = 0x8FBC8F;  
     const COL_GRID: u32 = 0x555555;   
     const COL_TEXT: u32 = 0xCCCCCC;   
-    const COL_TGT: u32 = 0x87CEFA;    
+    // const COL_TGT: u32 = 0x87CEFA;    
+    const COL_TGT: u32 = 0xFF00FF; // Flashy Magenta
 
     // Layout Offsets
     // Increased margins to handle larger text size
@@ -789,214 +833,32 @@ pub fn render_graph(
 
     // --- 4. DRAW DYNAMIC TARGET LINE ---
     let target_norm = get_normalized_height(current_target_kb);
-    let target_y = y_offset + graph_height - (target_norm * graph_height as f32) as usize;
+    let target_y_base = y_offset + graph_height - (target_norm * graph_height as f32) as usize;
+    let line_thickness = 3; // Make it 3 pixels thick
 
-    if target_y < (buffer.len() / stride) {
-        for px in x_offset..(x_offset + graph_width) {
-            if px < stride {
-                buffer[target_y * stride + px] = COL_TGT;
-            }
-        }
-        
-        render_text(
-            buffer, 
-            &format!("TGT: {:.1} kB", current_target_kb), 
-            x_offset + graph_width + 10, 
-            target_y - 8, 
-            stride, 
-            COL_TGT, 
-            DISPLAY_GRAPH_SCALE_TEXT
-        );
-    }
-}
+    if target_y_base < (buffer.len() / stride) {
+        // Draw the thick line
+        for ty in 0..line_thickness {
+            let target_y = target_y_base.saturating_sub(ty);
+            if target_y >= buffer.len() / stride { continue; }
 
-
-pub fn render_graph_overlaps_wrong(
-    buffer: &mut [u32],
-    history: &VecDeque<f32>,
-    x_offset: usize,
-    y_offset: usize,
-    stride: usize,
-    target_bps: f32,
-    fps: f32,
-    graph_height: usize,
-    max_size_kb: f32,
-    use_log: bool, 
-) {
-    let bar_width = 5;
-    let spacing = 1;
-    let graph_width = history.len() * (bar_width + spacing);
-    
-    // --- CONFIGURATION ---
-    // Define pastel colors for less saturation
-
-    const DISPLAY_GRAPH_SCALE_TEXT: usize = 4; 
-
-    const COL_RED: u32 = 0xEE6666;    // Soft Pastel Red
-    const COL_YELLOW: u32 = 0xF0E68C; // Khaki/Soft Yellow
-    const COL_GREEN: u32 = 0x8FBC8F;  // Dark Sea Green (Soft Green)
-    const COL_GRID: u32 = 0x555555;   // Slightly lighter grid for visibility
-    const COL_TEXT: u32 = 0xCCCCCC;   // Light Grey text (not pure white)
-    const COL_TGT: u32 = 0x87CEFA;    // Light Sky Blue (softer Cyan)
-
-    // Layout Offsets
-    let label_margin = 55; // Increased from 40 to add distance
-    let title_margin = 45; // Increased from 13 to move title up
-
-    // --- 0. DRAW BACKGROUND PLATE ---
-    let bg_y_start = y_offset.saturating_sub(title_margin + 10); // Expanded top
-    let bg_y_end = y_offset + graph_height + 20;
-    let bg_x_start = x_offset.saturating_sub(label_margin + 20); // Expanded left
-    let bg_x_end = x_offset + graph_width + 170;    
-
-    for y in bg_y_start..bg_y_end {
-        if y >= buffer.len() / stride { continue; }
-        for x in bg_x_start..bg_x_end {
-            if x >= stride { continue; }
-            
-            let pixel_idx = y * stride + x;
-            let current_pixel = buffer[pixel_idx];
-            
-            // Dimming logic (50% opacity)
-            let r = ((current_pixel >> 16) & 0xFF) / 2;
-            let g = ((current_pixel >> 8) & 0xFF) / 2;
-            let b = (current_pixel & 0xFF) / 2;
-            buffer[pixel_idx] = (r << 16) | (g << 8) | b;
-        }
-    }
-
-    // --- LOG SCALE HELPERS ---
-    let min_log_kb = 1.0f32;
-    let log_min = min_log_kb.ln();
-    let log_max = max_size_kb.max(min_log_kb + 0.1).ln();
-    let log_range = log_max - log_min;
-
-    let get_normalized_height = |kb_val: f32| -> f32 {
-        if use_log {
-            if kb_val < min_log_kb {
-                0.0
-            } else {
-                ((kb_val.ln() - log_min) / log_range).min(1.0).max(0.0)
-            }
-        } else {
-            (kb_val / max_size_kb).min(1.0).max(0.0)
-        }
-    };
-
-    let current_target_kb = (target_bps / (8.0 * fps)) / 1024.0;
-
-    // --- 1. TITLE & INFO ---
-    render_text(
-        buffer,
-        &format!(" Frame size ({} window) in kBytes", history.len()), // Shortened text for cleaner look
-        x_offset,
-        y_offset.saturating_sub(title_margin), 
-        stride,
-        0xFFFFFF, 
-        3,
-    );
-    
-    // Axis Unit Label (Moved slightly left to align with numbers)
-    render_text(
-        buffer, 
-        "[kB]", 
-        x_offset.saturating_sub(label_margin), 
-        y_offset.saturating_sub(title_margin), 
-        stride, 
-        COL_TEXT, 
-        2
-    );
-
-    // --- 2. DRAW Y-AXIS MARKERS & GRID ---
-    for i in 1..=4 {
-        let visual_percentage = i as f32 * 0.25;
-        let marker_y = y_offset + graph_height - (visual_percentage * graph_height as f32) as usize;
-        
-        let label_val = if use_log {
-            (visual_percentage * log_range + log_min).exp()
-        } else {
-            max_size_kb * visual_percentage
-        };
-
-        if marker_y < buffer.len() / stride {
             for px in x_offset..(x_offset + graph_width) {
                 if px < stride {
-                    buffer[marker_y * stride + px] = COL_GRID; 
+                    // Overwrite whatever was there (puts it "on top")
+                    buffer[target_y * stride + px] = COL_TGT;
                 }
             }
         }
-
-        // Label: Pushed further left via `label_margin`
-        render_text(
-            buffer,
-            &format!("{:.0}", label_val),
-            x_offset.saturating_sub(label_margin), 
-            marker_y - 4,
-            stride,
-            COL_TEXT,
-            DISPLAY_GRAPH_SCALE_TEXT,
-        );
-    }
-
-    // --- 3. DRAW THE DATA BARS ---
-    for (i, &size_bytes) in history.iter().enumerate() {
-        let size_kb = size_bytes / 1024.0;
-        let norm_h = get_normalized_height(size_kb);
-        let bar_height = (norm_h * graph_height as f32) as usize;
-
-        // "Alive" Color Logic: Adjust brightness based on proximity to target
-        let color = if size_kb > current_target_kb * 1.5 {
-            0xFF5555 // Danger: High Intensity Red
-        } else if size_kb > current_target_kb {
-            // Alert: Brighten the yellow if it's way over target
-            let intensity = ((size_kb / (current_target_kb * 1.5)) * 255.0) as u32;
-            0xFF0000 | (intensity << 8) // Shifts from Orange to Yellow
-        } else {
-            // Healthy: The closer to target, the "greener" it gets
-            let health = (size_kb / current_target_kb).min(1.0);
-            let g = (150.0 + (105.0 * health)) as u32; // 150 to 255
-            (g << 8) | 100 // Emerald Green with a hint of Blue
-        };
-
-
-        let base_y = y_offset + graph_height; 
-
-
         
-
-        // Render Bar
-        for bh in 0..bar_height {
-            let py = y_offset + graph_height - bh;
-            if py < buffer.len() / stride {
-                for bw in 0..bar_width {
-                    let px = x_offset + (i * (bar_width + spacing)) + bw;
-                    if px < stride {
-                        buffer[py * stride + px] = color;
-                    }
-                }
-            }
-        }
-    }
-
-    // --- 4. DRAW DYNAMIC TARGET LINE ---
-    let target_norm = get_normalized_height(current_target_kb);
-    let target_y = y_offset + graph_height - (target_norm * graph_height as f32) as usize;
-
-    if target_y < (buffer.len() / stride) {
-        for px in x_offset..(x_offset + graph_width) {
-            if px < stride {
-                buffer[target_y * stride + px] = COL_TGT;
-            }
-        }
-        
+        // Render the label slightly offset from the thicker line
         render_text(
             buffer, 
-            &format!("TGT: {:.1} kB", current_target_kb), 
-            x_offset + graph_width + 5, 
-            target_y - 4, 
+            &format!("TARGET: {:.1} kB", current_target_kb), 
+            x_offset + graph_width + 10, 
+            target_y_base.saturating_sub(12), // Adjusted for thickness
             stride, 
             COL_TGT, 
-            DISPLAY_GRAPH_SCALE_TEXT
+            2
         );
     }
 }

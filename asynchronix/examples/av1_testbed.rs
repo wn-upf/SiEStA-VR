@@ -331,7 +331,6 @@ impl ChunkedAv1Encoder {
                 }
             });
         }
-        // --- FIX ENDS HERE ---
 
         let mut buf = [0u8; 4096];
         let mut frame_count_in_chunk = 0;

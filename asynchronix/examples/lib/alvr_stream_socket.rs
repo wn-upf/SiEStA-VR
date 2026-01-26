@@ -47,6 +47,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 // use super::alvr_packets::NetworkStatisticsPacket;
 // use std::env;
 
+pub const DEBUG_FFMPEG_AV1_LOGS: bool = false; 
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = true; // TODO: Bring this from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -235,15 +236,19 @@ impl ChunkedAv1Encoder {
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
 
+
+        if DEBUG_FFMPEG_AV1_LOGS{
+               if let Some(stderr) = child.take_stderr() {
+                let mut err_reader = std::io::BufReader::new(stderr);
+                std::thread::spawn(move || {
+                    for line in err_reader.lines() {
+                        if let Ok(l) = line { println!("ffmpeg stderr: {}", l); }
+                    }
+                });
+            }  
+        }
         // Optional: Stderr handling similar to HEVC implementation
-        if let Some(stderr) = child.take_stderr() {
-            let mut err_reader = std::io::BufReader::new(stderr);
-            std::thread::spawn(move || {
-                for line in err_reader.lines() {
-                    if let Ok(l) = line { println!("ffmpeg stderr: {}", l); }
-                }
-            });
-        }  
+     
 
 
         self.aggregation_buffer.clear();
