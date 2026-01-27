@@ -7054,11 +7054,12 @@ impl STA_extended {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            const LIMIT_MOVEMENT_RADIUS: f64 = 1.0; // circle of 1m radius.
-            let delta_t = 0.01; //  is reasonable?
+            const LIMIT_MOVEMENT_RADIUS: f64 = 0.5; // circle of 1m radius.
+            const RANDOM_WALK_SPEED: f64 = 2.0; 
+            const DELTA_T: f64 = 0.01; 
 
             // Step length = speed * delta_t
-            let step = 5.0 * delta_t;
+            let step = RANDOM_WALK_SPEED * DELTA_T;
 
             {
                 let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth.
@@ -7107,7 +7108,7 @@ impl STA_extended {
             context
                 .scheduler
                 .schedule_event(
-                    Duration::from_secs_f64(delta_t),
+                    Duration::from_secs_f64(DELTA_T),
                     Self::move_coordinates_everest,
                     (),
                 )
