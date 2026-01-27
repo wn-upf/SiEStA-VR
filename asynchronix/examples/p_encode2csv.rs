@@ -152,6 +152,7 @@ async fn encode_one_video(
         if global_idx % 256 == 0 {
             wtr.flush()?;
         }
+        wtr.flush()?; // Ensure the last chunk of data hits the disk!
 
         if frames_this_chunk == 0 {
             println!(
@@ -196,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
+    
     for video_codec in codecs_to_run{
         for framerate in [60, 90, 120] {
             for &bitrate_mbps in &br_values {
