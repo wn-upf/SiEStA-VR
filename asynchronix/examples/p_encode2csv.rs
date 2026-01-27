@@ -5,11 +5,17 @@ use std::{path::Path, time::Duration};
 use tai_time::TaiTime;
 use tokio::{sync::Semaphore, time::sleep};
 mod lib;
+use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedEncoder, VideoCodec};
 // bring your types into scope (adjust these paths to your project)
 use crate::lib::models_XR::{HEIGHT_ENCODER, WIDTH_ENCODER};
 use lib::alvr_stream_socket::ChunkedHevcEncoder;
 use std::env;
 use std::path::PathBuf;
+
+
+
+pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes"; 
+pub const VIDEO_NAME: &str =    "swordsmith"; 
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
@@ -18,73 +24,23 @@ fn get_paths() -> (PathBuf, PathBuf) {
         // HPC user
         "fmaura" => (
             PathBuf::from("/home/fmaura/simulator_asynchronix/asynchronix/video_samples_vmaf"),
-            PathBuf::from("/home/fmaura/simulator_asynchronix/asynchronix/csv_framesizes"),
+            PathBuf::from( &format!("/home/fmaura/simulator_asynchronix/asynchronix/{}", CSV_FOLDER_STR)),
         ),
         // Local user
         "boris" => (
             PathBuf::from("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf"),
-            PathBuf::from("/home/boris/Desktop/Rust_MG1/asynchronix/csv_framesizes"),
+            PathBuf::from(&format!("/home/boris/Desktop/Rust_MG1/asynchronix/{}", CSV_FOLDER_STR)),
         ),
         // Fallback (optional)
         _ => (
             PathBuf::from("./video_samples_vmaf"),
-            PathBuf::from("./csv_framesizes"),
+            PathBuf::from(&format!("./{}", CSV_FOLDER_STR)),
         ),
     }
 }
 
 const CHUNK_DURATION: f64 = 5.0;
 const NUM_SEMAPHORES: usize = 5; // NUMBER OF PARALLEL TASKS.
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let width = WIDTH_ENCODER;
-    let height = HEIGHT_ENCODER;
-    let gop_size: usize = 90;
-    let intra_refresh = true;
-
-    let (video_dir, csv_dir) = get_paths();
-    println!(
-        "[INFO] Running as {} → VIDEO_DIR={}, CSV_DIR={}",
-        std::env::var("USER").unwrap_or_default(),
-        video_dir.display(),
-        csv_dir.display()
-    );
-
-    let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
-    let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
-    let mut tasks = Vec::new();
-
-    for framerate in [60, 90, 120] {
-        for &bitrate_mbps in &br_values {
-            let video_dir = video_dir.clone();
-            let csv_dir = csv_dir.clone();
-            let permit = sem.clone().acquire_owned().await?;
-            let task = tokio::spawn(async move {
-                let _permit = permit; // keep until task done
-                if let Err(e) = encode_one_video(
-                    video_dir,
-                    csv_dir,
-                    width,
-                    height,
-                    gop_size,
-                    intra_refresh,
-                    framerate,
-                    bitrate_mbps,
-                )
-                .await
-                {
-                    eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
-                }
-            });
-            tasks.push(task);
-        }
-    }
-
-    // Wait for all tasks
-    join_all(tasks).await;
-    Ok(())
-}
 
 async fn encode_one_video(
     video_dir: PathBuf,
@@ -95,33 +51,75 @@ async fn encode_one_video(
     intra_refresh: bool,
     framerate: u32,
     bitrate_mbps: f32,
+    codec: VideoCodec, 
 ) -> anyhow::Result<()> {
-    let video_name = format!("swordsmith_{}fps.mp4", framerate);
+    let video_name = format!("{}_{}fps.mp4", VIDEO_NAME,  framerate);
     let video_path = video_dir.join(&video_name);
 
     if !video_path.exists() {
         eprintln!("WARN: video not found: {}", video_path.display());
         return Ok(());
     }
+    let codec_str = match codec {
+        VideoCodec::AV1 => "AV1",
+        VideoCodec::HEVC => "HEVC",
+        // Add _ => "Unknown" if you expect other variants, 
+        // but typically these are the two main ones here.
+    };
 
     let csv_path = csv_dir.join(format!(
-        "{}_{}Mbps_framesizes.csv",
+        "{}_{}_{}Mbps_framesizes.csv",
+        codec_str,
         video_path.file_stem().unwrap().to_str().unwrap(),
         bitrate_mbps
     ));
 
-    let mut enc = ChunkedHevcEncoder::new(
-        video_path.to_str().unwrap(),
-        width as u32,
-        height as u32,
-        &format!("{:.2}M", bitrate_mbps),
-        CHUNK_DURATION, // chunk_seconds
-        format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
-        0.0,
-        framerate as f32,
-        gop_size,
-        intra_refresh,
-    );
+   
+
+    let mut enc = match codec {
+        VideoCodec::AV1 => ChunkedEncoder::Av1(ChunkedAv1Encoder::new(
+                    video_path.to_str().unwrap(),
+                         width as u32,
+                        height as u32,
+                        &format!("{:.2}M", bitrate_mbps),
+                        CHUNK_DURATION, // chunk_seconds
+                        format!("[AV1 ENCODER [{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+                        0.0,
+                        framerate as f32,
+                        gop_size,
+                        intra_refresh,
+                    )),
+
+        VideoCodec::HEVC => 
+
+            ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
+                video_path.to_str().unwrap(),
+                width as u32,
+                height as u32,
+                &format!("{:.2}M", bitrate_mbps),
+                CHUNK_DURATION, // chunk_seconds
+                format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+                0.0,
+                framerate as f32,
+                gop_size,
+                intra_refresh,
+            )) 
+        
+    }; 
+
+
+    // let mut enc = ChunkedHevcEncoder::new(
+    //     video_path.to_str().unwrap(),
+    //     width as u32,
+    //     height as u32,
+    //     &format!("{:.2}M", bitrate_mbps),
+    //     CHUNK_DURATION, // chunk_seconds
+    //     format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+    //     0.0,
+    //     framerate as f32,
+    //     gop_size,
+    //     intra_refresh,
+    // );
 
     let mut wtr = Writer::from_path(&csv_path)?;
     wtr.write_record(&["frame_index", "bytes"])?;
@@ -157,7 +155,8 @@ async fn encode_one_video(
 
         if frames_this_chunk == 0 {
             println!(
-                "[DONE] {}fps {:.1}Mbps → {} frames → {}",
+                "[DONE] {} -> {}fps {:.1}Mbps → {} frames → {}",
+                codec_str, 
                 framerate,
                 bitrate_mbps,
                 global_idx,
@@ -167,5 +166,66 @@ async fn encode_one_video(
         }
     }
 
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let width = WIDTH_ENCODER;
+    let height = HEIGHT_ENCODER;
+    let gop_size: usize = 90;
+    let intra_refresh = true;
+
+    // let video_codec = VideoCodec::AV1; 
+    let codecs_to_run = [VideoCodec::AV1]; 
+
+    let (video_dir, csv_dir) = get_paths();
+
+    if !csv_dir.exists() {
+        println!("[INFO] Creating directory: {}", csv_dir.display());
+        std::fs::create_dir_all(&csv_dir)?;
+    }
+    // ----------------------
+    println!(
+        "[INFO] Running as {} → VIDEO_DIR={}, CSV_DIR={}",
+        std::env::var("USER").unwrap_or_default(),
+        video_dir.display(),
+        csv_dir.display()
+    );
+
+    let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
+    let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
+    let mut tasks = Vec::new();
+    for video_codec in codecs_to_run{
+        for framerate in [60, 90, 120] {
+            for &bitrate_mbps in &br_values {
+                let video_dir = video_dir.clone();
+                let csv_dir = csv_dir.clone();
+                let permit = sem.clone().acquire_owned().await?;
+                let task = tokio::spawn(async move {
+                    let _permit = permit; // keep until task done
+                    if let Err(e) = encode_one_video(
+                        video_dir,
+                        csv_dir,
+                        width,
+                        height,
+                        gop_size,
+                        intra_refresh,
+                        framerate,
+                        bitrate_mbps,
+                        video_codec, 
+                    )
+                    .await
+                    {
+                        eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
+                    }
+                });
+                tasks.push(task);
+            }
+        }
+    }
+
+    // Wait for all tasks
+    join_all(tasks).await;
     Ok(())
 }
