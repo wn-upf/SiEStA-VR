@@ -1,4 +1,4 @@
-extern crate ffmpeg_next as ffmpeg;
+// extern crate ffmpeg_next as ffmpeg;
 extern crate minifb;
 
 use ffmpeg::format::{input, Pixel};

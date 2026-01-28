@@ -90,6 +90,7 @@ impl fmt::Display for VideoCodec {
 
 pub enum ChunkedEncoder {
     Hevc(ChunkedHevcEncoder),
+    HevcSoftware(ChunkedSoftwareHevcEncoder), 
     Av1(ChunkedAv1Encoder),
 }
 
@@ -98,6 +99,7 @@ impl ChunkedEncoder {
         match self {
             ChunkedEncoder::Hevc(e) => e.start_chunking(bitrate_mbps, now).await,
             ChunkedEncoder::Av1(e) => e.start_chunking(bitrate_mbps, now).await,
+            ChunkedEncoder::HevcSoftware(e) => e.start_chunking(bitrate_mbps, now).await,
         }
     }
 
@@ -105,6 +107,7 @@ impl ChunkedEncoder {
         match self {
             ChunkedEncoder::Hevc(e) => e.next_frame().await,
             ChunkedEncoder::Av1(e) => e.next_frame().await,
+            ChunkedEncoder::HevcSoftware(e) => e.next_frame().await,         
         }
     }
 
@@ -112,6 +115,8 @@ impl ChunkedEncoder {
         match self {
             ChunkedEncoder::Hevc(e) => e.clear_buffers(),
             ChunkedEncoder::Av1(e) => e.clear_buffers(),
+            ChunkedEncoder::HevcSoftware(e) => e.clear_buffers(),
+
         }
     }
 }
@@ -324,6 +329,232 @@ impl ChunkedAv1Encoder {
     None
 }
 }
+
+pub struct ChunkedSoftwareHevcEncoder {
+    input: String,
+    width: u32,
+    height: u32,
+    bitrate: String,
+    chunk_duration: f64,
+    current_offset: f64,
+    frame_tx: Sender<Vec<u8>>,
+    frame_rx: Receiver<Vec<u8>>,
+
+    frame_queue: VecDeque<Vec<u8>>,
+    parser: HevcParser,
+    encoder_str: String,
+    gop_size: usize,
+    intra_refresh: bool,
+}
+
+#[allow(unused)]
+impl ChunkedSoftwareHevcEncoder {
+    pub fn new(
+        input: &str,
+        width: u32,
+        height: u32,
+        bitrate: &str,
+        chunk_duration: f64,
+        string: String,
+        offset_video: f64,
+        framerate: f32,
+        gop_size: usize,
+        intra_refresh: bool,
+    ) -> Self {
+        println!("Initializing ChunkedSoftwareHevcEncoder (libx265)");
+        let (frame_tx, frame_rx) = bounded(1000);
+
+        Self {
+            input: input.to_string(),
+            width,
+            height,
+            bitrate: bitrate.to_string(),
+            chunk_duration,
+            current_offset: offset_video,
+            frame_tx,
+            frame_rx,
+            frame_queue: VecDeque::new(),
+            parser: HevcParser::new(),
+            encoder_str: string.clone(),
+            gop_size,
+            intra_refresh,
+        }
+    }
+
+    pub fn clear_buffers(&mut self) {
+        self.parser.buffer.clear();
+        self.frame_queue.clear();
+        while let Ok(_) = self.frame_rx.try_recv() {}
+    }
+
+    pub fn clear_parser(&mut self) {
+        self.parser.buffer.clear();
+    }
+
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
+        let bitrate_adjusted_fps = bitrate_mbps;
+        self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
+
+        println!(
+            "{} - {} SOFTWARE CHUNKING with bitrate {} Mbps",
+            crate::format_elapsed!(now),
+            self.encoder_str,
+            bitrate_mbps,
+        );
+        self.parser.buffer.clear();
+
+        let mut command = FfmpegCommand::new();
+        
+        // Common arguments for both modes
+        command
+            .args(&["-ss", &self.current_offset.to_string()])
+            .args(&["-t", &self.chunk_duration.to_string()])
+            .args(&["-threads", "4"]) // Software encoding needs CPU threads
+            .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
+            .args(&["-stats_period", "8"])
+            .input(&self.input)
+            .args(&[
+                "-vf",
+                &format!(
+                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
+                    self.width, self.height
+                ),
+            ])
+            .args(&["-c:v", "libx265"]) // SW Encoding
+            .args(&["-preset", "ultrafast"]) // Crucial for realtime SW encoding
+            .args(&["-tune", "zerolatency"]) // Minimize delay
+            .args(&["-fps_mode", "passthrough"]);
+
+        if self.intra_refresh {
+            command
+                .args(&["-analyzeduration", "200M"])
+                .args(&["-probesize", "200M"])
+                // Rate Control
+                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-bufsize", &self.bitrate]) 
+                .args(&["-rc-lookahead", "0"])
+                // Structural args
+                .args(&["-g", "0"]) // Let x265 params handle structure
+                .args(&["-bf", "0"]) // No B-frames for intra-refresh
+                // libx265 specific params for intra-refresh
+                .args(&["-x265-params", "intra-refresh=1:keyint=30:min-keyint=30"]) 
+                // Container flags
+                .args(&["-movflags", "+frag_keyframe+empty_moov"])
+                .args(&["-flush_packets", "1"])
+                .args(&["-bsf:v", "hevc_mp4toannexb"])
+                .args(&["-an"])
+                .args(&["-f", "hevc", "-"]);
+
+        } else {
+            command
+                .args(&["-analyzeduration", "100M"])
+                .args(&["-probesize", "100M"])
+                .args(&["-s", &format!("{}x{}", self.width, self.height)])
+                // Rate Control
+                .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
+                .args(&["-bufsize", &self.bitrate])
+                // Structural args
+                .args(&["-sc_threshold", "0"]) // Disable scene detection
+                .args(&["-g", &format!("{:.0}", self.gop_size)])
+                // libx265 specific params for Closed GOP
+                .args(&[
+                    "-x265-params", 
+                    &format!("no-open-gop=1:keyint={}:min-keyint={}", self.gop_size, self.gop_size)
+                ])
+                // Container flags
+                .args(&["-movflags", "+frag_keyframe+empty_moov"])
+                .args(&["-flush_packets", "1"])
+                .args(&["-bsf:v", "hevc_mp4toannexb"])
+                .args(&["-an"])
+                .args(&["-f", "hevc", "-"]);
+        }
+
+        // Spawn the ffmpeg process
+        let mut child = command.spawn().unwrap();
+        let stdout = child.take_stdout().unwrap();
+        let mut reader = BufReader::new(stdout);
+
+        // Handle Stderr in separate thread
+        if let Some(stderr) = child.take_stderr() {
+            let mut err_reader = std::io::BufReader::new(stderr);
+            std::thread::spawn(move || {
+                for line in err_reader.lines() {
+                    match line {
+                        Ok(l) => println!("ffmpeg stderr: {}", l),
+                        Err(e) => {
+                            eprintln!("Error reading ffmpeg stderr: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        let mut buf = [0u8; 4096];
+
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // end of chunk
+                Ok(n) => {
+                    self.parser.add_data(&buf[..n]);
+                    // Extract complete frames
+                    let frames = self.parser.get_frames();
+                    for frame in frames {
+                        if let Err(e) = self.frame_tx.send(frame) {
+                            eprintln!("{} Error sending frame: {}", e, self.encoder_str,);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} Error reading ffmpeg chunk: {}", e, self.encoder_str,);
+                    break;
+                }
+            }
+        }
+        
+        let _ = child.wait();
+
+        // Update offset
+        self.current_offset += self.chunk_duration;
+
+        // Safety check for parser buffer
+        if self.parser.buffer.len() > 1_000_000_00 {
+            println!(
+                "{} Parser buffer getting too large ({}), clearing",
+                self.parser.buffer.len(),
+                self.encoder_str,
+            );
+            self.parser.buffer.clear();
+        }
+    }
+
+    pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
+        // First try parser's frames
+        let extracted_frames = self.parser.get_frames();
+        if !extracted_frames.is_empty() {
+            // Store all but first frame for future use
+            for frame in extracted_frames.iter().skip(1) {
+                self.frame_queue.push_back(frame.clone());
+            }
+            return Some(extracted_frames[0].clone());
+        }
+
+        // Check queue next
+        if let Some(frame) = self.frame_queue.pop_front() {
+            return Some(frame);
+        }
+
+        // Only now try channel
+        if let Ok(frame) = self.frame_rx.recv_timeout(Duration::from_millis(1)) {
+            return Some(frame);
+        }
+
+        None
+    }
+}
+
+
+
 pub struct ChunkedHevcEncoder {
     input: String,
     width: u32,

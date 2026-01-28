@@ -8,7 +8,7 @@ mod lib;
 use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedEncoder, VideoCodec};
 // bring your types into scope (adjust these paths to your project)
 use crate::lib::models_XR::{HEIGHT_ENCODER, WIDTH_ENCODER};
-use lib::alvr_stream_socket::ChunkedHevcEncoder;
+use lib::alvr_stream_socket::{ChunkedHevcEncoder, ChunkedSoftwareHevcEncoder};
 use std::env;
 use std::path::PathBuf;
 
@@ -92,7 +92,7 @@ async fn encode_one_video(
 
         VideoCodec::HEVC => 
 
-            ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
+            ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
                 video_path.to_str().unwrap(),
                 width as u32,
                 height as u32,
@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     let intra_refresh = true;
 
     // let video_codec = VideoCodec::AV1; 
-    let codecs_to_run = [VideoCodec::AV1]; 
+    let codecs_to_run = [VideoCodec::HEVC]; 
 
     let (video_dir, csv_dir) = get_paths();
 
@@ -231,3 +231,4 @@ async fn main() -> anyhow::Result<()> {
     join_all(tasks).await;
     Ok(())
 }
+
