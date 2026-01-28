@@ -437,7 +437,7 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&["-g", "0"]) // Let x265 params handle structure
                 .args(&["-bf", "0"]) // No B-frames for intra-refresh
                 // libx265 specific params for intra-refresh
-                .args(&["-x265-params", "intra-refresh=1:keyint=30:min-keyint=30"]) 
+                .args(&["-x265-params", "intra-refresh=1:keyint=30:min-keyint=30:pools=4"]) 
                 // Container flags
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
@@ -459,7 +459,7 @@ impl ChunkedSoftwareHevcEncoder {
                 // libx265 specific params for Closed GOP
                 .args(&[
                     "-x265-params", 
-                    &format!("no-open-gop=1:keyint={}:min-keyint={}", self.gop_size, self.gop_size)
+                    &format!("no-open-gop=1:keyint={}:min-keyint={}:pools=4", self.gop_size, self.gop_size)
                 ])
                 // Container flags
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])

@@ -2422,17 +2422,17 @@ impl QueueModule {
         // );
 
         let selected = match self.mlo_linkselection_strat {
-            LinkSelectionStrategy::PrimaryFirst => self.select_primary_first(&cap.links, now),
-            LinkSelectionStrategy::Opportunistic => self.select_opportunistic(&cap.links, now),
+            LinkSelectionStrategy::PrimaryFirst => self.select_mlo_channel_primary_first(&cap.links, now),
+            LinkSelectionStrategy::Opportunistic => self.select_mlo_channel_opportunistic(&cap.links, now),
             LinkSelectionStrategy::LyapunovBackpressure => {
-                self.select_lyapunov_backpressure(&cap.links, now)
+                self.select_mlo_channel_lyapunov_backpressure(&cap.links, now)
             }
             _ => {
                 println!(
                     "Mode {} UNIMPLEMENTED --> DEFAULT TO OPPORTUNISTIC",
                     self.mlo_linkselection_strat.to_string()
                 );
-                self.select_opportunistic(&cap.links, now)
+                self.select_mlo_channel_opportunistic(&cap.links, now)
             }
         };
 
@@ -2455,7 +2455,7 @@ impl QueueModule {
     }
 
     #[inline]
-    fn select_lyapunov_backpressure(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+    fn select_mlo_channel_lyapunov_backpressure(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
         // 1. Handle edge cases
         if available_links.is_empty() {
             return None;
@@ -2499,7 +2499,7 @@ impl QueueModule {
     }
 
     #[inline]
-    fn select_opportunistic(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+    fn select_mlo_channel_opportunistic(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
         // 1. Handle edge cases (no links or only one link)
         if available_links.is_empty() {
             return None;
@@ -2580,7 +2580,7 @@ impl QueueModule {
             }
         }
     }
-    fn select_primary_first(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+    fn select_mlo_channel_primary_first(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
         let primary_link = available_links[0];
 
         // Check if primary is idle
