@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 
 pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes"; 
-pub const VIDEO_NAME: &str =    "swordsmith"; 
+pub const VIDEO_NAME: &str =    "snow"; 
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
@@ -92,7 +92,20 @@ async fn encode_one_video(
 
         VideoCodec::HEVC => 
 
-            ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
+            ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
+                video_path.to_str().unwrap(),
+                width as u32,
+                height as u32,
+                &format!("{:.2}M", bitrate_mbps),
+                CHUNK_DURATION, // chunk_seconds
+                format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+                0.0,
+                framerate as f32,
+                gop_size,
+                intra_refresh,
+            )), 
+
+            _ => ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
                 video_path.to_str().unwrap(),
                 width as u32,
                 height as u32,
@@ -106,20 +119,6 @@ async fn encode_one_video(
             )) 
         
     }; 
-
-
-    // let mut enc = ChunkedHevcEncoder::new(
-    //     video_path.to_str().unwrap(),
-    //     width as u32,
-    //     height as u32,
-    //     &format!("{:.2}M", bitrate_mbps),
-    //     CHUNK_DURATION, // chunk_seconds
-    //     format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
-    //     0.0,
-    //     framerate as f32,
-    //     gop_size,
-    //     intra_refresh,
-    // );
 
     let mut wtr = Writer::from_path(&csv_path)?;
     wtr.write_record(&["frame_index", "bytes"])?;
@@ -148,7 +147,6 @@ async fn encode_one_video(
                 sleep(Duration::from_millis(5)).await;
             }
         }
-
         if global_idx % 256 == 0 {
             wtr.flush()?;
         }
@@ -178,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
     let intra_refresh = true;
 
     // let video_codec = VideoCodec::AV1; 
-    let codecs_to_run = [VideoCodec::HEVC]; 
+    let codecs_to_run = [VideoCodec::AV1]; 
 
     let (video_dir, csv_dir) = get_paths();
 
@@ -195,11 +193,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
+    let framerate_values = [60, 90, 120] ; 
+
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
     
     for video_codec in codecs_to_run{
-        for framerate in [60, 90, 120] {
+        for framerate in framerate_values {
             for &bitrate_mbps in &br_values {
                 let video_dir = video_dir.clone();
                 let csv_dir = csv_dir.clone();
@@ -229,6 +229,93 @@ async fn main() -> anyhow::Result<()> {
 
     // Wait for all tasks
     join_all(tasks).await;
+
+
+    for video_codec in codecs_to_run{
+        let codec_str = format!("{}", video_codec); 
+        let _ = merge_csvs_into_one(&codec_str); 
+    }
     Ok(())
+
 }
 
+use polars::prelude::*;
+use regex::Regex;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs::File;
+
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct VideoGroup {
+    name: String,
+    fps: u32,
+}
+
+fn merge_csvs_into_one(codec_prefix: &str, )-> Result<(), Box<dyn Error>> {
+
+    // let codec_prefix = "HEVC"; 
+    // Regex to capture: 1: Name, 2: FPS, 3: Mbps
+    let re = Regex::new(&format!(r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv", ))?;
+    
+    // Map to group files: Key -> Vec<(Mbps, Path)>c
+    let mut groups: HashMap<VideoGroup, Vec<(u32, String)>> = HashMap::new();
+
+    // 1. Scan directory and group files
+    for entry in std::fs::read_dir("./bcopy")? {
+        let path = entry?.path();
+        let filename = path.file_name().unwrap().to_string_lossy();
+
+        if let Some(cap) = re.captures(&filename) {
+            let video_name = cap[1].to_string();
+            let fps = cap[2].parse::<u32>()?;
+            let mbps = cap[3].parse::<u32>()?;
+
+            let group = VideoGroup { name: video_name, fps };
+            groups.entry(group).or_default().push((mbps, path.to_string_lossy().into_owned()));
+        }
+    }
+
+    // 2. Process each group into its own CSV
+    for (group, mut files) in groups {
+        println!("Processing {} at {}fps...", group.name, group.fps);
+
+        // Sort files by bitrate (Mbps)
+        files.sort_by_key(|f| f.0);
+
+        // Initialize DataFrame with the first file in the sorted group
+        // ... inside your loop
+        let (first_mbps, first_path) = &files[0];
+
+        // FIX: Open file first, then pass to CsvReader::new()
+        let file = File::open(first_path)?;
+        let mut combined_df = CsvReader::new(file)
+            .finish()?;
+        combined_df.rename("bytes", format!("{}Mbps", first_mbps).into())?;
+
+        // Join subsequent files
+        for (mbps, path) in files.iter().skip(1) {
+            // FIX: Same here
+            let next_file = File::open(path)?;
+            let next_df = CsvReader::new(next_file)
+                .finish()?
+                .select(["frame_index", "bytes"])?;
+            
+            // Note: rename is usually done on the DataFrame after finish()
+            let mut next_df = next_df; 
+            next_df.rename("bytes", format!("{}Mbps", mbps).into())?;
+
+            combined_df = combined_df.left_join(&next_df, ["frame_index"], ["frame_index"])?;
+        }
+
+        // 3. Save the specific group file
+        let output_name = format!("merged_{}_{}fps.csv", group.name, group.fps);
+        let mut out_file = File::create(&output_name)?;
+        CsvWriter::new(&mut out_file).finish(&mut combined_df)?;
+        
+        println!("Saved to {}", output_name);
+    }
+
+    Ok(())
+
+}

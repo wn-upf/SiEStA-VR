@@ -2709,7 +2709,7 @@ impl<H: Serialize> StreamSender<H> {
             }
 
             let fps = framerate.round() as u32;
-            let table = get_table(final_file, fps)?; // global cached
+            let table = get_table(final_file, fps, self.codec_selection)?; // global cached
 
             // round to integer Mbps that must exist as a column
             // Cache column index on bitrate (avoid per-frame map lookup):
@@ -2991,6 +2991,7 @@ impl ReceiverDataStats {
 #[derive(Clone)]
 struct FrameSizeTable {
     _fps: u32,
+    codec_str: String, 
     mbps_cols: Vec<u32>,            // e.g. [5,10,15,...]
     col_index: HashMap<u32, usize>, // 5 -> 0, 10 -> 1, ...
     // Column-major: framesizes[col_idx][frame_idx] -> bytes
@@ -3071,10 +3072,10 @@ impl FrameSizeTable {
         ((v0 + f * (v1 - v0)).round() as u32) as usize
     }
 
-    fn load(final_file: &str, _fps: u32) -> anyhow::Result<Self> {
+    fn load(final_file: &str, _fps: u32, codec_str: String ) -> anyhow::Result<Self> {
         let path = get_prefix_path(&format!(
-            "csv_framesizes/{}_{}fps_fused_framesizes.csv",
-            final_file, _fps
+            "csv_framesizes/{}_{}_{}fps.csv",
+            codec_str ,final_file, _fps
         ));
         if !std::path::Path::new(&path).exists() {
             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
@@ -3135,6 +3136,7 @@ impl FrameSizeTable {
             col_index,
             framesizes,
             start_offset,
+            codec_str, 
         })
     }
 }
@@ -3156,12 +3158,14 @@ use once_cell::sync::Lazy;
 static TABLE_CACHE: Lazy<DashMap<(String, u32), Arc<FrameSizeTable>>> =
     Lazy::new(|| DashMap::new());
 
-fn get_table(final_file: &str, fps: u32) -> anyhow::Result<Arc<FrameSizeTable>> {
+fn get_table(final_file: &str, fps: u32, codec_selection: VideoCodec ) -> anyhow::Result<Arc<FrameSizeTable>> {
     if let Some(entry) = TABLE_CACHE.get(&(final_file.to_string(), fps)) {
         return Ok(entry.clone());
     }
+    let codec_str = format!("{}", codec_selection); // using Display trait to obtain String
     // Double-checked load
-    let table = Arc::new(FrameSizeTable::load(final_file, fps)?);
+
+    let table = Arc::new(FrameSizeTable::load(final_file, fps, codec_str)?);
     let key = (final_file.to_string(), fps);
     let entry = TABLE_CACHE.entry(key).or_insert_with(|| table.clone());
     Ok(entry.clone())

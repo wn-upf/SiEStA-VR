@@ -10,15 +10,20 @@ struct VideoGroup {
     fps: u32,
 }
 
+
+
 fn main() -> Result<(), Box<dyn Error>> {
+
+
+    let codec_prefix = "HEVC"; 
     // Regex to capture: 1: Name, 2: FPS, 3: Mbps
-    let re = Regex::new(r"AV1_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv")?;
+    let re = Regex::new(&format!(r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv", ))?;
     
     // Map to group files: Key -> Vec<(Mbps, Path)>c
     let mut groups: HashMap<VideoGroup, Vec<(u32, String)>> = HashMap::new();
 
     // 1. Scan directory and group files
-    for entry in std::fs::read_dir("./bcopy")? {
+    for entry in std::fs::read_dir("/home/boris/Desktop/merge_hevc/")? {
         let path = entry?.path();
         let filename = path.file_name().unwrap().to_string_lossy();
 
@@ -65,7 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // 3. Save the specific group file
-        let output_name = format!("merged_{}_{}fps.csv", group.name, group.fps);
+        let output_name = format!("{}_{}_{}fps.csv", codec_prefix, group.name, group.fps);
         let mut out_file = File::create(&output_name)?;
         CsvWriter::new(&mut out_file).finish(&mut combined_df)?;
         

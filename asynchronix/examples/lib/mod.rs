@@ -2151,7 +2151,8 @@ impl MpduPacket {
     }
 }
 
-type MacKey = (i32, EdcaAc, u8); // e.g. (AP_ID, AC_VO) or (sta_id, AC_BE); last u8 for MLO link ID
+type MacKey = (i32, EdcaAc, u8); // e.g. (AP/STA_ID, EDCA_AC, link_id)); last u8 for MLO link ID
+type WindowKey = (i32, u8);  // (STA_ID, link_id)
 
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {
@@ -2163,6 +2164,9 @@ pub struct AmpduPacket {
     pub coordinates: Coords,
     pub mac_key: MacKey,
     pub link_id: u8, // MLO field for intended link .
+
+    pub mcs_assigned: u8, 
+
 }
 
 impl AmpduPacket {
@@ -2181,13 +2185,14 @@ impl AmpduPacket {
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
             mac_key: MacKey::default(),
             link_id: 0,
+            mcs_assigned: 0, 
         }
     }
     // Method to print AMPDU_packet values
     pub fn print(&self) {
         println!(
-            "\x1b[33m \t[AMPDU INFO]\tSize: {}, Total Length: {} Bits | SRC_ID: {}, DEST_ID: {} \x1b[0m",
-            self.size, self.total_length, self.sta_src_id, self.sta_dest_id,
+            "\x1b[33m \t[AMPDU INFO]\tSize: {}, Total Length: {} Bits | SRC_ID: {}, DEST_ID: {} | MCS: {} \x1b[0m",
+            self.size, self.total_length, self.sta_src_id, self.sta_dest_id, self.mcs_assigned,
         );
         //  println!("AMPDU on LINK-{}: {} packets, {} bytes",
         //     self.link_id, self.mpdu_packets.len(), self.total_length);
@@ -2221,25 +2226,6 @@ impl AmpduPacket {
         }; // Reset coordinates to default (0.0, 0.0)
     }
 
-    // fn with_capacity(capacity: usize) -> Self {
-    //     Self {
-    //         mpdu_packets: Vec::with_capacity(capacity),
-    //         sta_id: 0,
-    //         coordinates: Coords::new(),
-    //         size: 0,
-    //         total_length: 0,
-    //     }
-    // }
-
-    // fn is_empty(&self) -> bool {
-    //     self.mpdu_packets.is_empty()
-    // }
-
-    // fn add_packet(&mut self, packet: MpduPacket) {
-    //     self.total_length += packet.length_packet;
-    //     self.size += 1;
-    //     self.mpdu_packets.push(packet);
-    // }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -2410,7 +2396,7 @@ pub fn airtime_ampdu(
     coords_dest: Coords,
     _p_tx_orig: f64,
     channel_width: usize,
-) -> f64 {
+) -> (f64, u8)  {
     let p_tx_cheated = match channel_width {
         20 => 20.0,
         40 => 20.0,
@@ -2514,7 +2500,7 @@ pub fn airtime_ampdu(
     // let _rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;              // ONLY FOR DEBUG
     // print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
     //              ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,);
-    phy_time
+    (phy_time, _mcs_val as u8)
 }
 
 #[inline]

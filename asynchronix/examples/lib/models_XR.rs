@@ -2190,6 +2190,7 @@ impl BitrateManager {
                         sim_unique_string,
                         RL_WINDOW_OBSERVATION_SIZE,
                     )))),
+
                     last_action_idx: Arc::new(Mutex::new(0)),
                     last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
                     pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
@@ -2214,7 +2215,6 @@ impl BitrateManager {
                     },
                 }
             }
-
             4 => {
                 // GCC estimator.
 
@@ -4996,7 +4996,10 @@ impl XRClient {
         let initial_title = format!("Client [{}] - Waiting for Stream...", server_ip);
 
         // 4. Spawn the Window Actor
-        Self::spawn_display_thread(rx, initial_title, window_width, total_height);
+        if USE_FFMPEG_DEMO {
+            Self::spawn_display_thread(rx, initial_title, window_width, total_height);
+
+        }
             
         // let everest_enabled = abr_mode == 2;
         let everest_enabled = true; // to enable info on heuristics for RL mode
@@ -7098,8 +7101,6 @@ impl STA_extended {
                     new_y
                 };
             }
-            // z stays constant (HMD height)
-            // println!("Coordinates After dt: {:?}", self.sta_coordinates);
 
             self.outport_coords_xrclient
                 .send(self.sta_coordinates.clone())
