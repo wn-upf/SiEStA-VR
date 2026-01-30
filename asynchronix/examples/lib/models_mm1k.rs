@@ -1,5 +1,5 @@
 use crate::{
-    debug_bgprint, debug_debug, print_magenta, print_prettyyyy, print_red, print_yellow // print_blue, print_dblue, print_green, print_pretty,
+    debug_bgprint, debug_debug, print_brown, print_magenta, print_pink, print_prettyyyy, print_red, print_yellow // print_blue, print_dblue, print_green, print_pretty,
 };
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
@@ -1760,8 +1760,8 @@ pub struct StatsUpdate {
     pub blocked_packet_counter: usize,
     pub arrived_packet_counter: usize,
     pub queue_length_when_out: usize,
-    pub sta_src_id: usize,
-    pub sta_dest_id: usize,
+    pub sta_src_id: i32,
+    pub sta_dest_id: i32,
     pub packet_id: i32,
     pub now: tai_time::TaiTime<0>,
     pub length_packet: usize,
@@ -2049,7 +2049,7 @@ pub struct WindowMetricReport {
     pub sta_util: f64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct WindowMetrics {
     pub sta_id: WindowKey,   
     pub window_start: f64,
@@ -2073,22 +2073,28 @@ impl WindowMetrics {
             ..Default::default()
         }
     }
-    pub fn reset(&mut self, now: f64) {
+    pub fn reset(&mut self, now: f64, ) {
         *self = Self {
             window_start: now,
+            sta_id: self.sta_id, 
+            window_duration: self.window_duration, 
             ..Default::default()
         };
     }
 
     #[inline]
     pub fn update_metrics_mcs_util(&mut self, mcs: Option<u8>, duration: f64, success: bool) {
-        
         if success {
             if let Some(emecese) = mcs{
                 self.sta_tx_time += duration;
                 self.total_busy_time += duration;  // Assuming successful TX contributes to total busy time
                 self.packet_count += 1; // Only count succesful transmissions for MCS.
                 self.mcs_sum += emecese as f64;
+            
+                // print_pink!("UPDATE! Metrics: tx_time: {}, busy_time: {}, packet_count: {}, mcs_avg: {}",
+                //                      self.sta_tx_time, self.total_busy_time, self.packet_count, self.mcs_sum / self.packet_count as f64); 
+            
+            
             }
         } else {
             self.sta_collision_time += duration;
@@ -2305,7 +2311,7 @@ impl QueueModule {
     pub fn update_window_stats(
         &mut self, 
         wind_key: WindowKey, 
-        mcs: u8, 
+        mcs: Option<u8>, 
         duration: f64, 
         success: bool, 
         now: f64, 
@@ -2319,26 +2325,37 @@ impl QueueModule {
 
         // 3. CHECK & REPORT: Has the window duration passed?
         // We check this BEFORE adding the new packet to keep the window boundary clean.
+        // println!("now: {}, start: {} -> Elapsed = {}", now, metrics.window_start, elapsed); 
         let elapsed = now - metrics.window_start;
-        
         if elapsed >= metrics.window_duration.as_secs_f64() {
             // A. Compute the averages for the finishing window
+
+
+            let sta_util = (metrics.sta_tx_time + metrics.sta_collision_time) / elapsed; // Redundant, for testing only
+            let total_util = metrics.total_busy_time / elapsed;                          // Redundant, for testing only
+
+            // if metrics.packet_count > 0 {
+            //      print_magenta!("{} ELAPSED = {:.4}, DURATION: {:.4}\nMETRICS_WINDOW STA {} LINK {}: MCS={:.2}, Util={:.6}, Relative_util_STA={:.6}", 
+            //          now,elapsed, metrics.window_duration.as_secs_f32(),  wind_key.0, wind_key.1, metrics.mcs_sum / metrics.packet_count as f64, total_util, sta_util
+            //      );
+            // } else {
+            //      // Optional: Print zeros even if idle to keep charts continuous
+            //      print_brown!("METRICS_WINDOW,{},{:?},0.0,0.0,0.0", now, wind_key);
+            // }
+
             let (window_key , avg_mcs, total_util, sta_util) = metrics.compute_and_reset(now);
+
+            let report = WindowMetricReport{timestamp: now, window_key: wind_key, avg_mcs, total_util, sta_util,  }; 
+            // println!("inside! metrics: {:?}\nreport:{:?}", metrics, report); 
+            self.output_metrics.send(report); 
 
             // B. Output to CSV/Console
             // Format: [Time, STA_ID, Avg_MCS, Total_Chan_Util, STA_Relative_Util]
             // You can append this to your self.csv_metrics or just print it.
-            if metrics.packet_count > 0 {
-                 print_magenta!("{} METRICS_WINDOW STA {} LINK {}: MCS={:.2}, Util={:.6}, Relative_util_STA={:.6}", 
-                     now, wind_key.0, wind_key.1, avg_mcs, total_util, sta_util
-                 );
-            } else {
-                 // Optional: Print zeros even if idle to keep charts continuous
-                 print_magenta!("METRICS_WINDOW,{},{:?},0.0,0.0,0.0", now, wind_key);
-            }
+            
         }
         // 4. UPDATE: Add the current packet's stats to the (possibly new) window
-        metrics.update_metrics_mcs_util(Some(mcs), duration, success);
+        metrics.update_metrics_mcs_util(mcs, duration, success);
     }
 
     #[inline]
@@ -3077,6 +3094,7 @@ impl QueueModule {
 
         let mac_key = AMPDU_sent.mac_key;
         let wind_key: WindowKey = (mac_key.0, mac_key.2); 
+        // crate::print_dblue!("[DBG SEND AMPDU] KEY: {:?}", wind_key ); 
 
         let now_elapsed = elapsed.duration_since(TaiTime::EPOCH).as_secs_f64(); 
         let mcs_assigned = AMPDU_sent.mcs_assigned; 
@@ -3090,67 +3108,87 @@ impl QueueModule {
             // context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
         }
 
-        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&mac_key) {
-            let prev_retries = st.retry_count;
-            let prev_cw_val = st.cw;
-            let prev_drawn_bo = st.last_backoff_drawn_logs;
+        let dcf_data = {
+        // Lock happens here
+            let mut guard = self.array_dcf_values.lock().unwrap();
+            
+            if let Some(st) = guard.get_mut(&mac_key) {
+                // Extract the values needed for CSV/Logging later
+                let prev_retries = st.retry_count;
+                let prev_cw_val = st.cw;
+                let prev_drawn_bo = st.last_backoff_drawn_logs;
+                // Clone the string now so we don't need 'st' later
+                let ac_str = st.edca_ac_str.clone(); 
 
-            st.on_success(st.param.cw_min);
+                // Update 'st' immediately while we have the lock
+                st.on_success(st.param.cw_min);
 
+                // Return the extracted data
+                Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str))
+            } else {
+                None
+            }
+        }; 
+        if let Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str)) = dcf_data {
             let mut drained = smallvec::SmallVec::<[StatsUpdate; 64]>::new();
-            if let Some(rx) = self.stats_rx.as_mut() {
-                while let Ok(up) = rx.try_recv() {
-                    drained.push(up);
-                }
-            }
-            if !drained.is_empty() {
-                if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
-                    for u in &drained {
-                        qstats.update_cumstats(
-                            u.T_s,
-                            u.T_q,
-                            u.blocked_packet_counter,
-                            u.arrived_packet_counter,
-                            u.queue_length_when_out,
-                        );
+                if let Some(rx) = self.stats_rx.as_mut() {
+                    while let Ok(up) = rx.try_recv() {
+                        drained.push(up);
                     }
-                } 
-
-                if let Ok(mut window) = self.window_metrics_mcs_util.lock() {
-                    if let Some(metrics_window) = window.get_mut(&wind_key) {
-                        metrics_window.update_metrics_mcs_util( Some(mcs_assigned), drained[0].T_s, true);
+                }
+                if !drained.is_empty() {
+                    if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
+                        for u in &drained {
+                            qstats.update_cumstats(
+                                u.T_s,
+                                u.T_q,
+                                u.blocked_packet_counter,
+                                u.arrived_packet_counter,
+                                u.queue_length_when_out,
+                            );
+                        }
                     } 
-                }
 
-                if CSV_PER_PACKET {
-                    for u in drained {
-                        // CSV write outside the lock
-                        self.csv_metrics.update_stats(
-                            u.now,
-                            u.packet_id as usize,
-                            u.queue_length_when_out,
-                            u.T_s,
-                            u.T_q,
-                            u.length_packet,
-                            u.sta_src_id,
-                            u.sta_dest_id,
-                            u.ampdu_id,
-                            u.is_collision,
-                            u.collision_backoff,
-                            u.link_id as usize,
-                            prev_cw_val as usize,
-                            prev_retries,
-                            prev_drawn_bo,
-                            st.edca_ac_str.clone(),
-                        );
+                    // println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!", 
+                    //     format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s ); 
+                    
+                    // self.update_window_stats(
+                    //     wind_key, 
+                    //     Some(mcs_assigned), 
+                    //     drained[0].T_s, 
+                    //     true, 
+                    //     now_elapsed
+                    // );  
+
+
+                    // crate::print_dblue!("[DBG SEND AMPDU] update! {:?}", wind_key , ); 
+
+                    if CSV_PER_PACKET {
+                        for u in drained {
+                            // CSV write outside the lock
+                            self.csv_metrics.update_stats(
+                                u.now,
+                                u.packet_id as usize,
+                                u.queue_length_when_out,
+                                u.T_s,
+                                u.T_q,
+                                u.length_packet,
+                                u.sta_src_id,
+                                u.sta_dest_id,
+                                u.ampdu_id,
+                                u.is_collision,
+                                u.collision_backoff,
+                                u.link_id as usize,
+                                prev_cw_val as usize,
+                                prev_retries,
+                                prev_drawn_bo,
+                                ac_str.clone(), 
+                            );
+                        }
                     }
                 }
             }
-        } else {
-            print_red!("NO MAC_KEY VALUE in array DCF vals??? {:?}", mac_key);
-        }
     }
-    
     
     #[inline]
     fn build_new_ampdu<'a>(
@@ -3291,8 +3329,8 @@ impl QueueModule {
                         blocked_packet_counter: self.blocked_packet_counter,
                         arrived_packet_counter: self.arrived_packet_counter,
                         queue_length_when_out: cloned_packet.queue_length_when_out,
-                        sta_src_id: cloned_packet.sta_src_id as usize,
-                        sta_dest_id: cloned_packet.sta_dest_id as usize,
+                        sta_src_id: cloned_packet.sta_src_id,
+                        sta_dest_id: cloned_packet.sta_dest_id,
                         packet_id: cloned_packet.packet_id as i32,
                         now,
                         length_packet: cloned_packet.length_packet_bits,
@@ -3602,14 +3640,19 @@ impl QueueModule {
                         }
                     }
                     
-                    if let Ok(mut window) = self.window_metrics_mcs_util.lock() {
-                 
-                        let wind_key = (first_contender_key.0, first_contender_key.2); 
+                    for key in contenders.iter(){
+                        let contender_key: WindowKey = (key.0, key.2); // this could be cleaner :D
+                        //  self.update_window_stats(
+                        //     contender_key, 
+                        //     None, 
+                        //     T_col as f64, 
+                        //     false, 
+                        //     now.duration_since(TaiTime::EPOCH).as_secs_f64()
+                        // );
 
-                        if let Some(metrics_window) = window.get_mut(&wind_key) {
-                            metrics_window.update_metrics_mcs_util( None, T_col.into(), false); 
-                        } 
                     }
+                   
+
 
                     if let Some(stats_tx) = &self.stats_tx {
                         // Deconstruct key. Assuming key is (sta_id, ac, link_id) based on your debug print
@@ -3627,8 +3670,8 @@ impl QueueModule {
                             collision_backoff: T_col as f64,
                             
                             // -- IDs --
-                            sta_src_id: src_id as usize,    // Python uses this to determine DL vs UL
-                            sta_dest_id: dummy_dest_id as usize,
+                            sta_src_id: src_id,    // Python uses this to determine DL vs UL
+                            sta_dest_id: dummy_dest_id,
                             link_id: link_id,
 
                             // -- Dummy / Empty values for non-packet fields --

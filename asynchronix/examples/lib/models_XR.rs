@@ -442,7 +442,7 @@ impl Av1Decoder {
             // For this visualization, we just pop.
             // let id = self.id_queue.pop_front().unwrap_or(0);
             // let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default()); 
-            return Some((frame));
+            return Some(frame);
         }
         None
     }
@@ -6324,15 +6324,15 @@ impl XRClient {
                     self.last_seen_id = id_f;
                     let timestamp = now.duration_since(self.t_0).as_secs_f64();
 
-                    print_magenta!(
-                        "{:.6} [DBG VSYNC] Pop Frame: ID={} | FPS={} | Queue: {} -> {} | Size: {} bytes",
-                        format_elapsed!(now), 
-                        id_f,
-                        self.framerate,
-                        queue_len_before,
-                        self.decoder_queue.len(),
-                        video_frame.len()
-                    );
+                    // print_magenta!(
+                    //     "{:.6} [DBG VSYNC] Pop Frame: ID={} | FPS={} | Queue: {} -> {} | Size: {} bytes",
+                    //     format_elapsed!(now), 
+                    //     id_f,
+                    //     self.framerate,
+                    //     queue_len_before,
+                    //     self.decoder_queue.len(),
+                    //     video_frame.len()
+                    // );
                     // CSV Logging
                     if Path::new(&csv_path).exists() {
                         self.offline_csv_trace.write_record(&[
@@ -6388,11 +6388,11 @@ impl XRClient {
 
                 } else {
                     // REBUFFER EVENT (Queue empty)
-                    print_magenta!(
-                        "{:.6} [DBG VSYNC] !!! REBUFFERING !!! | No frames in queue | Target FPS: {}",
-                        format_elapsed!(now), 
-                        self.framerate
-                    );
+                    // print_magenta!(
+                    //     "{:.6} [DBG VSYNC] !!! REBUFFERING !!! | No frames in queue | Target FPS: {}",
+                    //     format_elapsed!(now), 
+                    //     self.framerate
+                    // );
                     self.rebuffer_event_counter.add_one(now);
                 }
             }

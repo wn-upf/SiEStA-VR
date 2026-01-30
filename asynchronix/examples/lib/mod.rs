@@ -1509,8 +1509,8 @@ pub struct CsvData {
     v_queue_tq: Vec<f64>,
     v_packet_l: Vec<usize>,
 
-    v_id_src: Vec<usize>,
-    v_id_dest: Vec<usize>,
+    v_id_src: Vec<i32>,
+    v_id_dest: Vec<i32>,
     v_ampdu_id: Vec<u32>,
     v_collision: Vec<usize>,
     v_T_collision: Vec<f64>,
@@ -1585,8 +1585,8 @@ impl CsvType {
         Ts: f64,
         Tq: f64,
         length_packet: usize,
-        id_src: usize,
-        id_dest: usize,
+        id_src: i32,
+        id_dest: i32,
         ampdu_id: u32,
         is_collision: bool,
         T_collision: f64,
@@ -1835,8 +1835,8 @@ impl perStaStats {
         Ts: f64,
         Tq: f64,
         length_packet: usize,
-        sta_src_id: usize,
-        sta_dest_id: usize,
+        sta_src_id: i32,
+        sta_dest_id: i32,
     ) {
         self._q_time_sta_cum.add(Tq);
         self._s_time_sta_cum.add(Ts);
