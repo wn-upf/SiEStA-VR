@@ -2,20 +2,31 @@ use crate::lib::alvr_control_socket::{
     framed_recv_vec, ControlSocketReceiver, ControlSocketSender,
 };
 use crate::lib::gcc_nada_estimator::{GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
-use crate::lib::{alvr_stream_socket::{StreamReceiver, VideoCodec }, BATCH_SIZE_CSV};
+use crate::lib::{
+    alvr_stream_socket::{StreamReceiver, VideoCodec},
+    BATCH_SIZE_CSV,
+};
 // use async_std::future::pending;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
 use crate::lib::{get_prefix_path, render_text, AveragingStrategy, EdcaAc, HevcParser, WindowType};
 use crate::{
     // debug_debug,
-    print_magenta, taitime_to_f64,     // print_blue, print_brown, print_dblue, print_brown
+    print_magenta,
+    taitime_to_f64, // print_blue, print_brown, print_dblue, print_brown
 };
 
-use std::thread;
+use crate::lib::{
+    fovoptix::{FOAimdRateControl, FovOptixStruct, *},
+    models_mm1k::NetworkPattern,
+};
 use anyhow::Result;
+use core::f64;
+use ffmpeg_sidecar::command::FfmpegCommand;
+use glam::{Quat, Vec3};
 use image::{ImageBuffer, Rgb};
 use image_compare::rgb_hybrid_compare;
 use minifb::{Window, WindowOptions};
+use once_cell::sync::Lazy;
 use rand::distributions::Uniform;
 use rand::prelude::IteratorRandom;
 use rand::rngs::StdRng;
@@ -23,34 +34,39 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, Read, Write, BufRead};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread_local;
-use tempfile::TempDir;
-use tokio::sync::Semaphore;
-use crate::lib::{
-    fovoptix::{FOAimdRateControl, FovOptixStruct, *},
-    models_mm1k::NetworkPattern,
-};
-use core::f64;
-use ffmpeg_sidecar::command::FfmpegCommand;
-use glam::{Quat, Vec3};
-use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
-use std::net::IpAddr;
+use std::thread;
 use std::thread::yield_now;
+use std::thread_local;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 use std::{mem, vec};
+use tempfile::TempDir;
+use tokio::sync::Semaphore;
 
+use crate::lib::alvr_control_socket::ProtoControlSocket;
+use crate::lib::alvr_packets::{
+    ClientControlPacket, ClientStatistics, EverestCommand, NadaStats, NetworkStatisticsPacket,
+};
+use crate::lib::alvr_stream_socket::{
+    parse_shard_data, ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize,
+    SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader,
+};
+use crate::lib::alvr_stream_socket::{
+    AUDIO, FOVOPTIX_BW_PROBE, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
+};
+use crate::lib::DEBUG_PRINT_ENABLED;
 use crate::lib::{HeaderALVRStream, USE_FFMPEG_DEMO};
 use crate::print_pretty;
 #[allow(unused)]
@@ -58,27 +74,16 @@ use crate::{debug_bgprint, print_prettyy, print_red};
 #[allow(unused)]
 use crate::{debug_print, print_pink, print_prettyyyy, print_yellow};
 use crate::{format_elapsed, print_green};
-use crate::lib::alvr_control_socket::ProtoControlSocket;
-use crate::lib::alvr_packets::{
-    ClientControlPacket, ClientStatistics, EverestCommand, NadaStats, NetworkStatisticsPacket,
-};
-use crate::lib::alvr_stream_socket::{
-    ConnectionError, DscpTos, Haptics, ReceiverData, SocketBufferSize, SocketProtocol, SocketReader, StreamSender, StreamSocketBuilder, Tracking, VideoPacketHeader, parse_shard_data
-};
-use crate::lib::alvr_stream_socket::{
-    AUDIO, FOVOPTIX_BW_PROBE, HAPTICS, MAX_HISTORY_SIZE, STATISTICS, TRACKING, VIDEO,
-};
-use crate::lib::DEBUG_PRINT_ENABLED;
-use dashmap::DashMap;
-use tai_time::TaiTime;
 use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
+use dashmap::DashMap;
 use std::cmp::{self, max};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::future::Future;
 use std::sync::RwLock;
+use tai_time::TaiTime;
 
 use crate::lib::alvr_statistics::StatisticsManager;
 use crate::lib::CsvTrace;
@@ -95,7 +100,7 @@ use std::process::{Command as altCommand, Stdio};
 
 use tokio::sync::mpsc::UnboundedSender;
 
-////////////////////////////////////// CONSTS//////////////////////////////////////// TODO: STANDARDIZE AND GROUP CONSTS 
+////////////////////////////////////// CONSTS//////////////////////////////////////// TODO: STANDARDIZE AND GROUP CONSTS
 
 #[allow(unused)]
 pub enum WindowCommand {
@@ -114,9 +119,8 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<u32>() // shards index
     + mem::size_of::<f32>(); // tx relative timestamp
 
-
-pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false; 
-pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100; 
+pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false;
+pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100;
 pub const SPINNER_LOSS_THRESHOLD: usize = 10; // "N" frames
 
 pub const WIDTH_ENCODER: usize = 3840;
@@ -126,8 +130,8 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 #[allow(unused)]
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.35;  // X:1 scaling for 4k visuals in lower res screens
-pub const SCALE_FACTOR_GRAPH: f32 = 0.6; 
+pub const SCALE_FACTOR_WINDOW: f64 = 0.35; // X:1 scaling for 4k visuals in lower res screens
+pub const SCALE_FACTOR_GRAPH: f32 = 0.6;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -156,7 +160,9 @@ pub struct AltFfmpegCommand {
 }
 impl AltFfmpegCommand {
     pub fn new() -> Self {
-        Self { cmd: altCommand::new("ffmpeg") }
+        Self {
+            cmd: altCommand::new("ffmpeg"),
+        }
     }
     pub fn args(mut self, args: &[&str]) -> Self {
         self.cmd.args(args);
@@ -198,22 +204,29 @@ fn get_counter() -> &'static AtomicUsize {
 }
 
 pub fn is_keyframe(frame: &[u8], codec_type: VideoCodec) -> bool {
-    if frame.len() < 3 { return false; }
+    if frame.len() < 3 {
+        return false;
+    }
 
     match codec_type {
         VideoCodec::HEVC => {
             // ... (Your existing HEVC logic) ...
-             for i in 0..frame.len().saturating_sub(5) {
+            for i in 0..frame.len().saturating_sub(5) {
                 if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
-                    || (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1)
+                    || (frame[i] == 0
+                        && frame[i + 1] == 0
+                        && frame[i + 2] == 0
+                        && frame[i + 3] == 1)
                 {
                     let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
                     let nal_header_pos = i + start_code_len;
 
                     if nal_header_pos < frame.len() {
                         let nal_header = frame[nal_header_pos];
-                        let nal_type = (nal_header >> 1) & 0x3F; 
-                        if (16..=21).contains(&nal_type) { return true; }
+                        let nal_type = (nal_header >> 1) & 0x3F;
+                        if (16..=21).contains(&nal_type) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -221,21 +234,23 @@ pub fn is_keyframe(frame: &[u8], codec_type: VideoCodec) -> bool {
         VideoCodec::AV1 => {
             // Check the first OBU
             let obu0_type = (frame[0] >> 3) & 0xF;
-            if obu0_type == 1 { return true; } // Starts directly with Seq Header
+            if obu0_type == 1 {
+                return true;
+            } // Starts directly with Seq Header
 
             // Check if first OBU is a Temporal Delimiter (Type 2)
             // [TD Header (1B)] [Size (1B, usually 0)] -> Next OBU starts at index 2
             if obu0_type == 2 && frame.len() > 2 {
                 let obu1_type = (frame[2] >> 3) & 0xF;
-                if obu1_type == 1 { 
+                if obu1_type == 1 {
                     return true; // Found Seq Header after TD
                 }
             }
-            
+
             // Debug print to help you see what IS arriving
             // Only print if it's big enough to potentially be a keyframe to reduce spam
-            // if frame.len() > 5000 { 
-            //     println!("[AV1 CHECK] Frame len: {}, Type0: {}, Type1 (at idx2): {}", 
+            // if frame.len() > 5000 {
+            //     println!("[AV1 CHECK] Frame len: {}, Type0: {}, Type1 (at idx2): {}",
             //         frame.len(), obu0_type, (frame[2] >> 3) & 0xF);
             // }
         }
@@ -299,23 +314,22 @@ pub struct Av1Decoder {
     parser: crate::lib::Av1Parser,
     frame_buffer: VecDeque<Vec<u8>>,
     decoded_frames: VecDeque<Vec<u8>>,
-    
+
     // Metrics
     pub frames_processed: usize,
     pub keyframes_seen: usize,
     pub expected_frame_size: usize,
     pub total_bytes_processed: f64,
-    
+
     // Control
     decoder_string: String,
     priming_complete: bool,
     processing_semaphore: Arc<Semaphore>,
-    
+
     // Sync
     // id_queue: VecDeque<u32>,
     decoded_frame_counter: usize,
-
-    // pub metadata_queue: VecDeque<FrameMetadata>, 
+    // pub metadata_queue: VecDeque<FrameMetadata>,
 }
 
 impl Av1Decoder {
@@ -329,8 +343,8 @@ impl Av1Decoder {
             // .hwaccel("cuda") // Enable if you have RTX 30/40 series
             .args(&["-hide_banner", "-loglevel", "error"])
             .args(&["-f", "obu"]) // Input format is raw OBU
-            .args(&["-i", "-"])   // Read from stdin
-            .args(&["-s", &format!("{}x{}", width, height)]) 
+            .args(&["-i", "-"]) // Read from stdin
+            .args(&["-s", &format!("{}x{}", width, height)])
             .args(&["-vsync", "0"])
             .args(&["-pix_fmt", "rgb24"]) // Output format
             .args(&["-f", "rawvideo", "-"]) // Write to stdout
@@ -338,7 +352,7 @@ impl Av1Decoder {
             .expect("Failed to spawn ffmpeg decoder");
 
         let stdout = child.stdout.take().unwrap();
-        let stdin =  child.stdin.take().unwrap();
+        let stdin = child.stdin.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
         let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
@@ -358,7 +372,9 @@ impl Av1Decoder {
                         buffer.extend_from_slice(&chunk[..n]);
                         while buffer.len() >= frame_size {
                             let frame = buffer.drain(..frame_size).collect::<Vec<u8>>();
-                            if let Err(_) = frame_tx.send(frame) { return; }
+                            if let Err(_) = frame_tx.send(frame) {
+                                return;
+                            }
                         }
                     }
                     Err(e) => {
@@ -415,14 +431,12 @@ impl Av1Decoder {
         }
     }
 
-    pub fn process_packet(&mut self, packet: Vec<u8> ) {
-        
-        
+    pub fn process_packet(&mut self, packet: Vec<u8>) {
         self.frames_processed += 1;
-        if let Err(e) = self.packet_tx.send(packet) {  // has already been packetized in encoding
-                    eprintln!("Failed to send to ffmpeg: {}", e);
+        if let Err(e) = self.packet_tx.send(packet) {
+            // has already been packetized in encoding
+            eprintln!("Failed to send to ffmpeg: {}", e);
         }
-   
     }
 
     pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>)> {
@@ -440,16 +454,15 @@ impl Av1Decoder {
         }
 
         if let Some(frame) = self.decoded_frames.pop_front() {
-            // In a real scenario, you handle ID queue sync carefully. 
+            // In a real scenario, you handle ID queue sync carefully.
             // For this visualization, we just pop.
             // let id = self.id_queue.pop_front().unwrap_or(0);
-            // let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default()); 
+            // let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default());
             return Some(frame);
         }
         None
     }
 }
-
 
 #[allow(non_camel_case_types, unused)]
 pub struct HevcDecoder {
@@ -511,7 +524,7 @@ impl HevcDecoder {
             .args(&["-tune", "zerolatency"])
             // .args(&["-preset", "ultrafast"])
             .args(&["-vsync", "passthrough"])
-            .args(&["-s", &format!("{}x{}", width, height)]) 
+            .args(&["-s", &format!("{}x{}", width, height)])
             .args(&["-f", "rawvideo", "-"])
             .spawn()
             .unwrap();
@@ -590,15 +603,13 @@ impl HevcDecoder {
         });
 
         let decoder_string3 = decoder_string.clone(); // Stderr handler with improved debug output
-        
-        
-        
-        const LOG_ERRORS_HEVC_DECODER: bool = true; 
 
-        let mut stderr_container; 
+        const LOG_ERRORS_HEVC_DECODER: bool = true;
+
+        let mut stderr_container;
         if LOG_ERRORS_HEVC_DECODER {
             let stderr_handle = std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
+                let mut reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     match line {
                         Ok(l) => eprintln!("[{} HEVC]: {}", decoder_string3, l),
@@ -607,17 +618,12 @@ impl HevcDecoder {
                 }
 
                 println!("{decoder_string3} Decoder stderr reader thread exit");
-
-
             });
-            stderr_container = Some(stderr_handle); 
-
+            stderr_container = Some(stderr_handle);
+        } else {
+            stderr_container = None;
         }
 
-        else{
-            stderr_container = None; 
-        }
-        
         println!(
             "{decoder_str} 📹 HevcDecoder initialized with {}x{} resolution",
             width, height
@@ -704,7 +710,6 @@ impl HevcDecoder {
 
         false
     }
-
 
     pub fn inject_parameter_sets(
         &mut self,
@@ -816,8 +821,7 @@ impl HevcDecoder {
     /// Extract complete parameter set packets from a buffer
     /// This is useful when you want to extract the parameter sets as complete NAL units
     /// including the start code, which is necessary for feeding to another decoder
-    
-        
+
     /// Standalone function for finding the next NAL start code in a buffer
     pub fn find_next_start_code(&self, buffer: &[u8], start_pos: usize) -> Option<usize> {
         for i in start_pos..buffer.len().saturating_sub(3) {
@@ -834,7 +838,7 @@ impl HevcDecoder {
         }
         None
     }
-    
+
     pub fn extract_complete_parameter_sets(
         &self,
         buffer: &[u8],
@@ -868,8 +872,9 @@ impl HevcDecoder {
             let nal_type = (nal_header >> 1) & 0x3F; // Extract bits 1-6 (NAL type)
 
             // Find the end of this NAL unit (next start code or end of buffer)
-            let next_pos =
-                self.find_next_start_code(buffer, pos + start_code_len).unwrap_or(buffer.len());
+            let next_pos = self
+                .find_next_start_code(buffer, pos + start_code_len)
+                .unwrap_or(buffer.len());
 
             // Extract the complete NAL unit with start code
             match nal_type {
@@ -1242,7 +1247,6 @@ impl HevcDecoder {
         }
     }
 }
-
 
 // #[derive(Clone, PartialEq, Debug)]
 #[allow(unused)]
@@ -3355,7 +3359,7 @@ pub struct XRServer {
     pub t_update_abr: f32,
 
     pub edca_be_mode: bool,
-    pub codec_selection: VideoCodec
+    pub codec_selection: VideoCodec,
 }
 #[allow(unused)]
 impl XRServer {
@@ -3379,7 +3383,7 @@ impl XRServer {
         t_update_abr: f32,
         packet_size_sockets: usize,
         edca_be_mode: bool,
-        codec_selection: VideoCodec, 
+        codec_selection: VideoCodec,
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         let mut final_file;
@@ -3445,7 +3449,6 @@ impl XRServer {
                 obs_config,
                 t_update_abr,
                 reward_mode,
-                
             ),
 
             video_app_sender: None,
@@ -3492,7 +3495,7 @@ impl XRServer {
             reward_mode,
             t_update_abr,
             edca_be_mode,
-            codec_selection, 
+            codec_selection,
         }
     }
 
@@ -3882,7 +3885,6 @@ impl XRServer {
                 "{}[DBG XR_SERVER {}] Sending to network the following packets:",
                 elapsed.as_secs_f64(),
                 self.ip_self,
-
             );
             while !stop {
                 let bytes_received = {
@@ -3938,7 +3940,7 @@ impl XRServer {
 
                                 if packet.header_alvr.shard_index == 0 {
                                     debug_print!(
-                                        DebugColor::DarkGreen, 
+                                        DebugColor::DarkGreen,
                                         "{:.9}-Server {} sending {:#?}",
                                         now.duration_since(self.t_0).as_secs_f64(),
                                         self.ip_self,
@@ -4028,8 +4030,7 @@ impl XRServer {
                 let header_bytes = bincode::serialize(&header).unwrap();
                 raw[SHARD_PREFIX_SIZE..SHARD_PREFIX_SIZE + hsize].copy_from_slice(&header_bytes);
 
-
-                // debug_bgprint!(DebugColor::SaddleBrown, "{} Generating audio frame of {} bytes", format_elapsed!(now), payload_len_bytes); 
+                // debug_bgprint!(DebugColor::SaddleBrown, "{} Generating audio frame of {} bytes", format_elapsed!(now), payload_len_bytes);
 
                 // 5) wrap it—length is _only_ the payload
                 let buf = crate::lib::alvr_stream_socket::Buffer {
@@ -4297,21 +4298,19 @@ impl XRServer {
                 XRServer::read_app_send_network_interface(self, (), now, buffer, arc_receiver)
                     .await; // FUNCTION TO HANDLE NETWORK PACKETS!
 
-
                 let ideal = 1.0 / (self.fps as f32);
                 let floor = 0.5 * ideal;
-                
+
                 let time_until_next_frame = if FPS_RANDOMIZED_EPSILON_RENDERING_SERVER {
                     let normal: Normal<f32> = Normal::new(0.0, 0.001).unwrap(); // σ = 0.001s
                     let epsilon = normal.sample(&mut rand::thread_rng());
                     let dt = (ideal + epsilon).max(floor);
                     Duration::from_secs_f32(dt)
-                }
-                else{
+                } else {
                     let dt = ideal;
                     Duration::from_secs_f32(dt)
-                }; 
-                
+                };
+
                 self.bitrate_manager.report_encoded_frame_server(now);
 
                 context
@@ -4351,17 +4350,24 @@ impl XRServer {
             // println!("{} Connection established!", client_ip);
             self.is_streaming = true;
 
-            self.video_app_sender =
-                Some(stream_socket.request_stream::<VideoPacketHeader>(VIDEO, self.t_0, self.codec_selection));
+            self.video_app_sender = Some(stream_socket.request_stream::<VideoPacketHeader>(
+                VIDEO,
+                self.t_0,
+                self.codec_selection,
+            ));
 
-            self.audio_app_sender = Some(stream_socket.request_stream(AUDIO, self.t_0, self.codec_selection, ));
+            self.audio_app_sender =
+                Some(stream_socket.request_stream(AUDIO, self.t_0, self.codec_selection));
 
             if matches!(
                 self.bitrate_manager.bitrate_mode,
                 BitrateMode::FovOptixPort { .. }
             ) {
-                self.bw_probe_sender =
-                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0, self.codec_selection, ));
+                self.bw_probe_sender = Some(stream_socket.request_stream(
+                    FOVOPTIX_BW_PROBE,
+                    self.t_0,
+                    self.codec_selection,
+                ));
                 self.bw_probe_receiver =
                     Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
 
@@ -4758,21 +4764,19 @@ impl TimedRebufferCounter {
     }
 }
 
-
 pub enum VideoDecoder {
     Hevc(HevcDecoder),
     Av1(Av1Decoder),
 }
 
 impl VideoDecoder {
-
-   /// Unified Async Process Packet
+    /// Unified Async Process Packet
     pub fn process_packet(&mut self, packet: Vec<u8>) {
         match self {
             VideoDecoder::Hevc(d) => {
                 // HEVC is currently sync and doesn't explicitly use ID in the snippet
                 d.process_packet(packet);
-            },
+            }
             VideoDecoder::Av1(d) => {
                 d.process_packet(packet);
             }
@@ -4791,7 +4795,6 @@ impl VideoDecoder {
     //         }
     //     }
 
-
     // }
 
     /// Unified Frame Retrieval
@@ -4800,10 +4803,10 @@ impl VideoDecoder {
             VideoDecoder::Hevc(d) => {
                 // 1. Pump the internal channel to the deque
                 d.process_decoded_frames();
-                
+
                 // 2. Pop from the deque
                 d.decoded_frames.pop_front()
-            },
+            }
             VideoDecoder::Av1(d) => {
                 // AV1 implementation already handles channel polling inside this method
                 d.next_decoded_frame()
@@ -4825,11 +4828,7 @@ impl VideoDecoder {
     //         VideoDecoder::Av1(d) => &d.decoder_string,
     //     }
     // }
-
-
-
 }
-
 
 #[allow(unused)]
 pub struct XRClient {
@@ -4915,8 +4914,6 @@ pub struct XRClient {
     // frame_batch: Vec<(usize, Vec<u8>, Vec<u8>, f64)>, // (frame_id, sample, ref_sample, timestamp)
 
     // last_batch_process_time: TaiTime<0>,
-
-
     test: String,
 
     lost_ids_reference_buffer: VecDeque<(u32, u32)>,
@@ -4954,10 +4951,10 @@ pub struct XRClient {
 
     edca_be_mode: bool,
 
-    codec_selection: VideoCodec, 
+    codec_selection: VideoCodec,
     frame_size_history_vec: VecDeque<usize>,
-    window_tx: Option<UnboundedSender<WindowCommand>>, // The handle to talk to the window 
-    consecutive_lost_counter: usize, 
+    window_tx: Option<UnboundedSender<WindowCommand>>, // The handle to talk to the window
+    consecutive_lost_counter: usize,
 }
 
 #[allow(unused)]
@@ -4975,7 +4972,7 @@ impl XRClient {
         t_update_abr: f32,
         packet_size_sockets: usize,
         edca_be_mode: bool,
-        codec_selection: VideoCodec, 
+        codec_selection: VideoCodec,
     ) -> Self {
         // let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
@@ -4994,15 +4991,14 @@ impl XRClient {
         let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
         let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
         let total_height = window_height + GRAPH_HUD_HEIGHT;
-        
+
         let initial_title = format!("Client [{}] - Waiting for Stream...", server_ip);
 
         // 4. Spawn the Window Actor
         if USE_FFMPEG_DEMO {
             Self::spawn_display_thread(rx, initial_title, window_width, total_height);
-
         }
-            
+
         // let everest_enabled = abr_mode == 2;
         let everest_enabled = true; // to enable info on heuristics for RL mode
 
@@ -5095,12 +5091,11 @@ impl XRClient {
             abr_mode,
             t_update_abr,
             edca_be_mode,
-            codec_selection, 
+            codec_selection,
 
-            frame_size_history_vec: VecDeque::from(vec![0; DISPLAY_GRAPH_MAX_FRAMES]), 
+            frame_size_history_vec: VecDeque::from(vec![0; DISPLAY_GRAPH_MAX_FRAMES]),
             window_tx: Some(tx), // Store the tokio sender
-            consecutive_lost_counter: 0, 
-            
+            consecutive_lost_counter: 0,
         }
     }
 
@@ -5108,15 +5103,16 @@ impl XRClient {
         mut rx: tokio::sync::mpsc::UnboundedReceiver<WindowCommand>,
         initial_title: String,
         width: usize,
-        height: usize
+        height: usize,
     ) {
         std::thread::spawn(move || {
-            let mut window = Window::new(&initial_title, width, height, WindowOptions::default()).unwrap();
+            let mut window =
+                Window::new(&initial_title, width, height, WindowOptions::default()).unwrap();
             window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
 
             // 1. Create a buffer to hold the last valid image (Persistent State)
             let mut last_valid_buffer = vec![0u32; width * height];
-            
+
             // Initialize with a simple background or spinner
             let mut spinner_buffer = vec![0u32; width * height];
             let start_time = std::time::Instant::now();
@@ -5125,33 +5121,47 @@ impl XRClient {
             while window.is_open() {
                 match rx.try_recv() {
                     // CASE: New Frame Arrived (Video or Spinner update)
-                    Ok(WindowCommand::Update { buffer, width: w, height: h, title }) => {
+                    Ok(WindowCommand::Update {
+                        buffer,
+                        width: w,
+                        height: h,
+                        title,
+                    }) => {
                         has_received_first_frame = true;
                         window.set_title(&title);
-                        
+
                         // Update the window
                         window.update_with_buffer(&buffer, w, h).unwrap();
-                        
+
                         // 2. CACHE IT: Save this buffer as the "Last Known Good" state
                         if buffer.len() == last_valid_buffer.len() {
                             last_valid_buffer.copy_from_slice(&buffer);
                         }
                     }
-                    
+
                     Ok(WindowCommand::Quit) => break,
-                    
+
                     // CASE: No New Data (Freeze Mode)
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                         if !has_received_first_frame {
                             // ... (Your existing Init Spinner logic) ...
                             let elapsed = start_time.elapsed().as_secs_f32();
-                            crate::lib::render_loading_spinner(&mut spinner_buffer, width, height, elapsed);
-                            window.update_with_buffer(&spinner_buffer, width, height).unwrap();
+                            crate::lib::render_loading_spinner(
+                                &mut spinner_buffer,
+                                width,
+                                height,
+                                elapsed,
+                            );
+                            window
+                                .update_with_buffer(&spinner_buffer, width, height)
+                                .unwrap();
                         } else {
                             // 3. PERSISTENCE: Redraw the cached frame!
                             // Instead of sending &[], we send the last valid pixels.
                             // This prevents black screens/flickering on some OS backends.
-                            window.update_with_buffer(&last_valid_buffer, width, height).unwrap();
+                            window
+                                .update_with_buffer(&last_valid_buffer, width, height)
+                                .unwrap();
                         }
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
@@ -5257,15 +5267,18 @@ impl XRClient {
                 self.input_app_bw_probe =
                     Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
 
-                self.output_app_bw_probe_back =
-                    Some(stream_socket.request_stream(FOVOPTIX_BW_PROBE, self.t_0, self.codec_selection));
+                self.output_app_bw_probe_back = Some(stream_socket.request_stream(
+                    FOVOPTIX_BW_PROBE,
+                    self.t_0,
+                    self.codec_selection,
+                ));
                 // way back for bw probing packets.
             }
 
             self.streamsocket_clone = Some(stream_socket.clone());
 
             self.output_app_tracking_sender =
-                Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection, ));
+                Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection));
 
             XRClient::generate_tracking_data(self, (), context).await;
         }
@@ -5601,9 +5614,10 @@ impl XRClient {
             // edca_ac: EdcaAc::BestEffort, // Non-crutial to be received timely, we don't want it to interfere with UL tracking.
         };
 
-        for (i, frame)  in frames.iter().enumerate() {
+        for (i, frame) in frames.iter().enumerate() {
             // print_red!("[DBGGGY] MARKING FRAME {} for SKIPPING in REF DECODER", frame);
-            self.lost_ids_reference_buffer.push_back((*frame, shards_lost[i] as u32));
+            self.lost_ids_reference_buffer
+                .push_back((*frame, shards_lost[i] as u32));
         }
 
         context
@@ -5795,8 +5809,7 @@ impl XRClient {
                         if frame_span != 0.0 {
                             // prevent division by zero
                             if EVEREST_CLASSIC {
-                                if is_keyframe(&nal, self.codec_selection) 
-                                {
+                                if is_keyframe(&nal, self.codec_selection) {
                                     everest_throughput = frame_size_bytes * 8.0 / frame_span;
                                 } else {
                                     let frame_size_mtu_portion =
@@ -6295,7 +6308,9 @@ impl XRClient {
                 if Path::new(&csv_path).exists() {
                     print_green!("Read from: {}", csv_path);
                     self.offline_csv_trace.path = csv_path.clone().into();
-                    self.offline_csv_trace.init_writer().expect("CSV trace missing!");
+                    self.offline_csv_trace
+                        .init_writer()
+                        .expect("CSV trace missing!");
                 }
             }
 
@@ -6322,13 +6337,17 @@ impl XRClient {
                 // Attempt to pop frame from queue
                 if let Some((id_f, video_frame)) = self.decoder_queue.pop() {
                     frame_id_processed = id_f;
-                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 { 1 } else { 0 };
+                    let lost = if self.last_seen_id != 0 && id_f != self.last_seen_id + 1 {
+                        1
+                    } else {
+                        0
+                    };
                     self.last_seen_id = id_f;
                     let timestamp = now.duration_since(self.t_0).as_secs_f64();
 
                     // print_magenta!(
                     //     "{:.6} [DBG VSYNC] Pop Frame: ID={} | FPS={} | Queue: {} -> {} | Size: {} bytes",
-                    //     format_elapsed!(now), 
+                    //     format_elapsed!(now),
                     //     id_f,
                     //     self.framerate,
                     //     queue_len_before,
@@ -6337,14 +6356,19 @@ impl XRClient {
                     // );
                     // CSV Logging
                     if Path::new(&csv_path).exists() {
-                        self.offline_csv_trace.write_record(&[
-                            "", "", "", 
-                            &format!("{:.6}", timestamp),
-                            &id_f.to_string(),
-                            &lost.to_string(),
-                            &format!("{:.3}", self.last_throughput_avg),
-                        ]).await.expect("failed to append offline csv row");
-                        
+                        self.offline_csv_trace
+                            .write_record(&[
+                                "",
+                                "",
+                                "",
+                                &format!("{:.6}", timestamp),
+                                &id_f.to_string(),
+                                &lost.to_string(),
+                                &format!("{:.3}", self.last_throughput_avg),
+                            ])
+                            .await
+                            .expect("failed to append offline csv row");
+
                         if id_f % BATCH_SIZE_CSV == 0 {
                             let _ = self.offline_csv_trace.flush().await;
                         }
@@ -6362,13 +6386,16 @@ impl XRClient {
 
                     // Decoder Ready Check
                     if !self.is_decoder_ready && USE_FFMPEG_DEMO {
-                        if !video_frame.is_empty() { self.initialization_buffer.push(video_frame.clone()); }
-                        let has_enough = self.initialization_buffer.len() >= self.min_buffered_frames;
-                        
+                        if !video_frame.is_empty() {
+                            self.initialization_buffer.push(video_frame.clone());
+                        }
+                        let has_enough =
+                            self.initialization_buffer.len() >= self.min_buffered_frames;
+
                         if has_enough && self.dec_saw_keyframe {
                             self.is_decoder_ready = true;
                             self.initialization_buffer.clear();
-                            print_pretty!(DebugColor::Cyan, "Decoder initialization complete.", );
+                            print_pretty!(DebugColor::Cyan, "Decoder initialization complete.",);
                         }
                     }
 
@@ -6377,7 +6404,7 @@ impl XRClient {
                         if let Some(decoder_arc) = self.original_decoder.clone() {
                             let mut decoder = decoder_arc.lock().unwrap();
                             decoder.process_packet(video_frame.clone());
-                            
+
                             // Try to get the frame
                             if let Some(frame) = decoder.next_decoded_frame() {
                                 decoded_frame_candidate = Some(frame);
@@ -6386,13 +6413,14 @@ impl XRClient {
                     }
 
                     self.last_decoded_frame_instant = now;
-                    self.out_video_decoded.send(video_frame[0..10.min(video_frame.len())].to_vec()).await;
-
+                    self.out_video_decoded
+                        .send(video_frame[0..10.min(video_frame.len())].to_vec())
+                        .await;
                 } else {
                     // REBUFFER EVENT (Queue empty)
                     // print_magenta!(
                     //     "{:.6} [DBG VSYNC] !!! REBUFFERING !!! | No frames in queue | Target FPS: {}",
-                    //     format_elapsed!(now), 
+                    //     format_elapsed!(now),
                     //     self.framerate
                     // );
                     self.rebuffer_event_counter.add_one(now);
@@ -6402,11 +6430,11 @@ impl XRClient {
             // ---------------------------------------------------------
             // RENDERING BLOCK (Prepare buffer for thread)
             // ---------------------------------------------------------
-            
+
             // CASE A: We have a decoded frame ready
             if let Some(frame) = decoded_frame_candidate {
-                let lost_frames_aux = self.lost_ids_reference_buffer.clone(); 
-                
+                let lost_frames_aux = self.lost_ids_reference_buffer.clone();
+
                 // Render video to buffer
                 display_single_frame_with_info_buffered(
                     &frame,
@@ -6422,29 +6450,34 @@ impl XRClient {
                     GRAPH_HUD_HEIGHT,
                     self.framerate,
                     self.codec_selection,
-                    SCALE_FACTOR_GRAPH, 
+                    SCALE_FACTOR_GRAPH,
                 );
 
                 // Reset tracking
-                self.lost_ids_reference_buffer.clear(); 
+                self.lost_ids_reference_buffer.clear();
                 should_update_window = true;
-            } 
+            }
             // CASE B: No frame (Rebuffering/Spinning)
             else {
                 // Calculate elapsed time for animation
                 let is_start = self.last_seen_id == 0;
-    
+
                 // Condition 2: Loss Threshold Exceeded
                 let is_network_bad = self.consecutive_lost_counter >= SPINNER_LOSS_THRESHOLD;
 
                 if is_start || is_network_bad {
                     // --- SPINNING MODE ---
                     let elapsed = now.duration_since(self.t_0).as_secs_f32();
-                    
-                    // Draw spinner on top of the EXISTING display_buffer 
+
+                    // Draw spinner on top of the EXISTING display_buffer
                     // (which currently holds the last valid frame)
-                    crate::lib::render_loading_spinner(&mut display_buffer, window_width, window_height, elapsed);
-                    
+                    crate::lib::render_loading_spinner(
+                        &mut display_buffer,
+                        window_width,
+                        window_height,
+                        elapsed,
+                    );
+
                     // Optional: Black out the HUD area if you want, or leave it
                     let hud_color = 0x101010;
                     for y in window_height..total_window_height {
@@ -6452,22 +6485,17 @@ impl XRClient {
                             display_buffer[y * window_width + x] = hud_color;
                         }
                     }
-                    if let Some( tx)  = &self.window_tx {
+                    if let Some(tx) = &self.window_tx {
                         let _ = tx.send(WindowCommand::Update {
-                        buffer: display_buffer.clone(),
-                        width: window_width,
-                        height: total_window_height,
-                        title: "Buffering...".to_string(),
-                    });
+                            buffer: display_buffer.clone(),
+                            width: window_width,
+                            height: total_window_height,
+                            title: "Buffering...".to_string(),
+                        });
                     }
                     should_update_window = true;
-                    
-                    
                 } else {
                     // --- FREEZE MODE ---
-
-                    
-
                 }
             }
 
@@ -6477,7 +6505,7 @@ impl XRClient {
             if should_update_window {
                 if let Some(tx) = &self.window_tx {
                     let title = format!("{} - [{}]", format_elapsed!(now), self.server_ip);
-                    
+
                     let cmd = WindowCommand::Update {
                         buffer: display_buffer, // Moves the vector to the other thread
                         width: window_width,
@@ -6495,7 +6523,10 @@ impl XRClient {
             }
 
             // Schedule Next VSYNC
-            context.scheduler.schedule_event(T_vsync, Self::vsync, ()).unwrap();
+            context
+                .scheduler
+                .schedule_event(T_vsync, Self::vsync, ())
+                .unwrap();
         }
     }
 
@@ -6731,13 +6762,12 @@ pub fn display_single_frame_with_info_buffered(
     lost_frames: VecDeque<(u32, u32)>,
     lost_frames_buffer: &mut LostFramesBuffer,
     bm: &str,
-    size_history: &VecDeque<usize>, 
+    size_history: &VecDeque<usize>,
     hud_height: usize,
-    framerate: f32, 
-    codec_type: VideoCodec, 
-    graph_scale_factor: f32, 
+    framerate: f32,
+    codec_type: VideoCodec,
+    graph_scale_factor: f32,
 ) -> bool {
-    
     // 1) Compute scaled dimensions
     let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
     let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
@@ -6763,7 +6793,7 @@ pub fn display_single_frame_with_info_buffered(
         for x in 0..scaled_w {
             let sx = x * WIDTH_ENCODER as usize / scaled_w;
             let sy = y * HEIGHT_ENCODER as usize / scaled_h;
-            
+
             // Calculate index in source and dest
             let src_idx = sy * WIDTH_ENCODER as usize + sx;
             let dst_idx = y * stride + x; // Use 'stride', not scaled_w (safer)
@@ -6775,7 +6805,7 @@ pub fn display_single_frame_with_info_buffered(
     }
 
     // 4) Fill the bottom HUD area with a dark background
-    let hud_bg_color = 0x101010; 
+    let hud_bg_color = 0x101010;
     for y in scaled_h..total_h {
         for x in 0..scaled_w {
             display_buffer[y * stride + x] = hud_bg_color;
@@ -6784,21 +6814,21 @@ pub fn display_single_frame_with_info_buffered(
 
     // 5) Render the Graph
     let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
-    let target_graph_height = (250.0 * graph_scale_factor) as usize; 
-    let bottom_padding = 20; 
+    let target_graph_height = (250.0 * graph_scale_factor) as usize;
+    let bottom_padding = 20;
     let graph_y_pos = total_h.saturating_sub(bottom_padding + target_graph_height);
-    
+
     crate::lib::render_graph(
-        display_buffer,     // <--- Pass external buffer
+        display_buffer, // <--- Pass external buffer
         &history_f32,
-        85,              
-        graph_y_pos,     
-        stride,             // <--- Pass stride
-        bitrate_mbps * 1_000_000.0, 
-        framerate,              
+        85,
+        graph_y_pos,
+        stride, // <--- Pass stride
+        bitrate_mbps * 1_000_000.0,
+        framerate,
         target_graph_height,
-        200_000.0,       
-        true,            
+        200_000.0,
+        true,
     );
 
     // 6) Render Text
@@ -6806,29 +6836,27 @@ pub fn display_single_frame_with_info_buffered(
     let line_h = 25;
     let line_hh = 100;
 
-    const SCALE_TEXT_WINDOW: usize = 3; 
-        // --- RIGHT SIDE ELEMENTS ---
-    let right_margin = 600; 
+    const SCALE_TEXT_WINDOW: usize = 3;
+    // --- RIGHT SIDE ELEMENTS ---
+    let right_margin = 600;
     let right_x = scaled_w.saturating_sub(right_margin);
 
-    // let right_margin = 600; 
+    // let right_margin = 600;
     // let text_x = scaled_w.saturating_sub(right_margin);
-    // let first_y = scaled_h + 30; 
+    // let first_y = scaled_h + 30;
 
     // // Existing Codec position
-    // let right_margin = 600; 
+    // let right_margin = 600;
     // let text_x = scaled_w.saturating_sub(right_margin);
     // let line_spacing = 50; // Vertical distance between lines
 
     // // 1. Render Codec (Already in your code)
     // // --- Step 6: Render Text (Unified HUD) ---
     // let flashy_yellow = 0xFFFF00;
-    
+
     // // Vertical Alignment Variables
     // let first_y = scaled_h + 30;  // Same starting Y for both sides
     // let line_spacing = 33;        // Same spacing for both sides
-
-
 
     // // 1. Codec
     // render_text(
@@ -6883,14 +6911,14 @@ pub fn display_single_frame_with_info_buffered(
     //     flashy_yellow,
     //     SCALE_TEXT_WINDOW,
     // );
-    let first_y: usize = scaled_h + 30; 
+    let first_y: usize = scaled_h + 30;
     let flashy_yellow = 0xFFFF00;
-    let row_height = 33;    // Vertical spacing between rows
-    let cell_width = 450;   // Total width for the Key-Value pair block
+    let row_height = 33; // Vertical spacing between rows
+    let cell_width = 450; // Total width for the Key-Value pair block
     let bar_position = Some(180); // Pixels from the left of the cell
-    // --- HUD GRID RENDERING ---
-    
-    let time_str = format!("{:.6}", format_elapsed!(now)); 
+                                  // --- HUD GRID RENDERING ---
+
+    let time_str = format!("{:.6}", format_elapsed!(now));
     crate::render_hud_grid!(
         display_buffer,
         stride,
@@ -6900,37 +6928,34 @@ pub fn display_single_frame_with_info_buffered(
         SCALE_TEXT_WINDOW,
         cell_width,
         row_height,
-        true,            // Enable Box
-        bar_position,    // Enable Bar at 180px
-        [   
+        true,         // Enable Box
+        bar_position, // Enable Bar at 180px
+        [
             ("Time", &time_str),
             ("Frame ID", frame_id),
             ("Codec", codec_type),
-            ("ABR Mode", bm), 
+            ("ABR Mode", bm),
             ("Bitrate", format!("{:.2} Mbps", bitrate_mbps))
         ]
     );
 
-
     // 7) Handle lost-frames buffer updates
     if !lost_frames.is_empty() {
-
-        for (frames,shards) in lost_frames{
+        for (frames, shards) in lost_frames {
             let msg = format!(
                 "T: {:5.5} Frame lost: {} - Missing shards: {}",
                 format_elapsed!(now),
                 frames,
-                shards, 
+                shards,
             );
             lost_frames_buffer.add_message(msg);
-        }       
+        }
     }
-
 
     // 8) Render rolling messages in the gap between video and graph
     let message_margin = 10;
     let message_line_height = 25;
-    
+
     // The "ceiling" is the bottom of the video
     let gap_start_y = scaled_h + message_margin;
     // The "floor" is the top of the graph
@@ -6938,7 +6963,9 @@ pub fn display_single_frame_with_info_buffered(
 
     for (i, entry) in lost_frames_buffer.messages.iter().rev().enumerate() {
         let opacity = calculate_opacity(entry);
-        if opacity == 0 { continue; }
+        if opacity == 0 {
+            continue;
+        }
 
         // Calculate Y: Start at gap_start_y and move down for each message
         let y_pos = gap_start_y + (i * message_line_height);
@@ -6956,13 +6983,13 @@ pub fn display_single_frame_with_info_buffered(
                 opacity,
             );
         } else {
-            // Optional: break if we run out of space to avoid 
+            // Optional: break if we run out of space to avoid
             // drawing messages over the graph
-            break; 
+            break;
         }
     }
 
-    // Note: Window Title update is removed. 
+    // Note: Window Title update is removed.
     // The caller must construct the title string and pass it to the Window Actor.
 
     true
@@ -7075,7 +7102,7 @@ impl STA_extended {
         async move {
             const LIMIT_MOVEMENT_RADIUS: f64 = 0.5; // circle of 1m radius.
             const RANDOM_WALK_SPEED: f64 = 2.0; // 2 m/s
-            const DELTA_T: f64 = 0.01; 
+            const DELTA_T: f64 = 0.01;
 
             // Step length = speed * delta_t
             let step = RANDOM_WALK_SPEED * DELTA_T;

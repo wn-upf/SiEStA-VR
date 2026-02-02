@@ -12,10 +12,8 @@ use lib::alvr_stream_socket::{ChunkedHevcEncoder, ChunkedSoftwareHevcEncoder};
 use std::env;
 use std::path::PathBuf;
 
-
-
-pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes"; 
-pub const VIDEO_NAME: &str =    "snow"; 
+pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
+pub const VIDEO_NAME: &str = "snow";
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
@@ -24,12 +22,18 @@ fn get_paths() -> (PathBuf, PathBuf) {
         // HPC user
         "fmaura" => (
             PathBuf::from("/home/fmaura/simulator_asynchronix/asynchronix/video_samples_vmaf"),
-            PathBuf::from( &format!("/home/fmaura/simulator_asynchronix/asynchronix/{}", CSV_FOLDER_STR)),
+            PathBuf::from(&format!(
+                "/home/fmaura/simulator_asynchronix/asynchronix/{}",
+                CSV_FOLDER_STR
+            )),
         ),
         // Local user
         "boris" => (
             PathBuf::from("/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf"),
-            PathBuf::from(&format!("/home/boris/Desktop/Rust_MG1/asynchronix/{}", CSV_FOLDER_STR)),
+            PathBuf::from(&format!(
+                "/home/boris/Desktop/Rust_MG1/asynchronix/{}",
+                CSV_FOLDER_STR
+            )),
         ),
         // Fallback (optional)
         _ => (
@@ -51,9 +55,9 @@ async fn encode_one_video(
     intra_refresh: bool,
     framerate: u32,
     bitrate_mbps: f32,
-    codec: VideoCodec, 
+    codec: VideoCodec,
 ) -> anyhow::Result<()> {
-    let video_name = format!("{}_{}fps.mp4", VIDEO_NAME,  framerate);
+    let video_name = format!("{}_{}fps.mp4", VIDEO_NAME, framerate);
     let video_path = video_dir.join(&video_name);
 
     if !video_path.exists() {
@@ -63,7 +67,7 @@ async fn encode_one_video(
     let codec_str = match codec {
         VideoCodec::AV1 => "AV1",
         VideoCodec::HEVC => "HEVC",
-        // Add _ => "Unknown" if you expect other variants, 
+        // Add _ => "Unknown" if you expect other variants,
         // but typically these are the two main ones here.
     };
 
@@ -74,51 +78,46 @@ async fn encode_one_video(
         bitrate_mbps
     ));
 
-   
-
     let mut enc = match codec {
         VideoCodec::AV1 => ChunkedEncoder::Av1(ChunkedAv1Encoder::new(
-                    video_path.to_str().unwrap(),
-                         width as u32,
-                        height as u32,
-                        &format!("{:.2}M", bitrate_mbps),
-                        CHUNK_DURATION, // chunk_seconds
-                        format!("[AV1 ENCODER [{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
-                        0.0,
-                        framerate as f32,
-                        gop_size,
-                        intra_refresh,
-                    )),
+            video_path.to_str().unwrap(),
+            width as u32,
+            height as u32,
+            &format!("{:.2}M", bitrate_mbps),
+            CHUNK_DURATION, // chunk_seconds
+            format!("[AV1 ENCODER [{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+            0.0,
+            framerate as f32,
+            gop_size,
+            intra_refresh,
+        )),
 
-        VideoCodec::HEVC => 
+        VideoCodec::HEVC => ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
+            video_path.to_str().unwrap(),
+            width as u32,
+            height as u32,
+            &format!("{:.2}M", bitrate_mbps),
+            CHUNK_DURATION, // chunk_seconds
+            format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+            0.0,
+            framerate as f32,
+            gop_size,
+            intra_refresh,
+        )),
 
-            ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
-                video_path.to_str().unwrap(),
-                width as u32,
-                height as u32,
-                &format!("{:.2}M", bitrate_mbps),
-                CHUNK_DURATION, // chunk_seconds
-                format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
-                0.0,
-                framerate as f32,
-                gop_size,
-                intra_refresh,
-            )), 
-
-            _ => ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
-                video_path.to_str().unwrap(),
-                width as u32,
-                height as u32,
-                &format!("{:.2}M", bitrate_mbps),
-                CHUNK_DURATION, // chunk_seconds
-                format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
-                0.0,
-                framerate as f32,
-                gop_size,
-                intra_refresh,
-            )) 
-        
-    }; 
+        _ => ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
+            video_path.to_str().unwrap(),
+            width as u32,
+            height as u32,
+            &format!("{:.2}M", bitrate_mbps),
+            CHUNK_DURATION, // chunk_seconds
+            format!("[{}fps-{:.1}Mbps]", framerate, bitrate_mbps),
+            0.0,
+            framerate as f32,
+            gop_size,
+            intra_refresh,
+        )),
+    };
 
     let mut wtr = Writer::from_path(&csv_path)?;
     wtr.write_record(&["frame_index", "bytes"])?;
@@ -155,7 +154,7 @@ async fn encode_one_video(
         if frames_this_chunk == 0 {
             println!(
                 "[DONE] {} -> {}fps {:.1}Mbps → {} frames → {}",
-                codec_str, 
+                codec_str,
                 framerate,
                 bitrate_mbps,
                 global_idx,
@@ -175,8 +174,8 @@ async fn main() -> anyhow::Result<()> {
     let gop_size: usize = 90;
     let intra_refresh = true;
 
-    // let video_codec = VideoCodec::AV1; 
-    let codecs_to_run = [VideoCodec::AV1]; 
+    // let video_codec = VideoCodec::AV1;
+    let codecs_to_run = [VideoCodec::AV1];
 
     let (video_dir, csv_dir) = get_paths();
 
@@ -193,12 +192,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
-    let framerate_values = [60, 90, 120] ; 
+    let framerate_values = [60, 90, 120];
 
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
-    
-    for video_codec in codecs_to_run{
+
+    for video_codec in codecs_to_run {
         for framerate in framerate_values {
             for &bitrate_mbps in &br_values {
                 let video_dir = video_dir.clone();
@@ -215,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
                         intra_refresh,
                         framerate,
                         bitrate_mbps,
-                        video_codec, 
+                        video_codec,
                     )
                     .await
                     {
@@ -230,13 +229,11 @@ async fn main() -> anyhow::Result<()> {
     // Wait for all tasks
     join_all(tasks).await;
 
-
-    for video_codec in codecs_to_run{
-        let codec_str = format!("{}", video_codec); 
-        let _ = merge_csvs_into_one(&codec_str); 
+    for video_codec in codecs_to_run {
+        let codec_str = format!("{}", video_codec);
+        let _ = merge_csvs_into_one(&codec_str);
     }
     Ok(())
-
 }
 
 use polars::prelude::*;
@@ -245,19 +242,19 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 
-
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct VideoGroup {
     name: String,
     fps: u32,
 }
 
-fn merge_csvs_into_one(codec_prefix: &str, )-> Result<(), Box<dyn Error>> {
-
-    // let codec_prefix = "HEVC"; 
+fn merge_csvs_into_one(codec_prefix: &str) -> Result<(), Box<dyn Error>> {
+    // let codec_prefix = "HEVC";
     // Regex to capture: 1: Name, 2: FPS, 3: Mbps
-    let re = Regex::new(&format!(r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv", ))?;
-    
+    let re = Regex::new(&format!(
+        r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv",
+    ))?;
+
     // Map to group files: Key -> Vec<(Mbps, Path)>c
     let mut groups: HashMap<VideoGroup, Vec<(u32, String)>> = HashMap::new();
 
@@ -271,8 +268,14 @@ fn merge_csvs_into_one(codec_prefix: &str, )-> Result<(), Box<dyn Error>> {
             let fps = cap[2].parse::<u32>()?;
             let mbps = cap[3].parse::<u32>()?;
 
-            let group = VideoGroup { name: video_name, fps };
-            groups.entry(group).or_default().push((mbps, path.to_string_lossy().into_owned()));
+            let group = VideoGroup {
+                name: video_name,
+                fps,
+            };
+            groups
+                .entry(group)
+                .or_default()
+                .push((mbps, path.to_string_lossy().into_owned()));
         }
     }
 
@@ -289,8 +292,7 @@ fn merge_csvs_into_one(codec_prefix: &str, )-> Result<(), Box<dyn Error>> {
 
         // FIX: Open file first, then pass to CsvReader::new()
         let file = File::open(first_path)?;
-        let mut combined_df = CsvReader::new(file)
-            .finish()?;
+        let mut combined_df = CsvReader::new(file).finish()?;
         combined_df.rename("bytes", format!("{}Mbps", first_mbps).into())?;
 
         // Join subsequent files
@@ -300,9 +302,9 @@ fn merge_csvs_into_one(codec_prefix: &str, )-> Result<(), Box<dyn Error>> {
             let next_df = CsvReader::new(next_file)
                 .finish()?
                 .select(["frame_index", "bytes"])?;
-            
+
             // Note: rename is usually done on the DataFrame after finish()
-            let mut next_df = next_df; 
+            let mut next_df = next_df;
             next_df.rename("bytes", format!("{}Mbps", mbps).into())?;
 
             combined_df = combined_df.left_join(&next_df, ["frame_index"], ["frame_index"])?;
@@ -312,10 +314,9 @@ fn merge_csvs_into_one(codec_prefix: &str, )-> Result<(), Box<dyn Error>> {
         let output_name = format!("merged_{}_{}fps.csv", group.name, group.fps);
         let mut out_file = File::create(&output_name)?;
         CsvWriter::new(&mut out_file).finish(&mut combined_df)?;
-        
+
         println!("Saved to {}", output_name);
     }
 
     Ok(())
-
 }

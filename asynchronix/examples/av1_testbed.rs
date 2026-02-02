@@ -1,58 +1,56 @@
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use minifb::{Key, Window, WindowOptions};
+use rand::Rng;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::{
-    Arc,
-};
+use std::sync::Arc;
 use std::thread;
-use rand::Rng; 
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
-
 /////////////////////////////////////////////////////////////////////////////////////
 ////////////////////// PARALLEL SETTINGS ////////////////////////////////////////////
 
-pub const NUM_PARALLEL_THREADS_ENCODE: usize = 16; 
-pub const NUM_PARALLEL_THREADS_DECODE: usize = 4; 
+pub const NUM_PARALLEL_THREADS_ENCODE: usize = 16;
+pub const NUM_PARALLEL_THREADS_DECODE: usize = 4;
 
 /////////////////////////////////////////////////////////////////////////////////////
 ////////////////////// VIDEO SETTINGS ///////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
-pub const VIDEO_WINDOW_SCALE_FACTOR: f64 = 0.44; 
-pub const VIDEO_PATH: &str = "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/swordsmith_90fps.mp4";
-pub const VIDEO_FPS : f32 = 90.0; 
-pub const VIDEO_LOOP_DURATION_SECONDS: f32 = 80.0; // loop the video after 30 secs 
+pub const VIDEO_WINDOW_SCALE_FACTOR: f64 = 0.44;
+pub const VIDEO_PATH: &str =
+    "/home/boris/Desktop/Rust_MG1/asynchronix/video_samples_vmaf/swordsmith_90fps.mp4";
+pub const VIDEO_FPS: f32 = 90.0;
+pub const VIDEO_LOOP_DURATION_SECONDS: f32 = 80.0; // loop the video after 30 secs
 pub const VIDEO_GOP_SIZE: usize = 60; // Group of Pictures size, I-P frame frequency
 
-pub const VIDEO_BOOL_RANDOM_OFFSET: bool = true; 
+pub const VIDEO_BOOL_RANDOM_OFFSET: bool = true;
 /////////////////////////////////////////////////////////////////////////////////////
 //////////////////////  ABR DEMO ////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
 pub const DEMO_MAX_TARGET_BITRATE: f32 = 100.0; // on/off style of different bitrates,
-                                                // and visual effect. 
-pub const DEMO_MIN_TARGET_BITRATE: f32 = 1.0; 
-pub const DEMO_DURATION_BITRATE_SWITCH: f32 = 3.0; 
+                                                // and visual effect.
+pub const DEMO_MIN_TARGET_BITRATE: f32 = 1.0;
+pub const DEMO_DURATION_BITRATE_SWITCH: f32 = 3.0;
 /////////////////////////////////////////////////////////////////////////////////////
 ////////////////////// GRAPH FOR FRAME SIZES ////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////
 
-pub const DISPLAY_GRAPH_HUD_HEIGTH: usize = 260; 
+pub const DISPLAY_GRAPH_HUD_HEIGTH: usize = 260;
 
-pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 140; 
-pub const DISPLAY_GRAPH_SCALE_HEIGHT: f32 = 180.0; 
-pub const DISPLAY_GRAPH_UPPER_KB_BOUND: f32 = 800.0; 
-pub const DISPLAY_GRAPH_SCALE_TEXT: usize = 2; 
-pub const DISPLAY_GRAPH_LOG_Y_SCALE: bool = true; 
-pub const DISPLAY_TARGET_FRAMES_PER_SECOND: f32 = 24.0; // Absolute cinema (the encoder is too slow for real time 90FPS@4K processing demo) 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 140;
+pub const DISPLAY_GRAPH_SCALE_HEIGHT: f32 = 180.0;
+pub const DISPLAY_GRAPH_UPPER_KB_BOUND: f32 = 800.0;
+pub const DISPLAY_GRAPH_SCALE_TEXT: usize = 2;
+pub const DISPLAY_GRAPH_LOG_Y_SCALE: bool = true;
+pub const DISPLAY_TARGET_FRAMES_PER_SECOND: f32 = 24.0; // Absolute cinema (the encoder is too slow for real time 90FPS@4K processing demo)
+                                                        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // --- 1. Helpers ---
 use colored::Colorize;
@@ -190,7 +188,6 @@ impl DebugColor {
     }
 }
 
-
 macro_rules! print_pretty {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {
             let msg = format!($fmt, $($arg)*);
@@ -198,7 +195,7 @@ macro_rules! print_pretty {
     }
 }
 
-macro_rules! format_elapsed2{
+macro_rules! format_elapsed2 {
     ($elapsed:expr) => {{
         let total_seconds =
             $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
@@ -211,7 +208,7 @@ pub struct FrameMetadata {
     pub bitrate_mbps: f32,
     pub video_timestamp: f64, // Exact presentation time in seconds
     pub chunk_id: usize,      // Which 2.5s segment this belongs to
-    pub frame_size_bytes: usize, 
+    pub frame_size_bytes: usize,
 }
 
 // What travels over the network/channels
@@ -237,7 +234,7 @@ pub struct ChunkedAv1Encoder {
     gop_size: usize,
     intra_refresh: bool,
     framerate: f32, // Added to allow FPS control
-    start_instant: Instant, 
+    start_instant: Instant,
     frame_count_in_chunk: usize, // Track how many frames we've emitted for this chunk
     chunk_start_timestamp: f64,  // The 'offset' passed in new()
 }
@@ -273,18 +270,18 @@ impl ChunkedAv1Encoder {
             gop_size,
             intra_refresh,
             framerate,
-            start_instant: Instant::now(), 
+            start_instant: Instant::now(),
             frame_count_in_chunk: 0,
-            chunk_start_timestamp: offset_video, 
+            chunk_start_timestamp: offset_video,
         }
     }
 
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: Instant ) {
-        let bitrate_adjusted_fps = bitrate_mbps; 
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: Instant) {
+        let bitrate_adjusted_fps = bitrate_mbps;
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
-        
+
         print_pretty!(
-            DebugColor::DarkBlue, 
+            DebugColor::DarkBlue,
             "{} AV1 CHUNKING with bitrate {} Mbps", // Changed to {:?} just in case TaiTime doesn't implement Display
             // now.duration_since(self.start_instant).as_secs_f32(),
             self.encoder_str,
@@ -292,10 +289,10 @@ impl ChunkedAv1Encoder {
         );
 
         // Clear parser buffer to avoid stale data
-        // self.parser.buffer.clear(); 
+        // self.parser.buffer.clear();
 
         let mut command = FfmpegCommand::new();
-        
+
         // Base arguments
         let mut child = command
             // .hwaccel("cuda")
@@ -304,20 +301,29 @@ impl ChunkedAv1Encoder {
             .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)])
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .input(&self.input)
-            .args(&["-vf", &format!( "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p"         // Video Filter
-                                    ,self.width, self.height)])
-            .args(&["-c:v", "libsvtav1"]) 
-            .args(&["-preset", "9"]) // 9 is highest for 4k, so choosing it for XR RTC. 
+            .args(&[
+                "-vf",
+                &format!(
+                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p", // Video Filter
+                    self.width, self.height
+                ),
+            ])
+            .args(&["-c:v", "libsvtav1"])
+            .args(&["-preset", "9"]) // 9 is highest for 4k, so choosing it for XR RTC.
             // .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1"]) // rc=1 (VBR), lookahead=0 , pred-struct=2 (Low Delay P, no future encoded frames for XR)
-            .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1"]) // Tiling for fastness, lp: level of parallelism,
-            .args(&["-b:v", &self.bitrate ])
+            .args(&[
+                "-svtav1-params",
+                "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1",
+            ]) // Tiling for fastness, lp: level of parallelism,
+            .args(&["-b:v", &self.bitrate])
             .args(&["-bufsize", &self.bitrate])
             .args(&["-g", &format!("{}", self.gop_size)])
             // .args(&["-intra-refresh", &format!("{}", self.intra_refresh as i32)])
             .args(&["-f", "obu", "-"])
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
 
-        let stdout = child.stdout.take().unwrap(); 
+        let stdout = child.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
 
         // Access the public field .stderr directly and .take() the option
@@ -341,20 +347,19 @@ impl ChunkedAv1Encoder {
                     self.parser.add_data(&buf[..n]);
                     let frames = self.parser.get_frames();
                     for frame in frames {
-
-                        let pts = self.chunk_start_timestamp + (self.frame_count_in_chunk as f64 / self.framerate as f64);
-                        let lenframebytes = frame.len(); 
+                        let pts = self.chunk_start_timestamp
+                            + (self.frame_count_in_chunk as f64 / self.framerate as f64);
+                        let lenframebytes = frame.len();
                         let tagged = TaggedPacket {
                             data: frame,
                             meta: FrameMetadata {
                                 bitrate_mbps: bitrate_mbps,
                                 video_timestamp: pts,
                                 chunk_id: self.current_offset as usize,
-                                frame_size_bytes: lenframebytes, 
-                            }
+                                frame_size_bytes: lenframebytes,
+                            },
                         };
-                        if let Err(e) = self.frame_tx.send(tagged)
-                         {
+                        if let Err(e) = self.frame_tx.send(tagged) {
                             eprintln!("{} Error sending AV1 frame: {}", e, self.encoder_str);
                         }
                     }
@@ -384,9 +389,7 @@ impl ChunkedAv1Encoder {
 
         None
     }
-
 }
-
 
 // Wrapper for Command to match your syntax
 pub struct FfmpegCommand {
@@ -394,7 +397,9 @@ pub struct FfmpegCommand {
 }
 impl FfmpegCommand {
     pub fn new() -> Self {
-        Self { cmd: Command::new("ffmpeg") }
+        Self {
+            cmd: Command::new("ffmpeg"),
+        }
     }
     pub fn args(mut self, args: &[&str]) -> Self {
         self.cmd.args(args);
@@ -457,19 +462,27 @@ impl Av1Parser {
         let mut shift = 0;
 
         loop {
-            if offset + bytes_read >= self.buffer.len() { return None; }
+            if offset + bytes_read >= self.buffer.len() {
+                return None;
+            }
             let byte = self.buffer[offset + bytes_read];
             value |= ((byte & 0x7F) as usize) << shift;
             bytes_read += 1;
             shift += 7;
-            if (byte & 0x80) == 0 { break; }
-            if bytes_read > 8 { return None; } // Safety
+            if (byte & 0x80) == 0 {
+                break;
+            }
+            if bytes_read > 8 {
+                return None;
+            } // Safety
         }
         Some((value, bytes_read))
     }
 
     pub fn next_obu(&mut self) -> Option<ObuUnit> {
-        if self.buffer.is_empty() { return None; }
+        if self.buffer.is_empty() {
+            return None;
+        }
 
         // OBU Header parsing
         let header_byte = self.buffer[0];
@@ -487,14 +500,18 @@ impl Av1Parser {
         let mut offset = 1;
         if extension_flag == 1 {
             offset += 1;
-            if self.buffer.len() < offset { return None; }
+            if self.buffer.len() < offset {
+                return None;
+            }
         }
 
         let (payload_size, leb_bytes) = self.parse_leb128(offset)?;
         offset += leb_bytes;
 
         let total_size = offset + payload_size;
-        if self.buffer.len() < total_size { return None; }
+        if self.buffer.len() < total_size {
+            return None;
+        }
 
         let obu_data = self.buffer[0..total_size].to_vec();
         self.buffer.drain(0..total_size);
@@ -533,23 +550,23 @@ pub struct Av1Decoder {
     parser: Av1Parser,
     frame_buffer: VecDeque<Vec<u8>>,
     decoded_frames: VecDeque<Vec<u8>>,
-    
+
     // Metrics
     pub frames_processed: usize,
     pub keyframes_seen: usize,
     pub expected_frame_size: usize,
     pub total_bytes_processed: f64,
-    
+
     // Control
     decoder_string: String,
     priming_complete: bool,
     processing_semaphore: Arc<Semaphore>,
-    
+
     // Sync
     id_queue: VecDeque<u32>,
     decoded_frame_counter: usize,
 
-    pub metadata_queue: VecDeque<FrameMetadata>, 
+    pub metadata_queue: VecDeque<FrameMetadata>,
 }
 
 impl Av1Decoder {
@@ -563,7 +580,7 @@ impl Av1Decoder {
             // .hwaccel("cuda") // Enable if you have RTX 30/40 series
             .args(&["-hide_banner", "-loglevel", "error"])
             .args(&["-f", "obu"]) // Input format is raw OBU
-            .args(&["-i", "-"])   // Read from stdin
+            .args(&["-i", "-"]) // Read from stdin
             .args(&["-vsync", "0"])
             .args(&["-pix_fmt", "rgb24"]) // Output format
             .args(&["-f", "rawvideo", "-"]) // Write to stdout
@@ -571,7 +588,7 @@ impl Av1Decoder {
             .expect("Failed to spawn ffmpeg decoder");
 
         let stdout = child.stdout.take().unwrap();
-        let stdin =  child.stdin.take().unwrap();
+        let stdin = child.stdin.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
         let (frame_tx, frame_rx) = unbounded::<Vec<u8>>();
@@ -591,7 +608,9 @@ impl Av1Decoder {
                         buffer.extend_from_slice(&chunk[..n]);
                         while buffer.len() >= frame_size {
                             let frame = buffer.drain(..frame_size).collect::<Vec<u8>>();
-                            if let Err(_) = frame_tx.send(frame) { return; }
+                            if let Err(_) = frame_tx.send(frame) {
+                                return;
+                            }
                         }
                     }
                     Err(e) => {
@@ -646,7 +665,7 @@ impl Av1Decoder {
             id_queue: VecDeque::new(),
             decoded_frame_counter: 0,
 
-            metadata_queue: VecDeque::new(), 
+            metadata_queue: VecDeque::new(),
         }
     }
 
@@ -656,11 +675,10 @@ impl Av1Decoder {
         // Add to parser
         self.parser.add_data(&packet.data);
 
-
         // In AV1, we don't need to manually extract "Frames" as strictly as HEVC NALs
         // for the decoder pipe, but we do it to maintain your logic structure.
         let obus = self.parser.get_frames();
-        
+
         for obu_data in obus {
             // Detect Sequence Header (Keyframe-ish)
             if obu_data.len() > 1 {
@@ -675,16 +693,15 @@ impl Av1Decoder {
                     self.keyframes_seen += 1;
                     print_pretty!(DebugColor::Magenta, "{} 🔑 Seq Header", self.decoder_string);
                 }
-
             }
 
             self.frames_processed += 1;
-            
+
             // Send to FFmpeg
             if let Err(e) = self.packet_tx.send(obu_data) {
-                 eprintln!("Failed to send to ffmpeg: {}", e);
+                eprintln!("Failed to send to ffmpeg: {}", e);
             }
-            
+
             // Keep ID sync
             self.id_queue.push_back(id);
         }
@@ -705,62 +722,66 @@ impl Av1Decoder {
         }
 
         if let Some(frame) = self.decoded_frames.pop_front() {
-            // In a real scenario, you handle ID queue sync carefully. 
+            // In a real scenario, you handle ID queue sync carefully.
             // For this visualization, we just pop.
             let id = self.id_queue.pop_front().unwrap_or(0);
-            let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default()); 
+            let meta = self
+                .metadata_queue
+                .pop_front()
+                .unwrap_or(FrameMetadata::default());
             return Some((frame, meta));
         }
         None
     }
 }
 
-
-
 #[tokio::main]
 async fn main() {
     let width = 3840;
     let height = 2160;
-    
+
     // 1. Scaling Configuration
-    let scale_factor = VIDEO_WINDOW_SCALE_FACTOR; 
+    let scale_factor = VIDEO_WINDOW_SCALE_FACTOR;
     let scaled_w = (width as f64 * scale_factor) as usize;
     let scaled_h = (height as f64 * scale_factor) as usize;
 
-    let window_h = scaled_h + DISPLAY_GRAPH_HUD_HEIGTH; 
-    let input_file = VIDEO_PATH; 
+    let window_h = scaled_h + DISPLAY_GRAPH_HUD_HEIGTH;
+    let input_file = VIDEO_PATH;
 
-    println!("Initializing {}x{} display (scaled from 4K)...", scaled_w, scaled_h);
+    println!(
+        "Initializing {}x{} display (scaled from 4K)...",
+        scaled_w, scaled_h
+    );
 
     // 2. Setup Decoder and Channels
     let mut decoder = Av1Decoder::new(width, height, "AV1_DEC_01");
     let (tx_source, rx_source) = unbounded::<TaggedPacket>();
-    
+
     // Removed the incorrect 'let now: f64 = ...' definition here
 
-
-    //// GRAPH OVERLAY CODE: FRAME SIZES. 
+    //// GRAPH OVERLAY CODE: FRAME SIZES.
     let mut size_history: VecDeque<f32> = VecDeque::from(vec![0.0; DISPLAY_GRAPH_MAX_FRAMES]);
     let max_graph_height = 100; // Pixels
     let graph_x = 10;
     let graph_y = scaled_h - 200; // Position near bottom
 
-
-
     // 3. Setup Source Thread (FFmpeg)
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        
+
         rt.block_on(async {
-            let chunk_len = 2.5; 
+            let chunk_len = 2.5;
             let max_parallel_chunks = 1; // How many FFmpeg instances to run at once
             let (result_tx, mut result_rx) = mpsc::channel(100);
-            
 
             let mut rng = rand::thread_rng();
-            let random_offset: f64 = rng.gen_range(0.0..25.0);      
-            
-            let mut next_offset_to_encode = if VIDEO_BOOL_RANDOM_OFFSET {random_offset} else {0.0};
+            let random_offset: f64 = rng.gen_range(0.0..25.0);
+
+            let mut next_offset_to_encode = if VIDEO_BOOL_RANDOM_OFFSET {
+                random_offset
+            } else {
+                0.0
+            };
             let mut next_offset_to_send = 0.0;
             let mut reorder_buffer: BTreeMap<u64, Vec<TaggedPacket>> = BTreeMap::new();
             let mut active_workers = 0;
@@ -773,21 +794,32 @@ async fn main() {
                     let offset = next_offset_to_encode;
                     let tx = result_tx.clone();
                     let input = input_file.to_string();
-                    
+
                     // Determine bitrate for this specific chunk
                     let elapsed = start_time.elapsed().as_secs();
-                    let bitrate = if (elapsed  / DEMO_DURATION_BITRATE_SWITCH as u64) % 2 == 0 { DEMO_MAX_TARGET_BITRATE } else { DEMO_MIN_TARGET_BITRATE};
+                    let bitrate = if (elapsed / DEMO_DURATION_BITRATE_SWITCH as u64) % 2 == 0 {
+                        DEMO_MAX_TARGET_BITRATE
+                    } else {
+                        DEMO_MIN_TARGET_BITRATE
+                    };
 
                     tokio::spawn(async move {
                         // Create a fresh encoder for this chunk
                         let mut encoder = ChunkedAv1Encoder::new(
-                            &input, 3840, 2160, "10M", chunk_len,
+                            &input,
+                            3840,
+                            2160,
+                            "10M",
+                            chunk_len,
                             "AV1_Parallel_Worker".to_string(),
-                            offset, VIDEO_FPS, VIDEO_GOP_SIZE, false
+                            offset,
+                            VIDEO_FPS,
+                            VIDEO_GOP_SIZE,
+                            false,
                         );
 
                         // --- CRITICAL OPTIMIZATION ---
-                        // Since we are running 3 encoders, we restrict each to use 
+                        // Since we are running 3 encoders, we restrict each to use
                         // only a portion of the CPU to prevent thrashing.
                         // Preset 12 is essential for real-time 4K software encoding.
                         encoder.start_chunking(bitrate, Instant::now()).await;
@@ -796,7 +828,7 @@ async fn main() {
                         while let Some(f) = encoder.next_frame().await {
                             frames.push(f);
                         }
-                        
+
                         // Send frames back with the offset as a key (converted to u64 for BTreeMap)
                         let _ = tx.send(((offset * 1000.0) as u64, frames)).await;
                     });
@@ -820,22 +852,30 @@ async fn main() {
                 let current_key = (next_offset_to_send * 1000.0) as u64;
                 while let Some(frames) = reorder_buffer.remove(&current_key) {
                     for frame in frames {
-                        if let Err(_) = tx_source.send(frame) { return; }
+                        if let Err(_) = tx_source.send(frame) {
+                            return;
+                        }
                     }
                     next_offset_to_send += chunk_len;
-                    if next_offset_to_send > VIDEO_LOOP_DURATION_SECONDS as f64{ next_offset_to_send = 0.0; }
+                    if next_offset_to_send > VIDEO_LOOP_DURATION_SECONDS as f64 {
+                        next_offset_to_send = 0.0;
+                    }
                 }
             }
         });
     });
 
-    // 4. Visualization Window 
+    // 4. Visualization Window
     let mut window = Window::new(
-        &format!("AV1 Realtime Decode - Scaled View ({:.2}:1)", VIDEO_WINDOW_SCALE_FACTOR),
+        &format!(
+            "AV1 Realtime Decode - Scaled View ({:.2}:1)",
+            VIDEO_WINDOW_SCALE_FACTOR
+        ),
         scaled_w,
         window_h,
         WindowOptions::default(),
-    ).unwrap_or_else(|e| {
+    )
+    .unwrap_or_else(|e| {
         panic!("{}", e);
     });
 
@@ -843,31 +883,28 @@ async fn main() {
     let mut frame_count = 0;
     let mut last_log = Instant::now();
 
-    let target_fps = DISPLAY_TARGET_FRAMES_PER_SECOND;  // Absolute cinema (the encoder is too slow for real time 90FPS@4K processing demo) 
+    let target_fps = DISPLAY_TARGET_FRAMES_PER_SECOND; // Absolute cinema (the encoder is too slow for real time 90FPS@4K processing demo)
     let target_frame_time = Duration::from_secs_f64(1.0 / target_fps as f64);
     let mut next_frame_time = Instant::now();
 
-    let mut frame_count_timing = 0; 
-    let mut start_app_time = Instant::now(); 
+    let mut frame_count_timing = 0;
+    let mut start_app_time = Instant::now();
 
-   while window.is_open() && !window.is_key_down(Key::Escape) {
-        
+    while window.is_open() && !window.is_key_down(Key::Escape) {
         // A. ALWAYS Ingest packets as fast as they arrive
         // We do this continuously so the UDP/channel buffer doesn't overflow
         while let Ok(tagpacket) = rx_source.try_recv() {
-
-            // let packet = tagpacket.data; 
+            // let packet = tagpacket.data;
             decoder.process_packet(tagpacket, 0).await;
         }
 
         // B. PACE the Rendering (VSync Logic)
         let now = Instant::now();
         if now >= next_frame_time {
-            
             // Try to get ONE decoded frame
             if let Some((rgb_data, _id)) = decoder.next_decoded_frame() {
                 frame_count += 1;
-                frame_count_timing += 1; 
+                frame_count_timing += 1;
 
                 let rawdog_video_time = frame_count_timing as f32 / VIDEO_FPS;
                 // Optimized Scaling (Same as before)
@@ -876,7 +913,7 @@ async fn main() {
                         let sx = (x * width as usize) / scaled_w;
                         let sy = (y * height as usize) / scaled_h;
                         let src_idx = (sy * width as usize + sx) * 3;
-                        
+
                         if src_idx + 2 < rgb_data.len() {
                             let r = rgb_data[src_idx] as u32;
                             let g = rgb_data[src_idx + 1] as u32;
@@ -896,51 +933,70 @@ async fn main() {
                 size_history.pop_front();
                 size_history.push_back(_id.frame_size_bytes as f32);
 
-                let g_height = DISPLAY_GRAPH_SCALE_HEIGHT;  // Easily change this to 100, 300, etc.
+                let g_height = DISPLAY_GRAPH_SCALE_HEIGHT; // Easily change this to 100, 300, etc.
                 let g_ceiling = DISPLAY_GRAPH_UPPER_KB_BOUND; // The max kB the graph represents
 
                 render_graph(
                     &mut scaled_buffer,
                     &size_history,
-                    85,                                  // x_offset
-                    scaled_h + 60,                       // y_offset (Below video)
-                    scaled_w,                            // stride
-                    (_id.bitrate_mbps * 1_000_000.0), 
+                    85,            // x_offset
+                    scaled_h + 60, // y_offset (Below video)
+                    scaled_w,      // stride
+                    (_id.bitrate_mbps * 1_000_000.0),
                     DISPLAY_TARGET_FRAMES_PER_SECOND,
                     g_height as usize,
                     g_ceiling,
-                    DISPLAY_GRAPH_LOG_Y_SCALE, 
+                    DISPLAY_GRAPH_LOG_Y_SCALE,
                 );
 
                 render_text(
                     &mut scaled_buffer,
-                        
                     &format!("Sampled FPS:     {:.0}", VIDEO_FPS,),
-                    10, 10, scaled_w, 0xFFCC00, 3 
+                    10,
+                    10,
+                    scaled_w,
+                    0xFFCC00,
+                    3,
                 );
                 render_text(
                     &mut scaled_buffer,
-                        
                     &format!("Window  FPS:     {:.0}", DISPLAY_TARGET_FRAMES_PER_SECOND),
-                    10, 45, scaled_w, 0xFFCC00, 3 
+                    10,
+                    45,
+                    scaled_w,
+                    0xFFCC00,
+                    3,
                 );
 
                 render_text(
                     &mut scaled_buffer,
-                    &format!("Video playback:  {:.3}s", rawdog_video_time % VIDEO_LOOP_DURATION_SECONDS),
-                    10, 80, scaled_w, 0x00FF00, 3 
+                    &format!(
+                        "Video playback:  {:.3}s",
+                        rawdog_video_time % VIDEO_LOOP_DURATION_SECONDS
+                    ),
+                    10,
+                    80,
+                    scaled_w,
+                    0x00FF00,
+                    3,
                 );
 
                 render_text(
                     &mut scaled_buffer,
                     &format!("Bitrate:         {:.1} Mbps", _id.bitrate_mbps),
-                    10, 115, scaled_w, 0x00FF00, 3 
-                );                
-                
+                    10,
+                    115,
+                    scaled_w,
+                    0x00FF00,
+                    3,
+                );
+
                 // Update window
-                window.update_with_buffer(&scaled_buffer, scaled_w, window_h).unwrap();
-                
-                // Schedule next frame time. 
+                window
+                    .update_with_buffer(&scaled_buffer, scaled_w, window_h)
+                    .unwrap();
+
+                // Schedule next frame time.
                 // If we are lagging, reset to 'now' to catch up, otherwise add target duration.
                 if now > next_frame_time + target_frame_time {
                     next_frame_time = now + target_frame_time;
@@ -948,12 +1004,11 @@ async fn main() {
                     next_frame_time += target_frame_time;
                 }
             } else {
-    
                 // No frame ready? Spin the wheel.
                 let elapsed = start_app_time.elapsed().as_secs_f32();
-                
+
                 render_loading_spinner(&mut scaled_buffer, scaled_w, scaled_h, elapsed);
-                
+
                 // Still render the HUD background so it doesn't flicker
                 let hud_bg_color = 0x101010;
                 for y in scaled_h..window_h {
@@ -962,9 +1017,19 @@ async fn main() {
                     }
                 }
 
-                render_text(&mut scaled_buffer, "Buffering Stream...", 10, 10, scaled_w, 0xAAAAAA, 5);
-                
-                window.update_with_buffer(&scaled_buffer, scaled_w, window_h).unwrap();
+                render_text(
+                    &mut scaled_buffer,
+                    "Buffering Stream...",
+                    10,
+                    10,
+                    scaled_w,
+                    0xAAAAAA,
+                    5,
+                );
+
+                window
+                    .update_with_buffer(&scaled_buffer, scaled_w, window_h)
+                    .unwrap();
             }
         } else {
             // If we have time to spare, sleep a tiny bit to save CPU
@@ -975,30 +1040,34 @@ async fn main() {
 
         // FPS Logging
         if last_log.elapsed().as_secs() >= 1 {
-            print_pretty!(DebugColor::Blue, "FPS: {} | Keyframes: {}", frame_count, decoder.keyframes_seen);
+            print_pretty!(
+                DebugColor::Blue,
+                "FPS: {} | Keyframes: {}",
+                frame_count,
+                decoder.keyframes_seen
+            );
             frame_count = 0;
             last_log = Instant::now();
         }
     }
 }
 
-
 fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time: f32) {
     let center_x = width as f32 / 2.0;
     let center_y = height as f32 / 2.0;
     let radius = 80.0;
     let dot_count: i32 = 12;
-    let dot_radius = 8.0; 
+    let dot_radius = 8.0;
 
     // Clear the video area to a dark background
     for pixel in buffer.iter_mut().take(width * height) {
-        *pixel = 0x050505; 
+        *pixel = 0x050505;
     }
 
     for i in 0..dot_count {
         // Angle for this specific dot
         let angle = (i as f32 / dot_count as f32) * std::f32::consts::TAU;
-        
+
         // Calculate position
         let x = (center_x + angle.cos() * radius) as usize;
         let y = (center_y + angle.sin() * radius) as usize;
@@ -1017,7 +1086,7 @@ fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time:
                 if (dx * dx + dy * dy) as f32 <= dot_radius * dot_radius {
                     let px = (x as isize + dx) as usize;
                     let py = (y as isize + dy) as usize;
-                    
+
                     if px < width && py < height {
                         buffer[py * width + px] = color;
                     }
@@ -1132,32 +1201,32 @@ pub fn render_text(
         [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
         // a-z (64-89) - lowercase letters
-        [0x00, 0x00, 0x0E, 0x01, 0x0F, 0x11, 0x0F],  // a
-        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x1E],  // b
-        [0x00, 0x00, 0x0E, 0x10, 0x10, 0x11, 0x0E],  // c
-        [0x01, 0x01, 0x0D, 0x13, 0x11, 0x11, 0x0F],  // d
-        [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E],  // e
-        [0x06, 0x09, 0x08, 0x1C, 0x08, 0x08, 0x08],  // f
-        [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x0E],  // g
-        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11],  // h
-        [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E],  // i
-        [0x02, 0x00, 0x06, 0x02, 0x02, 0x12, 0x0C],  // j
-        [0x10, 0x10, 0x12, 0x14, 0x18, 0x14, 0x12],  // k
-        [0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],  // l
-        [0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11],  // m
-        [0x00, 0x00, 0x16, 0x19, 0x11, 0x11, 0x11],  // n
-        [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E],  // o
-        [0x00, 0x00, 0x1E, 0x11, 0x1E, 0x10, 0x10],  // p
-        [0x00, 0x00, 0x0D, 0x13, 0x0F, 0x01, 0x01],  // q
-        [0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10],  // r
-        [0x00, 0x00, 0x0E, 0x10, 0x0E, 0x01, 0x1E],  // s
-        [0x08, 0x08, 0x1C, 0x08, 0x08, 0x09, 0x06],  // t
-        [0x00, 0x00, 0x11, 0x11, 0x11, 0x13, 0x0D],  // u
-        [0x00, 0x00, 0x11, 0x11, 0x11, 0x0A, 0x04],  // v
-        [0x00, 0x00, 0x11, 0x11, 0x15, 0x15, 0x0A],  // w
-        [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11],  // x
-        [0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E],  // y
-        [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F],  // z
+        [0x00, 0x00, 0x0E, 0x01, 0x0F, 0x11, 0x0F], // a
+        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x1E], // b
+        [0x00, 0x00, 0x0E, 0x10, 0x10, 0x11, 0x0E], // c
+        [0x01, 0x01, 0x0D, 0x13, 0x11, 0x11, 0x0F], // d
+        [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E], // e
+        [0x06, 0x09, 0x08, 0x1C, 0x08, 0x08, 0x08], // f
+        [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x0E], // g
+        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11], // h
+        [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E], // i
+        [0x02, 0x00, 0x06, 0x02, 0x02, 0x12, 0x0C], // j
+        [0x10, 0x10, 0x12, 0x14, 0x18, 0x14, 0x12], // k
+        [0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E], // l
+        [0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11], // m
+        [0x00, 0x00, 0x16, 0x19, 0x11, 0x11, 0x11], // n
+        [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E], // o
+        [0x00, 0x00, 0x1E, 0x11, 0x1E, 0x10, 0x10], // p
+        [0x00, 0x00, 0x0D, 0x13, 0x0F, 0x01, 0x01], // q
+        [0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10], // r
+        [0x00, 0x00, 0x0E, 0x10, 0x0E, 0x01, 0x1E], // s
+        [0x08, 0x08, 0x1C, 0x08, 0x08, 0x09, 0x06], // t
+        [0x00, 0x00, 0x11, 0x11, 0x11, 0x13, 0x0D], // u
+        [0x00, 0x00, 0x11, 0x11, 0x11, 0x0A, 0x04], // v
+        [0x00, 0x00, 0x11, 0x11, 0x15, 0x15, 0x0A], // w
+        [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11], // x
+        [0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E], // y
+        [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F], // z
     ];
 
     let mut char_x = x;
@@ -1194,7 +1263,7 @@ pub fn render_text(
             ']' => 61,
             '^' => 62,
             '_' => 63,
-            'a'..='z' => (c as usize) - ('a' as usize) + 64,  // Now maps to lowercase glyphs
+            'a'..='z' => (c as usize) - ('a' as usize) + 64, // Now maps to lowercase glyphs
             _ => 0,
         };
 
@@ -1234,20 +1303,20 @@ pub fn render_graph(
     fps: f32,
     graph_height: usize,
     max_size_kb: f32,
-    use_log: bool, 
+    use_log: bool,
 ) {
     let bar_width = 5;
     let spacing = 1;
     let graph_width = history.len() * (bar_width + spacing);
-    
+
     // --- CONFIGURATION ---
     // Define pastel colors for less saturation
-    const COL_RED: u32 = 0xEE6666;    // Soft Pastel Red
+    const COL_RED: u32 = 0xEE6666; // Soft Pastel Red
     const COL_YELLOW: u32 = 0xF0E68C; // Khaki/Soft Yellow
-    const COL_GREEN: u32 = 0x8FBC8F;  // Dark Sea Green (Soft Green)
-    const COL_GRID: u32 = 0x555555;   // Slightly lighter grid for visibility
-    const COL_TEXT: u32 = 0xCCCCCC;   // Light Grey text (not pure white)
-    const COL_TGT: u32 = 0x87CEFA;    // Light Sky Blue (softer Cyan)
+    const COL_GREEN: u32 = 0x8FBC8F; // Dark Sea Green (Soft Green)
+    const COL_GRID: u32 = 0x555555; // Slightly lighter grid for visibility
+    const COL_TEXT: u32 = 0xCCCCCC; // Light Grey text (not pure white)
+    const COL_TGT: u32 = 0x87CEFA; // Light Sky Blue (softer Cyan)
 
     // Layout Offsets
     let label_margin = 55; // Increased from 40 to add distance
@@ -1257,16 +1326,20 @@ pub fn render_graph(
     let bg_y_start = y_offset.saturating_sub(title_margin + 10); // Expanded top
     let bg_y_end = y_offset + graph_height + 20;
     let bg_x_start = x_offset.saturating_sub(label_margin + 20); // Expanded left
-    let bg_x_end = x_offset + graph_width + 170;    
+    let bg_x_end = x_offset + graph_width + 170;
 
     for y in bg_y_start..bg_y_end {
-        if y >= buffer.len() / stride { continue; }
+        if y >= buffer.len() / stride {
+            continue;
+        }
         for x in bg_x_start..bg_x_end {
-            if x >= stride { continue; }
-            
+            if x >= stride {
+                continue;
+            }
+
             let pixel_idx = y * stride + x;
             let current_pixel = buffer[pixel_idx];
-            
+
             // Dimming logic (50% opacity)
             let r = ((current_pixel >> 16) & 0xFF) / 2;
             let g = ((current_pixel >> 8) & 0xFF) / 2;
@@ -1300,28 +1373,28 @@ pub fn render_graph(
         buffer,
         &format!(" Frame size ({} window) in kBytes", history.len()), // Shortened text for cleaner look
         x_offset,
-        y_offset.saturating_sub(title_margin), 
+        y_offset.saturating_sub(title_margin),
         stride,
-        0xFFFFFF, 
+        0xFFFFFF,
         3,
     );
-    
+
     // Axis Unit Label (Moved slightly left to align with numbers)
     render_text(
-        buffer, 
-        "[kB]", 
-        x_offset.saturating_sub(label_margin), 
-        y_offset.saturating_sub(title_margin), 
-        stride, 
-        COL_TEXT, 
-        2
+        buffer,
+        "[kB]",
+        x_offset.saturating_sub(label_margin),
+        y_offset.saturating_sub(title_margin),
+        stride,
+        COL_TEXT,
+        2,
     );
 
     // --- 2. DRAW Y-AXIS MARKERS & GRID ---
     for i in 1..=4 {
         let visual_percentage = i as f32 * 0.25;
         let marker_y = y_offset + graph_height - (visual_percentage * graph_height as f32) as usize;
-        
+
         let label_val = if use_log {
             (visual_percentage * log_range + log_min).exp()
         } else {
@@ -1331,7 +1404,7 @@ pub fn render_graph(
         if marker_y < buffer.len() / stride {
             for px in x_offset..(x_offset + graph_width) {
                 if px < stride {
-                    buffer[marker_y * stride + px] = COL_GRID; 
+                    buffer[marker_y * stride + px] = COL_GRID;
                 }
             }
         }
@@ -1340,7 +1413,7 @@ pub fn render_graph(
         render_text(
             buffer,
             &format!("{:.0}", label_val),
-            x_offset.saturating_sub(label_margin), 
+            x_offset.saturating_sub(label_margin),
             marker_y - 4,
             stride,
             COL_TEXT,
@@ -1392,15 +1465,15 @@ pub fn render_graph(
                 buffer[target_y * stride + px] = COL_TGT;
             }
         }
-        
+
         render_text(
-            buffer, 
-            &format!("TGT: {:.1} kB", current_target_kb), 
-            x_offset + graph_width + 5, 
-            target_y - 4, 
-            stride, 
-            COL_TGT, 
-            DISPLAY_GRAPH_SCALE_TEXT
+            buffer,
+            &format!("TGT: {:.1} kB", current_target_kb),
+            x_offset + graph_width + 5,
+            target_y - 4,
+            stride,
+            COL_TGT,
+            DISPLAY_GRAPH_SCALE_TEXT,
         );
     }
 }

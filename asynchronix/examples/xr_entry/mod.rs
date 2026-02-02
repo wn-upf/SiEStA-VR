@@ -1,4 +1,4 @@
-use crate::lib::alvr_stream_socket::{ALVR_ORIGINAL_SOCKETRX_BEHAVIOR, VideoCodec};
+use crate::lib::alvr_stream_socket::{VideoCodec, ALVR_ORIGINAL_SOCKETRX_BEHAVIOR};
 // asynchronix/examples/xr_entry.rs
 use crate::lib::models_mm1k::{
     EmulatedLink, NetworkPattern, QueueModule, MAX_EMULATED_QUEUE_PACKETS,
@@ -23,10 +23,10 @@ use anyhow::Result;
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 // use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::Rng;
-use rand::{thread_rng, };     //  SeedableRng};
 use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer};
+use rand::seq::SliceRandom;
+use rand::thread_rng; //  SeedableRng};
+use rand::Rng;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -82,7 +82,7 @@ impl VRPair {
         t_update_abr: f32,
         ap_coords: Coords,
         edca_be_mode: bool,
-        codec_selection: VideoCodec, 
+        codec_selection: VideoCodec,
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -136,7 +136,7 @@ impl VRPair {
             t_update_abr,
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
-            codec_selection, 
+            codec_selection,
         );
 
         let mut xr_client = XRClient::new(
@@ -151,7 +151,7 @@ impl VRPair {
             t_update_abr,
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
-            codec_selection, 
+            codec_selection,
         );
 
         let mut sta_server = STA_extended::new(
@@ -331,8 +331,8 @@ pub struct SimParams {
     pub mlo_channel_config: String,
     pub edca_be: usize,
     pub mlo_link_sel_policy: usize,
-    pub packs_per_ampdu: usize, 
-    pub codec_input_arg: String, 
+    pub packs_per_ampdu: usize,
+    pub codec_input_arg: String,
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -370,9 +370,8 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         mlo_channel_config: args[27].parse().unwrap(),
         edca_be: args[28].parse().unwrap(),
         mlo_link_sel_policy: args[29].parse().unwrap(),
-        packs_per_ampdu: args[30].parse().unwrap(), 
-        codec_input_arg: args[31].parse().unwrap(), 
-
+        packs_per_ampdu: args[30].parse().unwrap(),
+        codec_input_arg: args[31].parse().unwrap(),
     }
 }
 
@@ -412,8 +411,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         mlo_channel_config,
         edca_be,
         mlo_link_sel_policy,
-        packs_per_ampdu, 
-        codec_input_arg, 
+        packs_per_ampdu,
+        codec_input_arg,
     } = params;
 
     let sim_unique_string = format!("Simu_{} | {codec_input_arg}", sim_id);
@@ -456,7 +455,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     // Create output directory
     let name_folder = format!(
         "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
-        stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps_arg, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,  
+        stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps_arg, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -508,7 +507,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
         link_configs,
         mlo_policy,
-        packs_per_ampdu, 
+        packs_per_ampdu,
     );
 
     for sta_id in &all_sta_ids {
@@ -563,15 +562,14 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         BANDWIDTH_EMU_LINK,
     );
 
-    let codec_selection = match codec_input_arg.as_str(){
-        "AV1" => {VideoCodec::AV1}
-        "HEVC" => {VideoCodec::HEVC}
+    let codec_selection = match codec_input_arg.as_str() {
+        "AV1" => VideoCodec::AV1,
+        "HEVC" => VideoCodec::HEVC,
         _ => {
-                crate::print_red!("Unspecified codec WARNING! Default: HEVC", );
-                VideoCodec::HEVC 
-            }
-
-    }; 
+            crate::print_red!("Unspecified codec WARNING! Default: HEVC",);
+            VideoCodec::HEVC
+        }
+    };
 
     let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
@@ -582,32 +580,38 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         _ => ObservationConfig::ManualScaledV1,
     };
 
-   
     let mut rng = rand::thread_rng();
-    
+
     for i in 0..n_xr {
         // Determine the distance based on the index
-        let current_distance = if i < n_close { distance_close } else { distance };
-        
-        let current_fps = if i == 0 { fps_arg } else {
+        let current_distance = if i < n_close {
+            distance_close
+        } else {
+            distance
+        };
+
+        let current_fps = if i == 0 {
+            fps_arg
+        } else {
             if test_distances_everest_bool {
                 let choices = [60.0, 90.0, 120.0];
-                *choices.choose(&mut rng).unwrap_or(&fps_arg)            }
-            else{
+                *choices.choose(&mut rng).unwrap_or(&fps_arg)
+            } else {
                 fps_arg
             }
-        }; 
+        };
 
-        let current_abr_mode ; 
-        let mut bitrate_choice = initial_bitrate; 
-        let pair_index = i; 
-        if matches!(abr, 3) || test_distances_everest_bool == true { // Shared between RL training and ABR everest-like test. 
-                                                                        // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
+        let current_abr_mode;
+        let mut bitrate_choice = initial_bitrate;
+        let pair_index = i;
+        if matches!(abr, 3) || test_distances_everest_bool == true {
+            // Shared between RL training and ABR everest-like test.
+            // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
             if pair_index == 0 {
                 current_abr_mode = abr;
                 // do nothing, it's correct
             } else {
-                // abr_choice = rng.gen_range(0..=2); 
+                // abr_choice = rng.gen_range(0..=2);
                 let choices = [0, 1, 2, 4, 5]; // CBR, Nest, Everest, GCC, NADA
                 let mut rng = thread_rng();
                 current_abr_mode = *choices.choose(&mut rng).unwrap();
@@ -622,8 +626,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             current_abr_mode = abr; //makes all sessions have same ABR choice
         }
         println!("[VR session {}] Final: {}", pair_index, current_abr_mode);
-
-
 
         let vr = VRPair::new(
             i,
@@ -648,7 +650,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             t_update_abr,
             ap_coords,
             edca_be_bool,
-            codec_selection, 
+            codec_selection,
         );
 
         // Common pushes for all users
@@ -860,7 +862,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         crate::print_magenta!("ALL SESSIONS FOR CLIENT {} : {:#?}", i, sessions);
         let mut sessions = sessions;
         sessions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        
+
         let mut has_scheduled_vsync: bool = false;
 
         for (idx, (start, end)) in sessions.iter().copied().enumerate() {
@@ -875,7 +877,11 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 .unwrap();
 
             if !has_scheduled_vsync {
-                crate::print_red!("SIM START - Scheduling VSYNC at {} (ends at {}) ", start, end);
+                crate::print_red!(
+                    "SIM START - Scheduling VSYNC at {} (ends at {}) ",
+                    start,
+                    end
+                );
 
                 scheduler
                     .schedule_event(

@@ -1,5 +1,12 @@
 use crate::{
-    debug_bgprint, debug_debug, print_brown, print_magenta, print_pink, print_prettyyyy, print_red, print_yellow // print_blue, print_dblue, print_green, print_pretty,
+    debug_bgprint,
+    debug_debug,
+    print_brown,
+    print_magenta,
+    print_pink,
+    print_prettyyyy,
+    print_red,
+    print_yellow, // print_blue, print_dblue, print_green, print_pretty,
 };
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::Rng;
@@ -23,10 +30,10 @@ use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 
 use crate::lib::{
-    airtime_ampdu, collision_delay, exponential, perStaLockStats, AmpduPacket, Coords, CsvType,
-    CumulativeStats, MpduPacket, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG,
-    MacKey, DOWNLINK_QUEUE_SIZE, SLOT, UPLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS, 
-    P_TX, WindowKey, DebugColor, alvr_stream_socket::parse_shard_data, 
+    airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential,
+    perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
+    WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
+    P_TX, SLOT, UPLINK_QUEUE_SIZE,
 };
 
 use rand::SeedableRng;
@@ -57,13 +64,12 @@ pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
 
-
 pub const DEBUG_EDCA: bool = false;
 pub const DEBUG_MLO: bool = false;
 
-pub const STR_PLUS_MODE_MLO: bool = true; // Set to true for STR+ mode, running backoffs and assigning traffic to link in last moment. 
+pub const STR_PLUS_MODE_MLO: bool = true; // Set to true for STR+ mode, running backoffs and assigning traffic to link in last moment.
 
-pub const MCS_REPORT_PERIOD_F32: f32 = 0.1; // 
+pub const MCS_REPORT_PERIOD_F32: f32 = 0.1; //
 
 // pub const DEBUG_SCHEDULING: bool = false;
 // pub const SOFTMAX_POLICY: bool = false;
@@ -2038,8 +2044,6 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
     a
 }
 
-
-
 #[derive(Clone, Debug)]
 pub struct WindowMetricReport {
     pub timestamp: f64,
@@ -2051,33 +2055,33 @@ pub struct WindowMetricReport {
 
 #[derive(Clone, Default, Debug)]
 pub struct WindowMetrics {
-    pub sta_id: WindowKey,   
+    pub sta_id: WindowKey,
     pub window_start: f64,
-    pub window_duration: Duration, 
-    
+    pub window_duration: Duration,
+
     // Utilization Accumulators
-    pub total_busy_time: f64,   // Total channel busy time (all STAs)
-    pub sta_tx_time: f64,       // Time this STA spent transmitting
-    pub sta_collision_time: f64,// Time wasted in collisions for this STA
-    
+    pub total_busy_time: f64,    // Total channel busy time (all STAs)
+    pub sta_tx_time: f64,        // Time this STA spent transmitting
+    pub sta_collision_time: f64, // Time wasted in collisions for this STA
+
     // MCS Accumulators
-    pub mcs_sum: f64,           // Sum of MCS indices (for average)
-    pub packet_count: usize,    // Number of packets to compute average
+    pub mcs_sum: f64,        // Sum of MCS indices (for average)
+    pub packet_count: usize, // Number of packets to compute average
 }
 
 impl WindowMetrics {
-    pub fn new(duration_window_f32: f32, sta_id: WindowKey,  ) -> Self {
+    pub fn new(duration_window_f32: f32, sta_id: WindowKey) -> Self {
         Self {
-            sta_id, 
+            sta_id,
             window_duration: Duration::from_secs_f32(duration_window_f32),
             ..Default::default()
         }
     }
-    pub fn reset(&mut self, now: f64, ) {
+    pub fn reset(&mut self, now: f64) {
         *self = Self {
             window_start: now,
-            sta_id: self.sta_id, 
-            window_duration: self.window_duration, 
+            sta_id: self.sta_id,
+            window_duration: self.window_duration,
             ..Default::default()
         };
     }
@@ -2085,27 +2089,27 @@ impl WindowMetrics {
     #[inline]
     pub fn update_metrics_mcs_util(&mut self, mcs: Option<u8>, duration: f64, success: bool) {
         if success {
-            if let Some(emecese) = mcs{
+            if let Some(emecese) = mcs {
                 self.sta_tx_time += duration;
-                self.total_busy_time += duration;  // Assuming successful TX contributes to total busy time
+                self.total_busy_time += duration; // Assuming successful TX contributes to total busy time
                 self.packet_count += 1; // Only count succesful transmissions for MCS.
                 self.mcs_sum += emecese as f64;
-            
+
                 // print_pink!("UPDATE! Metrics: tx_time: {}, busy_time: {}, packet_count: {}, mcs_avg: {}",
-                //                      self.sta_tx_time, self.total_busy_time, self.packet_count, self.mcs_sum / self.packet_count as f64); 
-            
-            
+                //                      self.sta_tx_time, self.total_busy_time, self.packet_count, self.mcs_sum / self.packet_count as f64);
             }
         } else {
             self.sta_collision_time += duration;
-            self.total_busy_time += duration;             // Collisions also consume channel time
+            self.total_busy_time += duration; // Collisions also consume channel time
         }
     }
 
     // Returns (Avg MCS, Total Util, STA Util)
     pub fn compute_and_reset(&mut self, now: f64) -> (WindowKey, f64, f64, f64) {
         let duration = now - self.window_start;
-        if duration <= 0.0 { return (self.sta_id, 0.0, 0.0, 0.0); }
+        if duration <= 0.0 {
+            return (self.sta_id, 0.0, 0.0, 0.0);
+        }
 
         let avg_mcs = if self.packet_count > 0 {
             self.mcs_sum / self.packet_count as f64
@@ -2143,7 +2147,6 @@ pub struct QueueModule {
     // pub arrival_rate: f64,
     pub service_rate: f64,
     // pub t0_time: Instant,
-
     pub csv_metrics: CsvType,
 
     pub coords_queue: Coords,
@@ -2176,10 +2179,9 @@ pub struct QueueModule {
     pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
 
     pub mlo_linkselection_strat: LinkSelectionStrategy,
-    pub packs_per_ampdu: usize, 
+    pub packs_per_ampdu: usize,
     pub window_metrics_mcs_util: Arc<Mutex<HashMap<WindowKey, WindowMetrics>>>, //  K: STA_ID, V: Metrics on temporal window, Arc<Mutex<>> for accessibility
-    pub output_metrics: Output<WindowMetricReport>, // Just to report MCS and utilization in real time, for each STA. 
-
+    pub output_metrics: Output<WindowMetricReport>, // Just to report MCS and utilization in real time, for each STA.
 }
 #[allow(unused)]
 impl QueueModule {
@@ -2192,11 +2194,11 @@ impl QueueModule {
         emulated_tests: Option<(bool, bool, bool, bool)>,
         link_configs: Vec<LinkConfig>, // NEW: Configure available links
         mlo_linkselection_strat: LinkSelectionStrategy,
-        packs_per_ampdu: usize, 
+        packs_per_ampdu: usize,
     ) -> Self {
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
         let mut dcf_stats_vec: HashMap<(i32, EdcaAc, u8), DcfStats> = HashMap::new();
-        let mut windows_vec = HashMap::new(); 
+        let mut windows_vec = HashMap::new();
         let (stats_tx, stats_rx) = unbounded();
 
         // Initialize per-STA stats
@@ -2218,11 +2220,14 @@ impl QueueModule {
                 EdcaAc::BestEffort,
                 EdcaAc::Background,
             ] {
-                let mac_key = (-1, ac, link_id); 
-                let wind_key = (-1, link_id); 
+                let mac_key = (-1, ac, link_id);
+                let wind_key = (-1, link_id);
 
                 dcf_stats_vec.insert(mac_key, DcfStats::new(ac));
-                windows_vec.insert(wind_key, WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key)); 
+                windows_vec.insert(
+                    wind_key,
+                    WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key),
+                );
             }
 
             // Every uplink STA keeps one MAC per link per AC
@@ -2234,11 +2239,13 @@ impl QueueModule {
                     EdcaAc::Background,
                 ] {
                     let mac_key = (*sta_id, ac, link_id);
-                    let wind_key = (*sta_id, link_id);  
+                    let wind_key = (*sta_id, link_id);
 
                     dcf_stats_vec.insert(mac_key, DcfStats::new(ac));
-                    windows_vec.insert(wind_key, WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key)); 
-
+                    windows_vec.insert(
+                        wind_key,
+                        WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key),
+                    );
                 }
             }
         }
@@ -2291,9 +2298,9 @@ impl QueueModule {
             link_queue_depths,
             sta_capabilities: HashMap::new(),
             mlo_linkselection_strat,
-            packs_per_ampdu, 
+            packs_per_ampdu,
 
-            window_metrics_mcs_util: Arc::new(Mutex::new(windows_vec)), 
+            window_metrics_mcs_util: Arc::new(Mutex::new(windows_vec)),
             output_metrics: Output::default(),
         }
     }
@@ -2306,36 +2313,38 @@ impl QueueModule {
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
-    
+
     #[inline]
     pub fn update_window_stats(
-        &mut self, 
-        wind_key: WindowKey, 
-        mcs: Option<u8>, 
-        duration: f64, 
-        success: bool, 
-        now: f64, 
-    ){
-        let mut windows_map = self.window_metrics_mcs_util.lock().expect("Window stats mutex poisoned");
+        &mut self,
+        wind_key: WindowKey,
+        mcs: Option<u8>,
+        duration: f64,
+        success: bool,
+        now: f64,
+    ) {
+        let mut windows_map = self
+            .window_metrics_mcs_util
+            .lock()
+            .expect("Window stats mutex poisoned");
 
         let metrics = windows_map.entry(wind_key).or_insert_with(|| {
-             // Fallback default if STA missing: 0.1s window
-             WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key) 
+            // Fallback default if STA missing: 0.1s window
+            WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key)
         });
 
         // 3. CHECK & REPORT: Has the window duration passed?
         // We check this BEFORE adding the new packet to keep the window boundary clean.
-        // println!("now: {}, start: {} -> Elapsed = {}", now, metrics.window_start, elapsed); 
+        // println!("now: {}, start: {} -> Elapsed = {}", now, metrics.window_start, elapsed);
         let elapsed = now - metrics.window_start;
         if elapsed >= metrics.window_duration.as_secs_f64() {
             // A. Compute the averages for the finishing window
 
-
             let sta_util = (metrics.sta_tx_time + metrics.sta_collision_time) / elapsed; // Redundant, for testing only
-            let total_util = metrics.total_busy_time / elapsed;                          // Redundant, for testing only
+            let total_util = metrics.total_busy_time / elapsed; // Redundant, for testing only
 
             // if metrics.packet_count > 0 {
-            //      print_magenta!("{} ELAPSED = {:.4}, DURATION: {:.4}\nMETRICS_WINDOW STA {} LINK {}: MCS={:.2}, Util={:.6}, Relative_util_STA={:.6}", 
+            //      print_magenta!("{} ELAPSED = {:.4}, DURATION: {:.4}\nMETRICS_WINDOW STA {} LINK {}: MCS={:.2}, Util={:.6}, Relative_util_STA={:.6}",
             //          now,elapsed, metrics.window_duration.as_secs_f32(),  wind_key.0, wind_key.1, metrics.mcs_sum / metrics.packet_count as f64, total_util, sta_util
             //      );
             // } else {
@@ -2343,16 +2352,21 @@ impl QueueModule {
             //      print_brown!("METRICS_WINDOW,{},{:?},0.0,0.0,0.0", now, wind_key);
             // }
 
-            let (window_key , avg_mcs, total_util, sta_util) = metrics.compute_and_reset(now);
+            let (window_key, avg_mcs, total_util, sta_util) = metrics.compute_and_reset(now);
 
-            let report = WindowMetricReport{timestamp: now, window_key: wind_key, avg_mcs, total_util, sta_util,  }; 
-            // println!("inside! metrics: {:?}\nreport:{:?}", metrics, report); 
-            self.output_metrics.send(report); 
+            let report = WindowMetricReport {
+                timestamp: now,
+                window_key: wind_key,
+                avg_mcs,
+                total_util,
+                sta_util,
+            };
+            // println!("inside! metrics: {:?}\nreport:{:?}", metrics, report);
+            self.output_metrics.send(report);
 
             // B. Output to CSV/Console
             // Format: [Time, STA_ID, Avg_MCS, Total_Chan_Util, STA_Relative_Util]
             // You can append this to your self.csv_metrics or just print it.
-            
         }
         // 4. UPDATE: Add the current packet's stats to the (possibly new) window
         metrics.update_metrics_mcs_util(mcs, duration, success);
@@ -2514,8 +2528,6 @@ impl QueueModule {
         winner.into_values().collect()
     }
 
-
-
     #[inline]
     fn select_link_for_packet(&mut self, pkt: &MpduPacket, now: TaiTime<0>) -> Option<u8> {
         /// Select the best link for a given packet based on strategy and STA capabilities
@@ -2566,8 +2578,12 @@ impl QueueModule {
         // );
 
         let selected = match self.mlo_linkselection_strat {
-            LinkSelectionStrategy::PrimaryFirst => self.select_mlo_channel_primary_first(&cap.links, now),
-            LinkSelectionStrategy::Opportunistic => self.select_mlo_channel_opportunistic(&cap.links, now),
+            LinkSelectionStrategy::PrimaryFirst => {
+                self.select_mlo_channel_primary_first(&cap.links, now)
+            }
+            LinkSelectionStrategy::Opportunistic => {
+                self.select_mlo_channel_opportunistic(&cap.links, now)
+            }
             LinkSelectionStrategy::LyapunovBackpressure => {
                 self.select_mlo_channel_lyapunov_backpressure(&cap.links, now)
             }
@@ -2599,7 +2615,11 @@ impl QueueModule {
     }
 
     #[inline]
-    fn select_mlo_channel_lyapunov_backpressure(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+    fn select_mlo_channel_lyapunov_backpressure(
+        &self,
+        available_links: &[u8],
+        now: TaiTime<0>,
+    ) -> Option<u8> {
         // 1. Handle edge cases
         if available_links.is_empty() {
             return None;
@@ -2643,7 +2663,11 @@ impl QueueModule {
     }
 
     #[inline]
-    fn select_mlo_channel_opportunistic(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+    fn select_mlo_channel_opportunistic(
+        &self,
+        available_links: &[u8],
+        now: TaiTime<0>,
+    ) -> Option<u8> {
         // 1. Handle edge cases (no links or only one link)
         if available_links.is_empty() {
             return None;
@@ -2713,7 +2737,7 @@ impl QueueModule {
                 //     "Opportunistic: Both links busy, defaulting to LINK-{}",
                 //     link_a_id
                 // );
-                // Some(link_a_id) // WHOOPSIE! Should be RANDOM. 
+                // Some(link_a_id) // WHOOPSIE! Should be RANDOM.
 
                 let random_choice = if rand::thread_rng().gen_bool(0.5) {
                     link_a_id
@@ -2724,7 +2748,11 @@ impl QueueModule {
             }
         }
     }
-    fn select_mlo_channel_primary_first(&self, available_links: &[u8], now: TaiTime<0>) -> Option<u8> {
+    fn select_mlo_channel_primary_first(
+        &self,
+        available_links: &[u8],
+        now: TaiTime<0>,
+    ) -> Option<u8> {
         let primary_link = available_links[0];
 
         // Check if primary is idle
@@ -2816,7 +2844,7 @@ impl QueueModule {
                 );
 
                 // Use the pre-calculated cap_s_edca variable
-                if test_resultz.0 <= DEFAULT_TMAX_AGG || test_resultz.0 <= cap_s_edca   {
+                if test_resultz.0 <= DEFAULT_TMAX_AGG || test_resultz.0 <= cap_s_edca {
                     optimal_n_packets = mid;
                     resultz_full_ampdu = test_resultz;
                     low = mid + 1;
@@ -2891,19 +2919,15 @@ impl QueueModule {
 
                         // Trigger scheduling if medium is idle
 
-                        // [STR+] Trigger scheduling if ANY link is idle (start race on all links), else just check the link_id of the current packet. 
+                        // [STR+] Trigger scheduling if ANY link is idle (start race on all links), else just check the link_id of the current packet.
                         // Instead of checking only the assigned 'link_id', we check if any link is free to start the backoff process.
                         let any_link_idle = if STR_PLUS_MODE_MLO {
                             self.link_is_transmitting.values().any(|&tx| !tx)
-                        }
-                        else{
+                        } else {
                             *self.link_is_transmitting.get(&link_id).unwrap() == false
-                        }; 
+                        };
 
-
-                        if self.queue.len() == 1
-                            && any_link_idle
-                        {
+                        if self.queue.len() == 1 && any_link_idle {
                             // We schedule it one slot time in the future.
                             // This prevents an immediate call and starts the 9µs slot timer loop correctly.
                             ctx.scheduler
@@ -2982,15 +3006,12 @@ impl QueueModule {
                     );
 
                     let any_link_idle = if STR_PLUS_MODE_MLO {
-                        self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy 
-                    }
-                    else{
+                        self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy
+                    } else {
                         *self.link_is_transmitting.get(&link_id).unwrap() == false
-                    }; 
+                    };
 
-                    if self.queue.len() == 1
-                        && any_link_idle
-                    {
+                    if self.queue.len() == 1 && any_link_idle {
                         context
                             .scheduler
                             .schedule_event(
@@ -3050,7 +3071,8 @@ impl QueueModule {
             dest_coords,
             P_TX, // This is a global, ok
             channel_width,
-        ).0;
+        )
+        .0;
 
         if airtime_secs == 0.0 {
             return (0.0, 0.0); // Avoid division by zero
@@ -3093,11 +3115,11 @@ impl QueueModule {
         self.link_is_transmitting.insert(link_id, false);
 
         let mac_key = AMPDU_sent.mac_key;
-        let wind_key: WindowKey = (mac_key.0, mac_key.2); 
-        // crate::print_dblue!("[DBG SEND AMPDU] KEY: {:?}", wind_key ); 
+        let wind_key: WindowKey = (mac_key.0, mac_key.2);
+        // crate::print_dblue!("[DBG SEND AMPDU] KEY: {:?}", wind_key );
 
-        let now_elapsed = elapsed.duration_since(TaiTime::EPOCH).as_secs_f64(); 
-        let mcs_assigned = AMPDU_sent.mcs_assigned; 
+        let now_elapsed = elapsed.duration_since(TaiTime::EPOCH).as_secs_f64();
+        let mcs_assigned = AMPDU_sent.mcs_assigned;
         // Send to appropriate output port
         if let Some(output) = self.link_outputs.get_mut(&link_id) {
             output.send(AMPDU_sent).await;
@@ -3109,16 +3131,16 @@ impl QueueModule {
         }
 
         let dcf_data = {
-        // Lock happens here
+            // Lock happens here
             let mut guard = self.array_dcf_values.lock().unwrap();
-            
+
             if let Some(st) = guard.get_mut(&mac_key) {
                 // Extract the values needed for CSV/Logging later
                 let prev_retries = st.retry_count;
                 let prev_cw_val = st.cw;
                 let prev_drawn_bo = st.last_backoff_drawn_logs;
                 // Clone the string now so we don't need 'st' later
-                let ac_str = st.edca_ac_str.clone(); 
+                let ac_str = st.edca_ac_str.clone();
 
                 // Update 'st' immediately while we have the lock
                 st.on_success(st.param.cw_min);
@@ -3128,73 +3150,72 @@ impl QueueModule {
             } else {
                 None
             }
-        }; 
+        };
         if let Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str)) = dcf_data {
             let mut drained = smallvec::SmallVec::<[StatsUpdate; 64]>::new();
-                if let Some(rx) = self.stats_rx.as_mut() {
-                    while let Ok(up) = rx.try_recv() {
-                        drained.push(up);
+            if let Some(rx) = self.stats_rx.as_mut() {
+                while let Ok(up) = rx.try_recv() {
+                    drained.push(up);
+                }
+            }
+            if !drained.is_empty() {
+                if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
+                    for u in &drained {
+                        qstats.update_cumstats(
+                            u.T_s,
+                            u.T_q,
+                            u.blocked_packet_counter,
+                            u.arrived_packet_counter,
+                            u.queue_length_when_out,
+                        );
                     }
                 }
-                if !drained.is_empty() {
-                    if let Ok(mut qstats) = self.cumulative_stats_queue.lock() {
-                        for u in &drained {
-                            qstats.update_cumstats(
-                                u.T_s,
-                                u.T_q,
-                                u.blocked_packet_counter,
-                                u.arrived_packet_counter,
-                                u.queue_length_when_out,
-                            );
-                        }
-                    } 
 
-                    // println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!", 
-                    //     format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s ); 
-                    
-                    // self.update_window_stats(
-                    //     wind_key, 
-                    //     Some(mcs_assigned), 
-                    //     drained[0].T_s, 
-                    //     true, 
-                    //     now_elapsed
-                    // );  
+                // println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!",
+                //     format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s );
 
+                // self.update_window_stats(
+                //     wind_key,
+                //     Some(mcs_assigned),
+                //     drained[0].T_s,
+                //     true,
+                //     now_elapsed
+                // );
 
-                    // crate::print_dblue!("[DBG SEND AMPDU] update! {:?}", wind_key , ); 
+                // crate::print_dblue!("[DBG SEND AMPDU] update! {:?}", wind_key , );
 
-                    if CSV_PER_PACKET {
-                        for u in drained {
-                            // CSV write outside the lock
-                            self.csv_metrics.update_stats(
-                                u.now,
-                                u.packet_id as usize,
-                                u.queue_length_when_out,
-                                u.T_s,
-                                u.T_q,
-                                u.length_packet,
-                                u.sta_src_id,
-                                u.sta_dest_id,
-                                u.ampdu_id,
-                                u.is_collision,
-                                u.collision_backoff,
-                                u.link_id as usize,
-                                prev_cw_val as usize,
-                                prev_retries,
-                                prev_drawn_bo,
-                                ac_str.clone(), 
-                            );
-                        }
+                if CSV_PER_PACKET {
+                    for u in drained {
+                        // CSV write outside the lock
+                        self.csv_metrics.update_stats(
+                            u.now,
+                            u.packet_id as usize,
+                            u.queue_length_when_out,
+                            u.T_s,
+                            u.T_q,
+                            u.length_packet,
+                            u.sta_src_id,
+                            u.sta_dest_id,
+                            u.ampdu_id,
+                            u.is_collision,
+                            u.collision_backoff,
+                            u.link_id as usize,
+                            prev_cw_val as usize,
+                            prev_retries,
+                            prev_drawn_bo,
+                            ac_str.clone(),
+                        );
                     }
                 }
             }
+        }
     }
-    
+
     #[inline]
     fn build_new_ampdu<'a>(
         &mut self,
         first_packet: &MpduPacket,
-        link_id: u8, 
+        link_id: u8,
         now: TaiTime<0>,
     ) -> (AmpduPacket, Duration) {
         let mut success_indices: Vec<usize> = Vec::new();
@@ -3250,11 +3271,12 @@ impl QueueModule {
                 // 2. Are unassigned OR assigned to the SAME link
                 if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
                     || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                    || (current_packet.assigned_link_id.is_some() && current_packet.assigned_link_id != Some(link_id)) 
-                        {
-                            packet_index += 1;
-                            continue;
-                        }
+                    || (current_packet.assigned_link_id.is_some()
+                        && current_packet.assigned_link_id != Some(link_id))
+                {
+                    packet_index += 1;
+                    continue;
+                }
 
                 let new_total_length =
                     self.aux_ampdu_serviced.total_length + current_packet.length_packet_bits;
@@ -3273,9 +3295,8 @@ impl QueueModule {
                         P_TX,
                         channel_width,
                     );
-                    resultz = ampdu_airtime_mcs.0; 
-                    self.aux_ampdu_serviced.mcs_assigned = ampdu_airtime_mcs.1; 
-
+                    resultz = ampdu_airtime_mcs.0;
+                    self.aux_ampdu_serviced.mcs_assigned = ampdu_airtime_mcs.1;
                 } else {
                     let dest_coords = self
                         .STA_coords_map
@@ -3294,12 +3315,14 @@ impl QueueModule {
                         P_TX,
                         channel_width,
                     );
-                    resultz = ampdu_airtime_mcs.0; 
-                    self.aux_ampdu_serviced.mcs_assigned = ampdu_airtime_mcs.1; 
+                    resultz = ampdu_airtime_mcs.0;
+                    self.aux_ampdu_serviced.mcs_assigned = ampdu_airtime_mcs.1;
                 }
                 let cap_s_edca = self.txop_cap_secs(&mac_key);
 
-                if resultz >= DEFAULT_TMAX_AGG || new_size > self.packs_per_ampdu as i32 ||  resultz >= cap_s_edca
+                if resultz >= DEFAULT_TMAX_AGG
+                    || new_size > self.packs_per_ampdu as i32
+                    || resultz >= cap_s_edca
                 {
                     log_mlo!(
                         now,
@@ -3359,7 +3382,7 @@ impl QueueModule {
             "  Aggregated {} packets, total_length={}, MCS={},  airtime={:.3}ms",
             self.aux_ampdu_serviced.mpdu_packets.len(),
             self.aux_ampdu_serviced.total_length,
-            self.aux_ampdu_serviced.mcs_assigned, 
+            self.aux_ampdu_serviced.mcs_assigned,
             last_service_duration.as_secs_f64() * 1000.0
         );
 
@@ -3376,7 +3399,7 @@ impl QueueModule {
                 // Packet loss - leave original in queue for retransmission
                 failed_count += 1;
                 debug_bgprint!(
-                    DebugColor::DarkRed, 
+                    DebugColor::DarkRed,
                     "❌ Packet {} failed (PL={:.3}), will be retransmitted",
                     packet.header_alvr,
                     self.PL_probability
@@ -3603,11 +3626,11 @@ impl QueueModule {
                         medium.occupy_collision(now + T_col_dur);
                     }
 
-                    let first_contender_key = contenders.first().unwrap(); 
+                    let first_contender_key = contenders.first().unwrap();
 
                     if let Ok(mut map) = self.array_dcf_values.lock() {
                         // Apply backoff to all contenders on this link
-                        
+
                         for key in contenders.clone() {
                             if let Some(st) = map.get_mut(&key) {
                                 let old_cw = st.cw;
@@ -3639,38 +3662,35 @@ impl QueueModule {
                             }
                         }
                     }
-                    
-                    for key in contenders.iter(){
+
+                    for key in contenders.iter() {
                         let contender_key: WindowKey = (key.0, key.2); // this could be cleaner :D
-                        //  self.update_window_stats(
-                        //     contender_key, 
-                        //     None, 
-                        //     T_col as f64, 
-                        //     false, 
-                        //     now.duration_since(TaiTime::EPOCH).as_secs_f64()
-                        // );
-
+                                                                       //  self.update_window_stats(
+                                                                       //     contender_key,
+                                                                       //     None,
+                                                                       //     T_col as f64,
+                                                                       //     false,
+                                                                       //     now.duration_since(TaiTime::EPOCH).as_secs_f64()
+                                                                       // );
                     }
-                   
-
 
                     if let Some(stats_tx) = &self.stats_tx {
                         // Deconstruct key. Assuming key is (sta_id, ac, link_id) based on your debug print
-                        let (src_id, _ac, _lid) = *first_contender_key; 
+                        let (src_id, _ac, _lid) = *first_contender_key;
 
-                        // We don't know the exact destination from the DCF key alone, 
+                        // We don't know the exact destination from the DCF key alone,
                         // but strictly speaking, we only need 'src_id' for your Python DL/UL split.
                         // We'll set dest_id to 0 (or -1) as a placeholder.
-                        let dummy_dest_id = if src_id == -1 { 1 } else { -1 }; 
+                        let dummy_dest_id = if src_id == -1 { 1 } else { -1 };
 
                         let stats_update = StatsUpdate {
                             // -- Timing & collision info --
                             now,
                             is_collision: true,
                             collision_backoff: T_col as f64,
-                            
+
                             // -- IDs --
-                            sta_src_id: src_id,    // Python uses this to determine DL vs UL
+                            sta_src_id: src_id, // Python uses this to determine DL vs UL
                             sta_dest_id: dummy_dest_id,
                             link_id: link_id,
 
@@ -3682,12 +3702,12 @@ impl QueueModule {
                             queue_length_when_out: 0,
                             packet_id: 0,
                             length_packet: 0,
-                            ampdu_id: self.ampdu_id, 
+                            ampdu_id: self.ampdu_id,
                         };
 
                         stats_tx
                             .send(stats_update)
-                            .expect("Failed to send stats update");                    
+                            .expect("Failed to send stats update");
                     }
 
                     // CRITICAL FIX: Schedule wake-up after collision resolves
@@ -3710,11 +3730,12 @@ impl QueueModule {
                 let first_ix = match self.queue.iter().position(|p| {
                     let is_ul = p.sta_src_id > p.sta_dest_id;
                     let p_sta = if is_ul { p.sta_src_id } else { -1 };
-                    p_sta == sta_id 
-                        && p.edca_ac == ac 
-                        && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))                    // p_sta == sta_id 
-                    //     && p.edca_ac == ac
-                    //     && p.assigned_link_id == Some(winner_link_id)
+                    p_sta == sta_id
+                        && p.edca_ac == ac
+                        && (p.assigned_link_id.is_none()
+                            || p.assigned_link_id == Some(winner_link_id)) // p_sta == sta_id
+                                                                           //     && p.edca_ac == ac
+                                                                           //     && p.assigned_link_id == Some(winner_link_id)
                 }) {
                     Some(ix) => ix,
                     None => {
@@ -3730,7 +3751,8 @@ impl QueueModule {
                 let first_packet = self.queue.get(first_ix).cloned().unwrap();
 
                 // Build AMPDU for this link
-                let (mut ampdu_to_send, ampdu_airtime) = self.build_new_ampdu(&first_packet, link_id, now);
+                let (mut ampdu_to_send, ampdu_airtime) =
+                    self.build_new_ampdu(&first_packet, link_id, now);
                 ampdu_to_send.link_id = link_id; // Tag AMPDU with link
 
                 if ampdu_to_send.mpdu_packets.is_empty() || ampdu_airtime == Duration::ZERO {
@@ -3800,8 +3822,9 @@ impl QueueModule {
                             };
                             p_sta == sta_id
                                 && p.edca_ac == ac
-                                && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(link_id))
-                                // && p.assigned_link_id == Some(link_id)
+                                && (p.assigned_link_id.is_none()
+                                    || p.assigned_link_id == Some(link_id))
+                            // && p.assigned_link_id == Some(link_id)
                         });
 
                         if !has_packets {

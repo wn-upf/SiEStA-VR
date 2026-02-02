@@ -9,7 +9,7 @@ use tai_time::TaiTime;
 
 use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
-use crate::lib::models_mm1k::{STR_PLUS_MODE_MLO};
+use crate::lib::models_mm1k::STR_PLUS_MODE_MLO;
 use colored::Colorize;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ const SIFS: f64 = 16E-6;
 // const DIFS: f64 = 2.0 * SLOT + SIFS; // unused with EDCA
 
 pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
-// pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab 
+// pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab
 pub const AMPDU_BYTES_CAP: usize = 65535; // byte limit for AMPDUs (source: matlab)
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
@@ -424,10 +424,15 @@ fn get_4_octet(ip: IpAddr) -> u8 {
 } // get the 4th octet of IpAddr (for tagging CSVs)
 
 #[allow(unused)]
-
-
 #[allow(unused)]
-fn draw_v_line(buffer: &mut [u32], x: usize, y_start: usize, y_end: usize, stride: usize, color: u32) {
+fn draw_v_line(
+    buffer: &mut [u32],
+    x: usize,
+    y_start: usize,
+    y_end: usize,
+    stride: usize,
+    color: u32,
+) {
     for y in y_start..y_end {
         if y * stride + x < buffer.len() {
             buffer[y * stride + x] = color;
@@ -436,7 +441,14 @@ fn draw_v_line(buffer: &mut [u32], x: usize, y_start: usize, y_end: usize, strid
 }
 
 #[allow(unused)]
-fn draw_h_line(buffer: &mut [u32], y: usize, x_start: usize, x_end: usize, stride: usize, color: u32) {
+fn draw_h_line(
+    buffer: &mut [u32],
+    y: usize,
+    x_start: usize,
+    x_end: usize,
+    stride: usize,
+    color: u32,
+) {
     let start = y * stride + x_start;
     let end = y * stride + x_end;
     for idx in start..end {
@@ -444,7 +456,8 @@ fn draw_h_line(buffer: &mut [u32], y: usize, x_start: usize, x_end: usize, strid
             buffer[idx] = color;
         }
     }
-}#[allow(unused)]
+}
+#[allow(unused)]
 pub fn render_kv_cell(
     buffer: &mut [u32],
     label: &str,
@@ -457,7 +470,7 @@ pub fn render_kv_cell(
     total_width_px: usize,
     separator_offset: Option<usize>, // New: Option to draw a vertical bar
 ) {
-    const CHAR_BASE_W: usize = 6; 
+    const CHAR_BASE_W: usize = 6;
     const FONT_HEIGHT: usize = 7;
     let char_width = CHAR_BASE_W * scale;
 
@@ -493,7 +506,7 @@ macro_rules! render_hud_grid {
             let mut current_y = $y;
             let items_count = [ $( $label ),* ].len();
             let padding = 10;
-            
+
             // Draw Box Around Area
             if $draw_box {
                 let box_h = items_count * $spacing + padding;
@@ -510,14 +523,14 @@ macro_rules! render_hud_grid {
 
             $(
                 crate::lib::render_kv_cell(
-                    $buffer, 
-                    $label, 
-                    &format!("{}", $value), 
-                    $x, 
-                    current_y, 
-                    $stride, 
-                    $color, 
-                    $scale, 
+                    $buffer,
+                    $label,
+                    &format!("{}", $value),
+                    $x,
+                    current_y,
+                    $stride,
+                    $color,
+                    $scale,
                     $width,
                     $separator_pos
                 );
@@ -630,32 +643,32 @@ pub fn render_text(
         [0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00],
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
         // a-z (64-89) - lowercase letters
-        [0x00, 0x00, 0x0E, 0x01, 0x0F, 0x11, 0x0F],  // a
-        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x1E],  // b
-        [0x00, 0x00, 0x0E, 0x10, 0x10, 0x11, 0x0E],  // c
-        [0x01, 0x01, 0x0D, 0x13, 0x11, 0x11, 0x0F],  // d
-        [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E],  // e
-        [0x06, 0x09, 0x08, 0x1C, 0x08, 0x08, 0x08],  // f
-        [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x0E],  // g
-        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11],  // h
-        [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E],  // i
-        [0x02, 0x00, 0x06, 0x02, 0x02, 0x12, 0x0C],  // j
-        [0x10, 0x10, 0x12, 0x14, 0x18, 0x14, 0x12],  // k
-        [0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],  // l
-        [0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11],  // m
-        [0x00, 0x00, 0x16, 0x19, 0x11, 0x11, 0x11],  // n
-        [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E],  // o
-        [0x00, 0x00, 0x1E, 0x11, 0x1E, 0x10, 0x10],  // p
-        [0x00, 0x00, 0x0D, 0x13, 0x0F, 0x01, 0x01],  // q
-        [0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10],  // r
-        [0x00, 0x00, 0x0E, 0x10, 0x0E, 0x01, 0x1E],  // s
-        [0x08, 0x08, 0x1C, 0x08, 0x08, 0x09, 0x06],  // t
-        [0x00, 0x00, 0x11, 0x11, 0x11, 0x13, 0x0D],  // u
-        [0x00, 0x00, 0x11, 0x11, 0x11, 0x0A, 0x04],  // v
-        [0x00, 0x00, 0x11, 0x11, 0x15, 0x15, 0x0A],  // w
-        [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11],  // x
-        [0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E],  // y
-        [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F],  // z
+        [0x00, 0x00, 0x0E, 0x01, 0x0F, 0x11, 0x0F], // a
+        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x1E], // b
+        [0x00, 0x00, 0x0E, 0x10, 0x10, 0x11, 0x0E], // c
+        [0x01, 0x01, 0x0D, 0x13, 0x11, 0x11, 0x0F], // d
+        [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E], // e
+        [0x06, 0x09, 0x08, 0x1C, 0x08, 0x08, 0x08], // f
+        [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x0E], // g
+        [0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x11], // h
+        [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E], // i
+        [0x02, 0x00, 0x06, 0x02, 0x02, 0x12, 0x0C], // j
+        [0x10, 0x10, 0x12, 0x14, 0x18, 0x14, 0x12], // k
+        [0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E], // l
+        [0x00, 0x00, 0x1A, 0x15, 0x15, 0x11, 0x11], // m
+        [0x00, 0x00, 0x16, 0x19, 0x11, 0x11, 0x11], // n
+        [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E], // o
+        [0x00, 0x00, 0x1E, 0x11, 0x1E, 0x10, 0x10], // p
+        [0x00, 0x00, 0x0D, 0x13, 0x0F, 0x01, 0x01], // q
+        [0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10], // r
+        [0x00, 0x00, 0x0E, 0x10, 0x0E, 0x01, 0x1E], // s
+        [0x08, 0x08, 0x1C, 0x08, 0x08, 0x09, 0x06], // t
+        [0x00, 0x00, 0x11, 0x11, 0x11, 0x13, 0x0D], // u
+        [0x00, 0x00, 0x11, 0x11, 0x11, 0x0A, 0x04], // v
+        [0x00, 0x00, 0x11, 0x11, 0x15, 0x15, 0x0A], // w
+        [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11], // x
+        [0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E], // y
+        [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F], // z
     ];
 
     let mut char_x = x;
@@ -692,7 +705,7 @@ pub fn render_text(
             ']' => 61,
             '^' => 62,
             '_' => 63,
-            'a'..='z' => (c as usize) - ('a' as usize) + 64,  // Now maps to lowercase glyphs
+            'a'..='z' => (c as usize) - ('a' as usize) + 64, // Now maps to lowercase glyphs
             _ => 0,
         };
 
@@ -727,17 +740,17 @@ fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time:
     let center_y = height as f32 / 2.0;
     let radius = 80.0;
     let dot_count: i32 = 12;
-    let dot_radius = 8.0; 
+    let dot_radius = 8.0;
 
     // Clear the video area to a dark background
     for pixel in buffer.iter_mut().take(width * height) {
-        *pixel = 0x050505; 
+        *pixel = 0x050505;
     }
 
     for i in 0..dot_count {
         // Angle for this specific dot
         let angle = (i as f32 / dot_count as f32) * std::f32::consts::TAU;
-        
+
         // Calculate position
         let x = (center_x + angle.cos() * radius) as usize;
         let y = (center_y + angle.sin() * radius) as usize;
@@ -756,7 +769,7 @@ fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time:
                 if (dx * dx + dy * dy) as f32 <= dot_radius * dot_radius {
                     let px = (x as isize + dx) as usize;
                     let py = (y as isize + dy) as usize;
-                    
+
                     if px < width && py < height {
                         buffer[py * width + px] = color;
                     }
@@ -765,7 +778,6 @@ fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time:
         }
     }
 }
-
 
 pub fn render_graph(
     buffer: &mut [u32],
@@ -777,45 +789,49 @@ pub fn render_graph(
     fps: f32,
     graph_height: usize,
     max_size_kb: f32,
-    use_log: bool, 
+    use_log: bool,
 ) {
     // 1. MADE WIDER: Increased width and spacing
-    let bar_width = 7; 
+    let bar_width = 7;
     let spacing = 2;
     let graph_width = history.len() * (bar_width + spacing);
-    
+
     // --- CONFIGURATION ---
     // 2. INCREASED FONT SIZE: Changed from 2 to 3
-    const DISPLAY_GRAPH_SCALE_TEXT: usize = 3; 
+    const DISPLAY_GRAPH_SCALE_TEXT: usize = 3;
 
-    const COL_RED: u32 = 0xEE6666;    
-    const COL_YELLOW: u32 = 0xF0E68C; 
-    const COL_GREEN: u32 = 0x8FBC8F;  
-    const COL_GRID: u32 = 0x555555;   
-    const COL_TEXT: u32 = 0xCCCCCC;   
-    // const COL_TGT: u32 = 0x87CEFA;    
+    const COL_RED: u32 = 0xEE6666;
+    const COL_YELLOW: u32 = 0xF0E68C;
+    const COL_GREEN: u32 = 0x8FBC8F;
+    const COL_GRID: u32 = 0x555555;
+    const COL_TEXT: u32 = 0xCCCCCC;
+    // const COL_TGT: u32 = 0x87CEFA;
     const COL_TGT: u32 = 0xFF00FF; // Flashy Magenta
 
     // Layout Offsets
     // Increased margins to handle larger text size
-    let label_margin = 75; 
-    let title_margin = 55; 
+    let label_margin = 75;
+    let title_margin = 55;
 
     // --- 0. DRAW BACKGROUND PLATE ---
-    let bg_y_start = y_offset.saturating_sub(title_margin + 10); 
+    let bg_y_start = y_offset.saturating_sub(title_margin + 10);
     // Extended bottom margin significantly to fit the "0" and bottom padding
-    let bg_y_end = y_offset + graph_height + 40; 
-    let bg_x_start = x_offset.saturating_sub(label_margin + 20); 
-    let bg_x_end = x_offset + graph_width + 220;    
+    let bg_y_end = y_offset + graph_height + 40;
+    let bg_x_start = x_offset.saturating_sub(label_margin + 20);
+    let bg_x_end = x_offset + graph_width + 220;
 
     for y in bg_y_start..bg_y_end {
-        if y >= buffer.len() / stride { continue; }
+        if y >= buffer.len() / stride {
+            continue;
+        }
         for x in bg_x_start..bg_x_end {
-            if x >= stride { continue; }
-            
+            if x >= stride {
+                continue;
+            }
+
             let pixel_idx = y * stride + x;
             let current_pixel = buffer[pixel_idx];
-            
+
             // Dimming logic
             let r = ((current_pixel >> 16) & 0xFF) / 2;
             let g = ((current_pixel >> 8) & 0xFF) / 2;
@@ -847,22 +863,22 @@ pub fn render_graph(
     // --- 1. TITLE & INFO ---
     render_text(
         buffer,
-        &format!(" Frame size ({} window) in kBytes", history.len()), 
+        &format!(" Frame size ({} window) in kBytes", history.len()),
         x_offset,
-        y_offset.saturating_sub(title_margin), 
+        y_offset.saturating_sub(title_margin),
         stride,
-        0xFFFFFF, 
+        0xFFFFFF,
         3, // Increased Title Size
     );
-    
+
     render_text(
-        buffer, 
-        "[kB]", 
-        x_offset.saturating_sub(label_margin), 
-        y_offset.saturating_sub(title_margin), 
-        stride, 
-        COL_TEXT, 
-        3,  // Keep unit small
+        buffer,
+        "[kB]",
+        x_offset.saturating_sub(label_margin),
+        y_offset.saturating_sub(title_margin),
+        stride,
+        COL_TEXT,
+        3, // Keep unit small
     );
 
     // --- 2. DRAW Y-AXIS MARKERS & GRID ---
@@ -870,7 +886,7 @@ pub fn render_graph(
     for i in 0..=4 {
         let visual_percentage = i as f32 * 0.25;
         let marker_y = y_offset + graph_height - (visual_percentage * graph_height as f32) as usize;
-        
+
         let label_val = if i == 0 {
             0.0 // Force 0 for the bottom line
         } else if use_log {
@@ -882,7 +898,7 @@ pub fn render_graph(
         if marker_y < buffer.len() / stride {
             for px in x_offset..(x_offset + graph_width) {
                 if px < stride {
-                    buffer[marker_y * stride + px] = COL_GRID; 
+                    buffer[marker_y * stride + px] = COL_GRID;
                 }
             }
         }
@@ -892,8 +908,8 @@ pub fn render_graph(
         render_text(
             buffer,
             &format!("{:.0}", label_val),
-            x_offset.saturating_sub(label_margin), 
-            marker_y.saturating_sub(10), 
+            x_offset.saturating_sub(label_margin),
+            marker_y.saturating_sub(10),
             stride,
             COL_TEXT,
             DISPLAY_GRAPH_SCALE_TEXT,
@@ -907,14 +923,14 @@ pub fn render_graph(
         let bar_height = (norm_h * graph_height as f32) as usize;
 
         let color = if size_kb > current_target_kb * 1.5 {
-            0xFF5555 
+            0xFF5555
         } else if size_kb > current_target_kb {
             let intensity = ((size_kb / (current_target_kb * 1.5)) * 255.0) as u32;
-            0xFF0000 | (intensity << 8) 
+            0xFF0000 | (intensity << 8)
         } else {
             let health = (size_kb / current_target_kb).min(1.0);
-            let g = (150.0 + (105.0 * health)) as u32; 
-            (g << 8) | 100 
+            let g = (150.0 + (105.0 * health)) as u32;
+            (g << 8) | 100
         };
 
         // Render Bar
@@ -940,7 +956,9 @@ pub fn render_graph(
         // Draw the thick line
         for ty in 0..line_thickness {
             let target_y = target_y_base.saturating_sub(ty);
-            if target_y >= buffer.len() / stride { continue; }
+            if target_y >= buffer.len() / stride {
+                continue;
+            }
 
             for px in x_offset..(x_offset + graph_width) {
                 if px < stride {
@@ -949,20 +967,19 @@ pub fn render_graph(
                 }
             }
         }
-        
+
         // Render the label slightly offset from the thicker line
         render_text(
-            buffer, 
-            &format!("TARGET: {:.1} kB", current_target_kb), 
-            x_offset + graph_width + 10, 
+            buffer,
+            &format!("TARGET: {:.1} kB", current_target_kb),
+            x_offset + graph_width + 10,
             target_y_base.saturating_sub(12), // Adjusted for thickness
-            stride, 
-            COL_TGT, 
-            2
+            stride,
+            COL_TGT,
+            2,
         );
     }
 }
-
 
 impl SlidingWindowWeighted<f32> {
     pub fn weighted_sum(&self) -> f32 {
@@ -1108,38 +1125,52 @@ impl Av1Parser {
         let mut shift = 0;
 
         loop {
-            if offset + bytes_read >= self.buffer.len() { return None; }
+            if offset + bytes_read >= self.buffer.len() {
+                return None;
+            }
             let byte = self.buffer[offset + bytes_read];
             value |= ((byte & 0x7F) as usize) << shift;
             bytes_read += 1;
             shift += 7;
-            if (byte & 0x80) == 0 { break; }
-            if bytes_read > 8 { return None; } // Safety
+            if (byte & 0x80) == 0 {
+                break;
+            }
+            if bytes_read > 8 {
+                return None;
+            } // Safety
         }
         Some((value, bytes_read))
     }
 
     pub fn next_obu(&mut self) -> Option<ObuUnit> {
-        if self.buffer.is_empty() { return None; }
+        if self.buffer.is_empty() {
+            return None;
+        }
 
         let header_byte = self.buffer[0];
         let obu_type = (header_byte >> 3) & 0xF;
         let extension_flag = (header_byte >> 2) & 1;
         let has_size_field = (header_byte >> 1) & 1;
 
-        if has_size_field == 0 { return None; } // Simple safety check
+        if has_size_field == 0 {
+            return None;
+        } // Simple safety check
 
         let mut offset = 1;
         if extension_flag == 1 {
             offset += 1;
-            if self.buffer.len() < offset { return None; }
+            if self.buffer.len() < offset {
+                return None;
+            }
         }
 
         let (payload_size, leb_bytes) = self.parse_leb128(offset)?;
         offset += leb_bytes;
 
         let total_size = offset + payload_size;
-        if self.buffer.len() < total_size { return None; }
+        if self.buffer.len() < total_size {
+            return None;
+        }
 
         let obu_data = self.buffer[0..total_size].to_vec();
         self.buffer.drain(0..total_size);
@@ -1158,7 +1189,6 @@ impl Av1Parser {
         }
         units
     }
-
 
     pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
         self.get_obu_units().into_iter().map(|u| u.data).collect()
@@ -2033,12 +2063,10 @@ impl fmt::Display for HeaderALVRStream {
             write!(
                 f,
                 "(ALVR ID: {} |  s{:>3}/{:>3}, F: {:>4})",
-
-                self.stream_id, 
+                self.stream_id,
                 self.shard_index,
-                self.shards_count - 1, 
+                self.shards_count - 1,
                 self.next_packet_index,
-
             )
         }
     }
@@ -2114,15 +2142,12 @@ impl MpduPacket {
     }
 
     pub fn assign_link(&mut self, link_id: u8) {
-
-        if STR_PLUS_MODE_MLO{
-            self.assigned_link_id = None; 
-        }
-        else{
-            assert!(self.assigned_link_id.is_none(), "Link already assigned");  // make extra sure we don't assign links to packets more than once
+        if STR_PLUS_MODE_MLO {
+            self.assigned_link_id = None;
+        } else {
+            assert!(self.assigned_link_id.is_none(), "Link already assigned"); // make extra sure we don't assign links to packets more than once
             self.assigned_link_id = Some(link_id);
         }
-   
     }
 
     pub fn print(&self, color: DebugColor) -> String {
@@ -2152,7 +2177,7 @@ impl MpduPacket {
 }
 
 type MacKey = (i32, EdcaAc, u8); // e.g. (AP/STA_ID, EDCA_AC, link_id)); last u8 for MLO link ID
-type WindowKey = (i32, u8);  // (STA_ID, link_id)
+type WindowKey = (i32, u8); // (STA_ID, link_id)
 
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {
@@ -2165,8 +2190,7 @@ pub struct AmpduPacket {
     pub mac_key: MacKey,
     pub link_id: u8, // MLO field for intended link .
 
-    pub mcs_assigned: u8, 
-
+    pub mcs_assigned: u8,
 }
 
 impl AmpduPacket {
@@ -2185,7 +2209,7 @@ impl AmpduPacket {
             }, // Initialize coordinates to (0.0, 0.0, 0.0)
             mac_key: MacKey::default(),
             link_id: 0,
-            mcs_assigned: 0, 
+            mcs_assigned: 0,
         }
     }
     // Method to print AMPDU_packet values
@@ -2204,7 +2228,7 @@ impl AmpduPacket {
                 packet.data_inner.len(), // data_inner length counts bytes
                 packet.T_q.as_secs_f64() * 1000.0,
                 packet.T_s.as_secs_f64() * 1000.0,
-                packet.header_alvr.stream_id, 
+                packet.header_alvr.stream_id,
                 packet.header_alvr.shard_index,
                 packet.header_alvr.shards_count - 1,
                 packet.header_alvr.next_packet_index,
@@ -2225,7 +2249,6 @@ impl AmpduPacket {
             z: 0.0,
         }; // Reset coordinates to default (0.0, 0.0)
     }
-
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -2396,7 +2419,7 @@ pub fn airtime_ampdu(
     coords_dest: Coords,
     _p_tx_orig: f64,
     channel_width: usize,
-) -> (f64, u8)  {
+) -> (f64, u8) {
     let p_tx_cheated = match channel_width {
         20 => 20.0,
         40 => 20.0,
@@ -2446,7 +2469,7 @@ pub fn airtime_ampdu(
     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
 
     let (bits_symbol, coding_rate, _mcs_val) = match Pr {
-        _ if Pr < -82.0 => (1, 1.0 / 2.0,                1), // Could add additional PER in this case
+        _ if Pr < -82.0 => (1, 1.0 / 2.0, 1), // Could add additional PER in this case
         _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0, 1),
         _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0, 1),
         _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0, 2),
@@ -2461,9 +2484,9 @@ pub fn airtime_ampdu(
         _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0, 11),
         _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0, 12), // MCS 12, TODO: find a good reference for 802.11be SNR
         _ if Pr >= -46.0 => (12, 5.0 / 6.0, 13),               // MCS 13
-        _ => (1, 1.0 / 2.0, 1),                               // Catch-all for Pr out of range
+        _ => (1, 1.0 / 2.0, 1),                                // Catch-all for Pr out of range
     };
-    // print_dblue!("distance = {:.1} ----> MCS = {:.0}",distance,  _mcs_val); 
+    // print_dblue!("distance = {:.1} ----> MCS = {:.0}",distance,  _mcs_val);
     // println!("P_rx = {}", Pr);
 
     let Subcarriers = match channel_width {

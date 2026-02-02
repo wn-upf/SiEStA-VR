@@ -1,6 +1,8 @@
 use crate::debug_bgprint;
-use crate::lib::{get_prefix_path, get_third_octet, HevcParser, models_mm1k::NetworkPattern,DebugColor, OldCsvTrace,
-                Av1Parser,  };
+use crate::lib::{
+    get_prefix_path, get_third_octet, models_mm1k::NetworkPattern, Av1Parser, DebugColor,
+    HevcParser, OldCsvTrace,
+};
 use crate::print_green;
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 use asynchronix::model::Context;
@@ -47,7 +49,7 @@ use crate::lib::alvr_packets::{DeviceMotion, Pose};
 // use super::alvr_packets::NetworkStatisticsPacket;
 // use std::env;
 
-pub const DEBUG_FFMPEG_AV1_LOGS: bool = false; 
+pub const DEBUG_FFMPEG_AV1_LOGS: bool = false;
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring this from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -90,7 +92,7 @@ impl fmt::Display for VideoCodec {
 
 pub enum ChunkedEncoder {
     Hevc(ChunkedHevcEncoder),
-    HevcSoftware(ChunkedSoftwareHevcEncoder), 
+    HevcSoftware(ChunkedSoftwareHevcEncoder),
     Av1(ChunkedAv1Encoder),
 }
 
@@ -107,7 +109,7 @@ impl ChunkedEncoder {
         match self {
             ChunkedEncoder::Hevc(e) => e.next_frame().await,
             ChunkedEncoder::Av1(e) => e.next_frame().await,
-            ChunkedEncoder::HevcSoftware(e) => e.next_frame().await,         
+            ChunkedEncoder::HevcSoftware(e) => e.next_frame().await,
         }
     }
 
@@ -116,7 +118,6 @@ impl ChunkedEncoder {
             ChunkedEncoder::Hevc(e) => e.clear_buffers(),
             ChunkedEncoder::Av1(e) => e.clear_buffers(),
             ChunkedEncoder::HevcSoftware(e) => e.clear_buffers(),
-
         }
     }
 }
@@ -133,14 +134,13 @@ pub struct ChunkedAv1Encoder {
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
     frame_queue: VecDeque<Vec<u8>>,
-    parser: Av1Parser, 
+    parser: Av1Parser,
     encoder_str: String,
     gop_size: usize,
     intra_refresh: bool,
     framerate: f32,
 
-
-    aggregation_buffer: Vec<u8>, // to aggregate multiple OBUs into full frame.  
+    aggregation_buffer: Vec<u8>, // to aggregate multiple OBUs into full frame.
 }
 #[allow(unused)]
 impl ChunkedAv1Encoder {
@@ -174,7 +174,7 @@ impl ChunkedAv1Encoder {
             gop_size,
             intra_refresh,
             framerate,
-            aggregation_buffer: Vec::new(), 
+            aggregation_buffer: Vec::new(),
         }
     }
 
@@ -187,10 +187,10 @@ impl ChunkedAv1Encoder {
         self.parser.buffer.clear();
         // Clear the waiting frame queue
         self.frame_queue.clear();
-        
-        // Optional: drain the channel if necessary, though usually 
+
+        // Optional: drain the channel if necessary, though usually
         // queue and parser are sufficient for a reset.
-        while let Ok(_) = self.frame_rx.try_recv() {} 
+        while let Ok(_) = self.frame_rx.try_recv() {}
     }
     #[inline]
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
@@ -203,7 +203,7 @@ impl ChunkedAv1Encoder {
             self.encoder_str,
             bitrate_mbps,
         );
-        
+
         self.parser.buffer.clear();
 
         let mut command = FfmpegCommand::new();
@@ -241,20 +241,19 @@ impl ChunkedAv1Encoder {
         let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
 
-
-        if DEBUG_FFMPEG_AV1_LOGS{
-               if let Some(stderr) = child.take_stderr() {
+        if DEBUG_FFMPEG_AV1_LOGS {
+            if let Some(stderr) = child.take_stderr() {
                 let mut err_reader = std::io::BufReader::new(stderr);
                 std::thread::spawn(move || {
                     for line in err_reader.lines() {
-                        if let Ok(l) = line { println!("ffmpeg stderr: {}", l); }
+                        if let Ok(l) = line {
+                            println!("ffmpeg stderr: {}", l);
+                        }
                     }
                 });
-            }  
+            }
         }
         // Optional: Stderr handling similar to HEVC implementation
-     
-
 
         self.aggregation_buffer.clear();
         let mut buf = [0u8; 4096];
@@ -269,11 +268,11 @@ impl ChunkedAv1Encoder {
                         }
                         self.aggregation_buffer.clear();
                     }
-                    break; 
-                }, 
+                    break;
+                }
                 Ok(n) => {
                     self.parser.add_data(&buf[..n]);
-                    
+
                     let units = self.parser.get_obu_units();
                     for unit in units {
                         // OBU Type 2 is OBU_TEMPORAL_DELIMITER.
@@ -281,13 +280,14 @@ impl ChunkedAv1Encoder {
                         if unit.obu_type == 2 {
                             // If we have data accumulated, it means the *previous* frame is done.
                             if !self.aggregation_buffer.is_empty() {
-                                if let Err(e) = self.frame_tx.send(self.aggregation_buffer.clone()) {
+                                if let Err(e) = self.frame_tx.send(self.aggregation_buffer.clone())
+                                {
                                     eprintln!("Error sending AV1 frame: {}", e);
                                 }
                                 self.aggregation_buffer.clear();
                             }
                         }
-                        
+
                         // Add current OBU to the buffer (it belongs to the frame starting now)
                         self.aggregation_buffer.extend_from_slice(&unit.data);
                     }
@@ -301,10 +301,10 @@ impl ChunkedAv1Encoder {
         let _ = child.wait();
 
         self.current_offset += self.chunk_duration;
-        
+
         // Safety buffer clear
         if self.parser.buffer.len() > 100_000_000 {
-             self.parser.buffer.clear();
+            self.parser.buffer.clear();
         }
     }
 
@@ -312,7 +312,7 @@ impl ChunkedAv1Encoder {
         // Logic identical to ChunkedHevcEncoder for consistency
         let extracted_frames = self.parser.get_frames();
         if !extracted_frames.is_empty() {
-             for frame in extracted_frames.iter().skip(1) {
+            for frame in extracted_frames.iter().skip(1) {
                 self.frame_queue.push_back(frame.clone()); // Adapt .clone() if needed
             }
             return Some(extracted_frames[0].clone());
@@ -326,8 +326,8 @@ impl ChunkedAv1Encoder {
             return Some(frame);
         }
 
-    None
-}
+        None
+    }
 }
 
 pub struct ChunkedSoftwareHevcEncoder {
@@ -404,7 +404,7 @@ impl ChunkedSoftwareHevcEncoder {
         self.parser.buffer.clear();
 
         let mut command = FfmpegCommand::new();
-        
+
         // Common arguments for both modes
         command
             .args(&["-ss", &self.current_offset.to_string()])
@@ -431,20 +431,22 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&["-probesize", "200M"])
                 // Rate Control
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate]) 
+                .args(&["-bufsize", &self.bitrate])
                 .args(&["-rc-lookahead", "0"])
                 // Structural args
                 .args(&["-g", "0"]) // Let x265 params handle structure
                 .args(&["-bf", "0"]) // No B-frames for intra-refresh
                 // libx265 specific params for intra-refresh
-                .args(&["-x265-params", "intra-refresh=1:keyint=30:min-keyint=30:pools=4"]) 
+                .args(&[
+                    "-x265-params",
+                    "intra-refresh=1:keyint=30:min-keyint=30:pools=4",
+                ])
                 // Container flags
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
                 .args(&["-flush_packets", "1"])
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]);
-
         } else {
             command
                 .args(&["-analyzeduration", "100M"])
@@ -458,8 +460,11 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&["-g", &format!("{:.0}", self.gop_size)])
                 // libx265 specific params for Closed GOP
                 .args(&[
-                    "-x265-params", 
-                    &format!("no-open-gop=1:keyint={}:min-keyint={}:pools=4", self.gop_size, self.gop_size)
+                    "-x265-params",
+                    &format!(
+                        "no-open-gop=1:keyint={}:min-keyint={}:pools=4",
+                        self.gop_size, self.gop_size
+                    ),
                 ])
                 // Container flags
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
@@ -511,7 +516,7 @@ impl ChunkedSoftwareHevcEncoder {
                 }
             }
         }
-        
+
         let _ = child.wait();
 
         // Update offset
@@ -527,7 +532,7 @@ impl ChunkedSoftwareHevcEncoder {
             self.parser.buffer.clear();
         }
     }
-    
+
     #[inline]
     pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
         // First try parser's frames
@@ -553,8 +558,6 @@ impl ChunkedSoftwareHevcEncoder {
         None
     }
 }
-
-
 
 pub struct ChunkedHevcEncoder {
     input: String,
@@ -609,7 +612,7 @@ impl ChunkedHevcEncoder {
     pub fn clear_buffers(&mut self) {
         self.parser.buffer.clear();
         self.frame_queue.clear();
-        while let Ok(_) = self.frame_rx.try_recv() {} 
+        while let Ok(_) = self.frame_rx.try_recv() {}
     }
 
     pub fn clear_parser(&mut self) {
@@ -642,14 +645,13 @@ impl ChunkedHevcEncoder {
         if self.intra_refresh {
             command
                 .hwaccel("cuda")
-                .args(&["-analyzeduration", "200M"]) 
+                .args(&["-analyzeduration", "200M"])
                 .args(&["-probesize", "200M"])
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "8"])
-           
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
@@ -662,7 +664,6 @@ impl ChunkedHevcEncoder {
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-fps_mode", "passthrough"])
-
                 // .args(&["-preset", "llhq"])
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
@@ -678,16 +679,13 @@ impl ChunkedHevcEncoder {
                 .args(&["-bsf:v", "hevc_mp4toannexb"])
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]); // output raw HEVC
-
-
-
         } else {
             command
                 .hwaccel("cuda")
                 .args(&["-ss", &self.current_offset.to_string()])
                 .args(&["-t", &self.chunk_duration.to_string()])
                 // .args(&["-re"]) // read at realtime speed
-                .args(&["-analyzeduration", "100M"]) 
+                .args(&["-analyzeduration", "100M"])
                 .args(&["-probesize", "100M"])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
@@ -704,11 +702,9 @@ impl ChunkedHevcEncoder {
                 .args(&["-preset", "fast"]) // TODO : llhq is preferrable but deprecated on some of the HPC GPUs.
                 .args(&["-fps_mode", "passthrough"])
                 .args(&["-s", &format!("{}x{}", self.width, self.height)]) // Force input resolution
-                
-                .args(&["-flags", "+cgop"])       // 1. Force Closed GOP (No referencing frames outside the GOP)
+                .args(&["-flags", "+cgop"]) // 1. Force Closed GOP (No referencing frames outside the GOP)
                 // .args(&["-forced-idr", "1"])                     // 2. NVENC specific: Force the start to be an IDR frame. NOTE: not using this, better to make GoP frequency match T_abr
-                .args(&["-sc_threshold", "0"])    // 3. Disable scene change detection (keeps GOP strict)
-
+                .args(&["-sc_threshold", "0"]) // 3. Disable scene change detection (keeps GOP strict)
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
                 .args(&["-bufsize", &self.bitrate]) // 1-second VBV window (optional but keeps it tight)
@@ -1417,7 +1413,12 @@ pub struct StreamSocket {
 }
 #[allow(unused)]
 impl StreamSocket {
-    pub fn request_stream<T>(&self, stream_id: u16, t0: TaiTime<0>, codec_selection: VideoCodec) -> StreamSender<T> {
+    pub fn request_stream<T>(
+        &self,
+        stream_id: u16,
+        t0: TaiTime<0>,
+        codec_selection: VideoCodec,
+    ) -> StreamSender<T> {
         StreamSender::<T> {
             inner: Arc::clone(&self.send_socket),
             app_network_interface: Arc::clone(&self.receive_socket),
@@ -1439,7 +1440,7 @@ impl StreamSocket {
             last_lo: Cell::new(0),
             last_hi: Cell::new(1),
             video_chunk_duration: self.video_chunk_duration,
-            codec_selection, 
+            codec_selection,
             // col_cache: HashMap::new(),
         }
     }
@@ -1522,7 +1523,6 @@ impl StreamSocket {
 
         (vec_keys, vec_lost)
     }
-
 
     pub fn recv<T: XRDevice + asynchronix::model::Model>(
         &mut self,
@@ -1954,8 +1954,13 @@ impl StreamSocket {
                 components.in_progress_packets.iter().find(|(idx, _)| {
                     wrapping_cmp(**idx, shard_recv_state_mut.packet_index) == Ordering::Less
                 })
-            {   
-                debug_bgprint!(DebugColor::DarkOrange, "idx {} discarded because {} already found ", idx, shard_recv_state_mut.packet_index); 
+            {
+                debug_bgprint!(
+                    DebugColor::DarkOrange,
+                    "idx {} discarded because {} already found ",
+                    idx,
+                    shard_recv_state_mut.packet_index
+                );
                 let mut editprog = inprog.clone();
                 let idx = *idx; // fix borrow rule
                 let packet = components.in_progress_packets.remove(&idx).unwrap();
@@ -2357,7 +2362,7 @@ pub struct StreamSender<H> {
 
     pub video_chunk_duration: f32,
 
-    pub codec_selection: VideoCodec, 
+    pub codec_selection: VideoCodec,
 }
 
 #[allow(unused)]
@@ -2567,7 +2572,7 @@ impl<H: Serialize> StreamSender<H> {
                 let mut encoder = match self.codec_selection {
                     VideoCodec::HEVC => ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
                         &input_path,
-                        WIDTH_ENCODER  as u32,
+                        WIDTH_ENCODER as u32,
                         HEIGHT_ENCODER as u32,
                         &bitrate_cmd,
                         self.video_chunk_duration as f64, // Chunk duration in seconds
@@ -2623,7 +2628,7 @@ impl<H: Serialize> StreamSender<H> {
                         // );
 
                         // Clear ALL buffers before restart
-                                        
+
                         encoder.clear_buffers();
 
                         // Restart chunking
@@ -2994,7 +2999,7 @@ impl ReceiverDataStats {
 #[derive(Clone)]
 struct FrameSizeTable {
     _fps: u32,
-    codec_str: String, 
+    codec_str: String,
     mbps_cols: Vec<u32>,            // e.g. [5,10,15,...]
     col_index: HashMap<u32, usize>, // 5 -> 0, 10 -> 1, ...
     // Column-major: framesizes[col_idx][frame_idx] -> bytes
@@ -3075,10 +3080,10 @@ impl FrameSizeTable {
         ((v0 + f * (v1 - v0)).round() as u32) as usize
     }
 
-    fn load(final_file: &str, _fps: u32, codec_str: String ) -> anyhow::Result<Self> {
+    fn load(final_file: &str, _fps: u32, codec_str: String) -> anyhow::Result<Self> {
         let path = get_prefix_path(&format!(
             "csv_framesizes/{}_{}_{}fps.csv",
-            codec_str ,final_file, _fps
+            codec_str, final_file, _fps
         ));
         if !std::path::Path::new(&path).exists() {
             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
@@ -3139,7 +3144,7 @@ impl FrameSizeTable {
             col_index,
             framesizes,
             start_offset,
-            codec_str, 
+            codec_str,
         })
     }
 }
@@ -3161,12 +3166,16 @@ use once_cell::sync::Lazy;
 static TABLE_CACHE: Lazy<DashMap<(String, u32), Arc<FrameSizeTable>>> =
     Lazy::new(|| DashMap::new());
 
-fn get_table(final_file: &str, fps: u32, codec_selection: VideoCodec ) -> anyhow::Result<Arc<FrameSizeTable>> {
+fn get_table(
+    final_file: &str,
+    fps: u32,
+    codec_selection: VideoCodec,
+) -> anyhow::Result<Arc<FrameSizeTable>> {
     if let Some(entry) = TABLE_CACHE.get(&(final_file.to_string(), fps)) {
         return Ok(entry.clone());
     }
     let codec_str = format!("{}", codec_selection); // using Display trait to obtain String
-    // Double-checked load
+                                                    // Double-checked load
 
     let table = Arc::new(FrameSizeTable::load(final_file, fps, codec_str)?);
     let key = (final_file.to_string(), fps);

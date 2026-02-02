@@ -10,15 +10,13 @@ struct VideoGroup {
     fps: u32,
 }
 
-
-
 fn main() -> Result<(), Box<dyn Error>> {
-
-
-    let codec_prefix = "HEVC"; 
+    let codec_prefix = "HEVC";
     // Regex to capture: 1: Name, 2: FPS, 3: Mbps
-    let re = Regex::new(&format!(r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv", ))?;
-    
+    let re = Regex::new(&format!(
+        r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv",
+    ))?;
+
     // Map to group files: Key -> Vec<(Mbps, Path)>c
     let mut groups: HashMap<VideoGroup, Vec<(u32, String)>> = HashMap::new();
 
@@ -32,8 +30,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             let fps = cap[2].parse::<u32>()?;
             let mbps = cap[3].parse::<u32>()?;
 
-            let group = VideoGroup { name: video_name, fps };
-            groups.entry(group).or_default().push((mbps, path.to_string_lossy().into_owned()));
+            let group = VideoGroup {
+                name: video_name,
+                fps,
+            };
+            groups
+                .entry(group)
+                .or_default()
+                .push((mbps, path.to_string_lossy().into_owned()));
         }
     }
 
@@ -50,8 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // FIX: Open file first, then pass to CsvReader::new()
         let file = File::open(first_path)?;
-        let mut combined_df = CsvReader::new(file)
-            .finish()?;
+        let mut combined_df = CsvReader::new(file).finish()?;
         combined_df.rename("bytes", format!("{}Mbps", first_mbps).into())?;
 
         // Join subsequent files
@@ -61,9 +64,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let next_df = CsvReader::new(next_file)
                 .finish()?
                 .select(["frame_index", "bytes"])?;
-            
+
             // Note: rename is usually done on the DataFrame after finish()
-            let mut next_df = next_df; 
+            let mut next_df = next_df;
             next_df.rename("bytes", format!("{}Mbps", mbps).into())?;
 
             combined_df = combined_df.left_join(&next_df, ["frame_index"], ["frame_index"])?;
@@ -73,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let output_name = format!("{}_{}_{}fps.csv", codec_prefix, group.name, group.fps);
         let mut out_file = File::create(&output_name)?;
         CsvWriter::new(&mut out_file).finish(&mut combined_df)?;
-        
+
         println!("Saved to {}", output_name);
     }
 

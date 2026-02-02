@@ -218,7 +218,8 @@ impl TaskSet {
     ///
     /// This method will panic if there is no active task with the provided
     /// index.
-    pub(crate) fn waker_of(&self, idx: usize) -> WakerRef<'_> { // Changed to prevent compiler warning
+    pub(crate) fn waker_of(&self, idx: usize) -> WakerRef<'_> {
+        // Changed to prevent compiler warning
         assert!(idx < self.task_count);
 
         waker_ref(&self.tasks[idx])

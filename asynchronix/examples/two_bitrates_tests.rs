@@ -969,13 +969,12 @@ impl HevcDecoder {
 
         let decoder_string3 = decoder_string.clone(); // Stderr handler with improved debug output
 
+        const LOG_ERRORS_HEVC_DECODER: bool = false;
 
-        const LOG_ERRORS_HEVC_DECODER: bool = false; 
-
-        let mut stderr_container; 
+        let mut stderr_container;
         if LOG_ERRORS_HEVC_DECODER {
             let stderr_handle = std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
+                let mut reader = BufReader::new(stderr);
                 for line in reader.lines() {
                     match line {
                         Ok(l) => eprintln!("[{} HEVC]: {}", decoder_string3, l),
@@ -984,17 +983,12 @@ impl HevcDecoder {
                 }
 
                 println!("{decoder_string3} Decoder stderr reader thread exit");
-
-
             });
-            stderr_container = Some(stderr_handle); 
-
+            stderr_container = Some(stderr_handle);
+        } else {
+            stderr_container = None;
         }
 
-        else{
-            stderr_container = None; 
-        }
-        
         println!(
             "{decoder_str} 📹 HevcDecoder initialized with {}x{} resolution",
             width, height
