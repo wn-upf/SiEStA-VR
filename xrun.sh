@@ -4,7 +4,7 @@
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # number of nodes
 
-#SBATCH --mem=64G               # memory
+#SBATCH --mem=128G               # memory
 #SBATCH --time=48:00:00          # max walltime (adjust!)
 #SBATCH --cpus-per-task=48        # example
 #SBATCH -o logs_hpc/%x_%j.out
@@ -18,7 +18,7 @@ module load x264
 
 export PATH=$HOME/.local/bin:$PATH
 
-NUMBER_OF_JOBS=12
+NUMBER_OF_JOBS=20
 SERIAL_EXECUTION=0
 
 DEBUG_PROFILE_FLAMEGRAPH=0
@@ -26,22 +26,19 @@ DEBUG_LOGS=0
 
 #############################################################################
 
-simTime=25.0
+simTime=45.0
 
-EMU_TEST_TYPE=("STD") #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
-k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
+EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
+k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
-MLO_policies=(1) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
-                 ## (Does not matter if the const STR_PLUS_MODE_MLO is set to true)
+MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
+                        ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
 RANDOM_SEEDS=({1..3})
-# RANDOM_SEEDS=(1)
-# MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 ############################################################################# <- BG Traffic
-N_BGs=( 0 )                ## Nº of BG STAs
+N_BGs=( 0 )                    ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
-# rates_bps_BGtraffic=( 20000 50000 80000 )  ## Packets per second 
-rates_bps_BGtraffic=(20000)  ## Packets per second 
-IS_UL_BG=( 0 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL 
+rates_bps_BGtraffic=(20000)    ## Packets per second 
+IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
 MLO_CONFIGS=( "MLO0" "MLO1" "MLO3") ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
@@ -53,24 +50,25 @@ PL=0.1
 packs_per_ampdu=( 64 )
 
 ############################################################################# <- VR streaming Parameters
-CODEC_CHOICES=("AV1" "HEVC") ## can be "HEVC" or "AV1"
-N_XR=( 1 2 4 5 ) 
-initial_bitrate_mbps=( 100.0 ) # VR Only
-fps_list=( 60.0 90.0 120.0 )              # VR Only
-ABR_ENABLED=( 0 ) ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
-T_ABR=1.0         ## Time between updates of ABR, also affects RL mode. 
-nest_profiles=( 1 ) ## balanced and that's it 
-# video_samples=("swordsmith" )
-video_samples=("swordsmith")
-intrarefresh_choice=( 0 ) ## intra-refresh enabled if true
-GoP_sizes=(30)            ## Make sure GoP size is always less than (T_abr·FPS), and a common divisor 
+CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
+# N_XR=( 1 2 3 4 5 6) 
+N_XR=( 5 6) 
+
+initial_bitrate_mbps=( 100.0 )  
+fps_list=( 60.0 90.0 120.0 )    
+ABR_ENABLED=( 0 1 2 4 5)        ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
+nest_profiles=( 1 )             ## specific setting for Nest-vr
+video_samples=("swordsmith")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
+intrarefresh_choice=( 0 )       ## intra-refresh enabled if true
+GoP_sizes=(30)                  ## Make sure GoP size is always less than (T_abr·FPS), and a common divisor 
 
 ############################################################################# <- RL training Parameters
-observation_type=1 ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 
+observation_type=1              ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 
 reward_mode=0
 temp_file=$(mktemp)
 SHUFFLED_CMDS=$(mktemp)
-# N_STEPS_RL=7_500_000        ## Counter of simulations to iterate through for an RL training, needs to be synced with the python script.   
+# N_STEPS_RL=7_500_000          ## Counter of simulations to iterate through for an RL training, needs to be synced with the python script.   
 
 #########################################################################################################################
 SWEEP_ID="wn-upf/asynchronix-python_RL/i9igunmc" # ID for the W&B sweep for the agent.
@@ -82,9 +80,7 @@ SIM_COUNT=0                            # counter of simulations, not an input ar
 #########################################################################################################################
 # Define the function to execute on Ctrl+C
 handle_interrupt() {
-    echo "Simulation interrupted."
-    
-    # kill -9 -$(ps -o pgid= $PY_TERM_PID | grep -o '[0-9]*') 2>/dev/null
+    echo "Simulation interrupted."    
     exit 1
 }
 # Set up the trap for SIGINT (Ctrl+C)
@@ -92,8 +88,7 @@ trap handle_interrupt SIGINT
 
 # cargo build --release --example XR_sim
 cargo build --release --example XR_sim
-sleep 4 ## for being able to see if there were any errors before sims start
-
+sleep 4 ## for being able to see if there were any errors before sims start, else it would use the last best compiled code
 
 for test in "${EMU_TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do

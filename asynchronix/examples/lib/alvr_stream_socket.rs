@@ -1653,7 +1653,7 @@ impl StreamSocket {
                 .try_recv()
                 .ok()
                 .or_else(|| {
-                    println!("First fallback");
+                    // println!("First fallback");
                     // First fallback: Try to recycle old packets
                     let recyclable = components
                         .in_progress_packets

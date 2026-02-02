@@ -1,4 +1,4 @@
-use crate::lib::alvr_stream_socket::{VideoCodec, ALVR_ORIGINAL_SOCKETRX_BEHAVIOR};
+use crate::lib::alvr_stream_socket::{ALVR_ORIGINAL_SOCKETRX_BEHAVIOR, VideoCodec};
 // asynchronix/examples/xr_entry.rs
 use crate::lib::models_mm1k::{
     EmulatedLink, NetworkPattern, QueueModule, MAX_EMULATED_QUEUE_PACKETS,
@@ -110,6 +110,7 @@ impl VRPair {
         let server_coords: Coords = ap_coords.clone();
 
         let mut client_coords = Coords::with_coords(distance + AP_X, AP_Y, 0.0);
+        
         if test_distances_everest_bool {
             let mut rng = thread_rng();
             client_coords = random_room_coords(&mut rng);
@@ -262,34 +263,50 @@ fn truncated_exponential_seconds<R: Rng>(rng: &mut R, mean: f64, a: f64, b: f64)
 }
 
 fn generate_session_timeline_basic(sim_init_time: f64, stoptime: f64) -> Vec<(f64, f64)> {
-    let mut rng = thread_rng();
+    let mut _rng = thread_rng();
     let mut sessions = Vec::new();
 
     // exponentially distributed start offset between 1 and 5 seconds
-    let start_offset = truncated_exponential_seconds(&mut rng, 2.5, 1.0, 5.0);
+    
+    // let start_offset = truncated_exponential_seconds(&mut rng, 2.5, 1.0, 5.0);
+    let start_offset = 0.0; 
 
-    let start = sim_init_time + start_offset;
+    let start: f64 = sim_init_time + start_offset;
     let end = stoptime;
 
     sessions.push((start, end));
     sessions
 }
 
+
+
+const MIN_SESSION_DUR: f64 = 4.0;  // Reduced from 8.0
+const MAX_SESSION_DUR: f64 = 12.0; // Reduced from 20.0
+
+// Pause Timing Constants (Truncated Exponential)
+const PAUSE_MEAN: f64 = 12.0;      // Increased from 10.0 to space them out
+const PAUSE_MIN: f64 = 4.0;
+const PAUSE_MAX: f64 = 25.0;
+
 fn generate_session_timeline<R: Rng>(
     rng: &mut R,
-    // sim_init_time: f64,
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
-    let start_time_pause = truncated_exponential_seconds(rng, 15.0, 8.0, 25.0);
-    // let start_time_pause = sim_init_time;
+    let start_time_pause = truncated_exponential_seconds(rng, PAUSE_MIN, 3.0, 8.0);
 
     let mut t = start_time_pause;
     let mut sessions = Vec::new();
 
     while t < stoptime {
-        let dur = rng.gen_range(8.0..=20.0);
+        // Using the new constants here
+        let dur = rng.gen_range(MIN_SESSION_DUR..=MAX_SESSION_DUR);
 
-        let pause = truncated_exponential_seconds(rng, 10.0, 8.0, 15.0);
+        let pause = truncated_exponential_seconds(
+            rng, 
+            PAUSE_MEAN, 
+            PAUSE_MIN, 
+            PAUSE_MAX
+        );
 
         let start = t;
         let end = (t + dur).min(stoptime);
@@ -855,7 +872,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         // if i == 0 && abr == 3 {
         if i == 0 {
             // Make STA0 always be active, since it is used as the one for plots for a fair comparison.
-            sessions = generate_session_timeline_basic(init, stoptime); // Force the ReinforcementLearner to be active all across the simulation.
+            sessions = generate_session_timeline_basic(init, stoptime); // Force the ReinforcementLearner/VR STA to be active all across the simulation.
         }
         // let sessions: Vec<(f64, f64)> = generate_session_timeline(&mut rng, init, stoptime); // Each VR Session gets its own scheduling in the simulation
 
