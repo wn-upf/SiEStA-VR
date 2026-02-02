@@ -3,6 +3,7 @@ use crate::lib::alvr_stream_socket::{ALVR_ORIGINAL_SOCKETRX_BEHAVIOR, VideoCodec
 use crate::lib::models_mm1k::{
     EmulatedLink, NetworkPattern, QueueModule, MAX_EMULATED_QUEUE_PACKETS,
 };
+
 use crate::lib::models_mm1k::{LinkSelectionStrategy, StaCapabilities};
 use crate::lib::{
     exponential,
@@ -25,7 +26,6 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::{thread_rng, SeedableRng};
-
 use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
@@ -338,7 +338,7 @@ pub struct SimParams {
     pub is_ul_bg_traffic: usize,
     pub test_type: String, // "BW" | "JI" | "PL" | "STD" | "RANDOM"
     pub video_filename: String,
-    pub fps: f32,
+    pub fps_arg: f32,
     pub n_close: usize,
     pub distance_close: f64,
     pub seed: u64,
@@ -377,7 +377,7 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         is_ul_bg_traffic: args[10].parse().unwrap(),
         test_type: args[11].clone(),
         video_filename: args[12].clone(),
-        fps: args[13].parse().unwrap(),
+        fps_arg: args[13].parse().unwrap(),
         n_close: args[14].parse().unwrap(),
         distance_close: args[15].parse().unwrap(),
         seed: args[16].parse().unwrap(),
@@ -419,7 +419,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         is_ul_bg_traffic,
         test_type,
         video_filename,
-        fps,
+        fps_arg,
         n_close,
         distance_close,
         seed,
@@ -480,7 +480,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     // Create output directory
     let name_folder = format!(
         "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
-        stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,  
+        stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps_arg, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,  
     );
 
     let output_path = format!("Results/{}", name_folder);
@@ -606,57 +606,32 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         _ => ObservationConfig::ManualScaledV1,
     };
 
-    for i in 0..n_close {
-        // to set up variable distance scenarios across users
-        let first_vr_pair_distance: VRPair = VRPair::new(
-            i,
-            t0,
-            // mean_length_BG,
-            initial_bitrate,
-            distance_close,
-            &name_folder,
-            suffix,
-            &emu_effects,
-            &video_filename,
-            fps,
-            gop_size,
-            intra_refresh != 0,
-            abr,
-            &nest_vr_profile,
-            Some((test_bandwidth, test_jitter, test_pl, test_random)),
-            test_distances_everest_bool,
-            stoptime,
-            &sim_unique_string,
-            obs_config,
-            reward_mode,
-            t_update_abr,
-            ap_coords,
-            edca_be_bool,
-            codec_selection, 
-        );
-        // all_sta_ids.push(100 + i as i32);
-        // all_sta_ids.push(200 + i as i32);
-        xr_client_addresses.push(first_vr_pair_distance.mbox_xr_client.address());
-        xr_server_addresses.push(first_vr_pair_distance.mbox_xr_server.address());
-
-        emu_addresses.push(first_vr_pair_distance.mbox_emu_link.address());
-        vr_pairs.push(first_vr_pair_distance);
-    }
-
-    for i in n_close..n_xr {
-        // let emu_effects: &[lib::models_mm1k::NetworkPattern] = vr_pairs[0].emu_link.get_network_patterns();
+   
+    let mut rng = rand::thread_rng();
+    
+    for i in 0..n_xr {
+        // Determine the distance based on the index
+        let current_distance = if i < n_close { distance_close } else { distance };
+        
+        let current_fps = if i == 0 { fps_arg } else {
+            if test_distances_everest_bool {
+                let choices = [60.0, 90.0, 120.0];
+                *choices.choose(&mut rng).unwrap_or(&fps_arg)            }
+            else{
+                fps_arg
+            }
+        }; 
 
         let vr = VRPair::new(
             i,
             t0,
-            // mean_length_BG,
             initial_bitrate,
-            distance,
+            current_distance, // Use the conditional distance here
             &name_folder,
             suffix,
             &emu_effects,
             &video_filename,
-            fps,
+            current_fps,
             gop_size,
             intra_refresh != 0,
             abr,
@@ -671,15 +646,19 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             ap_coords,
             edca_be_bool,
             codec_selection, 
-
         );
-        // all_sta_ids.push(100 + i as i32);
-        // all_sta_ids.push(200 + i as i32);
+
+        // Common pushes for all users
         xr_client_addresses.push(vr.mbox_xr_client.address());
         xr_server_addresses.push(vr.mbox_xr_server.address());
+
+        // Only push to emu_addresses for the "close" users
+        if i < n_close {
+            emu_addresses.push(vr.mbox_emu_link.address());
+        }
+
         vr_pairs.push(vr);
     }
-
     let mut sta_client_addrs = Vec::new();
     for vr in &vr_pairs {
         sta_client_addrs.push(vr.mbox_sta_client.address());

@@ -19,7 +19,7 @@ module load x264
 export PATH=$HOME/.local/bin:$PATH
 
 NUMBER_OF_JOBS=12
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
@@ -33,8 +33,8 @@ k_queue=5000  ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is
 # RANDOM_SEEDS=(1)
 MLO_policies=(1) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                  ## (Does not matter if the const STR_PLUS_MODE_MLO is set to true)
-# RANDOM_SEEDS=({1..3})
-RANDOM_SEEDS=(1)
+RANDOM_SEEDS=({1..3})
+# RANDOM_SEEDS=(1)
 # MLO_policies=(0 1 2) ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
 ############################################################################# <- BG Traffic
 N_BGs=( 0 )                ## Nº of BG STAs
@@ -45,8 +45,8 @@ IS_UL_BG=( 0 )             ## 0 -> DL, 1-> UL, 2 -> DL + UL
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
 MLO_CONFIGS=( "MLO0" "MLO1" "MLO3") ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
-everest_tests=0              ## Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
-distance_list=( 2.5 10.0 )         ## Distance to AP of users                                     (ignored when everest_tests==1)
+everest_tests=1              ## Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
+distance_list=( 2.5 )         ## Distance to AP of users                                     (ignored when everest_tests==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
 PL=0.1
@@ -54,8 +54,8 @@ packs_per_ampdu=( 64 )
 
 ############################################################################# <- VR streaming Parameters
 CODEC_CHOICES=("AV1" "HEVC") ## can be "HEVC" or "AV1"
-N_XR=( 1 2 3 4 5 ) 
-initial_bitrate_mbps=( 10.0 20.0 50.0 100.0 ) # VR Only
+N_XR=( 1 2 4 5 ) 
+initial_bitrate_mbps=( 100.0 ) # VR Only
 fps_list=( 60.0 90.0 120.0 )              # VR Only
 ABR_ENABLED=( 0 ) ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0         ## Time between updates of ABR, also affects RL mode. 

@@ -7072,7 +7072,7 @@ impl STA_extended {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             const LIMIT_MOVEMENT_RADIUS: f64 = 0.5; // circle of 1m radius.
-            const RANDOM_WALK_SPEED: f64 = 2.0; 
+            const RANDOM_WALK_SPEED: f64 = 2.0; // 2 m/s
             const DELTA_T: f64 = 0.01; 
 
             // Step length = speed * delta_t
