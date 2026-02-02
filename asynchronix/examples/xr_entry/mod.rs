@@ -22,10 +22,10 @@ use anyhow::Result;
 #[allow(unused)]
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
-use rand::rngs::StdRng;
+// use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use rand::{thread_rng, SeedableRng};
+use rand::{thread_rng, };     //  SeedableRng};
 use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
@@ -84,38 +84,14 @@ impl VRPair {
         edca_be_mode: bool,
         codec_selection: VideoCodec, 
     ) -> Self {
-        let mut initial_bitrate = initial_bitrate_orig;
+        let initial_bitrate = initial_bitrate_orig;
 
-        let abr_choice;
         println!(
             "[VR session {}] with abr_choice: {}",
             pair_index, abr_enabled
         );
 
-        if matches!(abr_enabled, 3) {
-            // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random between CBR, Nest-VR and Everest.
-
-            if pair_index == 0 {
-                abr_choice = abr_enabled;
-                // do nothing, it's correct
-            } else {
-                // abr_choice = rng.gen_range(0..=2);  // generates 0, 1, or 2 (or 4 for GCC)
-                let choices = [0, 1, 2, 4];
-                let mut rng = thread_rng();
-                abr_choice = *choices.choose(&mut rng).unwrap();
-
-                if abr_choice == 0 {
-                    // CBR (RANDOM)
-                    let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario
-                    initial_bitrate = *values.choose(&mut rng).unwrap() as f64;
-                }
-            }
-        } else {
-            abr_choice = abr_enabled; //makes all sessions have same ABR choice
-        }
-        println!("[VR session {}] Final: {}", pair_index, abr_choice);
-
-        let bm_string = match abr_choice {
+        let bm_string = match abr_enabled {
             0 => "CBR",
             1 => "Nest-VR",
             2 => "EveRest",
@@ -151,7 +127,7 @@ impl VRPair {
             file_name_video,
             gop_size,
             intrarefresh,
-            abr_choice,
+            abr_enabled,
             nest_vr_profile,
             t_end_simu,
             simu_unique_str, // for identifying each simulation on the RLConnector
@@ -169,7 +145,7 @@ impl VRPair {
             t0,
             name_folder,
             test,
-            abr_choice,
+            abr_enabled,
             simu_unique_str,
             bm_string,
             t_update_abr,
@@ -459,7 +435,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     } else {
         "STD" // Default suffix if invalid test type provided
     };
-    let mut rng: StdRng = StdRng::seed_from_u64(seed);
+    // let mut rng: StdRng = StdRng::seed_from_u64(seed);
     // let abr_bool = abr > 0;
 
     let nest_vr_profile = match nest_vr_choice {
@@ -622,10 +598,37 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             }
         }; 
 
+        let current_abr_mode ; 
+        let mut bitrate_choice = initial_bitrate; 
+        let pair_index = i; 
+        if matches!(abr, 3) || test_distances_everest_bool == true { // Shared between RL training and ABR everest-like test. 
+                                                                        // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
+            if pair_index == 0 {
+                current_abr_mode = abr;
+                // do nothing, it's correct
+            } else {
+                // abr_choice = rng.gen_range(0..=2); 
+                let choices = [0, 1, 2, 4, 5]; // CBR, Nest, Everest, GCC, NADA
+                let mut rng = thread_rng();
+                current_abr_mode = *choices.choose(&mut rng).unwrap();
+
+                if current_abr_mode == 0 {
+                    // CBR (RANDOM)
+                    let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario
+                    bitrate_choice = *values.choose(&mut rng).unwrap() as f64;
+                }
+            }
+        } else {
+            current_abr_mode = abr; //makes all sessions have same ABR choice
+        }
+        println!("[VR session {}] Final: {}", pair_index, current_abr_mode);
+
+
+
         let vr = VRPair::new(
             i,
             t0,
-            initial_bitrate,
+            bitrate_choice,
             current_distance, // Use the conditional distance here
             &name_folder,
             suffix,
@@ -634,7 +637,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             current_fps,
             gop_size,
             intra_refresh != 0,
-            abr,
+            current_abr_mode,
             &nest_vr_profile,
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
             test_distances_everest_bool,

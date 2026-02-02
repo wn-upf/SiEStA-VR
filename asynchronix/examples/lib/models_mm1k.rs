@@ -2142,7 +2142,7 @@ pub struct QueueModule {
     pub queue_length_counter: usize,
     // pub arrival_rate: f64,
     pub service_rate: f64,
-    pub t0_time: Instant,
+    // pub t0_time: Instant,
 
     pub csv_metrics: CsvType,
 
@@ -2272,7 +2272,7 @@ impl QueueModule {
             arrived_packet_counter: 0,
             queue_length_counter: 0,
             service_rate: 0.0,
-            t0_time: Instant::now(),
+            // t0_time: Instant::now(),
             csv_metrics: CsvType::new(&folder_dir).expect("?? CSVTYPE"),
             coords_queue: Coords::with_coords(AP_X, AP_Y, 0.0), // To test.
             p_tx: P_TX,

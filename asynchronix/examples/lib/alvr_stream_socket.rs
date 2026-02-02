@@ -121,7 +121,7 @@ impl ChunkedEncoder {
     }
 }
 
-
+#[allow(unused)]
 pub struct ChunkedAv1Encoder {
     input: String,
     width: u32,
@@ -142,7 +142,7 @@ pub struct ChunkedAv1Encoder {
 
     aggregation_buffer: Vec<u8>, // to aggregate multiple OBUs into full frame.  
 }
-
+#[allow(unused)]
 impl ChunkedAv1Encoder {
     pub fn new(
         input: &str,
@@ -192,7 +192,7 @@ impl ChunkedAv1Encoder {
         // queue and parser are sufficient for a reset.
         while let Ok(_) = self.frame_rx.try_recv() {} 
     }
-
+    #[inline]
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
         let bitrate_adjusted_fps = bitrate_mbps;
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
@@ -390,7 +390,7 @@ impl ChunkedSoftwareHevcEncoder {
     pub fn clear_parser(&mut self) {
         self.parser.buffer.clear();
     }
-
+    #[inline]
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
         let bitrate_adjusted_fps = bitrate_mbps;
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
@@ -527,7 +527,8 @@ impl ChunkedSoftwareHevcEncoder {
             self.parser.buffer.clear();
         }
     }
-
+    
+    #[inline]
     pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
         // First try parser's frames
         let extracted_frames = self.parser.get_frames();
@@ -619,7 +620,7 @@ impl ChunkedHevcEncoder {
     /// Each process is configured to start at the current_offset and run for chunk_duration seconds.
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
-
+    #[inline]
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
         // let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
 
@@ -778,6 +779,8 @@ impl ChunkedHevcEncoder {
             self.parser.buffer.clear();
         }
     }
+
+    #[inline]
     pub async fn next_frame(&mut self) -> Option<Vec<u8>> {
         // First try parser's frames - keeping original behavior
         let extracted_frames = self.parser.get_frames();
@@ -2987,7 +2990,7 @@ impl ReceiverDataStats {
 //     TABLE_CACHE.set(new_map).ok(); // ignore error if already set by a race
 //     Ok(table)
 // }
-
+#[allow(unused)]
 #[derive(Clone)]
 struct FrameSizeTable {
     _fps: u32,

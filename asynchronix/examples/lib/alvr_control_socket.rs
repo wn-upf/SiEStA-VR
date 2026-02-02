@@ -9,11 +9,11 @@ use std::{
 
 use std::net::IpAddr;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ControlPacketType {
-    // Example fields; replace these with the actual data you want to send
-    pub data: Vec<u8>,
-}
+// #[derive(Serialize, Deserialize, Debug, Clone)]
+// pub struct ControlPacketType {
+//     // Example fields; replace these with the actual data you want to send
+//     pub data: Vec<u8>,
+// }
 
 use crossbeam::channel::{unbounded, Sender};
 

@@ -96,6 +96,8 @@ use std::process::{Command as altCommand, Stdio};
 use tokio::sync::mpsc::UnboundedSender;
 
 ////////////////////////////////////// CONSTS//////////////////////////////////////// TODO: STANDARDIZE AND GROUP CONSTS 
+
+#[allow(unused)]
 pub enum WindowCommand {
     Update {
         buffer: Vec<u32>, // The rendered pixels
@@ -149,10 +151,10 @@ const GRAPH_HUD_HEIGHT: usize = 470;
 static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
 // Wrapper for Command to match your syntax
-pub struct altFfmpegCommand {
+pub struct AltFfmpegCommand {
     cmd: altCommand,
 }
-impl altFfmpegCommand {
+impl AltFfmpegCommand {
     pub fn new() -> Self {
         Self { cmd: altCommand::new("ffmpeg") }
     }
@@ -286,7 +288,7 @@ fn convert_rgb_to_u32(rgb_data: &[u8], width: usize, height: usize) -> Option<Ve
 
     Some(pixels)
 }
-
+#[allow(unused)]
 pub struct Av1Decoder {
     frame_rx: Receiver<Vec<u8>>,
     packet_tx: Sender<Vec<u8>>,
@@ -322,7 +324,7 @@ impl Av1Decoder {
         let decoder_string = decoder_str.to_string();
 
         //  - We construct the FFmpeg pipe here
-        let mut child = altFfmpegCommand::new()
+        let mut child = AltFfmpegCommand::new()
             .args(&["-threads", &format!("{}", 2)])
             // .hwaccel("cuda") // Enable if you have RTX 30/40 series
             .args(&["-hide_banner", "-loglevel", "error"])
@@ -4777,20 +4779,20 @@ impl VideoDecoder {
         }
     }
 
-    pub fn get_frame_counter(&self) -> usize {
+    // pub fn get_frame_counter(&self) -> usize {
 
-        match self {
-            VideoDecoder::Hevc(d) => {
-                // HEVC is currently sync and doesn't explicitly use ID in the snippet
-                d.decoded_frame_counter
-            },
-            VideoDecoder::Av1(d) => {
-                d.decoded_frame_counter
-            }
-        }
+    //     match self {
+    //         VideoDecoder::Hevc(d) => {
+    //             // HEVC is currently sync and doesn't explicitly use ID in the snippet
+    //             d.decoded_frame_counter
+    //         },
+    //         VideoDecoder::Av1(d) => {
+    //             d.decoded_frame_counter
+    //         }
+    //     }
 
 
-    }
+    // }
 
     /// Unified Frame Retrieval
     pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
@@ -4809,20 +4811,20 @@ impl VideoDecoder {
         }
     }
 
-    /// Helper to access common metrics (Optional)
-    pub fn frames_processed(&self) -> usize {
-        match self {
-            VideoDecoder::Hevc(d) => d.frames_processed,
-            VideoDecoder::Av1(d) => d.frames_processed,
-        }
-    }
+    // /// Helper to access common metrics (Optional)
+    // pub fn frames_processed(&self) -> usize {
+    //     match self {
+    //         VideoDecoder::Hevc(d) => d.frames_processed,
+    //         VideoDecoder::Av1(d) => d.frames_processed,
+    //     }
+    // }
 
-    pub fn decoder_string(&self) -> &str {
-        match self {
-            VideoDecoder::Hevc(d) => &d.decoder_string,
-            VideoDecoder::Av1(d) => &d.decoder_string,
-        }
-    }
+    // pub fn decoder_string(&self) -> &str {
+    //     match self {
+    //         VideoDecoder::Hevc(d) => &d.decoder_string,
+    //         VideoDecoder::Av1(d) => &d.decoder_string,
+    //     }
+    // }
 
 
 
@@ -7309,15 +7311,15 @@ impl STA_extended {
 
 impl Model for STA_extended {}
 
-pub fn extract_br_value(input: &str) -> Option<f32> {
-    let re = Regex::new(r"Br(\d+\.\d+)").unwrap(); // Regex to match "Br" followed by a float.
+// pub fn extract_br_value(input: &str) -> Option<f32> {
+//     let re = Regex::new(r"Br(\d+\.\d+)").unwrap(); // Regex to match "Br" followed by a float.
 
-    if let Some(captures) = re.captures(input) {
-        captures.get(1).map(|m| m.as_str().parse::<f32>().unwrap())
-    } else {
-        None
-    }
-}
+//     if let Some(captures) = re.captures(input) {
+//         captures.get(1).map(|m| m.as_str().parse::<f32>().unwrap())
+//     } else {
+//         None
+//     }
+// }
 
 pub fn upper_bound_bitrate(bitrate_bps: f32, bitrate_ladder: &Vec<f32>) -> f32 {
     // Perform binary search to find the largest value less than or equal to `bitrate_bps`

@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-
+#![allow(unused)]
 use std::collections::VecDeque;
 use std::f64;
 
