@@ -153,8 +153,8 @@ struct CsvSink {
 }
 
 impl CsvSink {
-    fn new(folder: &str, file_stem: &str) -> std::io::Result<Self> {
-        let dir = Path::new("Results").join(folder);
+    fn new(results_path: &str ,folder: &str, file_stem: &str) -> std::io::Result<Self> {
+        let dir = Path::new(results_path).join(folder);
         create_dir_all(&dir)?;
         let path = dir.join(format!("{file_stem}.csv"));
 
@@ -239,11 +239,12 @@ impl StatisticsManager {
         folder: &str,
         ip_self: IpAddr,
         framerate_server: f32,
+        results_path: &str, 
     ) -> Self {
         let num = crate::lib::get_4_octet(ip_self);
         let file_stem = format!("XR_stats_{num:?}");
 
-        let csv_sink = CsvSink::new(folder, &file_stem).expect("failed to init CSV sink");
+        let csv_sink = CsvSink::new(results_path, folder, &file_stem).expect("failed to init CSV sink");
 
         Self {
             history_buffer: VecDeque::new(),

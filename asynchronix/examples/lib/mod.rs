@@ -1585,8 +1585,8 @@ pub struct CsvType {
 
 impl CsvType {
     /// Creates a new CsvType with a buffered writer and specified batch size.
-    pub fn new(folder_name: &str) -> io::Result<Self> {
-        let dir = format!("Results/{}", folder_name);
+    pub fn new(folder_name: &str, results_folder: &str) -> io::Result<Self> {
+        let dir = format!("{}/{}",  results_folder , folder_name);
         std::fs::create_dir_all(&dir)?;
         let file_path = format!("{}/QUEUE_stats.csv", dir);
         let file = OpenOptions::new()

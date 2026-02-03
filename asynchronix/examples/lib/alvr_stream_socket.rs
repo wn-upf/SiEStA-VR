@@ -9,6 +9,7 @@ use asynchronix::model::Context;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use ffmpeg_sidecar::command::FfmpegCommand;
 use rand::Rng;
+use rayon::result;
 use std::collections::HashMap;
 #[allow(unused)]
 use std::io::BufRead;
@@ -1418,6 +1419,7 @@ impl StreamSocket {
         stream_id: u16,
         t0: TaiTime<0>,
         codec_selection: VideoCodec,
+        results_path: &str, 
     ) -> StreamSender<T> {
         StreamSender::<T> {
             inner: Arc::clone(&self.send_socket),
@@ -1441,6 +1443,7 @@ impl StreamSocket {
             last_hi: Cell::new(1),
             video_chunk_duration: self.video_chunk_duration,
             codec_selection,
+            results_path: results_path.to_string(), 
             // col_cache: HashMap::new(),
         }
     }
@@ -2363,6 +2366,7 @@ pub struct StreamSender<H> {
     pub video_chunk_duration: f32,
 
     pub codec_selection: VideoCodec,
+    pub results_path: String, 
 }
 
 #[allow(unused)]
@@ -2507,13 +2511,13 @@ impl<H: Serialize> StreamSender<H> {
                 if self.csv_trace.path.as_os_str().is_empty() {
                     // one CSV per run – put it next to the hevc files, but anywhere is fine
                     let csv_path = get_prefix_path(&format!(
-                        "Results/{}/trace_offline_video{}.csv",
-                        name_folder, third_octet,
+                        "{}/{}/trace_offline_video{}.csv",
+                        self.results_path ,name_folder, third_octet,
                     ));
 
                     let csv_path_emu = get_prefix_path(&format!(
-                        "Results/{}/trace_emu_effects{}.csv",
-                        name_folder, third_octet,
+                        "{}/{}/trace_emu_effects{}.csv",
+                        self.results_path ,name_folder, third_octet,
                     ));
                     print_green!("Creating OFFLINE CSV at: {csv_path}",);
 
@@ -2673,8 +2677,8 @@ impl<H: Serialize> StreamSender<H> {
                 let third_octet = get_third_octet(ip).unwrap();
 
                 let csv_path_emu = get_prefix_path(&format!(
-                    "Results/{}/trace_emu_effects{}.csv",
-                    name_folder, third_octet,
+                    "{}/{}/trace_emu_effects{}.csv",
+                    self.results_path ,name_folder, third_octet,
                 ));
 
                 let parent_dir = std::path::Path::new(&csv_path_emu)

@@ -3222,8 +3222,8 @@ pub struct CsvTracking {
 }
 
 impl CsvTracking {
-    pub fn new(folder_name: &str, num_id: u8) -> std::io::Result<Self> {
-        let dir = format!("Results/{}", folder_name);
+    pub fn new(folder_name: &str, num_id: u8, results_path: &str, ) -> std::io::Result<Self> {
+        let dir = format!("{}/{}", results_path, folder_name, );
         let _ = std::fs::create_dir_all(&dir);
 
         let file_path = format!("{}/TRACKING_stats{}.csv", dir, num_id);
@@ -3336,6 +3336,7 @@ pub struct XRServer {
     pub map_rtt: Arc<DashMap<u32, TaiTime<0>>>,
     pub STATISTICS_MANAGER: StatisticsManager,
     pub name_folder: String,
+    pub results_path: String, 
     pub network_effects: Vec<NetworkPattern>,
 
     pub packet_size_sockets: usize,
@@ -3384,6 +3385,7 @@ impl XRServer {
         packet_size_sockets: usize,
         edca_be_mode: bool,
         codec_selection: VideoCodec,
+        results_path_name: &str,
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         let mut final_file;
@@ -3477,6 +3479,7 @@ impl XRServer {
                 name_folder,
                 ip_self,
                 frame_rate,
+                results_path_name, 
             ),
 
             network_effects: effects.to_vec(),
@@ -3488,7 +3491,7 @@ impl XRServer {
             output_perfect_information_bitrate: Output::default(),
 
             last_tracking_rx_instant: t0_sim,
-            csv_tracking: CsvTracking::new(name_folder, num).unwrap(),
+            csv_tracking: CsvTracking::new(name_folder, num, results_path_name).unwrap(),
             sim_unique_string: sim_unique_string.to_string(),
             nada_sender,
             fov_optix_manager: fovoptix_struct,
@@ -3496,6 +3499,7 @@ impl XRServer {
             t_update_abr,
             edca_be_mode,
             codec_selection,
+            results_path: results_path_name.to_string(), 
         }
     }
 
@@ -4354,10 +4358,11 @@ impl XRServer {
                 VIDEO,
                 self.t_0,
                 self.codec_selection,
+                &self.results_path
             ));
 
             self.audio_app_sender =
-                Some(stream_socket.request_stream(AUDIO, self.t_0, self.codec_selection));
+                Some(stream_socket.request_stream(AUDIO, self.t_0, self.codec_selection, &self.results_path));
 
             if matches!(
                 self.bitrate_manager.bitrate_mode,
@@ -4367,6 +4372,7 @@ impl XRServer {
                     FOVOPTIX_BW_PROBE,
                     self.t_0,
                     self.codec_selection,
+                    &self.results_path, 
                 ));
                 self.bw_probe_receiver =
                     Some(stream_socket.subscribe_to_stream(FOVOPTIX_BW_PROBE, MAX_UNREAD_PACKETS));
@@ -4911,6 +4917,8 @@ pub struct XRClient {
     last_keyframe_id: usize,
 
     name_folder: String,
+    results_path: String, // for simultaneous parallel simu runs
+
     // frame_batch: Vec<(usize, Vec<u8>, Vec<u8>, f64)>, // (frame_id, sample, ref_sample, timestamp)
 
     // last_batch_process_time: TaiTime<0>,
@@ -4973,6 +4981,8 @@ impl XRClient {
         packet_size_sockets: usize,
         edca_be_mode: bool,
         codec_selection: VideoCodec,
+        results_path: &str, // for simultaneous parallel simu runs
+
     ) -> Self {
         // let (vmaf_tx, vmaf_rx) = bounded(10);
         let (group_tx, group_rx) = bounded(10); // Buffer up to 5 groups
@@ -5058,6 +5068,7 @@ impl XRClient {
             last_displayed_pair_id: 0,
             last_keyframe_id: 0,
             name_folder: name_folder.to_string(),
+            results_path: results_path.to_string(), 
 
             test: test.to_string(),
 
@@ -5271,6 +5282,7 @@ impl XRClient {
                     FOVOPTIX_BW_PROBE,
                     self.t_0,
                     self.codec_selection,
+                    &self.results_path, 
                 ));
                 // way back for bw probing packets.
             }
@@ -5278,7 +5290,7 @@ impl XRClient {
             self.streamsocket_clone = Some(stream_socket.clone());
 
             self.output_app_tracking_sender =
-                Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection));
+                Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection, &self.results_path));
 
             XRClient::generate_tracking_data(self, (), context).await;
         }

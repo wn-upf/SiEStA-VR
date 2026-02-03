@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 32;
+pub const NUM_INPUT_ARGS_SIM: usize = 33;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 /// Draw a uniform random starting point inside the room.
@@ -83,6 +83,7 @@ impl VRPair {
         ap_coords: Coords,
         edca_be_mode: bool,
         codec_selection: VideoCodec,
+        results_path_name: &str, 
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -138,6 +139,7 @@ impl VRPair {
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
             codec_selection,
+            results_path_name, 
         );
 
         let mut xr_client = XRClient::new(
@@ -153,6 +155,7 @@ impl VRPair {
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
             codec_selection,
+            results_path_name, 
         );
 
         let mut sta_server = STA_extended::new(
@@ -350,6 +353,8 @@ pub struct SimParams {
     pub mlo_link_sel_policy: usize,
     pub packs_per_ampdu: usize,
     pub codec_input_arg: String,
+    pub name_results_path: String, 
+
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -389,6 +394,8 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         mlo_link_sel_policy: args[29].parse().unwrap(),
         packs_per_ampdu: args[30].parse().unwrap(),
         codec_input_arg: args[31].parse().unwrap(),
+        name_results_path: args[32].clone(),
+
     }
 }
 
@@ -430,6 +437,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         mlo_link_sel_policy,
         packs_per_ampdu,
         codec_input_arg,
+        name_results_path, 
     } = params;
 
     let sim_unique_string = format!("Simu_{} | {codec_input_arg}", sim_id);
@@ -475,7 +483,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps_arg, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
     );
 
-    let output_path = format!("Results/{}", name_folder);
+    let output_path = format!("{}/{}", name_results_path ,name_folder);
     fs::create_dir_all(&output_path).expect("Failed to create directory");
 
     let t0 = MonotonicTime::EPOCH;
@@ -525,6 +533,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         link_configs,
         mlo_policy,
         packs_per_ampdu,
+        &name_results_path, 
     );
 
     for sta_id in &all_sta_ids {
@@ -668,6 +677,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             ap_coords,
             edca_be_bool,
             codec_selection,
+            &name_results_path, 
         );
 
         // Common pushes for all users

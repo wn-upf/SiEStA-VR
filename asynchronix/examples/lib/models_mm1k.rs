@@ -2195,6 +2195,8 @@ impl QueueModule {
         link_configs: Vec<LinkConfig>, // NEW: Configure available links
         mlo_linkselection_strat: LinkSelectionStrategy,
         packs_per_ampdu: usize,
+        results_path: &str, 
+
     ) -> Self {
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
         let mut dcf_stats_vec: HashMap<(i32, EdcaAc, u8), DcfStats> = HashMap::new();
@@ -2280,7 +2282,7 @@ impl QueueModule {
             queue_length_counter: 0,
             service_rate: 0.0,
             // t0_time: Instant::now(),
-            csv_metrics: CsvType::new(&folder_dir).expect("?? CSVTYPE"),
+            csv_metrics: CsvType::new(&folder_dir, results_path).expect("?? CSVTYPE"),
             coords_queue: Coords::with_coords(AP_X, AP_Y, 0.0), // To test.
             p_tx: P_TX,
             STA_coords_grid: Vec::new(),
