@@ -526,7 +526,8 @@ pub async fn process_trace_vs_original(
     ip: IpAddr, 
     codec: VideoCodec, 
     fps_val: u32,
-    video_name: String
+    video_name: String, 
+    use_gui: bool, 
 ) -> Result<()> {
 
     // 1. Setup Scenario & Paths
@@ -686,10 +687,20 @@ pub async fn process_trace_vs_original(
     // 5. Processing Loop
     let sw = (WIDTH_ENCODER as f64 * WINDOW_SCALE_MULTIPLIER) as usize;
     let sh = (HEIGHT_ENCODER as f64 * WINDOW_SCALE_MULTIPLIER) as usize;
-    let mut window = Window::new(
-        &format!("VMAF: {} vs Orig", scenario),
-        sw * 2 + 10, sh, WindowOptions::default(),
-    )?;
+    // let mut window = Window::new(
+    //     &format!("VMAF: {} vs Orig", scenario),
+    //     sw * 2 + 10, sh, WindowOptions::default(),
+    // )?;
+
+    let mut window = if use_gui {
+        Some(Window::new(
+            &format!("VMAF: {} vs Orig", scenario),
+            sw * 2 + 10, sh, WindowOptions::default(),
+        )?)
+    } else {
+        None
+    };
+
 
     let mut buf_distorted = HashMap::new();
     let mut buf_ref = HashMap::new();
@@ -706,8 +717,8 @@ pub async fn process_trace_vs_original(
     const MAX_PENDING_TASKS: usize = 4; // Max VMAF calculations running/queued
 
 
-    while window.is_open() {
-        
+    // while window.is_open() {
+    loop{
         // A. THROTTLE: Check if we have too many pending VMAF tasks
         // If we do, we wait for one to finish before reading more video data.
         if vmaf_tasks.len() >= MAX_PENDING_TASKS {
@@ -762,7 +773,13 @@ pub async fn process_trace_vs_original(
                 
                 // Update Window (Cheap)
                 // Use unwrap_or to prevent crash on drawing error
-                let _ = draw_pair(&mut window, &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
+                // let _ = draw_pair(&mut window, &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
+
+                if let Some(ref mut w) = window {
+                    let _ = draw_pair(w, &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
+                    w.update();
+                }
+
 
                 // Spawn VMAF (Expensive - takes ownership of RAM)
                 let logger = metric.clone();
@@ -789,9 +806,7 @@ pub async fn process_trace_vs_original(
              println!("Trace processing complete."); 
              break;
         }
-        
-        window.update();
-        
+                
         // Small sleep to prevent tight loop burning 100% CPU on empty checks
         // Use standard sleep, not async sleep if not needed, but here we are in async fn
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -841,6 +856,15 @@ pub async fn main() {
 
         println!("Found Scenario: {} | Video: {} | FPS: {} | Codec: {:?}", folder_name, video_name, fps, video_codec);
 
+        let user = std::env::var("USER").unwrap_or_default();
+        let use_gui = match user.as_str() {
+            "boris" => true,
+            "fmaura" => false,
+            _ => std::env::var("DISPLAY").is_ok(), // Fallback to display check for anyone else
+        };
+        
+
+
         // 2. Find the CSV file inside the folder
         let csv_entries = fs::read_dir(&path).expect("Read subdir failed");
         for file in csv_entries.flatten() {
@@ -848,7 +872,7 @@ pub async fn main() {
             if p.extension().map_or(false, |ext| ext == "csv") {
                 let fname = p.file_name().unwrap().to_string_lossy().into_owned();
                 // Ensure it matches your trace file naming convention
-                if fname.starts_with("XR_stats_") {
+                if fname.starts_with("XR_stats_0") {
                     println!("   -> Processing Trace: {}", fname);
                     
                     // 3. Run the processing
@@ -857,7 +881,8 @@ pub async fn main() {
                         dummy_ip, 
                         video_codec, 
                         fps, 
-                        video_name.to_string()
+                        video_name.to_string(),
+                        use_gui, 
                     ).await {
                         eprintln!("ERROR processing {}: {}", fname, e);
                     }
