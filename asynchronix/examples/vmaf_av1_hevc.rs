@@ -6,7 +6,7 @@ use std::{path::Path, time::Duration};
 use tai_time::TaiTime;
 use tokio::{sync::Semaphore};
 mod lib;
-use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedHevcEncoder, ChunkedEncoder, VideoCodec};
+use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedHevcEncoder, ChunkedEncoder, ChunkedSoftwareHevcEncoder, VideoCodec};
 // bring your types into scope (adjust these paths to your project)
 use crate::lib::{DEBUG_PRINT_ENABLED, models_XR::{HEIGHT_ENCODER, SCALE_FACTOR_WINDOW, WIDTH_ENCODER, HevcDecoder, Av1Decoder, VideoDecoder}, render_text,};
 
@@ -420,7 +420,7 @@ fn make_encoder_task(
             VideoCodec::HEVC => {
                 // Assuming you want the Hardware HEVC here. 
                 // If you want software, change to ChunkedEncoder::HevcSoftware
-                ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
+                ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
                     &video_path,
                     width,
                     height,
