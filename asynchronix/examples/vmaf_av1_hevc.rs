@@ -16,7 +16,7 @@ use crate::lib::{DebugColor, };
 use anyhow::Result;
 use async_std::task;
 
-use crossbeam::channel::{bounded,  RecvTimeoutError, Sender,};
+use crossbeam::channel::{bounded,Sender,};
 use minifb::{ Window, WindowOptions};
 
 use serde::Deserialize;
@@ -28,7 +28,7 @@ use std::fs::File;
 
 use std::io::{Read,};
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::{
     collections::HashSet,
@@ -314,6 +314,74 @@ fn resize_nn(buf: &[u32], w_in: usize, h_in: usize, w_out: usize, h_out: usize) 
     }
     out
 }
+
+fn verify_visual_sync(
+    ref_rgb: &[u8],
+    dist_rgb: &[u8],
+    width: usize,
+    width_dist: usize, // In case resolutions differ slightly, though usually same
+) -> bool {
+    // 1. Define ROI (Region of Interest) containing the text
+    // ample space for 3-4 digits at fontsize 96
+    const ROI_W: usize = 350; 
+    const ROI_H: usize = 120; 
+    
+    // Safety check for buffer sizes
+    if ref_rgb.len() < ROI_W * 3 || dist_rgb.len() < ROI_W * 3 { return false; }
+
+    let mut mismatch_pixels = 0;
+    let mut text_pixels_count = 0;
+
+    for y in 10..ROI_H { // Start at 10 to skip potential border noise
+        for x in 10..ROI_W {
+            // Index calculation for RGB buffers
+            let idx_ref = (y * width + x) * 3;
+            let idx_dist = (y * width_dist + x) * 3;
+
+            // 2. Thresholding (Binarization)
+            // We look for "Bright" pixels against the "Black" box.
+            // Green Text (Ref): High G value. Red Text (Dist): High R value.
+            // Threshold > 80 assumes the text is reasonably bright.
+            
+            let r_ref = ref_rgb[idx_ref];
+            let g_ref = ref_rgb[idx_ref+1];
+            let b_ref = ref_rgb[idx_ref+2];
+            // Luminance approx or Max channel check
+            let is_text_ref = r_ref.max(g_ref).max(b_ref) > 80;
+
+            let r_dist = dist_rgb[idx_dist];
+            let g_dist = dist_rgb[idx_dist+1];
+            let b_dist = dist_rgb[idx_dist+2];
+            let is_text_dist = r_dist.max(g_dist).max(b_dist) > 80;
+
+            if is_text_ref { text_pixels_count += 1; }
+
+            // 3. XOR Check (Do they disagree?)
+            if is_text_ref != is_text_dist {
+                mismatch_pixels += 1;
+            }
+        }
+    }
+
+    // 4. Decision Logic
+    // If frames match, mismatch should be very low (just compression artifacts edges).
+    // If frames differ (e.g. 189 vs 190), mismatch will be high.
+    
+    // Guard: If no text was found (e.g. black frame), assume sync or skip?
+    if text_pixels_count < 50 { return true; } // Probably no text burned in yet, pass it.
+
+    // Allow 15% error rate for compression artifacts on text edges
+    let error_rate = mismatch_pixels as f32 / text_pixels_count as f32;
+    
+    // Debug print only on failure
+    if error_rate > 0.15 {
+        // println!(">> Sync Mismatch! Error Rate: {:.2}", error_rate);
+        return false;
+    }
+    
+    true
+}
+
 /* draw the two half-frames *plus* the ID text */
 fn draw_pair(
     window: &mut Window,
@@ -325,7 +393,7 @@ fn draw_pair(
 ) -> Result<()> {
     const W: usize = WIDTH_ENCODER;
     const H: usize = HEIGHT_ENCODER;
-    // const SCALE: f64 = 0.28;
+    // Increased scale for the window content if needed, or keep standard
     let sw = (W as f64 * SCALE_FACTOR_WINDOW) as usize;
     let sh = (H as f64 * SCALE_FACTOR_WINDOW) as usize;
     let ww = sw * 2 + 10;
@@ -336,27 +404,38 @@ fn draw_pair(
     let mut buf = vec![0u32; ww * sh];
     for y in 0..sh {
         let dst = y * ww;
+        // Copy Left Image (Modified)
         buf[dst..dst + sw].copy_from_slice(&left[y * sw..(y + 1) * sw]);
+        // Copy Right Image (Reference)
         buf[dst + sw + 10..dst + sw + 10 + sw].copy_from_slice(&right[y * sw..(y + 1) * sw]);
     }
 
-    let y_lbl = sh - 40;
-    render_text(&mut buf, &format!("#{}", id), 10, y_lbl, ww, 0xFFAA00, 2);
-    render_text(
+    // --- GUI OVERLAYS ---
+
+    // 1. "MODIFIED" Label (Left Side, Top Left)
+    // Scale 4 = Large Text
+    render_text(&mut buf, "MODIFIED", 20, 50, ww, 0xFF5555, 3); 
+
+    // 2. "REFERENCE" Label (Right Side, Top Right logic or Top Left of Right Panel)
+    // Placing it at (sw + 30) puts it at the start of the right panel
+    render_text(&mut buf, "REFERENCE", sw + 30, 50, ww, 0x55FF55, 3);
+
+    // 3. Frame Counter (Bottom Center - Existing)
+    let y_lbl = sh - 50; // Moved up slightly to accommodate larger text
+    render_text(&mut buf, &format!("#{}", id), 10, y_lbl, ww, 0xFFAA00, 3);    render_text(
         &mut buf,
         &format!("#{}", id),
         sw + 20,
         y_lbl,
         ww,
         0xFFAA00,
-        2,
+        3,
     );
 
     window.set_title(&format!("T: {:6.4} ID {} | Scenario: {scenario}", t, id,));
     window.update_with_buffer(&buf, ww, sh)?;
     Ok(())
 }
-
 
 fn make_encoder_task(
     tag: usize,
@@ -464,9 +543,13 @@ fn make_reference_reader_task(
     tx: Sender<(u32, Vec<u8>)>,
 ) {
     std::thread::spawn(move || {
+
+        let filter_str = format!("drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf: text='%{{n}}': x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5");
+        
         let mut child = Command::new("ffmpeg")
             .args(&[
                 "-i", &video_path,
+                "-vf", &filter_str,
                 "-f", "rawvideo",
                 "-pix_fmt", "rgb24",
                 "-",
@@ -767,12 +850,16 @@ pub async fn process_trace_vs_original(
             };
 
             if let (Some(fb_dist), Some(fb_ref)) = (buf_distorted.remove(&next_id), buf_ref.remove(&next_id)) {
+                
+                // let is_synced = verify_visual_sync(
+                //     &fb_ref.rgb, 
+                //     &fb_dist.rgb, 
+                //     WIDTH_ENCODER, 
+                //     WIDTH_ENCODER
+                // );
+                
                 let ts = *ts_map.get(&next_id).unwrap_or(&0.0);
                 
-                // Update Window (Cheap)
-                // Use unwrap_or to prevent crash on drawing error
-                // let _ = draw_pair(&mut window, &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
-
                 if let Some(ref mut w) = window {
                     let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
                     w.inner().update();

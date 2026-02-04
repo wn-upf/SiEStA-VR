@@ -209,23 +209,30 @@ impl ChunkedAv1Encoder {
 
         self.parser.buffer.clear();
 
+        let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
+        let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
+        let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+
         let mut command = FfmpegCommand::new();
         // SVT-AV1 Arguments from av1_testbed.rs
         let mut child = command
             // .hwaccel("cuda")
-            .args(&["-ss", &self.current_offset.to_string()])
+            // .args(&["-ss", &self.current_offset.to_string()])
+            .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
             .args(&["-t", &self.chunk_duration.to_string()])
             // .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)]) // Use const or hardcode
             .args(&["-threads", "16"]) 
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .input(&self.input)
             .args(&[
-                "-vf",
-                &format!(
-                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
-                    self.width, self.height
-                ),
-            ])
+                    "-vf", &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=yellow: box=1: boxcolor=black@0.5",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
+                    ),
+                ])
             .args(&["-c:v", "libsvtav1"]) // Using SVT-AV1
             .args(&["-preset", "9"])      // High speed preset for RTC
             .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
@@ -241,8 +248,10 @@ impl ChunkedAv1Encoder {
             .spawn()
             .unwrap();
 
+        self.chunk_index += 1;    
         let stdout = child.take_stdout().unwrap();
-        let mut reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(stdout);    
+
 
         if DEBUG_FFMPEG_AV1_LOGS {
             if let Some(stderr) = child.take_stderr() {
@@ -338,6 +347,8 @@ pub struct ChunkedSoftwareHevcEncoder {
     width: u32,
     height: u32,
     bitrate: String,
+    framerate: f32, 
+
     chunk_duration: f64,
     current_offset: f64,
     frame_tx: Sender<Vec<u8>>,
@@ -348,6 +359,7 @@ pub struct ChunkedSoftwareHevcEncoder {
     encoder_str: String,
     gop_size: usize,
     intra_refresh: bool,
+    chunk_index: usize, 
 }
 
 #[allow(unused)]
@@ -372,6 +384,7 @@ impl ChunkedSoftwareHevcEncoder {
             width,
             height,
             bitrate: bitrate.to_string(),
+            framerate, 
             chunk_duration,
             current_offset: offset_video,
             frame_tx,
@@ -381,6 +394,7 @@ impl ChunkedSoftwareHevcEncoder {
             encoder_str: string.clone(),
             gop_size,
             intra_refresh,
+            chunk_index: 0, 
         }
     }
 
@@ -398,6 +412,10 @@ impl ChunkedSoftwareHevcEncoder {
         let bitrate_adjusted_fps = bitrate_mbps;
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
+        let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
+        let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
+        let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+
         println!(
             "{} - {} SOFTWARE CHUNKING with bitrate {} Mbps",
             crate::format_elapsed!(now),
@@ -410,19 +428,22 @@ impl ChunkedSoftwareHevcEncoder {
 
         // Common arguments for both modes
         command
-            .args(&["-ss", &self.current_offset.to_string()])
+            .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
+            // .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-t", &self.chunk_duration.to_string()])
             .args(&["-threads", "4"]) // Software encoding needs CPU threads
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .args(&["-stats_period", "8"])
             .input(&self.input)
             .args(&[
-                "-vf",
-                &format!(
-                    "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
-                    self.width, self.height
-                ),
-            ])
+                    "-vf", &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=yellow: box=1: boxcolor=black@0.5",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
+                    ),
+                ])
             .args(&["-c:v", "libx265"]) // SW Encoding
             .args(&["-preset", "ultrafast"]) // Crucial for realtime SW encoding
             .args(&["-tune", "zerolatency"]) // Minimize delay
@@ -476,6 +497,7 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]);
         }
+        self.chunk_index += 1;
 
         // Spawn the ffmpeg process
         let mut child = command.spawn().unwrap();
@@ -567,6 +589,7 @@ pub struct ChunkedHevcEncoder {
     width: u32,
     height: u32,
     bitrate: String,
+    framerate: f32, 
     chunk_duration: f64,
     current_offset: f64,
     frame_tx: Sender<Vec<u8>>,
@@ -577,6 +600,7 @@ pub struct ChunkedHevcEncoder {
     encoder_str: String,
     gop_size: usize,
     intra_refresh: bool,
+    chunk_index: usize, 
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -600,6 +624,7 @@ impl ChunkedHevcEncoder {
             width,
             height,
             bitrate: bitrate.to_string(),
+            framerate, 
             chunk_duration,
             current_offset: offset_video,
             frame_tx,
@@ -609,6 +634,7 @@ impl ChunkedHevcEncoder {
             encoder_str: string.clone(),
             gop_size,
             intra_refresh,
+            chunk_index: 0, 
         }
     }
 
@@ -635,6 +661,10 @@ impl ChunkedHevcEncoder {
 
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
+        let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
+        let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
+        let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+
         println!(
             "{} - {} CHUNKING with bitrate {} Mbps",
             crate::format_elapsed!(now),
@@ -642,7 +672,6 @@ impl ChunkedHevcEncoder {
             bitrate_mbps,
         );
         self.parser.buffer.clear();
-        // println!("**** AAAA INPUT IS {} *****", self.input);
 
         let mut command = FfmpegCommand::new();
         if self.intra_refresh {
@@ -650,7 +679,7 @@ impl ChunkedHevcEncoder {
                 .hwaccel("cuda")
                 .args(&["-analyzeduration", "200M"])
                 .args(&["-probesize", "200M"])
-                .args(&["-ss", &self.current_offset.to_string()])
+                .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
                 .args(&["-t", &self.chunk_duration.to_string()])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
@@ -658,10 +687,12 @@ impl ChunkedHevcEncoder {
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
-                    "-vf",
-                    &format!(
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
-                        self.width, self.height
+                    "-vf", &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=yellow: box=1: boxcolor=black@0.5",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
@@ -685,7 +716,7 @@ impl ChunkedHevcEncoder {
         } else {
             command
                 .hwaccel("cuda")
-                .args(&["-ss", &self.current_offset.to_string()])
+                .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
                 .args(&["-t", &self.chunk_duration.to_string()])
                 // .args(&["-re"]) // read at realtime speed
                 .args(&["-analyzeduration", "100M"])
@@ -695,10 +726,12 @@ impl ChunkedHevcEncoder {
                 .args(&["-stats_period", "5"])
                 .input(&self.input)
                 .args(&[
-                    "-vf",
-                    &format!(
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p",
-                        self.width, self.height
+                    "-vf", &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=yellow: box=1: boxcolor=black@0.5",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
                     ),
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
@@ -719,7 +752,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-an"])
                 .args(&["-f", "hevc", "-"]); // output raw HEVC
         }
-
+        self.chunk_index +=1; 
         // Spawn the ffmpeg process for this chunk.
         let mut child = command.spawn().unwrap();
         let stdout = child.take_stdout().unwrap();
