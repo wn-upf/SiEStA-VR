@@ -137,16 +137,15 @@ impl MetricsLogger {
         Ok(())
     }
 
-    pub fn new_for_trace(scenario: &str, trace_idx: usize, two_encoders: bool) -> Result<Self> {
-        let dir = format!("Results/{}", scenario);
+    pub fn new_for_trace( results_folder: &str, scenario: &str, trace_idx: usize, two_encoders: bool) -> Result<Self> {
+        
+        let dir = format!("{}/{}", results_folder, scenario);
         std::fs::create_dir_all(&dir)?;
-
         let strrrrr = if two_encoders { "bitrate" } else { "loss" };
-
-        // let filename = format!( "Results/{}/VMAF_metrics_{}_{}.csv", name_folder, strrrrr, value);
 
         let path = format!("{}/VMAF_metrics_{}_{}.csv", dir, strrrrr, trace_idx);
         let file = std::fs::File::create(&path.clone().to_string())?;
+
         Ok(Self {
             writer: Arc::new(std::sync::Mutex::new(csv::Writer::from_writer(file))),
             name_folder: scenario.to_string(),
@@ -528,6 +527,7 @@ pub async fn process_trace_vs_original(
     fps_val: u32,
     video_name: String, 
     use_gui: bool, 
+    parent_results_path: &str, 
 ) -> Result<()> {
 
     // 1. Setup Scenario & Paths
@@ -550,7 +550,7 @@ pub async fn process_trace_vs_original(
     let caps = Regex::new(r"XR_stats_(\d+)\.csv$")?.captures(&file_name).expect("filename mismatch");
     let trace_idx: usize = caps[1].parse()?;
     
-    let metric = MetricsLogger::new_for_trace(&scenario, trace_idx, false)?;
+    let metric = MetricsLogger::new_for_trace( parent_results_path ,&scenario, trace_idx, false)?;
 
     // 3. Parse CSV for Bitrate & Simulation Data
     let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)(?:Mbps)?_")?;
@@ -868,7 +868,14 @@ pub async fn main() {
         // 2. Find the CSV file inside the folder
         let csv_entries = fs::read_dir(&path).expect("Read subdir failed");
         for file in csv_entries.flatten() {
+
             let p = file.path();
+            let parent_results = p.parent()           // scenario_folder
+                                .and_then(|p| p.parent()) // Results_test
+                                .and_then(|p| p.file_name()) // Get just the folder name
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "Unknown".to_string());
+
             if p.extension().map_or(false, |ext| ext == "csv") {
                 let fname = p.file_name().unwrap().to_string_lossy().into_owned();
                 // Ensure it matches your trace file naming convention
@@ -883,6 +890,8 @@ pub async fn main() {
                         fps, 
                         video_name.to_string(),
                         use_gui, 
+                        &parent_results, 
+
                     ).await {
                         eprintln!("ERROR processing {}: {}", fname, e);
                     }

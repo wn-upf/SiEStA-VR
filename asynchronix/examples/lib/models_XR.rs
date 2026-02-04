@@ -519,7 +519,7 @@ impl HevcDecoder {
         let decoder_string = decoder_str.to_string();
 
         let mut child = FfmpegCommand::new()
-            .hwaccel("cuda")
+            // .hwaccel("cuda")
             .args(&["-c:v", "hevc"]) // force software decoder
             // .args(&["-hide_banner", "-loglevel", "error"]) // Clean up logs
             .args(&["-f", "hevc", "-i", "-"])
