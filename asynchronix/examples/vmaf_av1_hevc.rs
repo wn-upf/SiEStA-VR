@@ -9,8 +9,6 @@ mod lib;
 use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedHevcEncoder, ChunkedEncoder, ChunkedSoftwareHevcEncoder, VideoCodec};
 // bring your types into scope (adjust these paths to your project)
 use crate::lib::{DEBUG_PRINT_ENABLED, models_XR::{HEIGHT_ENCODER, SCALE_FACTOR_WINDOW, WIDTH_ENCODER, HevcDecoder, Av1Decoder, VideoDecoder}, render_text,};
-
-
 use std::fs;
 use std::path::PathBuf;
 use crate::lib::{DebugColor, };
@@ -29,8 +27,7 @@ use std::fmt::{ Debug};
 use std::fs::File;
 
 use std::io::{Read,};
-#[allow(unused_imports)]
-#[allow(dead_code)]
+
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::{
@@ -39,16 +36,15 @@ use std::{
     // net::{TcpListener, UdpSocket},
 };
 use tempfile::TempDir;
-
 use std::net::IpAddr;
-
 use core::f64;
-
-
 use regex::Regex;
-
 use std::result::Result::Ok;
 use std::vec;
+use tokio::task::JoinSet;
+
+
+const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 3; 
 
 pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
 pub const VIDEO_NAME: &str = "snow";
@@ -439,13 +435,15 @@ fn make_encoder_task(
         
         // We need a time reference for the new start_chunking signature
         // Assuming asynchronix TaiTime is available
-        // let start_time: TaiTime<0> = TaiTime::now_from_utc(37); 
+        let start_time: TaiTime<0> = TaiTime::now_from_utc(37); 
+
 
         while produced < trace.len() {
 
-            let now = TaiTime::now_from_utc(37); 
 
+            let elapsed_dur = TaiTime::now_from_utc(37).duration_since(start_time);
 
+            let now: TaiTime<0> = TaiTime::new(elapsed_dur.as_secs() as i64, elapsed_dur.subsec_nanos()).unwrap();
             // (re)fill the encoder’s internal queue
             // UPDATED: The new library signature takes (bitrate, TaiTime)
             // The logic for IDR/GOP is now internal to the encoder struct set in ::new()
@@ -692,8 +690,8 @@ pub async fn process_trace_vs_original(
     //     sw * 2 + 10, sh, WindowOptions::default(),
     // )?;
 
-    let mut window = if use_gui {
-        Some(Window::new(
+    let mut window: Option<SendWindow> = if use_gui {
+        Some(SendWindow::new(
             &format!("VMAF: {} vs Orig", scenario),
             sw * 2 + 10, sh, WindowOptions::default(),
         )?)
@@ -776,8 +774,8 @@ pub async fn process_trace_vs_original(
                 // let _ = draw_pair(&mut window, &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
 
                 if let Some(ref mut w) = window {
-                    let _ = draw_pair(w, &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
-                    w.update();
+                    let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
+                    w.inner().update();
                 }
 
 
@@ -801,6 +799,10 @@ pub async fn process_trace_vs_original(
             ready_ids.remove(&next_id);
         }
 
+        if let Some(ref w) = window {
+            if !w.0.is_open() { break; } // Access inner .0
+        }
+
         // Cleanup check
         if enc_done && buf_distorted.is_empty() && vmaf_tasks.is_empty() {
              println!("Trace processing complete."); 
@@ -821,8 +823,150 @@ pub async fn process_trace_vs_original(
     Ok(())
 }
 
-#[tokio::main] // Ensure you have the tokio runtime
-pub async fn main() {
+
+struct SendWindow(minifb::Window);
+unsafe impl Send for SendWindow {}
+
+impl SendWindow {
+    fn new(name: &str, w: usize, h: usize, opts: WindowOptions) -> Result<Self> {
+        Ok(Self(Window::new(name, w, h, opts)?))
+    }
+    
+    // Helper to access inner window
+    fn inner(&mut self) -> &mut minifb::Window {
+        &mut self.0
+    }
+}
+
+
+
+#[tokio::main]
+pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
+
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_1user/"; 
+    let dummy_ip = "127.0.0.1".parse().unwrap();
+
+    // Regex compilation (done once)
+    let re_codec = Arc::new(Regex::new(r"_Codec([^_]+)").unwrap());
+    let re_fps =   Arc::new(Regex::new(r"_FPS(\d+)").unwrap());
+    let re_video = Arc::new(Regex::new(r"_([^_]+)_FPS").unwrap());
+
+    // 1. Collect all valid jobs first
+    // We do this synchronously to build a clean list of work items
+    let mut tasks = Vec::new();
+    let entries = fs::read_dir(results_scenarios_folder).expect("Read dir failed");
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+
+        let folder_name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        // Parse Metadata
+        let codec_str = re_codec.captures(&folder_name).map(|c| c.get(1).unwrap().as_str().to_string());
+        let fps = re_fps.captures(&folder_name).map(|c| c[1].parse::<u32>().unwrap_or(0));
+        let video_name = re_video.captures(&folder_name).map(|c| c.get(1).unwrap().as_str().to_string());
+
+        // Validate
+        if codec_str.is_none() || fps.is_none() || video_name.is_none() || fps.unwrap() == 0 {
+            eprintln!("Skipping {}, invalid metadata", folder_name);
+            continue;
+        }
+
+        let codec_enum = match codec_str.as_deref() {
+            Some("AV1") => VideoCodec::AV1,
+            Some("HEVC") => VideoCodec::HEVC,
+            _ => { eprintln!("Skipping {}, unknown codec", folder_name); continue; }
+        };
+
+        // Determine GUI usage (logic preserved)
+        let user = std::env::var("USER").unwrap_or_default();
+        let use_gui = match user.as_str() {
+            "boris" => true,
+            "fmaura" => false,
+            _ => std::env::var("DISPLAY").is_ok(),
+        };
+
+        // Find CSV within folder
+        let csv_entries = fs::read_dir(&path).expect("Read subdir failed");
+        for file in csv_entries.flatten() {
+            let p = file.path();
+            if p.extension().map_or(false, |ext| ext == "csv") {
+                let fname = p.file_name().unwrap().to_string_lossy().into_owned();
+                
+                // Only process specific trace files
+                if fname.starts_with("XR_stats_0") {
+                    
+                    let parent_results = p.parent()
+                        .and_then(|p| p.parent())
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    // Push job struct to vector
+                    tasks.push((
+                        p, // trace_csv path
+                        dummy_ip,
+                        codec_enum,
+                        fps.unwrap(),
+                        video_name.clone().unwrap(),
+                        use_gui,
+                        parent_results
+                    ));
+                }
+            }
+        }
+    }
+
+    println!(">> Found {} total scenarios to process.", tasks.len());
+
+    // 2. Process in Parallel with Semaphore
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_VMAF_SCENARIOS));
+    let mut set = JoinSet::new();
+
+    for (trace_csv, ip, codec, fps, v_name, gui, parent_res) in tasks {
+        let sem = semaphore.clone();
+        
+        // Spawn the task
+        set.spawn(async move {
+            // Acquire permit - this task will wait here if MAX_CONCURRENT_SCENARIOS are already running
+            let _permit = sem.acquire().await.unwrap();
+            
+            println!(">> Starting worker for: {:?}", trace_csv.file_name());
+
+            // Run the heavy process
+            let res = process_trace_vs_original(
+                trace_csv.clone(),
+                ip,
+                codec,
+                fps,
+                v_name,
+                gui,
+                &parent_res
+            ).await;
+
+            // Log result
+            match res {
+                Ok(_) => println!("✅ Finished: {:?}", trace_csv.file_name()),
+                Err(e) => eprintln!("❌ Error in {:?}: {}", trace_csv.file_name(), e),
+            }
+            
+            // Permit is dropped here, allowing the next task to start
+        });
+    }
+
+    // 3. Wait for all to finish
+    while let Some(res) = set.join_next().await {
+        if let Err(e) = res {
+            eprintln!("Worker thread panicked: {}", e);
+        }
+    }
+    
+    println!(">> All scenarios processed.");
+}
+
+
+pub async fn main_serial() { // works but does one thread at a time. 
     let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_test/"; 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
@@ -863,8 +1007,6 @@ pub async fn main() {
             _ => std::env::var("DISPLAY").is_ok(), // Fallback to display check for anyone else
         };
         
-
-
         // 2. Find the CSV file inside the folder
         let csv_entries = fs::read_dir(&path).expect("Read subdir failed");
         for file in csv_entries.flatten() {
