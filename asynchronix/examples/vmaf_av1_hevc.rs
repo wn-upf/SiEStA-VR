@@ -44,11 +44,9 @@ use std::vec;
 use tokio::task::JoinSet;
 
 
-const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 3; 
+const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 2; 
 
-pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
-pub const VIDEO_NAME: &str = "snow";
-pub const FRAMERATE_WINDOWS: usize = 60; 
+
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
 pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.4; 
 pub const BOUNDED_CHANNEL_SIZE: usize = 15; // channel depth for VMAF crossbeam
@@ -91,24 +89,7 @@ struct MetricsLogger {
 }
 
 impl MetricsLogger {
-    fn new(ip: IpAddr, name_folder: &str) -> Result<Self> {
-        let mut value = 99;
-        if let IpAddr::V4(ip4) = ip {
-            let octets = ip4.octets();
-            value = octets[2]
-        }
-        // create it (and any missing parents) if it doesn't exist
-        let dir = format!("Results/{}", name_folder);
-        std::fs::create_dir_all(&dir)?;
-        let filename = format!("Results/{}/VMAF_metrics_{}.csv", name_folder, value);
-        let file = File::create(filename.clone())?;
-        let writer = csv::Writer::from_writer(file);
-        Ok(Self {
-            writer: Arc::new(Mutex::new(writer)),
-            name_folder: name_folder.to_string(),
-            name_file_w_path: filename,
-        })
-    }
+
     /// Call once, after `join_all(vmaf_jobs).await`
     pub fn finalize(&self) -> Result<()> {
         // 1/ read everything (skip header)
@@ -476,9 +457,6 @@ fn make_encoder_task(
     });
 }
 
-
-// Spawns a thread that reads the ORIGINAL source video directly via FFmpeg
-// and sends raw RGB frames to a channel.
 fn make_reference_reader_task(
     video_path: String,
     width: usize,
@@ -501,19 +479,24 @@ fn make_reference_reader_task(
         let mut stdout = child.stdout.take().unwrap();
         let frame_size = width * height * 3;
         let mut frame_idx = 0;
+        let mut buffer = vec![0u8; frame_size];
 
         loop {
-            let mut buffer = vec![0u8; frame_size];
             // Read exactly one frame
             if stdout.read_exact(&mut buffer).is_err() {
                 break; // End of stream or error
             }
             // Send (ID, RGB_Data)
-            if tx.send((frame_idx, buffer)).is_err() {
-                break; // Receiver dropped
+            // If receiver is dropped (Ctrl+C), this returns Err and we break
+            if tx.send((frame_idx, buffer.clone())).is_err() {
+                break; 
             }
             frame_idx += 1;
         }
+
+        //Kill ffmpeg when we are done!
+        let _ = child.kill(); 
+        let _ = child.wait(); // Clean up process entry
     });
 }
 
@@ -726,20 +709,37 @@ pub async fn process_trace_vs_original(
         }
 
         // B. READ DISTORTED (Only if buffer has space)
+        // We check buffer space. If we are 'enc_done', we still enter here to drain the decoder!
         if buf_distorted.len() < MAX_BUFFER_SIZE {
-            // Try recv is non-blocking
-            match rx_enc.try_recv() {
-                Ok((_, id, pkt)) => dec_enc.process_packet(pkt, id),
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                        println!(">> Encoder Disconnected. Finalizing stream...");
-                        enc_done = true
+            
+            // 1. Pull raw packets from the network/channel
+            // Only attempt this if the encoder is still alive
+            if !enc_done {
+                match rx_enc.try_recv() {
+                    Ok((_, id, pkt)) => {
+                        // Push packet into decoder
+                        dec_enc.process_packet(pkt, id);
                     },
-                _ => {} // Empty
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        println!(">> Encoder Disconnected. Finalizing stream...");
+                        enc_done = true; // Stop trying to read from this channel
+                    },
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        // Channel is alive but empty, just continue
+                    }
+                }
             }
-            // Drain decoder
+
+            // 2. Always drain decoded frames from the decoder
+            // We must do this even if 'enc_done' is true, because the decoder 
+            // might still be processing the last packet we just sent it.
             while let Some((rgb, id)) = dec_enc.next_decoded_frame() {
                 buf_distorted.insert(id, FrameBuf { rgb, synthetic: false });
-                if buf_ref.contains_key(&id) { ready_ids.insert(id); }
+                
+                // Check if this new frame matches a reference frame we already have
+                if buf_ref.contains_key(&id) { 
+                    ready_ids.insert(id); 
+                }
             }
         }
 
@@ -843,7 +843,7 @@ impl SendWindow {
 #[tokio::main]
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_1user/"; 
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_test2/"; 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
     // Regex compilation (done once)

@@ -142,6 +142,7 @@ pub struct ChunkedAv1Encoder {
     framerate: f32,
 
     aggregation_buffer: Vec<u8>, // to aggregate multiple OBUs into full frame.
+    chunk_index: usize,
 }
 #[allow(unused)]
 impl ChunkedAv1Encoder {
@@ -176,6 +177,7 @@ impl ChunkedAv1Encoder {
             intra_refresh,
             framerate,
             aggregation_buffer: Vec::new(),
+            chunk_index: 0, 
         }
     }
 
