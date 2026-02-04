@@ -4,7 +4,7 @@ use crate::lib::alvr_control_socket::{
 use crate::lib::gcc_nada_estimator::{GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
 use crate::lib::{
     alvr_stream_socket::{StreamReceiver, VideoCodec},
-    BATCH_SIZE_CSV,
+    BATCH_SIZE_CSV_VIDEO,
 };
 // use async_std::future::pending;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
@@ -312,8 +312,10 @@ pub struct Av1Decoder {
     pub width: u32,
     pub height: u32,
     parser: crate::lib::Av1Parser,
-    frame_buffer: VecDeque<Vec<u8>>,
+
+    frame_buffer: VecDeque<Vec<u8>>, // queues
     decoded_frames: VecDeque<Vec<u8>>,
+    id_queue: VecDeque<u32>, // tracks Frame IDs
 
     // Metrics
     pub frames_processed: usize,
@@ -419,6 +421,7 @@ impl Av1Decoder {
             parser: crate::lib::Av1Parser::new(),
             frame_buffer: VecDeque::new(),
             decoded_frames: VecDeque::new(),
+            id_queue: VecDeque::new(), 
             frames_processed: 0,
             keyframes_seen: 0,
             expected_frame_size: frame_size,
@@ -431,15 +434,16 @@ impl Av1Decoder {
         }
     }
 
-    pub fn process_packet(&mut self, packet: Vec<u8>) {
+    pub fn process_packet(&mut self, packet: Vec<u8>, id: u32 ) {
         self.frames_processed += 1;
+        self.id_queue.push_back(id);
         if let Err(e) = self.packet_tx.send(packet) {
             // has already been packetized in encoding
             eprintln!("Failed to send to ffmpeg: {}", e);
         }
     }
 
-    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>)> {
+    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, u32)> {
         // Poll the receiver channel
         loop {
             match self.frame_rx.try_recv() {
@@ -453,12 +457,10 @@ impl Av1Decoder {
             }
         }
 
-        if let Some(frame) = self.decoded_frames.pop_front() {
-            // In a real scenario, you handle ID queue sync carefully.
-            // For this visualization, we just pop.
-            // let id = self.id_queue.pop_front().unwrap_or(0);
-            // let meta = self.metadata_queue.pop_front().unwrap_or(FrameMetadata::default());
-            return Some(frame);
+        if !self.decoded_frames.is_empty() && !self.id_queue.is_empty() {
+            let frame = self.decoded_frames.pop_front().unwrap();
+            let id = self.id_queue.pop_front().unwrap();
+            return Some((frame, id));
         }
         None
     }
@@ -475,6 +477,8 @@ pub struct HevcDecoder {
     parser: HevcParser,
     frame_buffer: VecDeque<Vec<u8>>, // Buffer for parsed HEVC frames
     decoded_frames: VecDeque<Vec<u8>>, // Buffer for decoded RGB frames
+    id_queue: VecDeque<u32>, // Queue of submitted IDs  
+
 
     ewma_frame_size: f64,
     last_update: Instant,
@@ -504,9 +508,10 @@ pub struct HevcDecoder {
     processing_semaphore: Arc<Semaphore>,
 
     decoded_frame_counter: usize,
+
 }
 
-#[allow(non_camel_case_types, unused)]
+#[allow(non_camel_case_types)]
 impl HevcDecoder {
     pub fn new(framerate: u32, width: u32, height: u32, decoder_str: &str) -> Self {
         let frame_size = (width as usize) * (height as usize) * 3;
@@ -515,7 +520,7 @@ impl HevcDecoder {
 
         let mut child = FfmpegCommand::new()
             .hwaccel("cuda")
-            .args(&["-c:v", "hevc"]) // ✅ force software decoder
+            .args(&["-c:v", "hevc"]) // force software decoder
             // .args(&["-hide_banner", "-loglevel", "error"]) // Clean up logs
             .args(&["-f", "hevc", "-i", "-"])
             // .args(&["-c:v", "libx265"])              // force software HEVC encoder
@@ -639,6 +644,7 @@ impl HevcDecoder {
             parser: HevcParser::new(),
             frame_buffer: VecDeque::new(),
             decoded_frames: VecDeque::new(),
+            id_queue:       VecDeque::new(), 
             ewma_frame_size: 0.0,
             last_update: Instant::now(), // use real time here, not simu
             frames_processed: 0,
@@ -907,26 +913,13 @@ impl HevcDecoder {
         self.keyframes_seen >= 1
     }
 
-    pub fn process_packet(&mut self, packet: Vec<u8>) {
+    pub fn process_packet(&mut self, packet: Vec<u8>, id: u32 ) {
         // Track if this packet contains a parameter set
         let mut has_parameter_update = false;
 
         // Extract parameter sets from this packet
         let (vps, sps, pps) = self.extract_complete_parameter_sets(&packet);
         let has_param_sets = vps.is_some() || sps.is_some() || pps.is_some();
-
-        // if has_param_sets {
-        //     has_parameter_update = true;
-
-        //     print_prettyy!(
-        //         DebugColor::Cyan,
-        //         "{} - Parameter sets found in packet: VPS: {}, SPS: {}, PPS: {}",
-        //         self.decoder_string,
-        //         vps.as_ref().map_or(0, |v| v.len()),
-        //         sps.as_ref().map_or(0, |v| v.len()),
-        //         pps.as_ref().map_or(0, |v| v.len()),
-        //     );
-        // }
 
         // Record frame metrics
         let frame_size = packet.len() as f64;
@@ -935,6 +928,7 @@ impl HevcDecoder {
 
         self.total_bytes_processed += frame_size;
         self.frames_processed += 1;
+        self.id_queue.push_back(id);
 
         // Check if this is a keyframe
         let is_keyframe = self.contains_keyframe(&packet);
@@ -1204,8 +1198,8 @@ impl HevcDecoder {
         return false;
     }
 
-    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, Instant)> {
-        let inst = Instant::now();
+    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, u32)> {
+        // let inst = Instant::now();
 
         // Process any newly available frames
         let frames_added = self.process_decoded_frames();
@@ -1230,8 +1224,11 @@ impl HevcDecoder {
                 }
             }
             self.decoded_frame_counter += 1;
+
+            let id = self.id_queue.pop_front().unwrap();
+
             // Frame is good
-            Some((frame, inst))
+            Some((frame, id))
         } else {
             if frames_added > 0 && !self.decoded_frames.is_empty() {
                 // Strange case: we added frames but now buffer is empty?
@@ -4508,10 +4505,11 @@ struct FrameMetrics {
 struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
     name_folder: String,
+    results_path: String, 
 }
 
 impl MetricsLogger {
-    fn new(ip: IpAddr, name_folder: &str) -> Result<Self> {
+    fn new(ip: IpAddr, name_folder: &str, results_path: &str, ) -> Result<Self> {
         let mut value = 99;
         if let IpAddr::V4(ip4) = ip {
             let octets = ip4.octets();
@@ -4519,13 +4517,14 @@ impl MetricsLogger {
         }
 
         let file = File::create(format!(
-            "Results/{}/VMAF_metrics_{}.csv",
-            name_folder, value
+            "{}/{}/VMAF_metrics_{}.csv",
+            results_path, name_folder, value
         ))?;
         let writer = csv::Writer::from_writer(file);
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             name_folder: name_folder.to_string(),
+            results_path: results_path.to_string(), 
         })
     }
 
@@ -4776,42 +4775,35 @@ pub enum VideoDecoder {
 }
 
 impl VideoDecoder {
-    /// Unified Async Process Packet
-    pub fn process_packet(&mut self, packet: Vec<u8>) {
+
+    pub fn new(codec: VideoCodec, fps: usize, width: u32, height: u32, name: &str) -> Self {
+            match codec {
+                VideoCodec::HEVC => VideoDecoder::Hevc(HevcDecoder::new(fps as u32, width, height, name)),
+                // Assuming Av1Decoder has a similar constructor signature
+                VideoCodec::AV1 => VideoDecoder::Av1(Av1Decoder::new( width, height, name)),
+            }
+        }    /// Unified Async Process Packet
+
+    pub fn process_packet(&mut self, packet: Vec<u8>, id: u32 ) {
         match self {
             VideoDecoder::Hevc(d) => {
                 // HEVC is currently sync and doesn't explicitly use ID in the snippet
-                d.process_packet(packet);
+                d.process_packet(packet, id);
             }
             VideoDecoder::Av1(d) => {
-                d.process_packet(packet);
+                d.process_packet(packet, id);
             }
         }
     }
 
-    // pub fn get_frame_counter(&self) -> usize {
-
-    //     match self {
-    //         VideoDecoder::Hevc(d) => {
-    //             // HEVC is currently sync and doesn't explicitly use ID in the snippet
-    //             d.decoded_frame_counter
-    //         },
-    //         VideoDecoder::Av1(d) => {
-    //             d.decoded_frame_counter
-    //         }
-    //     }
-
-    // }
-
     /// Unified Frame Retrieval
-    pub fn next_decoded_frame(&mut self) -> Option<Vec<u8>> {
+    pub fn next_decoded_frame(&mut self) -> Option<(Vec<u8>, u32)> { // returns (Frame, frame ID) 
         match self {
             VideoDecoder::Hevc(d) => {
                 // 1. Pump the internal channel to the deque
                 d.process_decoded_frames();
-
                 // 2. Pop from the deque
-                d.decoded_frames.pop_front()
+                d.next_decoded_frame()
             }
             VideoDecoder::Av1(d) => {
                 // AV1 implementation already handles channel polling inside this method
@@ -4820,20 +4812,6 @@ impl VideoDecoder {
         }
     }
 
-    // /// Helper to access common metrics (Optional)
-    // pub fn frames_processed(&self) -> usize {
-    //     match self {
-    //         VideoDecoder::Hevc(d) => d.frames_processed,
-    //         VideoDecoder::Av1(d) => d.frames_processed,
-    //     }
-    // }
-
-    // pub fn decoder_string(&self) -> &str {
-    //     match self {
-    //         VideoDecoder::Hevc(d) => &d.decoder_string,
-    //         VideoDecoder::Av1(d) => &d.decoder_string,
-    //     }
-    // }
 }
 
 #[allow(unused)]
@@ -6172,7 +6150,7 @@ impl XRClient {
         if self.metrics_logger.is_none() {
             println!("INITIALIZING LOGGER IN FOLDER: {}", self.name_folder);
 
-            match MetricsLogger::new(ip, &self.name_folder) {
+            match MetricsLogger::new(ip, &self.name_folder, &self.results_path) {
                 Ok(logger) => {
                     println!("Initialized metrics logger for VMAF analysis");
                     self.metrics_logger = Some(logger);
@@ -6311,21 +6289,24 @@ impl XRClient {
 
             // 3. CSV Setup (Async)
             let third_octet = get_third_octet(self.server_ip).unwrap();
-            let csv_path = get_prefix_path(&format!(
-                "Results/{}/trace_offline_video{}.csv",
-                self.name_folder, third_octet
-            ));
+
+            let csv_path_str = format!(
+                "{}/{}/trace_offline_video{}.csv",
+                self.results_path, self.name_folder, third_octet
+            );
+            let csv_path = get_prefix_path(&csv_path_str);
 
             if self.offline_csv_trace.writer.is_none() && USE_FFMPEG_DEMO {
-                if Path::new(&csv_path).exists() {
-                    print_green!("Read from: {}", csv_path);
+                if std::path::Path::new(&csv_path).exists() {
+                    print_green!("LOGGING: Found CSV, opening for append: {}", csv_path);
                     self.offline_csv_trace.path = csv_path.clone().into();
-                    self.offline_csv_trace
-                        .init_writer()
-                        .expect("CSV trace missing!");
+                    
+                    // Ensure your init_writer opens in APPEND mode!
+                    if let Err(e) = self.offline_csv_trace.init_writer() {
+                        print_pretty!(DebugColor::Red, "Failed to init CSV writer: {}", e);
+                    }
                 }
             }
-
             // 4. Clean Buffer logic
             let current_last_processed = self.last_processed_frame_id;
             self.missing_frames_buffer.retain(|&id, &mut processed| {
@@ -6367,21 +6348,22 @@ impl XRClient {
                     //     video_frame.len()
                     // );
                     // CSV Logging
-                    if Path::new(&csv_path).exists() {
-                        self.offline_csv_trace
+                    if self.offline_csv_trace.writer.is_some() {
+                        let log_result = self.offline_csv_trace
                             .write_record(&[
-                                "",
-                                "",
-                                "",
+                                "", "", "", 
                                 &format!("{:.6}", timestamp),
                                 &id_f.to_string(),
                                 &lost.to_string(),
                                 &format!("{:.3}", self.last_throughput_avg),
                             ])
-                            .await
-                            .expect("failed to append offline csv row");
+                            .await;
 
-                        if id_f % BATCH_SIZE_CSV == 0 {
+                        if let Err(e) = log_result {
+                            print_pretty!(DebugColor::Red, "CSV Write Error: {}", e);
+                        }
+
+                        if id_f % BATCH_SIZE_CSV_VIDEO == 0 { 
                             let _ = self.offline_csv_trace.flush().await;
                         }
                     }
@@ -6415,7 +6397,7 @@ impl XRClient {
                     if self.is_decoder_ready && USE_FFMPEG_DEMO {
                         if let Some(decoder_arc) = self.original_decoder.clone() {
                             let mut decoder = decoder_arc.lock().unwrap();
-                            decoder.process_packet(video_frame.clone());
+                            decoder.process_packet(video_frame.clone(), id_f as u32);
 
                             // Try to get the frame
                             if let Some(frame) = decoder.next_decoded_frame() {
@@ -6444,13 +6426,13 @@ impl XRClient {
             // ---------------------------------------------------------
 
             // CASE A: We have a decoded frame ready
-            if let Some(frame) = decoded_frame_candidate {
+            if let Some((frame, frame_i)) = decoded_frame_candidate {
                 let lost_frames_aux = self.lost_ids_reference_buffer.clone();
 
                 // Render video to buffer
                 display_single_frame_with_info_buffered(
                     &frame,
-                    frame_id_processed as usize, // Pass as usize
+                    frame_i as usize, // Pass as usize
                     &mut display_buffer,         // Pass the buffer
                     window_width,                // Pass the stride
                     now,

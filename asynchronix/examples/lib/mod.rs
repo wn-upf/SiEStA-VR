@@ -22,7 +22,8 @@ use std::time::Duration;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-pub const BATCH_SIZE_CSV: usize = 256 * 4;
+pub const BATCH_SIZE_CSV_QUEUE: usize = 256 * 4;
+pub const BATCH_SIZE_CSV_VIDEO: usize = 256; 
 
 const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;
@@ -69,7 +70,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = false;
+pub const USE_FFMPEG_DEMO: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -1602,7 +1603,7 @@ impl CsvType {
         Ok(Self {
             csv_data: Arc::new(Mutex::new(CsvData::new())),
             writer: Arc::new(Mutex::new(buf)),
-            batch_size: BATCH_SIZE_CSV,
+            batch_size: BATCH_SIZE_CSV_QUEUE,
         })
     }
 

@@ -618,50 +618,7 @@ impl SynStateOld {
     }
 }
 
-struct RingBuffer {
-    buf: VecDeque<f32>,
-    capacity: usize,
-}
 
-impl RingBuffer {
-    fn new(capacity: usize) -> Self {
-        RingBuffer {
-            buf: VecDeque::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    fn push(&mut self, value: f32) {
-        if self.buf.len() == self.capacity {
-            self.buf.pop_front(); // remove oldest
-        }
-        self.buf.push_back(value);
-    }
-
-    fn std_dev(&self) -> f32 {
-        let n = self.buf.len();
-        if n == 0 {
-            return 0.0;
-        }
-
-        let mean = self.buf.iter().copied().sum::<f32>() / n as f32;
-        let var = self
-            .buf
-            .iter()
-            .map(|x| {
-                let diff = x - mean;
-                diff * diff
-            })
-            .sum::<f32>()
-            / n as f32;
-
-        var.sqrt()
-    }
-
-    fn as_vec(&self) -> Vec<f32> {
-        self.buf.iter().copied().collect()
-    }
-}
 
 // use crate::lib::alvr_stream_socket::ConResult;
 #[allow(unused)]
@@ -2022,7 +1979,6 @@ impl ChunkedOldHevcEncoder {
     }
 }
 
-use csv::StringRecord;
 
 fn make_encoder_task(
     tag: usize,
@@ -3708,77 +3664,4 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-// fn main() -> Result<()> {
-//     // 1) Your IP
-//     let ip: IpAddr = "192.168.0.1".parse().unwrap();
 
-//     // 2) Trace‐filename regex
-//     let trace_re = Regex::new(r"^trace_offline_video\d+\.csv$")?;
-
-//     // 3) Group CSVs by their parent folder
-//     let mut scenarios: Vec<(PathBuf, Vec<PathBuf>)> = {
-//         let mut map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-//         for entry in WalkDir::new("Results/")
-//             .into_iter()
-//             .filter_map(|e| e.ok())
-//             .filter(|e| e.file_type().is_file())
-//         {
-//             let path = entry.path().to_path_buf();
-//             if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-//                 if trace_re.is_match(fname) {
-//                     map.entry(path.parent().unwrap().to_path_buf())
-//                        .or_default()
-//                        .push(path);
-//                 }
-//             }
-//         }
-//         let mut v: Vec<_> = map.into_iter().collect();
-//         v.sort_by(|(a, _), (b, _)| a.cmp(b));
-//         v
-//     };
-
-//     // 4) Split into N groups by index mod N
-//     let mut groups: Vec<Vec<(PathBuf, Vec<PathBuf>)>> = vec![Vec::new(); WORKERS];
-//     for (i, scenario) in scenarios.drain(..).enumerate() {
-//         groups[i % WORKERS].push(scenario);
-//     }
-
-//     // 5) Worker factory
-//     let make_worker = |group: Vec<(PathBuf, Vec<PathBuf>)>, ip: IpAddr| {
-//         thread::spawn(move || -> Result<()> {
-//             // each thread gets its own current-thread Tokio runtime
-//             // let rt = tokio::runtime::Builder::new_current_thread()
-//             //     .enable_all()
-//             //     .build()?;
-
-//             let rt = tokio::runtime::Builder::new_multi_thread()
-//                 .worker_threads(num_cpus::get().saturating_sub(5).max(3))   // e.g. 8 on your machine
-//                 .enable_all()
-//                 .build()?;
-
-//             rt.block_on(async {
-//                 for (_folder, traces) in group {
-//                     for trace_csv in traces {
-//                         process_trace_two_encoders_no_loss(trace_csv.clone(), ip.clone()).await?;
-//                         // process_trace_single_encoder_new(trace_csv.clone()  , ip.clone()).await?;
-//                     }
-//                 }
-//                 Ok(())
-//             })
-//         })
-//     };
-
-//     // 6) Spawn all WORKERS threads
-//     let mut handles = Vec::with_capacity(WORKERS);
-//     for group in groups {
-//         handles.push(make_worker(group, ip.clone()));
-//     }
-
-//     // 7) Join all of them
-//     for (idx, h) in handles.into_iter().enumerate() {
-//         h.join()
-//          .unwrap_or_else(|_| panic!("worker {} panicked", idx))?;
-//     }
-
-//     Ok(())
-// }

@@ -1,6 +1,6 @@
 use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::alvr_packets::NetworkStatisticsPacket;
-use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV};
+use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV_VIDEO};
 
 use crate::lib::DebugColor;
 use crate::lib::{
@@ -211,7 +211,7 @@ impl CsvSink {
                     break;
                 }
                 batch += 1;
-                if batch >= BATCH_SIZE_CSV {
+                if batch >= BATCH_SIZE_CSV_VIDEO {
                     let _ = wtr.flush();
                     batch = 0;
                 }
