@@ -21,12 +21,13 @@ use minifb::{ Window, WindowOptions};
 
 use serde::Deserialize;
 
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, BTreeSet, VecDeque};
 
 use std::fmt::{ Debug};
 use std::fs::File;
 
 use std::io::{Read,};
+use once_cell::sync::Lazy;
 
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -44,16 +45,17 @@ use std::vec;
 use tokio::task::JoinSet;
 use std::time:: {Instant}; 
 
-const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 2; 
-
-
+const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 1; 
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
 pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.4; 
 pub const BOUNDED_CHANNEL_SIZE: usize = 15; // channel depth for VMAF crossbeam
 
+const MAX_PARALLEL_VMAF: usize = 20; 
 
-const MAX_VMAF_BUFFER_SIZE: usize = 24;  // Max frames to hold in RAM per stream
-const MAX_PENDING_TASKS: usize = 4; // Max VMAF calculations running/queued
+/// One global pool → one permit per concurrent VMAF job
+static VMAF_SLOTS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::const_new(MAX_PARALLEL_VMAF)));
+
 
 const OCR_X: usize = 10;
 const OCR_Y: usize = 10;
@@ -61,10 +63,478 @@ const OCR_W: usize = 58; // Measure this in a screenshot if needed!
 const OCR_H: usize = 90;
 
 // Add this struct to handle the recognition
+
+const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(3); // Reduced from 5s
+const MAX_VMAF_BUFFER_SIZE: usize = 24;
+const MAX_PENDING_TASKS: usize = 4;
+
+// New: Adaptive timeout parameters
+const MIN_FRAME_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const TIMEOUT_ADAPTATION_SAMPLES: usize = 20; // Sample last N frame intervals
+
+// New: Flow control
+const BUFFER_HIGH_WATER_MARK: usize = 20; // Start slowing down reads
+const BUFFER_LOW_WATER_MARK: usize = 10;  // Resume normal operation
+
+// NEW: Deadlock detection
+const DEADLOCK_BUFFER_THRESHOLD: usize = 18; // Consider deadlock if both > this
+const DEADLOCK_GAP_THRESHOLD: u32 = 30;      // and gap > this
+const DEADLOCK_NO_MATCH_THRESHOLD: usize = 0; // and matching pairs = this
+
+#[derive(Clone)]
 struct BufferedFrame {
     frame: FrameBuf,
     arrived_at: Instant,
 }
+
+struct FrameArrivalTracker {
+    last_arrivals: VecDeque<(u32, Instant)>,
+    max_samples: usize,
+    last_activity: Instant, // Track when we last saw ANY frame
+}
+
+impl FrameArrivalTracker {
+    fn new(max_samples: usize) -> Self {
+        Self {
+            last_arrivals: VecDeque::with_capacity(max_samples),
+            max_samples,
+            last_activity: Instant::now(),
+        }
+    }
+
+    fn record_arrival(&mut self, frame_id: u32) {
+        let now = Instant::now();
+        self.last_arrivals.push_back((frame_id, now));
+        self.last_activity = now;
+        
+        if self.last_arrivals.len() > self.max_samples {
+            self.last_arrivals.pop_front();
+        }
+    }
+
+    fn calculate_adaptive_timeout(&self, default: Duration) -> Duration {
+        if self.last_arrivals.len() < 3 {
+            return default;
+        }
+
+        let mut intervals = Vec::new();
+        for i in 1..self.last_arrivals.len() {
+            let duration = self.last_arrivals[i].1
+                .duration_since(self.last_arrivals[i-1].1);
+            intervals.push(duration);
+        }
+
+        if intervals.is_empty() {
+            return default;
+        }
+
+        intervals.sort();
+        let p95_idx = (intervals.len() * 95) / 100;
+        let p95_interval = intervals.get(p95_idx).unwrap_or(&default);
+        let adaptive = p95_interval.saturating_mul(3);
+
+        adaptive.clamp(MIN_FRAME_TIMEOUT, MAX_FRAME_TIMEOUT)
+    }
+
+    fn is_stalled(&self, threshold: Duration) -> bool {
+        Instant::now().duration_since(self.last_activity) > threshold
+    }
+
+    fn time_since_last_frame(&self) -> Duration {
+        Instant::now().duration_since(self.last_activity)
+    }
+}
+
+#[derive(Debug)]
+struct SyncHealth {
+    ref_buffer_size: usize,
+    dist_buffer_size: usize,
+    frame_id_gap: u32,
+    matching_frames: usize,
+    ref_stalled: bool,
+    dist_stalled: bool,
+    current_ref_timeout: Duration,
+    current_dist_timeout: Duration,
+    in_deadlock: bool,
+}
+
+// Helper function for logging
+fn age_for_logging(buffer: &HashMap<u32, BufferedFrame>, id: u32, now: Instant) -> f32 {
+    buffer.get(&id)
+        .map(|b| now.duration_since(b.arrived_at).as_secs_f32())
+        .unwrap_or(0.0)
+}
+struct FrameSyncManager {
+    ref_buffer: HashMap<u32, BufferedFrame>,
+    dist_buffer: HashMap<u32, BufferedFrame>,
+    ref_tracker: FrameArrivalTracker,
+    dist_tracker: FrameArrivalTracker,
+    last_processed_id: i64,
+    
+    expected_ref_id: u32,
+    expected_dist_id: u32,
+    
+    dropped_ref_count: usize,
+    dropped_dist_count: usize,
+    
+    // NEW: Deadlock tracking
+    consecutive_deadlock_detections: usize,
+    last_deadlock_recovery: Instant,
+    
+}
+
+impl FrameSyncManager {
+    fn new() -> Self {
+        Self {
+            ref_buffer: HashMap::new(),
+            dist_buffer: HashMap::new(),
+            ref_tracker: FrameArrivalTracker::new(TIMEOUT_ADAPTATION_SAMPLES),
+            dist_tracker: FrameArrivalTracker::new(TIMEOUT_ADAPTATION_SAMPLES),
+            last_processed_id: -1,
+            expected_ref_id: 0,
+            expected_dist_id: 0,
+            dropped_ref_count: 0,
+            dropped_dist_count: 0,
+            consecutive_deadlock_detections: 0,
+            last_deadlock_recovery: Instant::now(),
+        }
+    }
+
+    fn get_ref_timeout(&self) -> Duration {
+        self.ref_tracker.calculate_adaptive_timeout(INITIAL_FRAME_TIMEOUT)
+    }
+
+    fn get_dist_timeout(&self) -> Duration {
+        self.dist_tracker.calculate_adaptive_timeout(INITIAL_FRAME_TIMEOUT)
+    }
+
+    fn insert_ref_frame(&mut self, id: u32, frame: FrameBuf) {
+        self.ref_tracker.record_arrival(id);
+        self.ref_buffer.insert(id, BufferedFrame {
+            frame,
+            arrived_at: Instant::now(),
+        });
+        
+        if id >= self.expected_ref_id {
+            self.expected_ref_id = id + 1;
+        }
+    }
+
+    fn insert_dist_frame(&mut self, id: u32, frame: FrameBuf) {
+        self.dist_tracker.record_arrival(id);
+        self.dist_buffer.insert(id, BufferedFrame {
+            frame,
+            arrived_at: Instant::now(),
+        });
+        
+        if id >= self.expected_dist_id {
+            self.expected_dist_id = id + 1;
+        }
+    }
+
+    /// NEW: Detect if we're in a deadlock state
+    fn detect_deadlock(&self) -> bool {
+        // Both buffers are nearly full
+        let buffers_full = self.ref_buffer.len() >= DEADLOCK_BUFFER_THRESHOLD 
+            && self.dist_buffer.len() >= DEADLOCK_BUFFER_THRESHOLD;
+        
+        if !buffers_full {
+            return false;
+        }
+
+        // Large gap between expected IDs
+        let id_gap = if self.expected_ref_id > self.expected_dist_id {
+            self.expected_ref_id - self.expected_dist_id
+        } else {
+            self.expected_dist_id - self.expected_ref_id
+        };
+        
+        let large_gap = id_gap > DEADLOCK_GAP_THRESHOLD;
+        
+        // No matching pairs available
+        let matching_count = self.ref_buffer.keys()
+            .filter(|id| self.dist_buffer.contains_key(id))
+            .count();
+        
+        let no_matches = matching_count <= DEADLOCK_NO_MATCH_THRESHOLD;
+        
+        buffers_full && large_gap && no_matches
+    }
+
+    /// NEW: Emergency recovery from deadlock
+    fn emergency_recovery(&mut self, task_id: usize) -> bool {
+        if !self.detect_deadlock() {
+            self.consecutive_deadlock_detections = 0;
+            return false;
+        }
+
+        self.consecutive_deadlock_detections += 1;
+        
+        // Only trigger emergency recovery after consistent deadlock detection
+        if self.consecutive_deadlock_detections < 3 {
+            return false;
+        }
+
+        // Don't spam recovery
+        if self.last_deadlock_recovery.elapsed() < Duration::from_secs(1) {
+            return false;
+        }
+
+        println!("\n🚨 [TASK {}] DEADLOCK DETECTED - EMERGENCY RECOVERY", task_id);
+        println!("   REF buffer: {} frames, expected ID: {}", 
+            self.ref_buffer.len(), self.expected_ref_id);
+        println!("   DIST buffer: {} frames, expected ID: {}", 
+            self.dist_buffer.len(), self.expected_dist_id);
+        
+        // Determine which stream is lagging
+        let ref_ahead = self.expected_ref_id > self.expected_dist_id;
+        
+        if ref_ahead {
+            // Reference is ahead - drop oldest REF frames to make room for DIST to catch up
+            let min_ref_id = *self.ref_buffer.keys().min().unwrap();
+            let max_ref_id = *self.ref_buffer.keys().max().unwrap();
+            let drop_threshold = min_ref_id + (max_ref_id - min_ref_id) / 2; // Drop oldest half
+            
+            let to_drop: Vec<u32> = self.ref_buffer.keys()
+                .filter(|&&id| id <= drop_threshold)
+                .cloned()
+                .collect();
+            
+            println!("   Dropping {} oldest REF frames (≤ {})", to_drop.len(), drop_threshold);
+            
+            for id in to_drop {
+                self.ref_buffer.remove(&id);
+                self.dropped_ref_count += 1;
+            }
+        } else {
+            // Distorted is ahead - drop oldest DIST frames
+            let min_dist_id = *self.dist_buffer.keys().min().unwrap();
+            let max_dist_id = *self.dist_buffer.keys().max().unwrap();
+            let drop_threshold = min_dist_id + (max_dist_id - min_dist_id) / 2;
+            
+            let to_drop: Vec<u32> = self.dist_buffer.keys()
+                .filter(|&&id| id <= drop_threshold)
+                .cloned()
+                .collect();
+            
+            println!("   Dropping {} oldest DIST frames (≤ {})", to_drop.len(), drop_threshold);
+            
+            for id in to_drop {
+                self.dist_buffer.remove(&id);
+                self.dropped_dist_count += 1;
+            }
+        }
+        
+        self.last_deadlock_recovery = Instant::now();
+        self.consecutive_deadlock_detections = 0;
+        
+        println!("   Recovery complete. Buffers now: REF={}, DIST={}\n", 
+            self.ref_buffer.len(), self.dist_buffer.len());
+        
+        true
+    }
+
+    /// FIXED: Cleanup with proper stall handling
+    fn cleanup_expired_frames(&mut self, task_id: usize) -> (Vec<u32>, Vec<u32>) {
+        let now = Instant::now();
+        let ref_timeout = self.get_ref_timeout();
+        let dist_timeout = self.get_dist_timeout();
+
+        // Check if we're in a deadlock - emergency recovery takes priority
+        if self.emergency_recovery(task_id) {
+            return (Vec::new(), Vec::new()); // Already handled
+        }
+
+        let mut expired_ref = Vec::new();
+        let mut expired_dist = Vec::new();
+
+        // FIXED LOGIC: Only be lenient with timeouts if ONE stream is stalled
+        // If BOTH are stalled, we're in trouble and need aggressive cleanup
+        let ref_stalled = self.ref_tracker.is_stalled(Duration::from_secs(2));
+        let dist_stalled = self.dist_tracker.is_stalled(Duration::from_secs(2));
+        let both_stalled = ref_stalled && dist_stalled;
+
+        // Check reference buffer
+        for (&id, buffered) in &self.ref_buffer {
+            let age = now.duration_since(buffered.arrived_at);
+            
+            // FIXED: If both stalled and old, drop it
+            if both_stalled && age > Duration::from_secs(1) {
+                expired_ref.push(id);
+                continue;
+            }
+            
+            // FIXED: Only be lenient if DIST is stalled but REF is not
+            if dist_stalled && !ref_stalled {
+                continue; // Don't drop ref frames if waiting for dist to resume
+            }
+            
+            if age > ref_timeout {
+                // Additional check for large gaps
+                if id > self.expected_dist_id && (id - self.expected_dist_id) > 50 {
+                    expired_ref.push(id);
+                } else if age > ref_timeout.saturating_mul(2) {
+                    expired_ref.push(id);
+                }
+            }
+        }
+
+        // Check distorted buffer (symmetric logic)
+        for (&id, buffered) in &self.dist_buffer {
+            let age = now.duration_since(buffered.arrived_at);
+            
+            if both_stalled && age > Duration::from_secs(1) {
+                expired_dist.push(id);
+                continue;
+            }
+            
+            // FIXED: Only be lenient if REF is stalled but DIST is not
+            if ref_stalled && !dist_stalled {
+                continue;
+            }
+            
+            if age > dist_timeout {
+                if id > self.expected_ref_id && (id - self.expected_ref_id) > 50 {
+                    expired_dist.push(id);
+                } else if age > dist_timeout.saturating_mul(2) {
+                    expired_dist.push(id);
+                }
+            }
+        }
+
+        // Remove expired frames
+        for &id in &expired_ref {
+            self.ref_buffer.remove(&id);
+            self.dropped_ref_count += 1;
+            if expired_ref.len() <= 10 { // Only print first 10
+                println!(">>[TASK ID {}]⚠️ REF Timeout: Dropping Frame #{} (age: {:.2}s, timeout: {:.2}s)", 
+                    task_id, id, 
+                    age_for_logging(&self.ref_buffer, id, now),
+                    ref_timeout.as_secs_f32()
+                );
+            }
+        }
+        if expired_ref.len() > 10 {
+            println!(">>[TASK ID {}]⚠️ REF Timeout: Dropped {} frames total", task_id, expired_ref.len());
+        }
+
+        for &id in &expired_dist {
+            self.dist_buffer.remove(&id);
+            self.dropped_dist_count += 1;
+            if expired_dist.len() <= 10 {
+                println!(">> [TASK ID {}]⚠️ DIST Timeout: Dropping Frame #{} (age: {:.2}s, timeout: {:.2}s)", 
+                    task_id, id,
+                    age_for_logging(&self.dist_buffer, id, now),
+                    dist_timeout.as_secs_f32()
+                );
+            }
+        }
+        if expired_dist.len() > 10 {
+            println!(">> [TASK ID {}]⚠️ DIST Timeout: Dropped {} frames total", task_id, expired_dist.len());
+        }
+
+        (expired_ref, expired_dist)
+    }
+
+    fn should_throttle_reads(&self) -> (bool, bool) {
+        let throttle_ref = self.ref_buffer.len() >= BUFFER_HIGH_WATER_MARK;
+        let throttle_dist = self.dist_buffer.len() >= BUFFER_HIGH_WATER_MARK;
+        (throttle_ref, throttle_dist)
+    }
+
+    fn find_ready_pairs(&self, max_pairs: usize) -> Vec<u32> {
+        let mut ready_ids: Vec<u32> = self.ref_buffer.keys()
+            .filter(|id| self.dist_buffer.contains_key(id))
+            .cloned()
+            .collect();
+        
+        ready_ids.sort();
+        
+        if self.last_processed_id >= 0 {
+            let anchor = (self.last_processed_id + 1) as u32;
+            ready_ids.sort_by_key(|id| {
+                if *id >= anchor {
+                    id - anchor
+                } else {
+                    u32::MAX - (anchor - id)
+                }
+            });
+        }
+        
+        ready_ids.truncate(max_pairs);
+        ready_ids
+    }
+
+    fn cleanup_stale_frames(&mut self, window_size: u32) {
+        if self.last_processed_id > window_size as i64 {
+            let threshold = (self.last_processed_id - window_size as i64) as u32;
+            
+            let removed_ref = self.ref_buffer.keys()
+                .filter(|&&k| k < threshold)
+                .count();
+            let removed_dist = self.dist_buffer.keys()
+                .filter(|&&k| k < threshold)
+                .count();
+            
+            self.ref_buffer.retain(|&k, _| k >= threshold);
+            self.dist_buffer.retain(|&k, _| k >= threshold);
+            
+            if removed_ref > 0 || removed_dist > 0 {
+                println!(">> Cleaned up stale frames: {} ref, {} dist (threshold: {})", 
+                    removed_ref, removed_dist, threshold);
+            }
+        }
+    }
+
+    fn get_sync_health(&self) -> SyncHealth {
+        let ref_size = self.ref_buffer.len();
+        let dist_size = self.dist_buffer.len();
+        
+        let id_gap = if self.expected_ref_id > self.expected_dist_id {
+            self.expected_ref_id - self.expected_dist_id
+        } else {
+            self.expected_dist_id - self.expected_ref_id
+        };
+
+        let matching_count: usize = self.ref_buffer.keys()
+            .filter(|id| self.dist_buffer.contains_key(id))
+            .count();
+
+        SyncHealth {
+            ref_buffer_size: ref_size,
+            dist_buffer_size: dist_size,
+            frame_id_gap: id_gap,
+            matching_frames: matching_count,
+            ref_stalled: self.ref_tracker.is_stalled(Duration::from_secs(2)),
+            dist_stalled: self.dist_tracker.is_stalled(Duration::from_secs(2)),
+            current_ref_timeout: self.get_ref_timeout(),
+            current_dist_timeout: self.get_dist_timeout(),
+            in_deadlock: self.detect_deadlock(),
+        }
+    }
+
+    fn print_stats(&self, task_id: usize) {
+        let health = self.get_sync_health();
+        println!("\n=== [TASK {}] Synchronization Statistics ===", task_id);
+        println!("  Dropped frames: REF={}, DIST={}", self.dropped_ref_count, self.dropped_dist_count);
+        println!("  Buffer sizes: REF={}, DIST={}", health.ref_buffer_size, health.dist_buffer_size);
+        println!("  Frame ID gap: {}", health.frame_id_gap);
+        println!("  Matching pairs ready: {}", health.matching_frames);
+        println!("  Adaptive timeouts: REF={:.2}s, DIST={:.2}s", 
+            health.current_ref_timeout.as_secs_f32(),
+            health.current_dist_timeout.as_secs_f32());
+        println!("  Stream status: REF stalled={}, DIST stalled={}", 
+            health.ref_stalled, health.dist_stalled);
+        if health.in_deadlock {
+            println!("  ⚠️  DEADLOCK RISK DETECTED!");
+        }
+        println!("==========================================\n");
+    }
+}
+
+
+
 struct DigitReader {
     // Templates for digits 0-9. Key is the digit (0-9), Value is the binary pixel mask
     templates: HashMap<u8, Vec<u8>>, 
@@ -253,7 +723,7 @@ impl MetricsLogger {
         ip_client: IpAddr,
     ) -> anyhow::Result<()> {
         // 1️⃣ back‑pressure – wait until a slot is free
-        // let _permit = VMAF_SLOTS.acquire().await.unwrap();
+        let _permit = VMAF_SLOTS.acquire().await.unwrap();
 
         // 2️⃣ clone `self` (the logger) for the blocking thread
         let logger = self.clone();
@@ -909,81 +1379,47 @@ pub async fn process_trace_vs_original(
     };
 
 
+    const FRAME_MATCH_TIMEOUT: Duration = Duration::from_secs(10);
+    let mut sync_manager = FrameSyncManager::new();
+    
+    // Your existing initialization
     let mut vmaf_tasks = FuturesUnordered::new();
-    // let sem = Arc::new(Semaphore::new(num_cpus::get()));
     let sem = Arc::new(Semaphore::new(num_cpus::get().min(4)));
-
-
     let mut enc_done = false;
-
- 
-    let mut ref_buffer: HashMap<u32, BufferedFrame> = HashMap::new();
-    let mut dist_buffer: HashMap<u32, BufferedFrame> = HashMap::new();
-    // Tracks the highest contiguous ID we have processed
-    let mut last_processed_id = -1i64; 
-    // Initialize our OCR helper
     let mut digit_reader = DigitReader::new(OCR_X, OCR_Y, OCR_W, OCR_H);
-
-    let mut last_processed_id = -1i64; // For cleanup
-    const FRAME_MATCH_TIMEOUT: Duration = Duration::from_secs(5);
-
-    // while window.is_open() {
-   loop {
+    
+    let mut iteration_count = 0;
+    
+    loop {
+        iteration_count += 1;
+        
         // A. THROTTLE VMAF
         if vmaf_tasks.len() >= MAX_PENDING_TASKS {
             if let Some(res) = vmaf_tasks.next().await {
-                 if let Err(e) = res { eprintln!("Task Error: {}", e); }
+                if let Err(e) = res { eprintln!("Task Error: {}", e); }
             }
         }
 
-        // --- 🛡️ B. SYMMETRIC TIMEOUT CHECK (The Anti-Freeze) 🛡️ ---
-        let now = Instant::now();
+        // B. ADAPTIVE TIMEOUT CHECK
+        sync_manager.cleanup_expired_frames(task_id);
 
-        // Check Reference Buffer
-        let ref_expired: Vec<u32> = ref_buffer.iter()
-            .filter(|(_, v)| now.duration_since(v.arrived_at) > FRAME_MATCH_TIMEOUT)
-            .map(|(k, _)| *k)
-            .collect();
-
-        for id in ref_expired {
-            println!(">>[TASK ID {}]⚠️ REF Timeout: Dropping Frame #{} (Distorted partner never came)",task_id ,id);
-            ref_buffer.remove(&id); 
-            // Freeing space here allows the Reference Reader to advance!
-        }
-
-        // Check Distorted Buffer
-        let dist_expired: Vec<u32> = dist_buffer.iter()
-            .filter(|(_, v)| now.duration_since(v.arrived_at) > FRAME_MATCH_TIMEOUT)
-            .map(|(k, _)| *k)
-            .collect();
-
-        for id in dist_expired {
-            println!(">> [TASK ID {}]⚠️ DIST Timeout: Dropping Frame #{} (Reference lagging or lost)", task_id, id);
-            dist_buffer.remove(&id);
-            // Freeing space here allows the Network Receiver to accept new packets!
-        }
-
-        // C. READ REFERENCE (The Teacher)
-        if ref_buffer.len() < MAX_VMAF_BUFFER_SIZE {
-             match rx_ref.try_recv() {
+        // C. CHECK BUFFER PRESSURE
+        let (throttle_ref, throttle_dist) = sync_manager.should_throttle_reads();
+        
+        // D. READ REFERENCE (with throttling)
+        if !throttle_ref && sync_manager.ref_buffer.len() < MAX_VMAF_BUFFER_SIZE {
+            match rx_ref.try_recv() {
                 Ok((trusted_id, rgb)) => {
                     digit_reader.learn_digit(&rgb, WIDTH_ENCODER, trusted_id);
-                    
-                    ref_buffer.insert(trusted_id, BufferedFrame { 
-                        frame: FrameBuf { rgb, synthetic: false },
-                        arrived_at: Instant::now(), 
-                    });
+                    sync_manager.insert_ref_frame(trusted_id, FrameBuf { rgb, synthetic: false });
                 },
-                Err(_) => {} 
+                Err(_) => {}
             }
         }
 
-        // D. READ DISTORTED (The Student)
-        // We only read if we have space. If buffer is full (e.g. huge gap), 
-        // the Timeout logic above will clear space eventually.
-        if dist_buffer.len() < MAX_VMAF_BUFFER_SIZE {
-            
-            // 1. Ingest Packets
+        // E. READ DISTORTED (with throttling)
+        if !throttle_dist && sync_manager.dist_buffer.len() < MAX_VMAF_BUFFER_SIZE {
+            // Ingest packets
             if !enc_done {
                 match rx_enc.try_recv() {
                     Ok((_, _pkt_id, pkt)) => dec_enc.process_packet(pkt, _pkt_id),
@@ -992,73 +1428,59 @@ pub async fn process_trace_vs_original(
                 }
             }
 
-            // 2. Decode & Recognize
+            // Decode & recognize
             while let Some((rgb, _)) = dec_enc.next_decoded_frame() {
                 if let Some(visual_id) = digit_reader.recognize(&rgb, WIDTH_ENCODER) {
-                    
-                    dist_buffer.insert(visual_id, BufferedFrame { 
-                        frame: FrameBuf { rgb, synthetic: false },
-                        arrived_at: Instant::now(), 
-                    });
-
+                    sync_manager.insert_dist_frame(visual_id, FrameBuf { rgb, synthetic: false });
                 } else {
-                    // Optional: If we can't read digits, maybe Ref hasn't taught us yet?
-                    // In a robust system, you might buffer this separately, but dropping is safer for VMAF.
+                    // Could not recognize - frame might be corrupted
                 }
             }
         }
 
-        // E. PROCESS PAIRS ("The Zipper")
-        let mut ready_keys: Vec<u32> = ref_buffer.keys().cloned().collect();
-        ready_keys.sort(); 
+        // F. PROCESS PAIRS (with improved matching)
+        let ready_pairs = sync_manager.find_ready_pairs(MAX_PENDING_TASKS - vmaf_tasks.len());
 
-        for id in ready_keys {
-            if dist_buffer.contains_key(&id) {
-                
-                // UNWRAP frames from BufferedFrame
-                let fb_ref = ref_buffer.remove(&id).unwrap().frame;
-                let fb_dist = dist_buffer.remove(&id).unwrap().frame;
+        for id in ready_pairs {
+            // Extract frames
+            let fb_ref = sync_manager.ref_buffer.remove(&id).unwrap().frame;
+            let fb_dist = sync_manager.dist_buffer.remove(&id).unwrap().frame;
 
-                let ts = *ts_map.get(&id).unwrap_or(&0.0);
-                last_processed_id = id as i64;
+            let ts = *ts_map.get(&id).unwrap_or(&0.0);
+            sync_manager.last_processed_id = id as i64;
 
-                // 1. GUI
-                if let Some(ref mut w) = window {
-                    let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, id, ts);
-                    w.inner().update();
-                }
-
-                // 2. VMAF Task
-                let logger = metric.clone();
-                let sem_clone = sem.clone();
-                let ip_clone = ip.clone();
-                let r_rgb = fb_ref.rgb;
-                let d_rgb = fb_dist.rgb;
-
-                vmaf_tasks.push(tokio::spawn(async move {
-                    let _p = sem_clone.acquire().await.unwrap();
-                    let _ = logger.process_frame_buffers(id as u64, ts, r_rgb, d_rgb, ip_clone).await;
-                }));
-
-                if vmaf_tasks.len() >= MAX_PENDING_TASKS { break; }
+            // GUI update (if enabled)
+            if let Some(ref mut w) = window {
+                let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, id, ts);
+                w.inner().update();
             }
+
+            // Spawn VMAF task
+            let logger = metric.clone();
+            let sem_clone = sem.clone();
+            let ip_clone = ip.clone();
+            let r_rgb = fb_ref.rgb;
+            let d_rgb = fb_dist.rgb;
+
+            vmaf_tasks.push(tokio::spawn(async move {
+                let _p = sem_clone.acquire().await.unwrap();
+                let _ = logger.process_frame_buffers(id as u64, ts, r_rgb, d_rgb, ip_clone).await;
+            }));
         }
 
-        // E. CLEANUP STALE FRAMES
-        // If we are at frame 100, and we still have frame 50 in buffers, 
-        // it means the partner frame was lost forever. Delete it to free RAM.
-        if last_processed_id > 50 {
-            let stale_threshold = (last_processed_id - 50) as u32;
-            ref_buffer.retain(|&k, _| k > stale_threshold);
-            dist_buffer.retain(|&k, _| k > stale_threshold);
+        // G. CLEANUP STALE FRAMES (sliding window)
+        sync_manager.cleanup_stale_frames(100);
+
+        // H. PERIODIC STATS
+        if iteration_count % 1000 == 0 {
+            sync_manager.print_stats(task_id);
         }
 
-        // F. EXIT CONDITION
-        // We are done if: Encoder is finished AND Distorted Buffer is empty AND VMAF queue is empty
-        // (Note: We might leave some Reference frames in buffer if the corresponding distorted ones never arrived)
-        if enc_done && dist_buffer.is_empty() && vmaf_tasks.is_empty() {
-             println!(">> Trace processing complete. Max ID processed: {}", last_processed_id); 
-             break;
+        // I. EXIT CONDITION
+        if enc_done && sync_manager.dist_buffer.is_empty() && vmaf_tasks.is_empty() {
+            println!(">> Trace processing complete. Max ID processed: {}", sync_manager.last_processed_id);
+            sync_manager.print_stats(task_id);
+            break;
         }
 
         // Small sleep to prevent busy loop

@@ -2325,7 +2325,7 @@ impl QueueModule {
         success: bool,
         now: f64,
     ) {
-        let mut windows_map = self
+        let mut windows_map: std::sync::MutexGuard<'_, HashMap<(i32, u8), WindowMetrics>> = self
             .window_metrics_mcs_util
             .lock()
             .expect("Window stats mutex poisoned");
@@ -3173,16 +3173,16 @@ impl QueueModule {
                     }
                 }
 
-                // println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!",
-                //     format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s );
+                println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!",
+                    format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s );
 
-                // self.update_window_stats(
-                //     wind_key,
-                //     Some(mcs_assigned),
-                //     drained[0].T_s,
-                //     true,
-                //     now_elapsed
-                // );
+                self.update_window_stats(
+                    wind_key,
+                    Some(mcs_assigned),
+                    drained[0].T_s,
+                    true,
+                    now_elapsed
+                );
 
                 // crate::print_dblue!("[DBG SEND AMPDU] update! {:?}", wind_key , );
 

@@ -1,66 +1,6 @@
 use std::fs;
 use std::panic;
 use std::panic::AssertUnwindSafe;
-
-// pub const INTRAREFRESH_ENABLED: bool = true;
-
-pub const FRAMERATE_WINDOWS: usize = 60;
-pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
-// pub const IDR_FRAME_SIZE_GOP: usize = 30;
-
-const SCALE: f64 = 0.15;
-pub const WIDTH_ENCODER: usize = 3840;
-pub const HEIGHT_ENCODER: usize = 2160;
-
-const MAX_PARALLEL_VMAF: usize = 5;
-const WORKERS: usize = 1;
-
-const MAX_PARALLEL_ENCODE: usize = 6;
-static ENCODE_SLOTS: Lazy<Arc<Semaphore>> =
-    Lazy::new(|| Arc::new(Semaphore::const_new(MAX_PARALLEL_ENCODE)));
-
-pub const RESYNC_BUFFER: usize = 20;
-const SIM_HISTORY: usize = 20;
-const DESYNC_STD_DEV: f64 = 20.0;
-const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500);
-
-pub const MAX_BITRATE_REFERENCE: f32 = 100.0;
-
-#[path = "lib/mod.rs"] // relative path to the module root you want
-mod lib;
-use lib::render_text;
-
-macro_rules! print_prettyy {
-    ($color:expr, $fmt:expr, $($arg:tt)*) => {
-        // if true {
-            let msg = format!($fmt, $($arg)*);
-            println!("{}", $color.to_background_fn()(msg));
-        // }
-    };
-}
-
-pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
-// pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
-
-// Similarity thresholds for sync state transitions
-const GOOD_SIMILARITY_THRESHOLD: f64 = 0.15; // 80% similar to establish sync
-const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.35; // 60% similar to maintain sync
-/// Threshold for considering a frame match "good" (lower value = more similar)
-/// Value of 0.2 means frames are approximately 80% similar
-
-/// Number of consecutive good matches required to establish synchronization
-pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
-
-/// Number of consecutive poor matches before considering sync lost
-pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 30;
-
-pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30;
-const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to wait for buffer
-
-const RECOVERY_GRACE_PERIOD: usize = 5; // Frames to wait before trying to find new similarity matches
-const RECOVERY_MATCH_THRESHOLD: f64 = 0.35; // More lenient similarity threshold during recovery
-const RECOVERY_MAX_ATTEMPTS: usize = 1; // How many consecutive frames to check before accepting new offset
-
 use futures::stream::StreamExt;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -117,9 +57,7 @@ use std::{
     // net::{TcpListener, UdpSocket},
 };
 use tempfile::TempDir;
-
 use std::net::IpAddr;
-// use tokio::sync::Semaphore;
 use asynchronix::model::Model;
 use asynchronix::ports::Output;
 use core::f64;
@@ -145,8 +83,65 @@ use std::time::SystemTime;
 use std::vec;
 use std::{fs::OpenOptions, path::PathBuf};
 use tai_time::TaiTime;
-
 use lazy_static::lazy_static;
+
+pub const FRAMERATE_WINDOWS: usize = 60;
+pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
+// pub const IDR_FRAME_SIZE_GOP: usize = 30;
+
+const SCALE: f64 = 0.15;
+pub const WIDTH_ENCODER: usize = 3840;
+pub const HEIGHT_ENCODER: usize = 2160;
+
+const MAX_PARALLEL_VMAF: usize = 5;
+const WORKERS: usize = 1;
+
+const MAX_PARALLEL_ENCODE: usize = 6;
+static ENCODE_SLOTS: Lazy<Arc<Semaphore>> =
+    Lazy::new(|| Arc::new(Semaphore::const_new(MAX_PARALLEL_ENCODE)));
+
+pub const RESYNC_BUFFER: usize = 20;
+const SIM_HISTORY: usize = 20;
+const DESYNC_STD_DEV: f64 = 20.0;
+const DESYNC_HIST_WINDOW: Duration = Duration::from_millis(1500);
+
+pub const MAX_BITRATE_REFERENCE: f32 = 100.0;
+
+#[path = "lib/mod.rs"] // relative path to the module root you want
+mod lib;
+use lib::render_text;
+macro_rules! print_prettyy {
+    ($color:expr, $fmt:expr, $($arg:tt)*) => {
+        // if true {
+            let msg = format!($fmt, $($arg)*);
+            println!("{}", $color.to_background_fn()(msg));
+        // }
+    };
+}
+
+pub const RGB_SIMILARITY_THRESHOLD: f64 = 0.5;
+// pub const MAX_REGULAR_FRAMES_FOR_COMPARE: usize = 10;
+
+// Similarity thresholds for sync state transitions
+const GOOD_SIMILARITY_THRESHOLD: f64 = 0.15; // 80% similar to establish sync
+const ACCEPTABLE_SIMILARITY_THRESHOLD: f64 = 0.35; // 60% similar to maintain sync
+/// Threshold for considering a frame match "good" (lower value = more similar)
+/// Value of 0.2 means frames are approximately 80% similar
+
+/// Number of consecutive good matches required to establish synchronization
+pub const CONSECUTIVE_MATCHES_TO_LOCK: u32 = 1;
+
+/// Number of consecutive poor matches before considering sync lost
+pub const CONSECUTIVE_MISMATCHES_TO_RECOVER: u32 = 30;
+
+pub const BUFFERING_START_FRAMES_UNTIL_PLAYBACK: usize = 30;
+const MAX_BUFFERING_TIME: Duration = Duration::from_secs(30); // Maximum time to wait for buffer
+
+const RECOVERY_GRACE_PERIOD: usize = 5; // Frames to wait before trying to find new similarity matches
+const RECOVERY_MATCH_THRESHOLD: f64 = 0.35; // More lenient similarity threshold during recovery
+const RECOVERY_MAX_ATTEMPTS: usize = 1; // How many consecutive frames to check before accepting new offset
+
+
 
 #[derive(Debug, Clone)]
 struct FrameData {
