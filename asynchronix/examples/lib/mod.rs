@@ -234,7 +234,7 @@ macro_rules! print_brown {
 
 use std::env;
 
-fn get_prefix_path(directory: &str) -> String {
+pub fn get_prefix_path(directory: &str) -> String {
     let home = env::var("HOME").unwrap_or_default();
 
     if home.contains("fmaura") {
@@ -1096,8 +1096,8 @@ pub struct ObuUnit {
 }
 
 pub struct Av1Parser {
-    buffer: Vec<u8>,
-    sequence_header: Option<Vec<u8>>,
+    pub buffer: Vec<u8>,
+    pub sequence_header: Option<Vec<u8>>,
 }
 
 impl Av1Parser {
@@ -1197,11 +1197,11 @@ impl Av1Parser {
 }
 
 pub struct HevcParser {
-    buffer: Vec<u8>,
+    pub buffer: Vec<u8>,
     // Store the most recent parameter sets
-    vps: Option<Vec<u8>>,
-    sps: Option<Vec<u8>>,
-    pps: Option<Vec<u8>>,
+    pub vps: Option<Vec<u8>>,
+    pub sps: Option<Vec<u8>>,
+    pub pps: Option<Vec<u8>>,
 }
 #[allow(dead_code)]
 impl HevcParser {
@@ -2752,7 +2752,7 @@ pub struct GraphStatistics {
 }
 use std::net::IpAddr;
 
-fn get_third_octet(ip: IpAddr) -> Option<u8> {
+pub fn get_third_octet(ip: IpAddr) -> Option<u8> {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets(); // returns [u8; 4]
@@ -2763,7 +2763,7 @@ fn get_third_octet(ip: IpAddr) -> Option<u8> {
 }
 
 #[derive(Default)]
-struct OldCsvTrace {
+pub struct OldCsvTrace {
     path: PathBuf,
     _writer: Option<csv::Writer<std::fs::File>>,
 }

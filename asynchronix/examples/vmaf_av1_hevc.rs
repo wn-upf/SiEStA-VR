@@ -48,9 +48,17 @@ use std::time:: {Instant};
 const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 1; 
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
 pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.4; 
-pub const BOUNDED_CHANNEL_SIZE: usize = 15; // channel depth for VMAF crossbeam
+pub const BOUNDED_CHANNEL_SIZE: usize = 150; // channel depth for VMAF crossbeam
 
 const MAX_PARALLEL_VMAF: usize = 20; 
+
+// Tunables
+const MAX_DRIFT_GAP: u32 = 40; // Allow small out-of-order arrival before dropping
+const FORCE_DROP_TIMEOUT: Duration = Duration::from_millis(8000); // Max wait for a lagging frame
+
+const MAX_VMAF_BUFFER_SIZE: usize = 100;
+const MAX_PENDING_TASKS: usize = 8;
+
 
 /// One global pool → one permit per concurrent VMAF job
 static VMAF_SLOTS: Lazy<Arc<Semaphore>> =
@@ -64,9 +72,6 @@ const OCR_H: usize = 96;
 
 // Add this struct to handle the recognition
 
-const MAX_VMAF_BUFFER_SIZE: usize = 35;
-const MAX_PENDING_TASKS: usize = 4;
-
 
 #[derive(Clone)]
 struct BufferedFrame {
@@ -74,9 +79,6 @@ struct BufferedFrame {
     arrived_at: Instant,
 }
 
-// Tunables
-const MAX_DRIFT_GAP: u32 = 20; // Allow small out-of-order arrival before dropping
-const FORCE_DROP_TIMEOUT: Duration = Duration::from_millis(4000); // Max wait for a lagging frame
 
 pub struct FrameSyncManager {
     // Using BTreeSet for efficient Min/Max ID retrieval
@@ -174,7 +176,7 @@ impl FrameSyncManager {
                     // Ref exists, waiting for ANY Dist. 
                     // Clean up Ref if it gets incredibly old (zombie frame prevention)
                     let age = self.ref_buffer.get(&r_id).unwrap().arrived_at.elapsed();
-                    if age > Duration::from_secs(5) {
+                    if age > Duration::from_secs(20) {
                         self.drop_ref(r_id, "Zombie REF frame (No DIST input)");
                     }
                     break; 
@@ -221,8 +223,61 @@ impl FrameSyncManager {
         self.dropped_dist += 1;
         println!(">> [SYNC] Dropped DIST #{} - {}", id, reason);
     }
-}
 
+    pub fn check_timeouts(&mut self) {
+        // Define your hard limit (e.g., 2.0 or 5.0 seconds)
+        // This must be longer than your expected network latency but shorter than "forever"
+        const HARD_TIMEOUT: Duration = Duration::from_secs(30); 
+
+        // --- 1. CLEAN REFERENCE BUFFER ---
+        loop {
+            // Peek at the oldest ID (BTreeSet is sorted, first is always smallest/oldest)
+            let should_drop = if let Some(&id) = self.ref_ids.iter().next() {
+                if let Some(frame) = self.ref_buffer.get(&id) {
+                    if frame.arrived_at.elapsed() > HARD_TIMEOUT  {
+                        Some(id)
+                    } else {
+                        None // Oldest frame is fresh enough, stop checking
+                    }
+                } else {
+                    None // Should not happen, but safety first
+                }
+            } else {
+                None // Buffer empty
+            };
+
+            // Apply the drop (we do this outside the borrow to please Rust)
+            if let Some(id) = should_drop {
+                self.drop_ref(id, "HARD TIMEOUT (Stale)");
+            } else {
+                break; // We are done
+            }
+        }
+
+        // --- 2. CLEAN DISTORTED BUFFER ---
+        loop {
+            let should_drop = if let Some(&id) = self.dist_ids.iter().next() {
+                if let Some(frame) = self.dist_buffer.get(&id) {
+                    if frame.arrived_at.elapsed() > HARD_TIMEOUT {
+                        Some(id)
+                    } else {
+                        None 
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(id) = should_drop {
+                self.drop_dist(id, "HARD TIMEOUT (Stale)");
+            } else {
+                break;
+            }
+        }
+    }
+}
 struct DigitReader {
     templates: HashMap<u8, Vec<u8>>, 
     char_w: usize,
@@ -231,8 +286,11 @@ struct DigitReader {
     start_y: usize,
     grid_w: usize,
     grid_h: usize,
-    // NEW: Memory of the last valid number seen
+    // NEW: Track recognition history for better temporal validation
     last_seen_id: Option<u32>,
+    consecutive_failures: usize,
+    // NEW: Multi-template support for robustness
+    template_samples: HashMap<u8, Vec<Vec<u8>>>,
 }
 
 impl DigitReader {
@@ -243,11 +301,12 @@ impl DigitReader {
             grid_w: 12, 
             grid_h: 18,
             last_seen_id: None,
+            consecutive_failures: 0,
+            template_samples: HashMap::new(),
         }
     }
 
-    /// Extract patch AND Normalize Contrast (0-255)
-    /// This fixes issues where the text gets slightly dimmer/brighter
+    /// Your existing process_patch is good, keep it
     fn process_patch(&self, rgb: &[u8], width: usize, digit_index: usize) -> Vec<u8> {
         let mut grid = Vec::with_capacity(self.grid_w * self.grid_h);
         let crop_x = self.start_x + (digit_index * self.char_w);
@@ -256,7 +315,6 @@ impl DigitReader {
         let mut min_val = 255u8;
         let mut max_val = 0u8;
 
-        // 1. Downscale & Find Min/Max
         for gy in 0..self.grid_h {
             for gx in 0..self.grid_w {
                 let src_x_start = crop_x + (gx * self.char_w) / self.grid_w;
@@ -270,7 +328,6 @@ impl DigitReader {
                 for y in src_y_start..src_y_end {
                     for x in src_x_start..src_x_end {
                         let px_idx = (y * width + x) * 3;
-                        // Fast Grayscale
                         let gray = (rgb[px_idx] as u32 * 3 + rgb[px_idx+1] as u32 * 6 + rgb[px_idx+2] as u32) / 10;
                         sum += gray;
                         count += 1;
@@ -285,10 +342,8 @@ impl DigitReader {
             }
         }
 
-        // 2. Contrast Stretch (Normalize)
-        // If the patch is low contrast (e.g. dark gray on black), stretch it to White on Black.
-        // This helps HUGE amounts with compression artifacts.
-        if max_val > min_val + 10 { // Avoid /0 on solid blocks
+        // Contrast stretch
+        if max_val > min_val + 10 {
             let range = (max_val - min_val) as f32;
             for val in &mut grid {
                 *val = (((*val - min_val) as f32 / range) * 255.0) as u8;
@@ -298,33 +353,128 @@ impl DigitReader {
         grid
     }
 
+    /// IMPROVED: Learn multiple samples and create averaged templates
     fn learn_digit(&mut self, rgb: &[u8], width: usize, number: u32) {
         let s = format!("{:05}", number); 
         for (i, char_digit) in s.chars().enumerate() {
             let digit = char_digit.to_digit(10).unwrap() as u8;
-            if !self.templates.contains_key(&digit) {
-                let grid = self.process_patch(rgb, width, i);
-                // Only learn if there is actual content (average brightness > 50 after normalization)
-                let sum: u32 = grid.iter().map(|&x| x as u32).sum();
-                if sum > (self.grid_w * self.grid_h * 50) as u32 { 
-                     self.templates.insert(digit, grid);
+            let grid = self.process_patch(rgb, width, i);
+            
+            // Quality check
+            let sum: u32 = grid.iter().map(|&x| x as u32).sum();
+            if sum > (self.grid_w * self.grid_h * 50) as u32 {
+                // Store sample
+                self.template_samples.entry(digit)
+                    .or_insert_with(Vec::new)
+                    .push(grid.clone());
+                
+                // Keep only last 10 samples to avoid memory bloat
+                let samples = self.template_samples.get_mut(&digit).unwrap();
+                if samples.len() > 10 {
+                    samples.remove(0);
                 }
+                
+                // Update template to median of all samples (more robust than mean)
+                self.templates.insert(digit, Self::median_template(samples));
             }
         }
     }
 
+    /// Compute median template from multiple samples
+    fn median_template(samples: &[Vec<u8>]) -> Vec<u8> {
+        if samples.is_empty() { return Vec::new(); }
+        
+        let len = samples[0].len();
+        let mut median = Vec::with_capacity(len);
+        
+        for i in 0..len {
+            let mut values: Vec<u8> = samples.iter().map(|s| s[i]).collect();
+            values.sort_unstable();
+            median.push(values[values.len() / 2]);
+        }
+        
+        median
+    }
+
+    /// IMPROVED: Better temporal validation and fallback strategies
     fn recognize(&mut self, rgb: &[u8], width: usize) -> Option<u32> {
         if self.templates.len() < 10 { return None; }
 
-        let mut result_val: u32 = 0;
-        let mut total_confidence_loss = 0;
+        // Try main recognition
+        let result = self.recognize_internal(rgb, width);
+        
+        match result {
+            Some(val) => {
+                self.consecutive_failures = 0;
+                
+                // Validate against expected sequence
+                if let Some(last) = self.last_seen_id {
+                    if self.is_valid_sequence(last, val) {
+                        self.last_seen_id = Some(val);
+                        return Some(val);
+                    } else {
+                        // Sequence violation - but maybe it's real?
+                        // Try with relaxed thresholds
+                        if let Some(relaxed) = self.recognize_relaxed(rgb, width) {
+                            if self.is_valid_sequence(last, relaxed) {
+                                self.last_seen_id = Some(relaxed);
+                                return Some(relaxed);
+                            }
+                        }
+                        return None;
+                    }
+                } else {
+                    // First frame
+                    self.last_seen_id = Some(val);
+                    return Some(val);
+                }
+            },
+            None => {
+                self.consecutive_failures += 1;
+                
+                // If we've failed many times in a row, reset expectations
+                // This helps recover from persistent corruption
+                if self.consecutive_failures > 20 {
+                    println!(">> [OCR] Too many failures, resetting sequence tracker");
+                    self.last_seen_id = None;
+                    self.consecutive_failures = 0;
+                }
+                
+                return None;
+            }
+        }
+    }
 
-        // Calculate what we EXPECT the next digit to be (temporal coherence)
-        let expected_digits: Vec<Option<u8>> = if let Some(last) = self.last_seen_id {
-            // We expect last + 1. If last was 532, expect 533 ("00533")
-            format!("{:05}", last + 1).chars()
-                .map(|c| c.to_digit(10).map(|d| d as u8))
-                .collect()
+    /// Main recognition with standard thresholds
+    fn recognize_internal(&self, rgb: &[u8], width: usize) -> Option<u32> {
+        self.recognize_with_thresholds(rgb, width, 12_000, 0.85, false)
+    }
+
+    /// Relaxed recognition for recovery
+    fn recognize_relaxed(&self, rgb: &[u8], width: usize) -> Option<u32> {
+        self.recognize_with_thresholds(rgb, width, 20_000, 0.92, true)
+    }
+
+    /// Core recognition with configurable thresholds
+    fn recognize_with_thresholds(
+        &self, 
+        rgb: &[u8], 
+        width: usize,
+        base_sad_limit: u32,
+        base_ratio_limit: f32,
+        use_temporal_bias: bool,
+    ) -> Option<u32> {
+        let mut result_val: u32 = 0;
+        let mut total_confidence = 0u32;
+        
+        let expected_digits: Vec<Option<u8>> = if use_temporal_bias {
+            if let Some(last) = self.last_seen_id {
+                format!("{:05}", last + 1).chars()
+                    .map(|c| c.to_digit(10).map(|d| d as u8))
+                    .collect()
+            } else {
+                vec![None; 5]
+            }
         } else {
             vec![None; 5]
         };
@@ -332,89 +482,87 @@ impl DigitReader {
         for i in 0..5 {
             let patch = self.process_patch(rgb, width, i);
             
-            let mut best_digit = None;
-            let mut best_score = u32::MAX;
-            let mut second_best_score = u32::MAX;
-
-            for (&tmpl_digit, tmpl_grid) in &self.templates {
-                let score: u32 = patch.iter().zip(tmpl_grid.iter())
-                    .map(|(a, b)| (*a as i32 - *b as i32).abs() as u32)
-                    .sum();
-
-                if score < best_score {
-                    second_best_score = best_score;
-                    best_score = score;
-                    best_digit = Some(tmpl_digit);
-                } else if score < second_best_score {
-                    second_best_score = score;
-                }
-            }
-
-            // --- RECOVERY LOGIC ---
+            let mut scores: Vec<(u8, u32)> = self.templates.iter()
+                .map(|(&digit, tmpl)| {
+                    let score: u32 = patch.iter().zip(tmpl.iter())
+                        .map(|(a, b)| (*a as i32 - *b as i32).abs() as u32)
+                        .sum();
+                    (digit, score)
+                })
+                .collect();
             
-            // Standard thresholds
-            let mut sad_limit = 12_000; // Increased from 8000 for robustness
-            let mut ratio_limit = 0.85;
+            scores.sort_by_key(|&(_, score)| score);
+            
+            if scores.len() < 2 { return None; }
+            
+            let (best_digit, best_score) = scores[0];
+            let (_, second_score) = scores[1];
 
-            // Bias: If the best match IS the expected digit, loosen the rules!
-            if let Some(exp) = expected_digits.get(i).cloned().flatten() {
-                if best_digit == Some(exp) {
-                    sad_limit = 18_000;  // Allow much more noise for expected digits
-                    ratio_limit = 0.95;  // Allow it to be almost ambiguous
+            // Dynamic thresholds based on expectations
+            let mut sad_limit = base_sad_limit;
+            let mut ratio_limit = base_ratio_limit;
+
+            if use_temporal_bias {
+                if let Some(exp) = expected_digits.get(i).cloned().flatten() {
+                    if best_digit == exp {
+                        sad_limit = (sad_limit as f32 * 1.5) as u32;
+                        ratio_limit = 0.95;
+                    }
                 }
             }
 
-            // Failure checks
+            // Validation
             if best_score > sad_limit { 
-                // println!(">> [OCR FAIL] Digit {}: Score {} > {}", i, best_score, sad_limit);
                 return None; 
             }
 
-            if second_best_score > 0 {
-                let ratio = best_score as f32 / second_best_score as f32;
-                if ratio > ratio_limit { 
-                    // println!(">> [OCR AMBIGUOUS] Digit {}: Ratio {:.2} > {}", i, ratio, ratio_limit);
-                    return None; 
-                }
+            let ratio = best_score as f32 / second_score as f32;
+            if ratio > ratio_limit { 
+                return None; 
             }
 
-            if let Some(d) = best_digit {
-                result_val = result_val * 10 + d as u32;
-                total_confidence_loss += best_score;
-            } else {
-                return None;
-            }
+            result_val = result_val * 10 + best_digit as u32;
+            total_confidence += best_score;
         }
 
-        // Logic Check: Don't allow massive jumps (e.g. 532 -> 900) unless we are just starting
-        if let Some(last) = self.last_seen_id {
-            // Allow small gaps (frame drops), but reject massive random numbers
-            // 60fps * 2 seconds = 120 frames gap max
-            if result_val > last && result_val < last + 120 {
-                self.last_seen_id = Some(result_val);
-                return Some(result_val);
-            } else if result_val <= last {
-                // Out of order or duplicate? We might accept duplicates or just ignore.
-                // For safety, let's accept it but not update last_seen if it's old.
-                return Some(result_val);
-            } else {
-                // Massive jump (Hallucination risk). 
-                // Only accept if confidence was REALLY high (low SAD score)
-                if total_confidence_loss < 10000 {
-                    self.last_seen_id = Some(result_val);
-                    return Some(result_val);
-                } else {
-                    println!(">> [OCR REJECT] Jump too large: {} -> {} (Conf: {})", last, result_val, total_confidence_loss);
-                    return None;
-                }
-            }
-        }
-
-        self.last_seen_id = Some(result_val);
         Some(result_val)
     }
-}
 
+    /// Improved sequence validation
+    fn is_valid_sequence(&self, last: u32, current: u32) -> bool {
+        // Allow backwards for out-of-order delivery
+        if current <= last {
+            // Accept if within reasonable window (30 frames back)
+            return last - current <= 30;
+        }
+        
+        // Forward jump
+        let gap = current - last;
+        
+        // Normal increment (1-3 frames ahead due to processing delays)
+        if gap <= 3 {
+            return true;
+        }
+        
+        // Small gap (4-60 frames) - likely frame drops, acceptable
+        if gap <= 60 {
+            return true;
+        }
+        
+        // Large gap (60-150) - suspicious but might be real if many drops
+        if gap <= 150 {
+            if self.consecutive_failures < 5 {
+                // If we haven't been failing, be skeptical
+                return false;
+            }
+            // If we've been failing, maybe we missed a lot
+            return true;
+        }
+        
+        // Huge gap (>150) - almost certainly hallucination
+        false
+    }
+}
 
 
 #[derive(Clone)]
@@ -905,11 +1053,16 @@ fn make_encoder_task(
                     let info = &trace[produced];
                     produced += 1;
 
-                    let millis_sleep = (1000.0 / framerate_fps) as u64;
-                    async_std::task::sleep(Duration::from_millis(millis_sleep)).await;
+                    // let millis_sleep = (1000.0 / framerate_fps) as u64;
+                    async_std::task::sleep(Duration::from_millis(1)).await;
 
                     // simulate loss only on the “low” path
                     if !simulate_loss || !info.lost {
+
+                        if tx.len() >= BOUNDED_CHANNEL_SIZE - 1 {
+                            println!("⚠️ Encoder Task {} BLOCKED on full channel for ID {}", tag, info.id);
+                        }
+
                         if tx.send((tag, info.id, pkt)).is_err() {
                             println!("Encoder of tag {tag} hung up!");
                             // receiver hung up → terminate task
@@ -922,6 +1075,9 @@ fn make_encoder_task(
                 }
             }
         }
+
+
+
     });
 }
 
@@ -983,6 +1139,8 @@ pub async fn process_trace_vs_original(
     parent_results_path: &str, 
     task_id: usize, 
 ) -> Result<()> {
+    let mut last_status = Instant::now();
+
 
     // 1. Setup Scenario & Paths
     let scenario = trace_csv.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
@@ -1109,7 +1267,7 @@ pub async fn process_trace_vs_original(
     // 4. Start The Tasks
 
     // A) Distorted Encoder (Driven by CSV)
-    let (tx_enc, rx_enc) = bounded::<(usize, u32, Vec<u8>)>(BOUNDED_CHANNEL_SIZE); // limited capacity to prevent OOM
+    let (tx_enc, rx_enc) = bounded::<(usize, u32, Vec<u8>)>(2000); // limited capacity to prevent OOM
     make_encoder_task(
         0,
         bitrate_mbps,
@@ -1156,153 +1314,166 @@ pub async fn process_trace_vs_original(
     };
 
 
-    const FRAME_MATCH_TIMEOUT: Duration = Duration::from_secs(10);
     let mut sync_manager = FrameSyncManager::new();
     
     // Your existing initialization
     let mut vmaf_tasks = FuturesUnordered::new();
-    let sem = Arc::new(Semaphore::new(num_cpus::get().min(4)));
+    // let vmaf_permit_sem = Arc::new(Semaphore::new(MAX_PENDING_TASKS));
+    let sem = Arc::new(Semaphore::new(num_cpus::get().min(MAX_PENDING_TASKS)));
     let mut enc_done = false;
     let mut digit_reader = DigitReader::new(OCR_X, OCR_Y, OCR_W, OCR_H);
     
-    let mut iteration_count = 0;
-    
-    loop {
-        iteration_count += 1;
 
-        // =================================================================
-        // A. MANAGE VMAF TASK CONCURRENCY
-        // =================================================================
-        // If we have too many pending VMAF calculations, wait for one to finish.
-        if vmaf_tasks.len() >= MAX_PENDING_TASKS {
-            if let Some(res) = vmaf_tasks.next().await {
-                if let Err(e) = res { eprintln!("Task Error: {}", e); }
-            }
-        }
+        // 1. PREP: Queue to hold matched frames waiting for a CPU slot
+    let mut pending_pairs: VecDeque<(u32, FrameBuf, FrameBuf)> = VecDeque::new();
+    let mut last_status = std::time::Instant::now();
 
-        // =================================================================
-        // B. CHECK BUFFER PRESSURE (New Implementation)
-        // =================================================================
-        // We check raw counts to decide if we should stop reading from inputs.
-        let (ref_len, dist_len) = sync_manager.buffer_counts();
-        let throttle_ref = ref_len >= MAX_VMAF_BUFFER_SIZE;
-        let throttle_dist = dist_len >= MAX_VMAF_BUFFER_SIZE;
-
-        // =================================================================
-        // C. READ REFERENCE STREAM
-        // =================================================================
-        if !throttle_ref {
-            // Read until empty or blocked
-            match rx_ref.try_recv() {
-                Ok((trusted_id, rgb)) => {
-                    // 1. Learn the font template from the clean reference
-                    digit_reader.learn_digit(&rgb, WIDTH_ENCODER, trusted_id);
-                    
-                    // 2. Insert into the sync manager
-                    sync_manager.insert_ref_frame(trusted_id, FrameBuf { rgb, synthetic: false });
-                },
-                Err(crossbeam_channel::TryRecvError::Empty) => {}, // Nothing to read
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {}, // Stream ended
-            }
-        }
-
-        // =================================================================
-        // D. READ DISTORTED STREAM (Packet -> Decode -> OCR)
-        // =================================================================
-        if !throttle_dist {
-            // 1. Ingest packets
-            if !enc_done {
-                match rx_enc.try_recv() {
-                    Ok((_, _pkt_id, pkt)) => dec_enc.process_packet(pkt, _pkt_id),
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => enc_done = true,
-                    Err(_) => {}
+   loop {
+        tokio::select! {
+            
+            // =================================================================
+            // BRANCH A: Handle Finished VMAF Tasks (High Priority)
+            // =================================================================
+            Some(res) = vmaf_tasks.next(), if !vmaf_tasks.is_empty() => {
+                match res {
+                    Ok(_) => { /* Success logging */ },
+                    Err(e) => eprintln!("❌ VMAF Task Failed: {}", e),
                 }
+                // Loop restarts immediately to fill the slot via Branch C logic below
             }
 
-            // 2. Decode & OCR
-            while let Some((rgb, _)) = dec_enc.next_decoded_frame() {
-                // Pass mutable reference to digit_reader
-                // If recognize() returns None, we LOG it so you know why it's stuck!
-                match digit_reader.recognize(&rgb, WIDTH_ENCODER) {
-                    Some(visual_id) => {
+            // =================================================================
+            // BRANCH B: The "Ticker" (Runs constantly)
+            // =================================================================
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                
+                // --- 1. ALWAYS READ PACKETS (Never Throttle Input) ---
+                // CRITICAL FIX: We drain the channel completely. If we don't, 
+                // the Encoder blocks, corrupts the stream (PPS error), and dies.
+                if !enc_done {
+                    loop {
+                        match rx_enc.try_recv() {
+                            Ok((_, _pkt_id, pkt)) => {
+                                // Always process the packet so the decoder stays healthy
+                                dec_enc.process_packet(pkt, _pkt_id);
+                            },
+                            Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                                enc_done = true;
+                                break;
+                            },
+                            Err(crossbeam::channel::TryRecvError::Empty) => {
+                                break; // Channel is completely drained for this tick
+                            }
+                        }
+                    }
+                }
+
+                // --- 2. DECODE & MANAGE OVERFLOW ---
+                // Now we extract frames. If the SyncManager buffer is full, 
+                // we must make room by dropping OLD frames, not by blocking new ones.
+                while let Some((rgb, _)) = dec_enc.next_decoded_frame() {
+                    
+                    if let Some(visual_id) = digit_reader.recognize(&rgb, WIDTH_ENCODER) {
+                        
+                        // Filter ancient garbage (standard logic)
+                        if let Some(last) = digit_reader.last_seen_id {
+                            if visual_id < last.saturating_sub(300) { continue; }
+                        }
+
+                        // === OVERFLOW PROTECTION ===
+                        // If buffer is full, force drop the OLDEST frame to make room.
+                        // This prevents the "Buf: D57" deadlock.
+                        if sync_manager.dist_buffer.len() >= MAX_VMAF_BUFFER_SIZE {
+                            // Find the oldest ID to evict
+                            if let Some(&oldest_id) = sync_manager.dist_ids.iter().next() {
+                                sync_manager.drop_dist(oldest_id, "Overflow Protection (Buffer Full)");
+                            }
+                        }
+
+                        // Now safe to insert
                         sync_manager.insert_dist_frame(visual_id, FrameBuf { rgb, synthetic: false });
-                    },
-                    None => {
-                        // Optional: Enable this only if you are stuck debugging
-                        println!(">> [OCR] Dropped frame - unrecognizable");
+                    }
+                }
+
+                // --- 3. READ REFERENCE (Safe to throttle this, it's a file) ---
+                // We can stop reading reference frames if we have too many, because
+                // the file reader thread won't crash if it blocks.
+                if sync_manager.ref_buffer.len() < MAX_VMAF_BUFFER_SIZE {
+                     while let Ok((id, rgb)) = rx_ref.try_recv() {
+                         digit_reader.learn_digit(&rgb, WIDTH_ENCODER, id);
+                         sync_manager.insert_ref_frame(id, FrameBuf { rgb, synthetic: false });
+                         
+                         // Stop reading if we filled up
+                         if sync_manager.ref_buffer.len() >= MAX_VMAF_BUFFER_SIZE { break; }
+                     }
+                }
+
+                // --- 4. SYNC & SPAWN (Standard Logic) ---
+                
+                // Check for hard timeouts (cleans up zombie frames)
+                sync_manager.check_timeouts(); 
+
+                // Get matched pairs
+                let new_matches = sync_manager.sync_and_retrieve();
+                for m in new_matches {
+                    pending_pairs.push_back(m);
+                }
+
+                // Spawn tasks if we have CPU slots available
+                while vmaf_tasks.len() < MAX_PENDING_TASKS {
+                    if let Some((id, fb_ref, fb_dist)) = pending_pairs.pop_front() {
+                        
+                        let ts = *ts_map.get(&id).unwrap_or(&0.0);
+                        
+                        // GUI Update
+                        if let Some(ref mut w) = window {
+                            let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, id, ts);
+                            w.inner().update();
+                        }
+
+                        // Prepare Move variables
+                        let logger = metric.clone();
+                        let sem_clone = sem.clone();
+                        let ip_clone = ip.clone();
+                        let r_rgb = fb_ref.rgb;
+                        let d_rgb = fb_dist.rgb;
+
+                        // SPAWN
+                        vmaf_tasks.push(tokio::spawn(async move {
+                            let _p = sem_clone.acquire().await.unwrap(); 
+                            logger.process_frame_buffers(id as u64, ts, r_rgb, d_rgb, ip_clone).await
+                        }));
+                    } else {
+                        break; // No more pairs ready
+                    }
+                }
+                
+                // --- 5. LOGGING & EXIT ---
+                
+                if last_status.elapsed() > Duration::from_secs(1) {
+                    let (r_len, d_len) = sync_manager.buffer_counts();
+                    println!(">> [Task {}] VMAF: {}/{} | Pending: {} | Buf: R{} D{}", 
+                        task_id, vmaf_tasks.len(), MAX_PENDING_TASKS, pending_pairs.len(), r_len, d_len);
+                    last_status = std::time::Instant::now();
+                }
+
+                // Exit Condition
+                if enc_done && 
+                   sync_manager.dist_buffer.is_empty() && // Use buffer count, not just len var
+                   pending_pairs.is_empty() && 
+                   vmaf_tasks.is_empty() {
+                    
+                    // Final sanity check
+                    if sync_manager.sync_and_retrieve().is_empty() {
+                        println!(">> Trace processing complete for Task {}", task_id);
+                        break; 
                     }
                 }
             }
         }
-
-        // =================================================================
-        // E. SYNC & RETRIEVE (The "Zipper")
-        // =================================================================
-        // This single call handles matching, dropping lagging frames, and timeouts.
-        // It returns OWNED frames (FrameBuf), so they are already removed from buffers.
-        let pairs = sync_manager.sync_and_retrieve();
-
-        for (id, fb_ref, fb_dist) in pairs {
-            let ts = *ts_map.get(&id).unwrap_or(&0.0);
-            
-            // GUI update (if enabled)
-            if let Some(ref mut w) = window {
-                let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, id, ts);
-                w.inner().update();
-            }
-
-            // Spawn VMAF task
-            // Note: We already checked MAX_PENDING_TASKS at the top of the loop,
-            // but if sync_and_retrieve dumps 50 frames at once, we might want to 
-            // ensure we don't overload.
-            if vmaf_tasks.len() >= MAX_PENDING_TASKS {
-                 if let Some(res) = vmaf_tasks.next().await {
-                    if let Err(e) = res { eprintln!("Task Error: {}", e); }
-                }
-            }
-
-            let logger = metric.clone();
-            let sem_clone = sem.clone();
-            let ip_clone = ip.clone();
-            let r_rgb = fb_ref.rgb; // Moved ownership
-            let d_rgb = fb_dist.rgb; // Moved ownership
-
-            vmaf_tasks.push(tokio::spawn(async move {
-                // Acquire semaphore to limit CPU usage if needed
-                let _p = sem_clone.acquire().await.unwrap(); 
-                let _ = logger.process_frame_buffers(id as u64, ts, r_rgb, d_rgb, ip_clone).await;
-            }));
-        }
-
-        // =================================================================
-        // F. PERIODIC STATS & EXIT
-        // =================================================================
-        if iteration_count % 1000 == 0 {
-             // You might need to update the signature of print_stats in your new struct 
-             // to accept task_id, or just print internal stats.
-             println!(">> [Task {}] Buffers: REF={}, DIST={} | Dropped: REF={}, DIST={}", 
-                task_id, ref_len, dist_len, sync_manager.dropped_ref, sync_manager.dropped_dist);
-        }
-
-        // Exit Condition:
-        // 1. Encoder/Network input is done
-        // 2. Distorted buffer is empty (we processed everything that arrived)
-        // 3. VMAF tasks are finished
-        // Note: We check ref_len == 0 to ensure we aren't waiting on a ref frame for a dist frame that exists.
-        if enc_done && dist_len == 0 && vmaf_tasks.is_empty() {
-            // Optional: Give it one last check to ensure no pending REF frames match pending DIST frames
-            // (Only relevant if enc_done is true but we are still decoding)
-            if sync_manager.sync_and_retrieve().is_empty() {
-                println!(">> Trace processing complete for Task {}", task_id);
-                break;
-            }
-        }
-
-        // Yield to prevent CPU starvation
-        tokio::time::sleep(Duration::from_millis(1)).await;
     }
-
-    // Await remaining tasks
+   
+   // Await remaining tasks
     while let Some(res) = vmaf_tasks.next().await {
         if let Err(e) = res { eprintln!("Final Task Join Error: {}", e); }
     }
