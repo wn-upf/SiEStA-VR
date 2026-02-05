@@ -76,6 +76,7 @@ pub const FOVOPTIX_BW_PROBE: u16 = 9;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     HEVC,
@@ -227,7 +228,7 @@ impl ChunkedAv1Encoder {
             .args(&[
                     "-vf", &format!(
                         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5",
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
                         self.width, 
                         self.height, 
                         start_frame_idx
@@ -438,7 +439,7 @@ impl ChunkedSoftwareHevcEncoder {
             .args(&[
                     "-vf", &format!(
                         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5",
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
                         self.width, 
                         self.height, 
                         start_frame_idx
@@ -689,7 +690,7 @@ impl ChunkedHevcEncoder {
                 .args(&[
                     "-vf", &format!(
                         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5",
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
                         self.width, 
                         self.height, 
                         start_frame_idx
@@ -728,7 +729,7 @@ impl ChunkedHevcEncoder {
                 .args(&[
                     "-vf", &format!(
                         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5",
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
                         self.width, 
                         self.height, 
                         start_frame_idx
