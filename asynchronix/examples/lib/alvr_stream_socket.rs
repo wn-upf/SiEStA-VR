@@ -227,7 +227,7 @@ impl ChunkedAv1Encoder {
             .args(&[
                     "-vf", &format!(
                         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=yellow: box=1: boxcolor=black@0.5",
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{n}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=yellow: box=1: boxcolor=black@0.5",
                         self.width, 
                         self.height, 
                         start_frame_idx

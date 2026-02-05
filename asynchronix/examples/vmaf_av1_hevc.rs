@@ -42,7 +42,7 @@ use regex::Regex;
 use std::result::Result::Ok;
 use std::vec;
 use tokio::task::JoinSet;
-
+use std::time:: {Instant}; 
 
 const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 2; 
 
@@ -50,6 +50,117 @@ const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 2;
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
 pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.4; 
 pub const BOUNDED_CHANNEL_SIZE: usize = 15; // channel depth for VMAF crossbeam
+
+
+const MAX_VMAF_BUFFER_SIZE: usize = 24;  // Max frames to hold in RAM per stream
+const MAX_PENDING_TASKS: usize = 4; // Max VMAF calculations running/queued
+
+const OCR_X: usize = 10;
+const OCR_Y: usize = 10;
+const OCR_W: usize = 58; // Measure this in a screenshot if needed!
+const OCR_H: usize = 90;
+
+// Add this struct to handle the recognition
+struct BufferedFrame {
+    frame: FrameBuf,
+    arrived_at: Instant,
+}
+struct DigitReader {
+    // Templates for digits 0-9. Key is the digit (0-9), Value is the binary pixel mask
+    templates: HashMap<u8, Vec<u8>>, 
+    char_w: usize,
+    char_h: usize,
+    start_x: usize,
+    start_y: usize,
+}
+
+impl DigitReader {
+    fn new(start_x: usize, start_y: usize, char_w: usize, char_h: usize) -> Self {
+        Self {
+            templates: HashMap::new(),
+            char_w, char_h, start_x, start_y
+        }
+    }
+
+    /// Helper to extract a binary mask of a specific digit slot
+    fn extract_patch(&self, rgb: &[u8], width: usize, digit_index: usize) -> Vec<u8> {
+        let mut patch = Vec::with_capacity(self.char_w * self.char_h);
+        // Assuming digits grow to the right: "123" -> '1' at x, '2' at x+w, ...
+        let patch_x = self.start_x + (digit_index * self.char_w);
+        
+        for y in 0..self.char_h {
+            for x in 0..self.char_w {
+                let px_idx = ((self.start_y + y) * width + (patch_x + x)) * 3;
+                let r = rgb[px_idx];
+                let g = rgb[px_idx+1];
+                let b = rgb[px_idx+2];
+                // Simple thresholding: Text is White, Box is Black
+                // Value 1 = Text, 0 = Background
+                patch.push(if r > 128 || g > 128 || b > 128 { 1 } else { 0 });
+            }
+        }
+        patch
+    }
+
+    /// Learn a digit from the clean Reference stream
+    fn learn_digit(&mut self, rgb: &[u8], width: usize, number: u32) {
+        let s = number.to_string();
+        for (i, char_digit) in s.chars().enumerate() {
+            let digit = char_digit.to_digit(10).unwrap() as u8;
+            if !self.templates.contains_key(&digit) {
+                let mask = self.extract_patch(rgb, width, i);
+                // Sanity check: Don't learn empty black squares
+                if mask.iter().filter(|&&v| v == 1).count() > 5 { 
+                     self.templates.insert(digit, mask);
+                     // println!(">> Learned Template for digit '{}'", digit);
+                }
+            }
+        }
+    }
+
+    /// Recognize the number in a (possibly distorted) frame
+    fn recognize(&self, rgb: &[u8], width: usize) -> Option<u32> {
+        if self.templates.is_empty() { return None; }
+
+        let mut result_str = String::new();
+        // We scan up to 5 digit slots (supports up to frame 99999)
+        for i in 0..5 {
+            let patch = self.extract_patch(rgb, width, i);
+            let active_pixels = patch.iter().filter(|&&v| v == 1).count();
+            
+            // Stop if we hit an empty space (end of number)
+            if active_pixels < 5 { break; } 
+
+            // Find best matching template (Lowest Hamming Distance / XOR)
+            let mut best_digit = None;
+            let mut min_diff = usize::MAX;
+
+            for (&digit, tmpl) in &self.templates {
+                // XOR diff count
+                let diff = patch.iter().zip(tmpl.iter())
+                    .filter(|(a, b)| a != b).count();
+                
+                if diff < min_diff {
+                    min_diff = diff;
+                    best_digit = Some(digit);
+                }
+            }
+
+            // Heuristic: If the best match still has > 30% difference, it's garbage/noise
+            let threshold = (self.char_w * self.char_h) / 3; 
+            if min_diff < threshold {
+                if let Some(d) = best_digit {
+                    result_str.push_str(&d.to_string());
+                }
+            } else {
+                 break; // Unrecognizable char, stop parsing
+            }
+        }
+
+        if result_str.is_empty() { None } else { result_str.parse::<u32>().ok() }
+    }
+}
+
 
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +197,7 @@ struct MetricsLogger {
     writer: Arc<Mutex<csv::Writer<File>>>,
     name_folder: String,
     name_file_w_path: String,
+    task_id: usize, 
 }
 
 impl MetricsLogger {
@@ -114,7 +226,7 @@ impl MetricsLogger {
         Ok(())
     }
 
-    pub fn new_for_trace( results_folder: &str, scenario: &str, trace_idx: usize, two_encoders: bool) -> Result<Self> {
+    pub fn new_for_trace( results_folder: &str, scenario: &str, trace_idx: usize, two_encoders: bool, task_id: usize, ) -> Result<Self> {
         
         let dir = format!("{}/{}", results_folder, scenario);
         std::fs::create_dir_all(&dir)?;
@@ -127,6 +239,7 @@ impl MetricsLogger {
             writer: Arc::new(std::sync::Mutex::new(csv::Writer::from_writer(file))),
             name_folder: scenario.to_string(),
             name_file_w_path: path,
+            task_id, 
         })
     }
     /// *The heavy ffmpeg work happens in a dedicated thread;* the caller just awaits
@@ -266,7 +379,8 @@ impl MetricsLogger {
 
         // ─────────── log & emit ───────────
         print_green!(
-            "T:{:.3} [{}] | Frame {} : VMAF {:.2}, SSIM {:.4}",
+            "Task {} - T:{:.3} [{}] | Frame {} : VMAF {:.2}, SSIM {:.4}",
+            self.task_id, 
             timestamp_ms,
             ip_client,
             frame_number,
@@ -381,7 +495,23 @@ fn verify_visual_sync(
     
     true
 }
-
+/* Helper to draw a hollow rectangle for debug boxes */
+fn draw_debug_rect(buf: &mut [u32], buf_w: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
+    // Top & Bottom lines
+    for i in x..(x + w).min(buf_w) {
+        let top_idx = y * buf_w + i;
+        let bot_idx = (y + h) * buf_w + i;
+        if top_idx < buf.len() { buf[top_idx] = color; }
+        if bot_idx < buf.len() { buf[bot_idx] = color; }
+    }
+    // Left & Right lines
+    for j in y..(y + h) {
+        let left_idx = j * buf_w + x;
+        let right_idx = j * buf_w + (x + w);
+        if left_idx < buf.len() && x < buf_w { buf[left_idx] = color; }
+        if right_idx < buf.len() && (x + w) < buf_w { buf[right_idx] = color; }
+    }
+}
 /* draw the two half-frames *plus* the ID text */
 fn draw_pair(
     window: &mut Window,
@@ -431,6 +561,18 @@ fn draw_pair(
         0xFFAA00,
         3,
     );
+
+    let debug_x = (OCR_X as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let debug_y = (OCR_Y as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let debug_w =((OCR_W as f64 * 5.0) * SCALE_FACTOR_WINDOW) as usize; // *5 for 5 digits
+    let debug_h = (OCR_H as f64 * SCALE_FACTOR_WINDOW) as usize;
+
+    // Draw RED box on Left (Distorted)
+    draw_debug_rect(&mut buf, ww, debug_x, debug_y, debug_w, debug_h, 0xFF0000);
+
+    // Draw GREEN box on Right (Reference)
+    // Offset by (sw + 10) to move to the second panel
+    draw_debug_rect(&mut buf, ww, debug_x + sw + 10, debug_y, debug_w, debug_h, 0x00FF00);
 
     window.set_title(&format!("T: {:6.4} ID {} | Scenario: {scenario}", t, id,));
     window.update_with_buffer(&buf, ww, sh)?;
@@ -544,7 +686,7 @@ fn make_reference_reader_task(
 ) {
     std::thread::spawn(move || {
 
-        let filter_str = format!("drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf: text='%{{n}}': x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5");
+        let filter_str = format!("drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{n}}': x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black@0.5");
         
         let mut child = Command::new("ffmpeg")
             .args(&[
@@ -592,6 +734,7 @@ pub async fn process_trace_vs_original(
     video_name: String, 
     use_gui: bool, 
     parent_results_path: &str, 
+    task_id: usize, 
 ) -> Result<()> {
 
     // 1. Setup Scenario & Paths
@@ -614,7 +757,7 @@ pub async fn process_trace_vs_original(
     let caps = Regex::new(r"XR_stats_(\d+)\.csv$")?.captures(&file_name).expect("filename mismatch");
     let trace_idx: usize = caps[1].parse()?;
     
-    let metric = MetricsLogger::new_for_trace( parent_results_path ,&scenario, trace_idx, false)?;
+    let metric = MetricsLogger::new_for_trace( parent_results_path ,&scenario, trace_idx, false, task_id)?;
 
     // 3. Parse CSV for Bitrate & Simulation Data
     let bitrate_re = Regex::new(r"_Br(?P<br>\d+(\.\d+)?)(?:Mbps)?_")?;
@@ -766,10 +909,6 @@ pub async fn process_trace_vs_original(
     };
 
 
-    let mut buf_distorted = HashMap::new();
-    let mut buf_ref = HashMap::new();
-    let mut ready_ids = BTreeSet::new();
-    
     let mut vmaf_tasks = FuturesUnordered::new();
     // let sem = Arc::new(Semaphore::new(num_cpus::get()));
     let sem = Arc::new(Semaphore::new(num_cpus::get().min(4)));
@@ -777,133 +916,158 @@ pub async fn process_trace_vs_original(
 
     let mut enc_done = false;
 
-    const MAX_BUFFER_SIZE: usize = 5;  // Max frames to hold in RAM per stream
-    const MAX_PENDING_TASKS: usize = 4; // Max VMAF calculations running/queued
+ 
+    let mut ref_buffer: HashMap<u32, BufferedFrame> = HashMap::new();
+    let mut dist_buffer: HashMap<u32, BufferedFrame> = HashMap::new();
+    // Tracks the highest contiguous ID we have processed
+    let mut last_processed_id = -1i64; 
+    // Initialize our OCR helper
+    let mut digit_reader = DigitReader::new(OCR_X, OCR_Y, OCR_W, OCR_H);
 
+    let mut last_processed_id = -1i64; // For cleanup
+    const FRAME_MATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
     // while window.is_open() {
-    loop{
-        // A. THROTTLE: Check if we have too many pending VMAF tasks
-        // If we do, we wait for one to finish before reading more video data.
+   loop {
+        // A. THROTTLE VMAF
         if vmaf_tasks.len() >= MAX_PENDING_TASKS {
             if let Some(res) = vmaf_tasks.next().await {
-                 if let Err(e) = res { eprintln!("Task Join Error: {}", e); }
+                 if let Err(e) = res { eprintln!("Task Error: {}", e); }
             }
         }
 
-        // B. READ DISTORTED (Only if buffer has space)
-        // We check buffer space. If we are 'enc_done', we still enter here to drain the decoder!
-        if buf_distorted.len() < MAX_BUFFER_SIZE {
+        // --- 🛡️ B. SYMMETRIC TIMEOUT CHECK (The Anti-Freeze) 🛡️ ---
+        let now = Instant::now();
+
+        // Check Reference Buffer
+        let ref_expired: Vec<u32> = ref_buffer.iter()
+            .filter(|(_, v)| now.duration_since(v.arrived_at) > FRAME_MATCH_TIMEOUT)
+            .map(|(k, _)| *k)
+            .collect();
+
+        for id in ref_expired {
+            println!(">>[TASK ID {}]⚠️ REF Timeout: Dropping Frame #{} (Distorted partner never came)",task_id ,id);
+            ref_buffer.remove(&id); 
+            // Freeing space here allows the Reference Reader to advance!
+        }
+
+        // Check Distorted Buffer
+        let dist_expired: Vec<u32> = dist_buffer.iter()
+            .filter(|(_, v)| now.duration_since(v.arrived_at) > FRAME_MATCH_TIMEOUT)
+            .map(|(k, _)| *k)
+            .collect();
+
+        for id in dist_expired {
+            println!(">> [TASK ID {}]⚠️ DIST Timeout: Dropping Frame #{} (Reference lagging or lost)", task_id, id);
+            dist_buffer.remove(&id);
+            // Freeing space here allows the Network Receiver to accept new packets!
+        }
+
+        // C. READ REFERENCE (The Teacher)
+        if ref_buffer.len() < MAX_VMAF_BUFFER_SIZE {
+             match rx_ref.try_recv() {
+                Ok((trusted_id, rgb)) => {
+                    digit_reader.learn_digit(&rgb, WIDTH_ENCODER, trusted_id);
+                    
+                    ref_buffer.insert(trusted_id, BufferedFrame { 
+                        frame: FrameBuf { rgb, synthetic: false },
+                        arrived_at: Instant::now(), 
+                    });
+                },
+                Err(_) => {} 
+            }
+        }
+
+        // D. READ DISTORTED (The Student)
+        // We only read if we have space. If buffer is full (e.g. huge gap), 
+        // the Timeout logic above will clear space eventually.
+        if dist_buffer.len() < MAX_VMAF_BUFFER_SIZE {
             
-            // 1. Pull raw packets from the network/channel
-            // Only attempt this if the encoder is still alive
+            // 1. Ingest Packets
             if !enc_done {
                 match rx_enc.try_recv() {
-                    Ok((_, id, pkt)) => {
-                        // Push packet into decoder
-                        dec_enc.process_packet(pkt, id);
-                    },
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                        println!(">> Encoder Disconnected. Finalizing stream...");
-                        enc_done = true; // Stop trying to read from this channel
-                    },
-                    Err(crossbeam_channel::TryRecvError::Empty) => {
-                        // Channel is alive but empty, just continue
-                    }
+                    Ok((_, _pkt_id, pkt)) => dec_enc.process_packet(pkt, _pkt_id),
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => enc_done = true,
+                    Err(_) => {}
                 }
             }
 
-            // 2. Always drain decoded frames from the decoder
-            // We must do this even if 'enc_done' is true, because the decoder 
-            // might still be processing the last packet we just sent it.
-            while let Some((rgb, id)) = dec_enc.next_decoded_frame() {
-                buf_distorted.insert(id, FrameBuf { rgb, synthetic: false });
-                
-                // Check if this new frame matches a reference frame we already have
-                if buf_ref.contains_key(&id) { 
-                    ready_ids.insert(id); 
+            // 2. Decode & Recognize
+            while let Some((rgb, _)) = dec_enc.next_decoded_frame() {
+                if let Some(visual_id) = digit_reader.recognize(&rgb, WIDTH_ENCODER) {
+                    
+                    dist_buffer.insert(visual_id, BufferedFrame { 
+                        frame: FrameBuf { rgb, synthetic: false },
+                        arrived_at: Instant::now(), 
+                    });
+
+                } else {
+                    // Optional: If we can't read digits, maybe Ref hasn't taught us yet?
+                    // In a robust system, you might buffer this separately, but dropping is safer for VMAF.
                 }
             }
         }
 
-        // C. READ REFERENCE (Only if buffer has space)
-        // This is crucial: if buf_ref is full, we STOP reading rx_ref.
-        // This causes rx_ref channel to fill, which causes tx_ref.send() to block in the thread, pausing ffmpeg.
-        if buf_ref.len() < MAX_BUFFER_SIZE {
-             match rx_ref.try_recv() {
-                Ok((id, rgb)) => {
-                    buf_ref.insert(id, FrameBuf { rgb, synthetic: false });
-                    if buf_distorted.contains_key(&id) { ready_ids.insert(id); }
-                },
-                Err(_) => {} // Empty or disconnected
-            }
-        }
+        // E. PROCESS PAIRS ("The Zipper")
+        let mut ready_keys: Vec<u32> = ref_buffer.keys().cloned().collect();
+        ready_keys.sort(); 
 
-        // D. PROCESS PAIRS
-        let mut processed_ids = Vec::new();
-        // Only process what we can fit into the task queue
-        while vmaf_tasks.len() < MAX_PENDING_TASKS {
-            // Get the next ready ID
-            let next_id = match ready_ids.iter().next() {
-                Some(&id) => id,
-                None => break,
-            };
+        for id in ready_keys {
+            if dist_buffer.contains_key(&id) {
+                
+                // UNWRAP frames from BufferedFrame
+                let fb_ref = ref_buffer.remove(&id).unwrap().frame;
+                let fb_dist = dist_buffer.remove(&id).unwrap().frame;
 
-            if let (Some(fb_dist), Some(fb_ref)) = (buf_distorted.remove(&next_id), buf_ref.remove(&next_id)) {
-                
-                // let is_synced = verify_visual_sync(
-                //     &fb_ref.rgb, 
-                //     &fb_dist.rgb, 
-                //     WIDTH_ENCODER, 
-                //     WIDTH_ENCODER
-                // );
-                
-                let ts = *ts_map.get(&next_id).unwrap_or(&0.0);
-                
+                let ts = *ts_map.get(&id).unwrap_or(&0.0);
+                last_processed_id = id as i64;
+
+                // 1. GUI
                 if let Some(ref mut w) = window {
-                    let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, next_id, ts);
+                    let _ = draw_pair(w.inner(), &fb_dist.rgb, &fb_ref.rgb, &scenario, id, ts);
                     w.inner().update();
                 }
 
-
-                // Spawn VMAF (Expensive - takes ownership of RAM)
+                // 2. VMAF Task
                 let logger = metric.clone();
-                let sem = sem.clone();
-                let ip = ip.clone();
+                let sem_clone = sem.clone();
+                let ip_clone = ip.clone();
                 let r_rgb = fb_ref.rgb;
                 let d_rgb = fb_dist.rgb;
 
                 vmaf_tasks.push(tokio::spawn(async move {
-                    // Acquire semaphore inside task to limit CPU usage
-                    let _p = sem.acquire().await.unwrap();
-                    if let Err(e) = logger.process_frame_buffers(next_id as u64, ts, r_rgb, d_rgb, ip).await {
-                        eprintln!("VMAF Error frame {}: {}", next_id, e);
-                    }
+                    let _p = sem_clone.acquire().await.unwrap();
+                    let _ = logger.process_frame_buffers(id as u64, ts, r_rgb, d_rgb, ip_clone).await;
                 }));
 
-                processed_ids.push(next_id);
+                if vmaf_tasks.len() >= MAX_PENDING_TASKS { break; }
             }
-            ready_ids.remove(&next_id);
         }
 
-        if let Some(ref w) = window {
-            if !w.0.is_open() { break; } // Access inner .0
+        // E. CLEANUP STALE FRAMES
+        // If we are at frame 100, and we still have frame 50 in buffers, 
+        // it means the partner frame was lost forever. Delete it to free RAM.
+        if last_processed_id > 50 {
+            let stale_threshold = (last_processed_id - 50) as u32;
+            ref_buffer.retain(|&k, _| k > stale_threshold);
+            dist_buffer.retain(|&k, _| k > stale_threshold);
         }
 
-        // Cleanup check
-        if enc_done && buf_distorted.is_empty() && vmaf_tasks.is_empty() {
-             println!("Trace processing complete."); 
+        // F. EXIT CONDITION
+        // We are done if: Encoder is finished AND Distorted Buffer is empty AND VMAF queue is empty
+        // (Note: We might leave some Reference frames in buffer if the corresponding distorted ones never arrived)
+        if enc_done && dist_buffer.is_empty() && vmaf_tasks.is_empty() {
+             println!(">> Trace processing complete. Max ID processed: {}", last_processed_id); 
              break;
         }
-                
-        // Small sleep to prevent tight loop burning 100% CPU on empty checks
-        // Use standard sleep, not async sleep if not needed, but here we are in async fn
+
+        // Small sleep to prevent busy loop
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
-    // Await all VMAF jobs
+    // Await remaining tasks
     while let Some(res) = vmaf_tasks.next().await {
-        if let Err(e) = res { eprintln!("Task Join Error: {}", e); }
+        if let Err(e) = res { eprintln!("Final Task Join Error: {}", e); }
     }
 
     metric.finalize()?;
@@ -1011,7 +1175,7 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_VMAF_SCENARIOS));
     let mut set = JoinSet::new();
 
-    for (trace_csv, ip, codec, fps, v_name, gui, parent_res) in tasks {
+    for (task_id, (trace_csv, ip, codec, fps, v_name, gui, parent_res)) in tasks.into_iter().enumerate() {
         let sem = semaphore.clone();
         
         // Spawn the task
@@ -1029,7 +1193,8 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
                 fps,
                 v_name,
                 gui,
-                &parent_res
+                &parent_res,
+                task_id,  
             ).await;
 
             // Log result
@@ -1120,6 +1285,7 @@ pub async fn main_serial() { // works but does one thread at a time.
                         video_name.to_string(),
                         use_gui, 
                         &parent_results, 
+                        1, 
 
                     ).await {
                         eprintln!("ERROR processing {}: {}", fname, e);
