@@ -54,10 +54,12 @@ const MAX_PARALLEL_VMAF: usize = 20;
 
 // Tunables
 const MAX_DRIFT_GAP: u32 = 40; // Allow small out-of-order arrival before dropping
-const FORCE_DROP_TIMEOUT: Duration = Duration::from_millis(8000); // Max wait for a lagging frame
+const FORCE_DROP_TIMEOUT: Duration = Duration::from_millis(12000); // Max wait for a lagging frame
 
 const MAX_VMAF_BUFFER_SIZE: usize = 100;
-const MAX_PENDING_TASKS: usize = 8;
+const MAX_PENDING_TASKS: usize = 5;
+
+const MAX_PENDING_PAIRS: usize = 50;
 
 
 /// One global pool → one permit per concurrent VMAF job
@@ -986,7 +988,9 @@ fn make_encoder_task(
     idr_freq: u32,
     intra_refresh: bool,
     video_codec: VideoCodec, 
-) {
+    pacer_rx: crossbeam::channel::Receiver<()>,) 
+
+{
     task::spawn(async move {
         let width = WIDTH_ENCODER as u32;
         let height = HEIGHT_ENCODER as u32;
@@ -1049,13 +1053,25 @@ fn make_encoder_task(
             // drain all frames this chunk produced (but never overrun our trace)
             while produced < trace.len() {
                 // try to grab the next packet
+                
+                loop {
+                        match pacer_rx.try_recv() {
+                            Ok(_) => break, // Got a permit! Go ahead.
+                            Err(crossbeam::channel::TryRecvError::Empty) => {
+                                // No permit yet? Sleep briefly and try again.
+                                async_std::task::sleep(Duration::from_millis(1)).await;
+                            }
+                            Err(_) => return, // Main channel closed, exit task.
+                        }
+                }
+                
                 if let Some(pkt) = enc.next_frame().await {
                     let info = &trace[produced];
                     produced += 1;
 
                     // let millis_sleep = (1000.0 / framerate_fps) as u64;
-                    async_std::task::sleep(Duration::from_millis(1)).await;
-
+                    // async_std::task::sleep(Duration::from_millis(1)).await;
+                    
                     // simulate loss only on the “low” path
                     if !simulate_loss || !info.lost {
 
@@ -1088,6 +1104,7 @@ fn make_reference_reader_task(
     tx: Sender<(u32, Vec<u8>)>,
     start_offset: f64, // <--- NEW: Offset in seconds
     fps: f64,          // <--- NEW: Framerate to calculate start number
+    pacer_rx: crossbeam::channel::Receiver<()>, 
 
 ) {
     std::thread::spawn(move || {
@@ -1123,7 +1140,9 @@ fn make_reference_reader_task(
         let mut buffer = vec![0u8; frame_size];
 
         loop {
-            
+            if pacer_rx.recv().is_err() {
+                break; // Main thread hung up
+            }
             // Read exactly one frame
             if stdout.read_exact(&mut buffer).is_err() {
                 break; // End of stream or error
@@ -1284,6 +1303,11 @@ pub async fn process_trace_vs_original(
     print_green!(">> Trace loaded: {} frames (Max ID: {}). Starting tasks...", id_set.len(), max_id);
     // 4. Start The Tasks
 
+
+    let (tx_pacer_enc, rx_pacer_enc) = bounded::<()>(50);
+    let (tx_pacer_ref, rx_pacer_ref) = bounded::<()>(50);
+
+
     // A) Distorted Encoder (Driven by CSV)
     let (tx_enc, rx_enc) = bounded::<(usize, u32, Vec<u8>)>(2000); // limited capacity to prevent OOM
     make_encoder_task(
@@ -1298,6 +1322,7 @@ pub async fn process_trace_vs_original(
         idr_freq,
         intra_refresh_enabled,
         codec,
+        rx_pacer_enc
     );
 
     // B) Reference Reader (Direct from MP4)
@@ -1309,6 +1334,7 @@ pub async fn process_trace_vs_original(
         tx_ref,
         offset_video, 
         fps_val as f64, 
+        rx_pacer_ref
     );
 
     // C) Distorted Decoder (Decodes packets from A)
@@ -1367,6 +1393,16 @@ pub async fn process_trace_vs_original(
             // =================================================================
             _ = tokio::time::sleep(Duration::from_millis(1)) => {
                 
+                if pending_pairs.len() < MAX_PENDING_PAIRS {
+                    // Try to send a permit to BOTH producers.
+                    // 'try_send' is non-blocking: if the pacer channel is full (tasks haven't 
+                    // picked up previous permits yet), this simply does nothing, which is correct.
+                    let _ = tx_pacer_enc.try_send(());
+                    let _ = tx_pacer_ref.try_send(());
+                }
+
+
+
                 // --- 1. ALWAYS READ PACKETS (Never Throttle Input) ---
                 // CRITICAL FIX: We drain the channel completely. If we don't, 
                 // the Encoder blocks, corrupts the stream (PPS error), and dies.
@@ -1526,7 +1562,7 @@ impl SendWindow {
 #[tokio::main]
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_test2/"; 
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_1user/"; 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
     // Regex compilation (done once)
