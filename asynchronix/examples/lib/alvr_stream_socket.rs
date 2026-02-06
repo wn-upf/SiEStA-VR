@@ -474,7 +474,7 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&[
                     "-x265-params",
                     // "intra-refresh=1:keyint=30:min-keyint=30:pools=4",
-                    "intra-refresh=1:keyint=30:min-keyint=30:pools=4:repeat-headers=1:aud=1:hrd=1",
+                    "intra-refresh=1:keyint=30:min-keyint=30:pools=4:repeat-headers=1:aud=1:hrd=1:slices=1",
                 ])
                 // Container flags
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
@@ -497,7 +497,7 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&[
                     "-x265-params",
                     &format!(
-                        "no-open-gop=1:keyint={}:min-keyint={}:pools=4",
+                        "no-open-gop=1:keyint={}:min-keyint={}:pools=4:slices=1",
                         self.gop_size, self.gop_size
                     ),
                 ])

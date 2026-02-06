@@ -13,7 +13,7 @@ use std::env;
 use std::path::PathBuf;
 
 pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
-pub const VIDEO_NAME: &str = "snow";
+pub const VIDEO_NAME: &str = "snow_short";
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
