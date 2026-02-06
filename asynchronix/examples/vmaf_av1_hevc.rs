@@ -1086,13 +1086,26 @@ fn make_reference_reader_task(
     width: usize,
     height: usize,
     tx: Sender<(u32, Vec<u8>)>,
+    start_offset: f64, // <--- NEW: Offset in seconds
+    fps: f64,          // <--- NEW: Framerate to calculate start number
+
 ) {
     std::thread::spawn(move || {
 
-        let filter_str = format!("drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30");
-        
+       
+        // let filter_str = format!("drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30");
+        let start_frame_idx = (start_offset * fps).round() as usize;
+        let filter_str = format!(
+            "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: \
+            text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: \
+            fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+            start_frame_idx
+        );
+
+
         let mut child = Command::new("ffmpeg")
             .args(&[
+                "-ss", &format!("{:.6}", start_offset), 
                 "-i", &video_path,
                 "-vf", &filter_str,
                 "-f", "rawvideo",
@@ -1110,13 +1123,18 @@ fn make_reference_reader_task(
         let mut buffer = vec![0u8; frame_size];
 
         loop {
+            
             // Read exactly one frame
             if stdout.read_exact(&mut buffer).is_err() {
                 break; // End of stream or error
             }
+
+            let adjusted_id = (start_frame_idx + frame_idx) as u32;
+
+
             // Send (ID, RGB_Data)
             // If receiver is dropped (Ctrl+C), this returns Err and we break
-            if tx.send((frame_idx, buffer.clone())).is_err() {
+            if tx.send((adjusted_id, buffer.clone())).is_err() {
                 break; 
             }
             frame_idx += 1;
@@ -1199,7 +1217,7 @@ pub async fn process_trace_vs_original(
     let mut raw_ts = Vec::new();
     
     // Hardcoded defaults since XR_stats might not have them in row 1
-    let offset_video = 0.0; 
+    let offset_video = 20.0; 
 
     for (i, result) in rdr.records().enumerate() {
         let rec = result?;
@@ -1288,7 +1306,9 @@ pub async fn process_trace_vs_original(
         ref_video_path.clone(),
         WIDTH_ENCODER,
         HEIGHT_ENCODER,
-        tx_ref
+        tx_ref,
+        offset_video, 
+        fps_val as f64, 
     );
 
     // C) Distorted Decoder (Decodes packets from A)
@@ -1423,7 +1443,11 @@ pub async fn process_trace_vs_original(
                 while vmaf_tasks.len() < MAX_PENDING_TASKS {
                     if let Some((id, fb_ref, fb_dist)) = pending_pairs.pop_front() {
                         
-                        let ts = *ts_map.get(&id).unwrap_or(&0.0);
+
+                        let start_frame_idx = (offset_video * fps_val as f64).round() as u32;
+                        let lookup_id = id- start_frame_idx; 
+
+                        let ts = *ts_map.get(&lookup_id).unwrap_or(&0.0);
                         
                         // GUI Update
                         if let Some(ref mut w) = window {
@@ -1627,7 +1651,7 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
 
 
 pub async fn main_serial() { // works but does one thread at a time. 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_test/"; 
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_1user/"; 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
     let re_codec = Regex::new(r"_Codec([^_]+)").unwrap();

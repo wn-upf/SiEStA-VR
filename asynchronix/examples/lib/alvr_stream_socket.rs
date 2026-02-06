@@ -211,8 +211,12 @@ impl ChunkedAv1Encoder {
         self.parser.buffer.clear();
 
         let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
-        let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
-        let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+        // let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
+
+        let exact_offset = self.current_offset;
+        // let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize  + self.chunk_index * frames_per_chunk ;
+        let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
+        // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
 
         let mut command = FfmpegCommand::new();
         // SVT-AV1 Arguments from av1_testbed.rs
@@ -414,8 +418,13 @@ impl ChunkedSoftwareHevcEncoder {
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
         let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
-        let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
-        let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+        // let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
+        // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+
+        let exact_offset = self.current_offset;
+        // let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize  + self.chunk_index * frames_per_chunk ;
+        let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
+
 
         println!(
             "{} - {} SOFTWARE CHUNKING with bitrate {} Mbps",
@@ -664,8 +673,12 @@ impl ChunkedHevcEncoder {
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
         let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
-        let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
-        let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+        // let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
+        // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+
+        let exact_offset = self.current_offset;
+        let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
+
 
         println!(
             "{} - {} CHUNKING with bitrate {} Mbps",
@@ -2636,10 +2649,6 @@ impl<H: Serialize> StreamSender<H> {
                         intra_refresh,
                     )),
                 };
-
-                // Now you can use `encoder` transparently in your loop
-                // await encoder.start_chunking(...);
-                // let frame = encoder.next_frame().await;
 
                 // Wrap the encoder in an Arc<Mutex<_>>
                 let encoder_arc = Arc::new(async_std::sync::Mutex::new(encoder));
