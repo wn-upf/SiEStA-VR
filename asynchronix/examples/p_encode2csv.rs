@@ -167,75 +167,6 @@ async fn encode_one_video(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let width = WIDTH_ENCODER;
-    let height = HEIGHT_ENCODER;
-    let gop_size: usize = 90;
-    let intra_refresh = true;
-
-    // let video_codec = VideoCodec::AV1;
-    let codecs_to_run = [VideoCodec::AV1];
-
-    let (video_dir, csv_dir) = get_paths();
-
-    if !csv_dir.exists() {
-        println!("[INFO] Creating directory: {}", csv_dir.display());
-        std::fs::create_dir_all(&csv_dir)?;
-    }
-    // ----------------------
-    println!(
-        "[INFO] Running as {} → VIDEO_DIR={}, CSV_DIR={}",
-        std::env::var("USER").unwrap_or_default(),
-        video_dir.display(),
-        csv_dir.display()
-    );
-
-    let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
-    let framerate_values = [60, 90, 120];
-
-    let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
-    let mut tasks = Vec::new();
-
-    for video_codec in codecs_to_run {
-        for framerate in framerate_values {
-            for &bitrate_mbps in &br_values {
-                let video_dir = video_dir.clone();
-                let csv_dir = csv_dir.clone();
-                let permit = sem.clone().acquire_owned().await?;
-                let task = tokio::spawn(async move {
-                    let _permit = permit; // keep until task done
-                    if let Err(e) = encode_one_video(
-                        video_dir,
-                        csv_dir,
-                        width,
-                        height,
-                        gop_size,
-                        intra_refresh,
-                        framerate,
-                        bitrate_mbps,
-                        video_codec,
-                    )
-                    .await
-                    {
-                        eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
-                    }
-                });
-                tasks.push(task);
-            }
-        }
-    }
-
-    // Wait for all tasks
-    join_all(tasks).await;
-
-    for video_codec in codecs_to_run {
-        let codec_str = format!("{}", video_codec);
-        let _ = merge_csvs_into_one(&codec_str);
-    }
-    Ok(())
-}
-
 use polars::prelude::*;
 use regex::Regex;
 use std::collections::HashMap;
@@ -318,5 +249,75 @@ fn merge_csvs_into_one(codec_prefix: &str) -> Result<(), Box<dyn Error>> {
         println!("Saved to {}", output_name);
     }
 
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let width = WIDTH_ENCODER;
+    let height = HEIGHT_ENCODER;
+    let gop_size: usize = 90;
+    let intra_refresh = true;
+
+    // let video_codec = VideoCodec::AV1;
+
+    let (video_dir, csv_dir) = get_paths();
+
+    if !csv_dir.exists() {
+        println!("[INFO] Creating directory: {}", csv_dir.display());
+        std::fs::create_dir_all(&csv_dir)?;
+    }
+    // ----------------------
+    println!(
+        "[INFO] Running as {} → VIDEO_DIR={}, CSV_DIR={}",
+        std::env::var("USER").unwrap_or_default(),
+        video_dir.display(),
+        csv_dir.display()
+    );
+
+    let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
+    let framerate_values = [60, 90, 120];
+    let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
+
+
+    let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
+    let mut tasks = Vec::new();
+
+    for video_codec in codecs_to_run {
+        for framerate in framerate_values {
+            for &bitrate_mbps in &br_values {
+                let video_dir = video_dir.clone();
+                let csv_dir = csv_dir.clone();
+                let permit = sem.clone().acquire_owned().await?;
+                let task = tokio::spawn(async move {
+                    let _permit = permit; // keep until task done
+                    if let Err(e) = encode_one_video(
+                        video_dir,
+                        csv_dir,
+                        width,
+                        height,
+                        gop_size,
+                        intra_refresh,
+                        framerate,
+                        bitrate_mbps,
+                        video_codec,
+                    )
+                    .await
+                    {
+                        eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
+                    }
+                });
+                tasks.push(task);
+            }
+        }
+    }
+
+    // Wait for all tasks
+    join_all(tasks).await;
+
+    for video_codec in codecs_to_run {
+        let codec_str = format!("{}", video_codec);
+        let _ = merge_csvs_into_one(&codec_str);
+    }
     Ok(())
 }

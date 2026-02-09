@@ -226,7 +226,7 @@ impl ChunkedAv1Encoder {
             .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
             .args(&["-t", &self.chunk_duration.to_string()])
             // .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)]) // Use const or hardcode
-            .args(&["-threads", "16"]) 
+            .args(&["-threads", "8"]) 
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .input(&self.input)
             .args(&[
@@ -240,7 +240,7 @@ impl ChunkedAv1Encoder {
                 ])
             .args(&["-c:v", "libsvtav1"]) // Using SVT-AV1
             .args(&["-preset", "9"])      // High speed preset for RTC
-            .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
+            .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=3:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
             // .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
             .args(&["-b:v", &self.bitrate, ])
             .args(&["-bufsize", &self.bitrate])

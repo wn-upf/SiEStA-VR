@@ -1,7 +1,7 @@
 
 use futures::stream::FuturesUnordered;
 use futures_channel::mpsc::TryRecvError;
-use futures_util::stream::StreamExt; 
+use futures_util::stream::StreamExt;
 use std::{path::Path, time::Duration};
 use tai_time::TaiTime;
 use tokio::{sync::Semaphore};
@@ -95,6 +95,8 @@ pub struct FrameSyncManager {
     // Stats
     pub dropped_ref: usize,
     pub dropped_dist: usize,
+    sync_started: bool,
+
 }
 
 impl FrameSyncManager {
@@ -107,6 +109,8 @@ impl FrameSyncManager {
             last_processed_id: -1,
             dropped_ref: 0,
             dropped_dist: 0,
+            sync_started: false, 
+
         }
     }
 
@@ -130,6 +134,17 @@ impl FrameSyncManager {
     /// It automatically cleans up lagging frames.
     pub fn sync_and_retrieve(&mut self) -> Vec<(u32, FrameBuf, FrameBuf)> {
         let mut ready_pairs = Vec::new();
+
+        if !self.sync_started {
+            if self.dist_ids.is_empty() {
+                // We have Refs, but no Dist yet. 
+                // Return empty to wait (blocking drops) until the encoder starts.
+                return ready_pairs; 
+            } else {
+                // First Dist frame arrived! Enable normal logic.
+                self.sync_started = true;
+            }
+        }
 
         loop {
             // Peek at the oldest available frames in both buffers
@@ -230,7 +245,9 @@ impl FrameSyncManager {
         // Define your hard limit (e.g., 2.0 or 5.0 seconds)
         // This must be longer than your expected network latency but shorter than "forever"
         const HARD_TIMEOUT: Duration = Duration::from_secs(30); 
-
+         if !self.sync_started {
+            return;
+        }
         // --- 1. CLEAN REFERENCE BUFFER ---
         loop {
             // Peek at the oldest ID (BTreeSet is sorted, first is always smallest/oldest)
@@ -1562,7 +1579,7 @@ impl SendWindow {
 #[tokio::main]
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_1user/"; 
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_filtered_snowshort"; 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
     // Regex compilation (done once)
@@ -1584,8 +1601,20 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
         // Parse Metadata
         let codec_str = re_codec.captures(&folder_name).map(|c| c.get(1).unwrap().as_str().to_string());
         let fps = re_fps.captures(&folder_name).map(|c| c[1].parse::<u32>().unwrap_or(0));
-        let video_name = re_video.captures(&folder_name).map(|c| c.get(1).unwrap().as_str().to_string());
+        let video_pre = re_video.captures(&folder_name).map(|c| c.get(1).unwrap().as_str().to_string());
 
+        let video_name: Option<String> = 
+            if let Some(video) = video_pre{
+                if video == "short"{            // small hack
+                    Some("snow_short".to_string()) 
+                }
+                else{
+                    Some(video.to_string())
+                }
+            }
+            else{
+                None
+            }; 
         // Validate
         if codec_str.is_none() || fps.is_none() || video_name.is_none() || fps.unwrap() == 0 {
             eprintln!("Skipping {}, invalid metadata", folder_name);

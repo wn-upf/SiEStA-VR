@@ -3173,8 +3173,8 @@ impl QueueModule {
                     }
                 }
 
-                println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!",
-                    format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s );
+                // println!("{:.6} {:?} Updating with mcs: {}, dur:{}, transmit!",
+                //     format_elapsed!(context.scheduler.time()), wind_key,  mcs_assigned, drained[0].T_s );
 
                 self.update_window_stats(
                     wind_key,

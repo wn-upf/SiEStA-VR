@@ -4196,7 +4196,6 @@ impl XRServer {
                         self.bitrate_manager.bitrate_mode,
                         BitrateMode::FovOptixPort { .. }
                     ) {
-                        println!("INSIDE FOVOPTIXIXXX");
                         if let Some(man) = self.fov_optix_manager.as_mut() {
                             let mut guard = man.lock().unwrap();
 
@@ -4222,6 +4221,7 @@ impl XRServer {
                         bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),
                         bitrate_mbps: last_bitrate_mbps,
                     };
+                    
                     self.output_perfect_information_bitrate
                         .send(perfect_info_message)
                         .await; // Client knows the bitrate ladder, needed for thresholds computing in HMD.

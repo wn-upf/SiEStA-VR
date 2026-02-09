@@ -616,8 +616,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             distance
         };
 
+
         let current_fps = if i == 0 {
             fps_arg
+            
         } else {
             if test_distances_everest_bool {
                 let choices = [60.0, 90.0, 120.0];
@@ -627,14 +629,21 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             }
         };
 
+
         let current_abr_mode;
         let mut bitrate_choice = initial_bitrate;
+    
         let pair_index = i;
+        
+
+    
+        
         if matches!(abr, 3) || test_distances_everest_bool == true {
             // Shared between RL training and ABR everest-like test.
             // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
             if pair_index == 0 {
                 current_abr_mode = abr;
+
                 // do nothing, it's correct
             } else {
                 // abr_choice = rng.gen_range(0..=2);
@@ -651,7 +660,14 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         } else {
             current_abr_mode = abr; //makes all sessions have same ABR choice
         }
-        println!("[VR session {}] Final: {}", pair_index, current_abr_mode);
+
+
+        let mut current_t_update_abr = t_update_abr; 
+        if current_abr_mode == 2 {
+                current_t_update_abr = 1.0 / fps_arg; // Make Everest have an update per each frame. 
+            }
+        
+        println!("[VR session {}] Final: {}, ABR_duration: {:.3}" , pair_index, current_abr_mode, current_t_update_abr);
 
         let vr = VRPair::new(
             i,
@@ -673,7 +689,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             &sim_unique_string,
             obs_config,
             reward_mode,
-            t_update_abr,
+            current_t_update_abr,
             ap_coords,
             edca_be_bool,
             codec_selection,
@@ -872,6 +888,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         .enumerate()
     {
         let init: f64 = SIM_START_TIME as f64;
+
 
         let mut sessions = if test_distances_everest_bool {
             generate_session_timeline(&mut rng, stoptime)
