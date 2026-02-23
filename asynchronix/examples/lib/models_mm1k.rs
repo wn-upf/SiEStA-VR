@@ -2031,6 +2031,22 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
             ]
         }
 
+        "MLO4" => {
+            // MLO 160_320 MHz channels
+            vec![
+                LinkConfig {
+                    link_id: 0,
+                    _frequency_ghz: 5.0,
+                    bandwidth_mhz: 160,
+                },
+                LinkConfig {
+                    link_id: 1,
+                    _frequency_ghz: 6.0,
+                    bandwidth_mhz: 320,
+                },
+            ]
+        }
+
         _ => {
             print_red!("WARNING WRONG MLO STRING ({config}) || DEFAULTING TO SLO!!",);
             vec![LinkConfig {

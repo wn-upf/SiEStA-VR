@@ -7033,13 +7033,16 @@ pub struct STA_extended {
     pub sta_coordinates: Coords,
     pub orig_sta_coordinates: Coords,
     pub does_sta_tx: bool,
-
+    pub current_angle: f64, 
     pub is_bg_sta: bool,
 
     pub t_0: TaiTime<0>,
     pub is_ul_bg: usize, // 3 modes: 0 -> DL only, 1 -> UL, 2 -> DL/UL
     pub random_seed: StdRng,
     pub ap_coords: Coords, // used for BG DL traffic in TX
+
+
+
 }
 #[allow(unused)]
 impl STA_extended {
@@ -7081,76 +7084,131 @@ impl STA_extended {
             is_ul_bg,
             random_seed,
             ap_coords,
+            current_angle: 0.0, 
         }
     }
 
-    // To simulate the channel changes, simulate the HMD moving at a
+        // To simulate the channel changes, simulate the HMD moving at a
     // constant speed of 5 m/s according to a random direction model within 1m² around
     // initial position. In this way, we approximate the channel changes caused
-    // by a VR gamer standing still but rapidly moving around. src: How to model cloud VR, khorov et al.
-    pub fn move_coordinates_everest<'a>(
+    // by a VR user standing still but rapidly moving around. src: How to model cloud VR, khorov et al.
+    // pub fn move_coordinates_everest<'a>(
+    //     &'a mut self,
+    //     _: (),
+    //     context: &'a Context<Self>,
+    // ) -> impl Future<Output = ()> + Send + 'a {
+    //     async move {
+    //         const LIMIT_MOVEMENT_RADIUS: f64 = 11.5; // circle of 1m radius.
+    //         const RANDOM_WALK_SPEED: f64 = 2.0; // 2 m/s
+    //         const DELTA_T: f64 = 0.01;
+
+    //         // Step length = speed * delta_t
+    //         let step = RANDOM_WALK_SPEED * DELTA_T;
+
+    //         {
+    //             let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth.
+
+    //             // Pick a random direction in 2D plane (azimuth only)
+    //             let theta = rng.gen_range(0.0..2.0 * PI);
+    //             let dx = step * theta.cos();
+    //             let dy = step * theta.sin();
+
+    //             // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
+
+    //             // New candidate position
+    //             let new_x = self.sta_coordinates.x + dx;
+    //             let new_y = self.sta_coordinates.y + dy;
+
+    //             // Boundaries: within ±0.5 m around initial position
+    //             let min_x = self.orig_sta_coordinates.x - LIMIT_MOVEMENT_RADIUS;
+    //             let max_x = self.orig_sta_coordinates.x + LIMIT_MOVEMENT_RADIUS;
+    //             let min_y = self.orig_sta_coordinates.y - LIMIT_MOVEMENT_RADIUS;
+    //             let max_y = self.orig_sta_coordinates.y + LIMIT_MOVEMENT_RADIUS;
+
+    //             // Reflect if out of bounds
+    //             self.sta_coordinates.x = if new_x < min_x {
+    //                 min_x + (min_x - new_x) // reflect back
+    //             } else if new_x > max_x {
+    //                 max_x - (new_x - max_x)
+    //             } else {
+    //                 new_x
+    //             };
+
+    //             self.sta_coordinates.y = if new_y < min_y {
+    //                 min_y + (min_y - new_y)
+    //             } else if new_y > max_y {
+    //                 max_y - (new_y - max_y)
+    //             } else {
+    //                 new_y
+    //             };
+    //         }
+
+    //         self.outport_coords_xrclient
+    //             .send(self.sta_coordinates.clone())
+    //             .await;
+
+    //         context
+    //             .scheduler
+    //             .schedule_event(
+    //                 Duration::from_secs_f64(DELTA_T),
+    //                 Self::move_coordinates_everest,
+    //                 (),
+    //             )
+    //             .unwrap();
+    //     }
+    // }
+
+    pub fn move_coordinates_everest<'a>(  // More 'random walk' version
         &'a mut self,
         _: (),
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
-            const LIMIT_MOVEMENT_RADIUS: f64 = 0.5; // circle of 1m radius.
-            const RANDOM_WALK_SPEED: f64 = 2.0; // 2 m/s
+            const LIMIT_RADIUS: f64 = 11.5; 
+            const STEP_SIZE: f64 = 0.02; 
             const DELTA_T: f64 = 0.01;
-
-            // Step length = speed * delta_t
-            let step = RANDOM_WALK_SPEED * DELTA_T;
+            // Persistence factor: 0.0 is pure random, 0.9 is very "straight" lines
+            const PERSISTENCE: f64 = 0.65; 
 
             {
-                let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth.
+                let mut rng = rand::thread_rng();
 
-                // Pick a random direction in 2D plane (azimuth only)
-                let theta = rng.gen_range(0.0..2.0 * PI);
-                let dx = step * theta.cos();
-                let dy = step * theta.sin();
+                // 1. Correlated Angle (Smooths the movement)
+                let random_offset = rng.gen_range(-PI/4.0..PI/4.0);
+                self.current_angle = (self.current_angle * PERSISTENCE) + (random_offset * (1.0 - PERSISTENCE));
 
-                // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
+                let dx = STEP_SIZE * self.current_angle.cos();
+                let dy = STEP_SIZE * self.current_angle.sin();
 
-                // New candidate position
-                let new_x = self.sta_coordinates.x + dx;
-                let new_y = self.sta_coordinates.y + dy;
+                let mut new_x = self.sta_coordinates.x + dx;
+                let mut new_y = self.sta_coordinates.y + dy;
 
-                // Boundaries: within ±0.5 m around initial position
-                let min_x = self.orig_sta_coordinates.x - LIMIT_MOVEMENT_RADIUS;
-                let max_x = self.orig_sta_coordinates.x + LIMIT_MOVEMENT_RADIUS;
-                let min_y = self.orig_sta_coordinates.y - LIMIT_MOVEMENT_RADIUS;
-                let max_y = self.orig_sta_coordinates.y + LIMIT_MOVEMENT_RADIUS;
+                // 2. True Circular Boundary Check
+                let rel_x = new_x - self.orig_sta_coordinates.x;
+                let rel_y = new_y - self.orig_sta_coordinates.y;
+                let dist_from_center = (rel_x.powi(2) + rel_y.powi(2)).sqrt();
 
-                // Reflect if out of bounds
-                self.sta_coordinates.x = if new_x < min_x {
-                    min_x + (min_x - new_x) // reflect back
-                } else if new_x > max_x {
-                    max_x - (new_x - max_x)
-                } else {
-                    new_x
-                };
+                if dist_from_center > LIMIT_RADIUS {
+                    // Reflective logic: point back toward the center
+                    let angle_to_center = f64::atan2(-rel_y, -rel_x);
+                    self.current_angle = angle_to_center + rng.gen_range(-PI/4.0..PI/4.0);
+                    
+                    // Keep it just inside the boundary
+                    new_x = self.orig_sta_coordinates.x + (rel_x / dist_from_center) * (LIMIT_RADIUS - 0.01);
+                    new_y = self.orig_sta_coordinates.y + (rel_y / dist_from_center) * (LIMIT_RADIUS - 0.01);
+                }
 
-                self.sta_coordinates.y = if new_y < min_y {
-                    min_y + (min_y - new_y)
-                } else if new_y > max_y {
-                    max_y - (new_y - max_y)
-                } else {
-                    new_y
-                };
+                self.sta_coordinates.x = new_x;
+                self.sta_coordinates.y = new_y;
             }
 
-            self.outport_coords_xrclient
-                .send(self.sta_coordinates.clone())
-                .await;
+            self.outport_coords_xrclient.send(self.sta_coordinates.clone()).await;
 
-            context
-                .scheduler
-                .schedule_event(
-                    Duration::from_secs_f64(DELTA_T),
-                    Self::move_coordinates_everest,
-                    (),
-                )
-                .unwrap();
+            context.scheduler.schedule_event(
+                Duration::from_secs_f64(DELTA_T),
+                Self::move_coordinates_everest,
+                (),
+            ).unwrap();
         }
     }
 

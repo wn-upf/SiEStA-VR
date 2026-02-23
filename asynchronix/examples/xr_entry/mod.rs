@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 33;
+pub const NUM_INPUT_ARGS_SIM: usize = 32;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 /// Draw a uniform random starting point inside the room.
@@ -271,8 +271,8 @@ fn generate_session_timeline_basic(sim_init_time: f64, stoptime: f64) -> Vec<(f6
 
     // exponentially distributed start offset between 1 and 5 seconds
     
-    // let start_offset = truncated_exponential_seconds(&mut rng, 2.5, 1.0, 5.0);
-    let start_offset = 0.0; 
+    let start_offset = truncated_exponential_seconds(&mut _rng, 2.5, 1.0, 5.0);
+    // let start_offset = 0.0; 
 
     let start: f64 = sim_init_time + start_offset;
     let end = stoptime;
@@ -281,11 +281,8 @@ fn generate_session_timeline_basic(sim_init_time: f64, stoptime: f64) -> Vec<(f6
     sessions
 }
 
-
-
 const MIN_SESSION_DUR: f64 = 4.0;  // Reduced from 8.0
 const MAX_SESSION_DUR: f64 = 12.0; // Reduced from 20.0
-
 // Pause Timing Constants (Truncated Exponential)
 const PAUSE_MEAN: f64 = 12.0;      // Increased from 10.0 to space them out
 const PAUSE_MIN: f64 = 4.0;
@@ -347,7 +344,7 @@ pub struct SimParams {
     pub observation_type: usize,
     pub reward_mode: usize, // 0-> naive , 1-> normalized, 2-> ??? todo shaping.
     pub t_update_abr: f32,
-    pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel.
+    // pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel.
     pub mlo_channel_config: String,
     pub edca_be: usize,
     pub mlo_link_sel_policy: usize,
@@ -388,14 +385,13 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         observation_type: args[23].parse().unwrap(),
         reward_mode: args[24].parse().unwrap(),
         t_update_abr: args[25].parse().unwrap(),
-        eval_string: args[26].parse().unwrap(),
-        mlo_channel_config: args[27].parse().unwrap(),
-        edca_be: args[28].parse().unwrap(),
-        mlo_link_sel_policy: args[29].parse().unwrap(),
-        packs_per_ampdu: args[30].parse().unwrap(),
-        codec_input_arg: args[31].parse().unwrap(),
-        name_results_path: args[32].clone(),
-
+        // eval_string: args[26].parse().unwrap(),
+        mlo_channel_config: args[26].parse().unwrap(),
+        edca_be: args[27].parse().unwrap(),
+        mlo_link_sel_policy: args[28].parse().unwrap(),
+        packs_per_ampdu: args[29].parse().unwrap(),
+        codec_input_arg: args[30].parse().unwrap(),
+        name_results_path: args[31].clone(),
     }
 }
 
@@ -431,7 +427,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         observation_type,
         reward_mode,
         t_update_abr,
-        eval_string,
+        // eval_string,
         mlo_channel_config,
         edca_be,
         mlo_link_sel_policy,
@@ -479,7 +475,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_eval_{eval_string}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
         stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps_arg, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
     );
 
@@ -616,50 +612,49 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             distance
         };
 
-
-        let current_fps = if i == 0 {
-            fps_arg
-            
-        } else {
-            if test_distances_everest_bool {
-                let choices = [60.0, 90.0, 120.0];
-                *choices.choose(&mut rng).unwrap_or(&fps_arg)
-            } else {
-                fps_arg
-            }
-        };
+        let current_fps = fps_arg; 
+       
 
 
-        let current_abr_mode;
+        let current_abr_mode = abr;
         let mut bitrate_choice = initial_bitrate;
-    
-        let pair_index = i;
         
 
-    
-        
-        if matches!(abr, 3) || test_distances_everest_bool == true {
-            // Shared between RL training and ABR everest-like test.
-            // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
-            if pair_index == 0 {
-                current_abr_mode = abr;
+        // let current_fps = if i == 0 {
+        //     fps_arg
+        // } else {
+        //     if test_distances_everest_bool {
+        //         let choices = [60.0, 90.0, 120.0];
+        //         *choices.choose(&mut rng).unwrap_or(&fps_arg)
+        //     } else {
+        //         fps_arg
+        //     }
+        // };
 
-                // do nothing, it's correct
-            } else {
-                // abr_choice = rng.gen_range(0..=2);
-                let choices = [0, 1, 2, 4, 5]; // CBR, Nest, Everest, GCC, NADA
-                let mut rng = thread_rng();
-                current_abr_mode = *choices.choose(&mut rng).unwrap();
+        // if matches!(abr, 3) || test_distances_everest_bool == true {
+        //     // Shared between RL training and ABR everest-like test.
+        //     // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
+            
+        //     let pair_index: usize = i;
+        //     if pair_index == 0 {
+        //         current_abr_mode = abr;
 
-                if current_abr_mode == 0 {
-                    // CBR (RANDOM)
-                    let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario
-                    bitrate_choice = *values.choose(&mut rng).unwrap() as f64;
-                }
-            }
-        } else {
-            current_abr_mode = abr; //makes all sessions have same ABR choice
-        }
+        //         // do nothing, it's correct
+        //     } else {
+        //         // abr_choice = rng.gen_range(0..=2);
+        //         let choices = [0, 1, 2, 4, 5]; // CBR, Nest, Everest, GCC, NADA
+        //         let mut rng = thread_rng();
+        //         current_abr_mode = *choices.choose(&mut rng).unwrap();
+
+        //         if current_abr_mode == 0 {
+        //             // CBR (RANDOM)
+        //             let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario
+        //             bitrate_choice = *values.choose(&mut rng).unwrap() as f64;
+        //         }
+        //     }
+        // } else {
+        //     current_abr_mode = abr; //makes all sessions have same ABR choice
+        // }
 
 
         let mut current_t_update_abr = t_update_abr; 
@@ -667,7 +662,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 current_t_update_abr = 1.0 / fps_arg; // Make Everest have an update per each frame. 
             }
         
-        println!("[VR session {}] Final: {}, ABR_duration: {:.3}" , pair_index, current_abr_mode, current_t_update_abr);
+        println!("[VR session {}] Final: {}, ABR_duration: {:.3}" , i, current_abr_mode, current_t_update_abr);
 
         let vr = VRPair::new(
             i,
@@ -888,7 +883,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         .enumerate()
     {
         let init: f64 = SIM_START_TIME as f64;
-
 
         let mut sessions = if test_distances_everest_bool {
             generate_session_timeline(&mut rng, stoptime)

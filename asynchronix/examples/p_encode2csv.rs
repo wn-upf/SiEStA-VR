@@ -13,7 +13,12 @@ use std::env;
 use std::path::PathBuf;
 
 pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
-pub const VIDEO_NAME: &str = "snow_short";
+pub const VIDEO_NAME: &str = "bbbcut";
+
+
+const FRAMERATE_VALUES: [u32; 3] = [60, 90, 120];
+const CODECS_TO_RUN: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
+
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
@@ -276,15 +281,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
-    let framerate_values = [60, 90, 120];
-    let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
+    // let framerate_values = [60, 90, 120];
+    // let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
 
 
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
 
-    for video_codec in codecs_to_run {
-        for framerate in framerate_values {
+    for video_codec in CODECS_TO_RUN {
+        for framerate in FRAMERATE_VALUES {
             for &bitrate_mbps in &br_values {
                 let video_dir = video_dir.clone();
                 let csv_dir = csv_dir.clone();
@@ -315,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
     // Wait for all tasks
     join_all(tasks).await;
 
-    for video_codec in codecs_to_run {
+    for video_codec in CODECS_TO_RUN {
         let codec_str = format!("{}", video_codec);
         let _ = merge_csvs_into_one(&codec_str);
     }

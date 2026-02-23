@@ -25,14 +25,17 @@ use std::path::PathBuf;
 pub const BATCH_SIZE_CSV_QUEUE: usize = 256 * 4;
 pub const BATCH_SIZE_CSV_VIDEO: usize = 256; 
 
-const LEGACY_PHY_DURATION: f64 = 20E-6; // microseconds
+const LEGACY_PHY_DURATION:f64= 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;
 const SLOT: f64 = 9E-6;
 const SIFS: f64 = 16E-6;
 // const CW_MIN: i32 = 8;
 // const DIFS: f64 = 2.0 * SLOT + SIFS; // unused with EDCA
 
-pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3;
+// pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3; // Max time for AMPDU, in our model AMPDU ~= PPDU/AMSDU, so we change to 5.4 ms
+
+pub const DEFAULT_TMAX_AGG: f64 = 5.484E-3; 
+
 // pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab
 pub const AMPDU_BYTES_CAP: usize = 65535; // byte limit for AMPDUs (source: matlab)
 pub const P_TX: f64 = 20.0;
@@ -2421,7 +2424,7 @@ pub fn airtime_ampdu(
     _p_tx_orig: f64,
     channel_width: usize,
 ) -> (f64, u8) {
-    let p_tx_cheated = match channel_width {
+    let p_tx_cheated = match channel_width { // small hack, higher widths get higher P_tx
         20 => 20.0,
         40 => 20.0,
         80 => 20.0,
