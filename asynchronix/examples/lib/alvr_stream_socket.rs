@@ -77,6 +77,15 @@ pub const FOVOPTIX_BW_PROBE: u16 = 9;
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 
+pub const USE_HARDCODED_SIZES_VALIDATION: bool = true;
+// Define the path to your hardcoded CSV
+pub const HARDCODED_CSV_PATH: &str = "csv_framesizes/ALVR_session_framesizes_100Mbps.csv";
+static HARDCODED_TABLE: Lazy<Arc<HardcodedFrameTable>> = Lazy::new(|| {
+    Arc::new(HardcodedFrameTable::load(HARDCODED_CSV_PATH).expect("Failed to load hardcoded CSV frame sizes"))
+});
+
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     HEVC,
@@ -2487,6 +2496,8 @@ impl<H> StreamSender<H> {
     }
 }
 
+
+
 impl<H: Serialize> StreamSender<H> {
     #[inline]
     pub async fn get_buffer_emu(
@@ -2767,27 +2778,26 @@ impl<H: Serialize> StreamSender<H> {
             }
 
             let fps = framerate.round() as u32;
-            let table = get_table(final_file, fps, self.codec_selection)?; // global cached
+            let bytes_this_frame = if USE_HARDCODED_SIZES_VALIDATION {
+                let bytes = HARDCODED_TABLE.get_bytes(id_frame); 
+                crate::print_dblue!("ALVR VALIDATION MODE: Frame size: {}", bytes); 
+                bytes
+            } else {
+                // --- OLD MODE: Bitrate interpolation ---
+                let fps = framerate.round() as u32;
+                let table = get_table(final_file, fps, self.codec_selection)?; // global cached
+                
+                table.bytes_interp_cached(
+                    current_bitrate_mbps as f32,
+                    id_frame,
+                    &self.last_lo,
+                    &self.last_hi,
+                )
+            };
 
-            // round to integer Mbps that must exist as a column
-            // Cache column index on bitrate (avoid per-frame map lookup):
-            // let want_mbps = current_bitrate_mbps.round() as u32;
-
-            let bytes_this_frame = table.bytes_interp_cached(
-                current_bitrate_mbps as f32,
-                id_frame,
-                &self.last_lo,
-                &self.last_hi,
-            );
-            // bytes interpolation, when current_bitrate is not in {5,10,15..max_bitrate} for fastness
-
-            // Reuse one buffer:
             ensure_len_uninit(&mut self.tmp_buf, bytes_this_frame);
             buffer = self.tmp_buf.clone();
 
-            //////////// FAST CODE ///////////////
-            // buffer = generate_fibonacci_video_payload(current_bitrate_mbps);
-            // println!("TODO use CSV frame sizes per bitrate");
         }
 
         // Rest of your function remains the same
@@ -3280,3 +3290,71 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
 
     buffer_inner
 }
+
+
+/////// ALT code to use table based on real ALVR frame size distribution at 100 Mbps /////////
+
+#[derive(Clone)]
+struct HardcodedFrameTable {
+    framesizes: Vec<u32>,
+    start_offset: usize,
+}
+
+impl HardcodedFrameTable {
+    fn load(path: &str) -> anyhow::Result<Self> {
+        // Assuming get_prefix_path is in your scope
+        let actual_path = get_prefix_path(path);
+        
+        if !std::path::Path::new(&actual_path).exists() {
+            return Err(anyhow::anyhow!("Hardcoded CSV not found: {}", actual_path));
+        }
+
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_path(&actual_path)?;
+            
+        let mut framesizes = Vec::new();
+
+        for rec in rdr.records() {
+            let rec = rec?;
+            // Assuming the CSV format is: frame_id, size_in_bytes
+            // We read index 1. If your CSV only has one column, change this to get(0).
+            let size_str = rec.get(1).unwrap_or("0");
+
+            let bytes = size_str.parse::<f32>()
+                .map(|f| f.ceil() as u32) // Use .round() for accuracy or just 'as u32' to truncate
+                .unwrap_or(0);
+
+            framesizes.push(bytes);
+        }
+
+        let num_frames = framesizes.len();
+        let start_offset = if num_frames > 1 {
+            let middle_frame = num_frames / 2;
+            if middle_frame > 0 {
+                rand::thread_rng().gen_range(0..middle_frame)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        Ok(Self {
+            framesizes,
+            start_offset,
+        })
+    }
+
+    #[inline(always)]
+    fn get_bytes(&self, frame_idx: usize) -> usize {
+        if self.framesizes.is_empty() {
+            return 0;
+        }
+        let offset_idx = (frame_idx + self.start_offset) % self.framesizes.len();
+        self.framesizes[offset_idx] as usize
+    }
+}
+
+
+
