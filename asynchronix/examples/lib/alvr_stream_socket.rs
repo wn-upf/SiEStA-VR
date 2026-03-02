@@ -79,10 +79,6 @@ pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 pub const USE_HARDCODED_SIZES_VALIDATION: bool = true;
 // Define the path to your hardcoded CSV
-pub const HARDCODED_CSV_PATH: &str = "csv_framesizes/ALVR_session_framesizes_100Mbps.csv";
-static HARDCODED_TABLE: Lazy<Arc<HardcodedFrameTable>> = Lazy::new(|| {
-    Arc::new(HardcodedFrameTable::load(HARDCODED_CSV_PATH).expect("Failed to load hardcoded CSV frame sizes"))
-});
 
 
 
@@ -2778,8 +2774,14 @@ impl<H: Serialize> StreamSender<H> {
             }
 
             let fps = framerate.round() as u32;
+
             let bytes_this_frame = if USE_HARDCODED_SIZES_VALIDATION {
-                let bytes = HARDCODED_TABLE.get_bytes(id_frame); 
+                
+                let csv_path = format!("csv_framesizes/ALVR_session_framesizes_{}fps_100Mbps.csv", fps);
+                let hardcoded_table = Arc::new(
+                    HardcodedFrameTable::load(&csv_path).expect("Failed to load hardcoded CSV frame sizes")
+                );
+                let bytes = hardcoded_table.get_bytes(id_frame); 
                 crate::print_dblue!("ALVR VALIDATION MODE: Frame size: {}", bytes); 
                 bytes
             } else {
@@ -3322,7 +3324,7 @@ impl HardcodedFrameTable {
             let size_str = rec.get(1).unwrap_or("0");
 
             let bytes = size_str.parse::<f32>()
-                .map(|f| f.ceil() as u32) // Use .round() for accuracy or just 'as u32' to truncate
+                .map(|f| f.round() as u32) // Use .round() for accuracy or just 'as u32' to truncate
                 .unwrap_or(0);
 
             framesizes.push(bytes);

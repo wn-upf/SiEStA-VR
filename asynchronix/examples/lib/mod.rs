@@ -2490,7 +2490,6 @@ pub fn airtime_ampdu(
         _ if Pr >= -46.0 => (12, 5.0 / 6.0, 13),               // MCS 13
         _ => (1, 1.0 / 2.0, 1),                                // Catch-all for Pr out of range
     };
-    // print_dblue!("distance = {:.1} ----> MCS = {:.0}",distance,  _mcs_val);
     // println!("P_rx = {}", Pr);
 
     let Subcarriers = match channel_width {
@@ -2501,6 +2500,10 @@ pub fn airtime_ampdu(
         20 => 234,
         _ => 0, // Default case,  fallback
     };
+
+    // print_dblue!("distance = {:.1} ----> MCS = {:.0}",distance,  _mcs_val);
+
+    // print_dblue!("ChanWidth: {} -> Subcarriers: {}", channel_width, Subcarriers); 
 
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
 
@@ -2515,8 +2518,11 @@ pub fn airtime_ampdu(
 
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
-    let T_DATA: f64 =
-        PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6; // 802.11ax symbol time 4 times greates for 16E-6 s
+    
+    let mpdu_length_bits = L + MAC_H_size; // Payload + MAC Header
+    let padded_mpdu_size = ((mpdu_length_bits / 32.0).ceil() * 32.0); // Round up to 32-bit boundary
+    
+    let T_DATA: f64 = PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * 16E-6; // 802.11ax symbol time 4 times greates for 16E-6 s
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
 
     // let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff

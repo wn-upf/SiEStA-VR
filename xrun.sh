@@ -24,14 +24,14 @@ SERIAL_EXECUTION=0
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
-results_path_name="Results_bw_validation"
-simTime=100.0
-EMU_TEST_TYPE=("STD" "BW")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
+results_path_name="Results_nest_new"
+simTime=45.0
+EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
 MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
-RANDOM_SEEDS=({1..3})
+RANDOM_SEEDS=({1..5})
 # RANDOM_SEEDS=(1)
 
 ############################################################################# <- BG Traffic
@@ -41,12 +41,12 @@ rates_bps_BGtraffic=( 5000 )    ## Packets per second
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
-# MLO_CONFIGS=( "MLO0" "MLO1" "MLO4") ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
-MLO_CONFIGS=( "MLO0" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
+MLO_CONFIGS=( "MLO0" "MLO1" "MLO4") ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
+# MLO_CONFIGS=( "MLO0" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
 
 ## MLO 4 -> 160-320 MHz
 everest_tests=0              ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
-distance_list=( 1.5 )         ## Distance to AP of users                                     (ignored when everest_tests==1)
+distance_list=( 1.5 5.0 11.0 )         ## Distance to AP of users                                     (ignored when everest_tests==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
 PL=0.1
@@ -54,20 +54,20 @@ packs_per_ampdu=( 64 )
 
 ############################################################################# <- VR streaming Parameters
 # CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
-CODEC_CHOICES=( "HEVC" "AV1" )
-# N_XR=( 1 2 3 4 5 6) 
-N_XR=( 1 ) 
+CODEC_CHOICES=( "HEVC" )
+N_XR=( 1 2 3 4 5 6 7) 
+# N_XR=( 1 ) 
 
 initial_bitrate_mbps=( 100.0 )  
 # fps_list=( 60.0 90.0 120.0 )    
 fps_list=( 90.0 )    
 
-ABR_ENABLED=( 0 1 )        ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+ABR_ENABLED=( 1 )               ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
 video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
-intrarefresh_choice=( 1 )       ## intra-refresh enabled if true
-GoP_sizes=(30)                  ## Make sure GoP size is always less than (T_abr·FPS), and a common divisor 
+intrarefresh_choice=( 1 )       ## ONly if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
+GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor 
 
 ############################################################################# <- RL training Parameters
 observation_type=1              ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 

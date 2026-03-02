@@ -84,6 +84,7 @@ impl VRPair {
         edca_be_mode: bool,
         codec_selection: VideoCodec,
         results_path_name: &str, 
+        random_seed: u64, 
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -170,6 +171,7 @@ impl VRPair {
             0.0,
             0,
             ap_coords,
+            random_seed, 
         );
         let mut sta_client = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -183,6 +185,8 @@ impl VRPair {
             0.0,
             0,
             ap_coords,
+            random_seed, 
+
         );
 
         let mut emu_link = EmulatedLink::new_with_bandwidth(
@@ -475,8 +479,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_FPS{:.0}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
-        stoptime, distance, initial_bitrate, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic, fps_arg, n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
+        stoptime, distance, initial_bitrate, fps_arg, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
     );
 
     let output_path = format!("{}/{}", name_results_path ,name_folder);
@@ -689,6 +693,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             edca_be_bool,
             codec_selection,
             &name_results_path, 
+            seed, 
         );
 
         // Common pushes for all users
@@ -731,6 +736,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             rate_bps_bg_in, // Background traffic rate
             is_ul_bg_traffic,
             ap_coords,
+            seed, 
         );
 
         let mbox_bg_sta = Mailbox::new();

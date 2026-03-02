@@ -1735,20 +1735,20 @@ impl NetworkPatternEmulator {
                     *last_delay = Duration::from_secs_f64(new_delay_secs);
                     self.debug_counter += 1;
 
-                    if self.debug_counter >= 128 {
-                        print_red!("{:4.9} [DBG JITTER ({:.5} -> {:.5})] Delay: {:.3} ms | Mean: {:.3} ms, Rand: {:.3} ms, Corr: {:.3} ms | (ALVR F_id: {} - {}/{})",
-                            format_elapsed!(current_time),
-                            format_elapsed!(valid_from),
-                            format_elapsed!(valid_until),
-                            new_delay_secs * 1000.0,
-                            mean_delay.as_secs_f64() * 1000.0,
-                            random_component * 1000.0,
-                            correlated_offset * 1000.0,
-                            alvr_header.next_packet_index,
-                            alvr_header.shard_index,
-                            alvr_header.shards_count - 1
-                        );
-                    }
+                    // if self.debug_counter >= 4096 {
+                    //     print_red!("{:4.9} [DBG JITTER ({:.5} -> {:.5})] Delay: {:.3} ms | Mean: {:.3} ms, Rand: {:.3} ms, Corr: {:.3} ms | (ALVR F_id: {} - {}/{})",
+                    //         format_elapsed!(current_time),
+                    //         format_elapsed!(valid_from),
+                    //         format_elapsed!(valid_until),
+                    //         new_delay_secs * 1000.0,
+                    //         mean_delay.as_secs_f64() * 1000.0,
+                    //         random_component * 1000.0,
+                    //         correlated_offset * 1000.0,
+                    //         alvr_header.next_packet_index,
+                    //         alvr_header.shard_index,
+                    //         alvr_header.shards_count - 1
+                    //     );
+                    // }
 
                     return Some(Duration::from_secs_f64(new_delay_secs));
                 }
@@ -1982,7 +1982,7 @@ pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
             vec![LinkConfig {
                 link_id: 0,
                 _frequency_ghz: 5.0,
-                bandwidth_mhz: 80,
+                bandwidth_mhz: 40,
             }]
         }
         "MLO1" => {

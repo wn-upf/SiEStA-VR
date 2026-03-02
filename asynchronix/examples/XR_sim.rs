@@ -26,6 +26,7 @@ fn main() {
     env::set_var("RUST_BACKTRACE", "1");
     let args: Vec<String> = env::args().collect();
     if args.len() != crate::xr_entry::NUM_INPUT_ARGS_SIM {
+        println!("Debug: Expected {}, got {}", crate::xr_entry::NUM_INPUT_ARGS_SIM, args.len());
         eprintln!("Usage: {} <stoptime> <mean_length_BG> <k_queue> \
                 <distance> <bitrate> <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> \
                 <video_filename> <FPS> <N_close_users> <distance_close_users> <seed> <GoP_size> \

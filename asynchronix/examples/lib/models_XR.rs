@@ -119,6 +119,10 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<u32>() // shards index
     + mem::size_of::<f32>(); // tx relative timestamp
 
+pub const MAX_MBPS_LADDER: f32 = 100.0;
+pub const MIN_MBPS_LADDER: f32 = 10.0; 
+pub const NESTVR_STEP_COUNT: usize = 10; 
+
 pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false;
 pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100;
 pub const SPINNER_LOSS_THRESHOLD: usize = 10; // "N" frames
@@ -2079,12 +2083,14 @@ impl BitrateManager {
         };
 
         let mut bitrate_ladder_std_bps = Vec::new();
-        let bitrate_step_count: usize = 20;
+        
+        
+        let bitrate_step_count: usize = NESTVR_STEP_COUNT;
 
         // let bitrate_ladder_mbps: Vec<u32> = (5..=100).step_by(5).collect();
 
         let max_mbps = MAX_MBPS_LADDER;
-        let min_mbps = 5.0;
+        let min_mbps = MIN_MBPS_LADDER;
 
         let (min_bps, max_bps) = (min_mbps * 1e6, max_mbps * 1e6);
         // let initial_bitrate_mbps = 50.0;
@@ -7058,13 +7064,14 @@ impl STA_extended {
         arrival_rate_BG_lambda_packets_per_s: f64,
         is_ul_bg: usize,
         ap_coords: Coords,
+        input_seed: u64, 
     ) -> Self {
         let arrival_rate_BG_bps = arrival_rate_BG_lambda_packets_per_s * mean_length_BG;
 
         println!("\n*************************************************");
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3} ->  RATE_BG_packs_per_s: {:.3}| Rate = {:.3} Mbps |  is_BG_STA {}",
                             src, coordinates, dest, mean_length_BG, arrival_rate_BG_lambda_packets_per_s, arrival_rate_BG_bps / 1e6,  is_bg_sta);
-        let mut random_seed = StdRng::seed_from_u64(42);
+        let mut random_seed = StdRng::seed_from_u64(input_seed);
         Self {
             output_network_port: Default::default(),
             outport_coords_xrclient: Default::default(),
@@ -7088,75 +7095,6 @@ impl STA_extended {
         }
     }
 
-        // To simulate the channel changes, simulate the HMD moving at a
-    // constant speed of 5 m/s according to a random direction model within 1m² around
-    // initial position. In this way, we approximate the channel changes caused
-    // by a VR user standing still but rapidly moving around. src: How to model cloud VR, khorov et al.
-    // pub fn move_coordinates_everest<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-    //     async move {
-    //         const LIMIT_MOVEMENT_RADIUS: f64 = 11.5; // circle of 1m radius.
-    //         const RANDOM_WALK_SPEED: f64 = 2.0; // 2 m/s
-    //         const DELTA_T: f64 = 0.01;
-
-    //         // Step length = speed * delta_t
-    //         let step = RANDOM_WALK_SPEED * DELTA_T;
-
-    //         {
-    //             let mut rng = rand::thread_rng(); // rng needs to be scoped ( {...} ) so that future is Send or sth.
-
-    //             // Pick a random direction in 2D plane (azimuth only)
-    //             let theta = rng.gen_range(0.0..2.0 * PI);
-    //             let dx = step * theta.cos();
-    //             let dy = step * theta.sin();
-
-    //             // println!("[MOVE COORDS] Before: {:?}", self.sta_coordinates);
-
-    //             // New candidate position
-    //             let new_x = self.sta_coordinates.x + dx;
-    //             let new_y = self.sta_coordinates.y + dy;
-
-    //             // Boundaries: within ±0.5 m around initial position
-    //             let min_x = self.orig_sta_coordinates.x - LIMIT_MOVEMENT_RADIUS;
-    //             let max_x = self.orig_sta_coordinates.x + LIMIT_MOVEMENT_RADIUS;
-    //             let min_y = self.orig_sta_coordinates.y - LIMIT_MOVEMENT_RADIUS;
-    //             let max_y = self.orig_sta_coordinates.y + LIMIT_MOVEMENT_RADIUS;
-
-    //             // Reflect if out of bounds
-    //             self.sta_coordinates.x = if new_x < min_x {
-    //                 min_x + (min_x - new_x) // reflect back
-    //             } else if new_x > max_x {
-    //                 max_x - (new_x - max_x)
-    //             } else {
-    //                 new_x
-    //             };
-
-    //             self.sta_coordinates.y = if new_y < min_y {
-    //                 min_y + (min_y - new_y)
-    //             } else if new_y > max_y {
-    //                 max_y - (new_y - max_y)
-    //             } else {
-    //                 new_y
-    //             };
-    //         }
-
-    //         self.outport_coords_xrclient
-    //             .send(self.sta_coordinates.clone())
-    //             .await;
-
-    //         context
-    //             .scheduler
-    //             .schedule_event(
-    //                 Duration::from_secs_f64(DELTA_T),
-    //                 Self::move_coordinates_everest,
-    //                 (),
-    //             )
-    //             .unwrap();
-    //     }
-    // }
 
     pub fn move_coordinates_everest<'a>(  // More 'random walk' version
         &'a mut self,

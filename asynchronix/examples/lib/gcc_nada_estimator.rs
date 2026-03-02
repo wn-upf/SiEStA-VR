@@ -11,6 +11,7 @@ use std::{
 };
 // use chrono::{Utc, TimeZone};
 use crate::{lib::DebugColor, print_brown};
+use crate::lib::models_XR::{MAX_MBPS_LADDER, MIN_MBPS_LADDER};
 use tai_time::TaiTime;
 
 use crate::lib::SlidingWindowAverage;
@@ -26,7 +27,7 @@ macro_rules! gcc_debug {
 
     };
 }
-pub const MAX_MBPS_LADDER: f32 = 100.0;
+
 
 pub const GCC_WINDOW_SIZE: usize = 20;
 pub const GCC_MIN_CONFIGURED_BITRATE: f64 = 5.0 * 1000. * 1000.; //5Mbps
