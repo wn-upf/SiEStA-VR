@@ -785,7 +785,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         );
 
         for (link_id, output) in queue.link_outputs.iter_mut() {
-            println!("connecting link id {} to corresponding sta", link_id);
+            // println!("connecting link id {} to corresponding sta", link_id);
             output.connect(STA_extended::input_wireless, &vr.mbox_sta_server);
             output.connect(STA_extended::input_wireless, &vr.mbox_sta_client);
 

@@ -37,7 +37,7 @@ const SIFS: f64 = 16E-6;
 pub const DEFAULT_TMAX_AGG: f64 = 5.484E-3; 
 
 // pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab
-pub const AMPDU_BYTES_CAP: usize = 65535; // byte limit for AMPDUs (source: matlab)
+// pub const AMPDU_BYTES_CAP: usize = 65535; // byte limit for AMPDUs (source: matlab) //  UNUSED
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
 pub const UPLINK_QUEUE_SIZE: usize = 1024;
