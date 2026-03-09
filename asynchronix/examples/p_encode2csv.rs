@@ -13,11 +13,13 @@ use std::env;
 use std::path::PathBuf;
 
 pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
-pub const VIDEO_NAME: &str = "bbbcut";
+pub const VIDEO_NAME: &str = "snow_short";
 
+const CHUNK_DURATION: f64 = 5.0;
+const NUM_SEMAPHORES: usize = 3; // NUMBER OF PARALLEL TASKS.
 
 const FRAMERATE_VALUES: [u32; 3] = [60, 90, 120];
-const CODECS_TO_RUN: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
+const CODECS_TO_RUN: [VideoCodec; 2] = [VideoCodec::HEVC, VideoCodec::AV1];
 
 
 // Instead of consts, we use a small helper
@@ -48,8 +50,6 @@ fn get_paths() -> (PathBuf, PathBuf) {
     }
 }
 
-const CHUNK_DURATION: f64 = 5.0;
-const NUM_SEMAPHORES: usize = 5; // NUMBER OF PARALLEL TASKS.
 
 async fn encode_one_video(
     video_dir: PathBuf,
@@ -184,25 +184,23 @@ struct VideoGroup {
     fps: u32,
 }
 
-fn merge_csvs_into_one(codec_prefix: &str) -> Result<(), Box<dyn Error>> {
-    // let codec_prefix = "HEVC";
-    // Regex to capture: 1: Name, 2: FPS, 3: Mbps
-    let re = Regex::new(&format!(
-        r"{codec_prefix}_(.*)_(\d+)fps_(\d+)Mbps_framesizes\.csv",
-    ))?;
+fn merge_csvs_into_one(codec_prefix: &str, csv_dir: &Path) -> Result<(), Box<dyn Error>> {
+    // 1. Updated regex to handle potential decimals in Mbps (e.g., 5.5Mbps)
+    let re_str = format!(r"{}_(.*)_(\d+)fps_([\d\.]+)Mbps_framesizes\.csv", codec_prefix);
+    let re = Regex::new(&re_str)?;
 
-    // Map to group files: Key -> Vec<(Mbps, Path)>c
-    let mut groups: HashMap<VideoGroup, Vec<(u32, String)>> = HashMap::new();
+    // Store Mbps as a String (or f32) to handle decimals properly during sorting
+    let mut groups: HashMap<VideoGroup, Vec<(f32, String)>> = HashMap::new();
 
-    // 1. Scan directory and group files
-    for entry in std::fs::read_dir("./bcopy")? {
+    // 2. Scan the actual csv_dir instead of hardcoded "./bcopy"
+    for entry in std::fs::read_dir(csv_dir)? {
         let path = entry?.path();
         let filename = path.file_name().unwrap().to_string_lossy();
 
         if let Some(cap) = re.captures(&filename) {
             let video_name = cap[1].to_string();
             let fps = cap[2].parse::<u32>()?;
-            let mbps = cap[3].parse::<u32>()?;
+            let mbps = cap[3].parse::<f32>()?; // Parse as f32 in case of floats
 
             let group = VideoGroup {
                 name: video_name,
@@ -215,43 +213,43 @@ fn merge_csvs_into_one(codec_prefix: &str) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // 2. Process each group into its own CSV
+    // 3. Process each group into its own CSV
     for (group, mut files) in groups {
-        println!("Processing {} at {}fps...", group.name, group.fps);
+        println!("[MERGING] Processing {} at {}fps for codec {}...", group.name, group.fps, codec_prefix);
 
-        // Sort files by bitrate (Mbps)
-        files.sort_by_key(|f| f.0);
+        // Sort files by bitrate (Mbps) so columns go from lowest to highest
+        files.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         // Initialize DataFrame with the first file in the sorted group
-        // ... inside your loop
         let (first_mbps, first_path) = &files[0];
-
-        // FIX: Open file first, then pass to CsvReader::new()
         let file = File::open(first_path)?;
         let mut combined_df = CsvReader::new(file).finish()?;
-        combined_df.rename("bytes", format!("{}Mbps", first_mbps).into())?;
+        
+        // Rename "bytes" to "XMbps"
+        let first_col_name = format!("{}Mbps", first_mbps);
+        combined_df.rename("bytes", first_col_name.into())?;
 
         // Join subsequent files
         for (mbps, path) in files.iter().skip(1) {
-            // FIX: Same here
             let next_file = File::open(path)?;
-            let next_df = CsvReader::new(next_file)
+            let mut next_df = CsvReader::new(next_file)
                 .finish()?
                 .select(["frame_index", "bytes"])?;
 
-            // Note: rename is usually done on the DataFrame after finish()
-            let mut next_df = next_df;
-            next_df.rename("bytes", format!("{}Mbps", mbps).into())?;
+            let next_col_name = format!("{}Mbps", mbps);
+            next_df.rename("bytes", next_col_name.into())?;
 
+            // Left join on "frame_index"
             combined_df = combined_df.left_join(&next_df, ["frame_index"], ["frame_index"])?;
         }
 
-        // 3. Save the specific group file
-        let output_name = format!("merged_{}_{}fps.csv", group.name, group.fps);
-        let mut out_file = File::create(&output_name)?;
+        // 4. Save the merged file directly into the csv_dir
+        let output_name = format!("merged_{}_{}_{}fps.csv", codec_prefix, group.name, group.fps);
+        let output_path = csv_dir.join(output_name);
+        let mut out_file = File::create(&output_path)?;
         CsvWriter::new(&mut out_file).finish(&mut combined_df)?;
 
-        println!("Saved to {}", output_name);
+        println!("[DONE] Saved merged CSV to {}", output_path.display());
     }
 
     Ok(())
@@ -280,49 +278,62 @@ async fn main() -> anyhow::Result<()> {
         csv_dir.display()
     );
 
-    let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
-    // let framerate_values = [60, 90, 120];
-    // let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
+    // let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
+    // // let framerate_values = [60, 90, 120];
+    // // let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
 
 
-    let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
-    let mut tasks = Vec::new();
+    // let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
+    // let mut tasks = Vec::new();
 
+    // for video_codec in CODECS_TO_RUN {
+    //     for framerate in FRAMERATE_VALUES {
+    //         for &bitrate_mbps in &br_values {
+    //             let video_dir = video_dir.clone();
+    //             let csv_dir = csv_dir.clone();
+    //             let permit = sem.clone().acquire_owned().await?;
+    //             let task = tokio::spawn(async move {
+    //                 let _permit = permit; // keep until task done
+    //                 if let Err(e) = encode_one_video(
+    //                     video_dir,
+    //                     csv_dir,
+    //                     width,
+    //                     height,
+    //                     gop_size,
+    //                     intra_refresh,
+    //                     framerate,
+    //                     bitrate_mbps,
+    //                     video_codec,
+    //                 )
+    //                 .await
+    //                 {
+    //                     eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
+    //                 }
+    //             });
+    //             tasks.push(task);
+    //         }
+    //     }
+    // }
+
+    // // Wait for all tasks
+    // join_all(tasks).await;
+
+    println!("[INFO] All encoding tasks completed. Starting CSV merge...");
+
+    // Merge the resulting CSVs
     for video_codec in CODECS_TO_RUN {
-        for framerate in FRAMERATE_VALUES {
-            for &bitrate_mbps in &br_values {
-                let video_dir = video_dir.clone();
-                let csv_dir = csv_dir.clone();
-                let permit = sem.clone().acquire_owned().await?;
-                let task = tokio::spawn(async move {
-                    let _permit = permit; // keep until task done
-                    if let Err(e) = encode_one_video(
-                        video_dir,
-                        csv_dir,
-                        width,
-                        height,
-                        gop_size,
-                        intra_refresh,
-                        framerate,
-                        bitrate_mbps,
-                        video_codec,
-                    )
-                    .await
-                    {
-                        eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
-                    }
-                });
-                tasks.push(task);
-            }
+        // Match string names identically to how you saved them in `encode_one_video`
+        let codec_str = match video_codec {
+            VideoCodec::AV1 => "AV1",
+            VideoCodec::HEVC => "HEVC",
+            // Add other variants if needed
+        };
+        
+        // Pass the csv_dir reference so it knows where to look and save
+        if let Err(e) = merge_csvs_into_one(codec_str, &csv_dir) {
+            eprintln!("[ERR] Failed to merge CSVs for {}: {}", codec_str, e);
         }
     }
-
-    // Wait for all tasks
-    join_all(tasks).await;
-
-    for video_codec in CODECS_TO_RUN {
-        let codec_str = format!("{}", video_codec);
-        let _ = merge_csvs_into_one(&codec_str);
-    }
+    
     Ok(())
 }

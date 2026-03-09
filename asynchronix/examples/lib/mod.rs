@@ -2473,8 +2473,8 @@ pub fn airtime_ampdu(
     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
 
     let (bits_symbol, coding_rate, _mcs_val) = match Pr {
-        _ if Pr < -82.0 => (1, 1.0 / 2.0, 1), // Could add additional PER in this case
-        _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0, 1),
+        _ if Pr < -82.0 => (1, 1.0 / 2.0, 0), // Could add additional PER in this case
+        _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0, 0),
         _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0, 1),
         _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0, 2),
         _ if Pr >= -74.0 && Pr < -70.0 => (4, 1.0 / 2.0, 3),

@@ -77,7 +77,7 @@ pub const FOVOPTIX_BW_PROBE: u16 = 9;
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 
-pub const USE_HARDCODED_SIZES_VALIDATION: bool = true;
+pub const USE_HARDCODED_SIZES_VALIDATION: bool = false;
 // Define the path to your hardcoded CSV
 
 
@@ -214,7 +214,7 @@ impl ChunkedAv1Encoder {
         );
 
         self.parser.buffer.clear();
-
+        
         let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
         // let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
 
@@ -222,6 +222,13 @@ impl ChunkedAv1Encoder {
         // let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize  + self.chunk_index * frames_per_chunk ;
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
         // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
+
+
+        let frame_duration_ms = 1000.0 / self.framerate;
+        let bufsize_ms = frame_duration_ms.max(20.0); // Force at least 20ms for AV1: The maximum buffer size must be between [20, 10000]
+
+        let bufsize_kbits = bitrate_mbps * 1000.0 * (bufsize_ms / 1000.0);
+        let bufsize_str = format!("{:.0}k", bufsize_kbits);
 
         let mut command = FfmpegCommand::new();
         // SVT-AV1 Arguments from av1_testbed.rs
@@ -246,9 +253,11 @@ impl ChunkedAv1Encoder {
             .args(&["-c:v", "libsvtav1"]) // Using SVT-AV1
             .args(&["-preset", "9"])      // High speed preset for RTC
             .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=3:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
-            // .args(&["-svtav1-params", "rc=2:lookahead=0:pred-struct=1:lp=3:tile-columns=2:tile-rows=1:fast-decode=1:include-td=1"]) // Tiling for fastness, lp: level of parallelism,
-            .args(&["-b:v", &self.bitrate, ])
-            .args(&["-bufsize", &self.bitrate])
+            // .args(&["-b:v", &self.bitrate, ])
+            // .args(&["-bufsize", &self.bitrate])
+            .args(&["-b:v", &self.bitrate]) 
+            .args(&["-bufsize", &bufsize_str]) // Updated VBV
+
             .args(&["-g", &format!("{}", self.gop_size)])
             // .args(&["-f", "ivf", "-"]) // IVF is standard for raw AV1 piping
             // .args(&["-intra-refresh", &format!("{}", self.intra_refresh as i32)]) // TODO: Test IR on AV1, don't have access to nvenc GPU 
@@ -429,7 +438,9 @@ impl ChunkedSoftwareHevcEncoder {
         let exact_offset = self.current_offset;
         // let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize  + self.chunk_index * frames_per_chunk ;
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
-
+        
+        let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate;
+        let bufsize_str = format!("{:.0}k", bufsize_kbits);
 
         println!(
             "{} - {} SOFTWARE CHUNKING with bitrate {} Mbps",
@@ -470,7 +481,7 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&["-probesize", "200M"])
                 // Rate Control
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate])
+                .args(&["-bufsize", &bufsize_str]) // updated VBV
                 .args(&["-rc-lookahead", "0"])
                 // Structural args
                 .args(&["-g", "0"]) // Let x265 params handle structure
@@ -494,7 +505,7 @@ impl ChunkedSoftwareHevcEncoder {
                 .args(&["-s", &format!("{}x{}", self.width, self.height)])
                 // Rate Control
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate])
+                .args(&["-bufsize", &bufsize_str]) // updated VBV
                 // Structural args
                 .args(&["-sc_threshold", "0"]) // Disable scene detection
                 .args(&["-g", &format!("{:.0}", self.gop_size)])
@@ -681,8 +692,12 @@ impl ChunkedHevcEncoder {
         // let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
         // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
 
-        let exact_offset = self.current_offset;
+        let exact_offset: f64 = self.current_offset;
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
+        
+
+        let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al. 
+        let bufsize_str = format!("{:.0}k", bufsize_kbits);
 
 
         println!(
@@ -721,7 +736,7 @@ impl ChunkedHevcEncoder {
                 // .args(&["-preset", "llhq"])
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate]) // 1-second VBV window (optional but keeps it tight)
+                .args(&["-bufsize", &bufsize_str]) // per-frame window( keep it tight)
                 // the throughput distribution will match that of the bitrate target strictly by padding.
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", "0"]) // Disable GOP, intra-refresh instead
@@ -763,7 +778,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-sc_threshold", "0"]) // 3. Disable scene change detection (keeps GOP strict)
                 .args(&["-rc", "cbr"])
                 .args(&["-b:v", &self.bitrate, "-maxrate", &self.bitrate])
-                .args(&["-bufsize", &self.bitrate]) // 1-second VBV window (optional but keeps it tight)
+                .args(&["-bufsize", &bufsize_str]) // per-frame VBV window (keeps it tight)
                 .args(&["-rc-lookahead", "0"])
                 .args(&["-g", &format!("{:.0}", self.gop_size)]) // using your GOP size constant
                 .args(&["-movflags", "+frag_keyframe+empty_moov"])
