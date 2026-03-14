@@ -2524,9 +2524,6 @@ pub fn airtime_ampdu(
     
     let T_DATA: f64 = PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * 16E-6; // 802.11ax symbol time 4 times greates for 16E-6 s
     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
-
-    // let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
-    //                                                                   // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
     let phy_time = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK; // ⬅  removed DIFS + SLOT + BO, it happens in EDCA now.
 
     // let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;                            // ONLY FOR DEBUG

@@ -1579,13 +1579,13 @@ impl SendWindow {
 #[tokio::main]
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_filtered_snowshort"; 
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_d1.5m_allbitrate_allfps_1seed"; 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
     // Regex compilation (done once)
     let re_codec = Arc::new(Regex::new(r"_Codec([^_]+)").unwrap());
     let re_fps =   Arc::new(Regex::new(r"_FPS(\d+)").unwrap());
-    let re_video = Arc::new(Regex::new(r"_([^_]+)_FPS").unwrap());
+    let re_video = Arc::new(Regex::new(r"_([^_]+)_Nclose").unwrap());
 
     // 1. Collect all valid jobs first
     // We do this synchronously to build a clean list of work items
@@ -1712,83 +1712,4 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
     }
     
     println!(">> All scenarios processed.");
-}
-
-
-pub async fn main_serial() { // works but does one thread at a time. 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_1user/"; 
-    let dummy_ip = "127.0.0.1".parse().unwrap();
-
-    let re_codec = Regex::new(r"_Codec([^_]+)").unwrap();
-    let re_fps =   Regex::new(r"_FPS(\d+)").unwrap();
-    let re_video = Regex::new(r"_([^_]+)_FPS").unwrap();
-
-    let entries = fs::read_dir(results_scenarios_folder).expect("Read dir failed");
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() { continue; }
-
-        let folder_name = path.file_name().unwrap().to_string_lossy().to_string();
-
-        // 1. Extract Metadata
-        let codec_str = re_codec.captures(&folder_name).map_or("Unknown", |c| c.get(1).unwrap().as_str());
-        let fps = re_fps.captures(&folder_name).map_or(0, |c| c[1].parse::<u32>().unwrap_or(0));
-        let video_name = re_video.captures(&folder_name).map_or("Unknown", |c| c.get(1).unwrap().as_str());
-
-        let video_codec = match codec_str {
-            "AV1" => VideoCodec::AV1,
-            "HEVC" => VideoCodec::HEVC,
-            _ => { eprintln!("Skipping {}, unknown codec", folder_name); continue; }
-        };
-
-        if fps == 0 || video_name == "Unknown" {
-            eprintln!("Skipping {}, couldn't parse FPS or Video Name", folder_name);
-            continue;
-        }
-
-        println!("Found Scenario: {} | Video: {} | FPS: {} | Codec: {:?}", folder_name, video_name, fps, video_codec);
-
-        let user = std::env::var("USER").unwrap_or_default();
-        let use_gui = match user.as_str() {
-            "boris" => true,
-            "fmaura" => false,
-            _ => std::env::var("DISPLAY").is_ok(), // Fallback to display check for anyone else
-        };
-        
-        // 2. Find the CSV file inside the folder
-        let csv_entries = fs::read_dir(&path).expect("Read subdir failed");
-        for file in csv_entries.flatten() {
-
-            let p = file.path();
-            let parent_results = p.parent()           // scenario_folder
-                                .and_then(|p| p.parent()) // Results_test
-                                .and_then(|p| p.file_name()) // Get just the folder name
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "Unknown".to_string());
-
-            if p.extension().map_or(false, |ext| ext == "csv") {
-                let fname = p.file_name().unwrap().to_string_lossy().into_owned();
-                // Ensure it matches your trace file naming convention
-                if fname.starts_with("XR_stats_0") {
-                    println!("   -> Processing Trace: {}", fname);
-                    
-                    // 3. Run the processing
-                    if let Err(e) = process_trace_vs_original(
-                        p, 
-                        dummy_ip, 
-                        video_codec, 
-                        fps, 
-                        video_name.to_string(),
-                        use_gui, 
-                        &parent_results, 
-                        1, 
-
-                    ).await {
-                        eprintln!("ERROR processing {}: {}", fname, e);
-                    }
-                }
-            }
-        }
-    }
 }

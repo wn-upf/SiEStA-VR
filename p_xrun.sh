@@ -3,9 +3,9 @@
 #SBATCH -J xr_sims               # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # Nodes PER TASK (Always 1 for arrays)
-#SBATCH --array=0-2             # <--- INPUT: Run n nodes total (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
+#SBATCH --array=0-1             # <--- INPUT: Run n nodes total (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
 #SBATCH --mem=64G                # memory
-#SBATCH --time=48:00:00          # max walltime
+#SBATCH --time=96:00:00          # max walltime
 #SBATCH --cpus-per-task=30       # CPUs per node
 #SBATCH -o logs_hpc/%x_%A_%a.out # %A=Job ID, %a=Array Index (Log separation)
 #SBATCH -e logs_hpc/%x_%A_%a.err
@@ -18,7 +18,7 @@ module load x264
 
 export PATH=$HOME/.local/bin:$PATH
 
-NUMBER_OF_JOBS=15
+NUMBER_OF_JOBS=10
 SERIAL_EXECUTION=0
 
 DEBUG_PROFILE_FLAMEGRAPH=0
@@ -26,7 +26,7 @@ DEBUG_LOGS=0
 
 #############################################################################
 
-results_path_name="Results_cbr_final_45s"
+results_path_name="Results_figMLO_allusers_RWALK_10seeds_ABR"
 simTime=45.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
@@ -46,7 +46,7 @@ EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category.
 MLO_CONFIGS=( "MLO0" "MLO1" "MLO4") ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
 # MLO_CONFIGS=( "MLO0" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels ## MLO 4 -> 160-320 MHz
 
-RANDOMWALK_TEST=0             ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
+RANDOMWALK_TEST=1            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 distance_list=( 5.0 )         ## Distance to AP of users                                     (ignored when RANDOMWALK_TEST==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
@@ -55,15 +55,13 @@ packs_per_ampdu=( 64 )
 
 ############################################################################# <- VR streaming Parameters
 # CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
-CODEC_CHOICES=( "HEVC" )
-N_XR=( 1 2 3 4 5 6 7 ) 
+CODEC_CHOICES=( "HEVC" "AV1")
+N_XR=( 1 2 3 4 5 6 7 8 9 10 11 12 ) 
 # N_XR=( 1 ) 
 
-initial_bitrate_mbps=(10.0 50.0 100.0 )  
-# fps_list=( 60.0 90.0 120.0 )    
+initial_bitrate_mbps=( 100.0 )  
 fps_list=( 90.0 )    
-
-ABR_ENABLED=( 0 )               ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+ABR_ENABLED=( 1 2 )               ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
 video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
@@ -120,7 +118,7 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                                     NAME_ABR="ABR_${ABR}"
                                                                                     (( SIM_COUNT++ ))  # ← increment
 
-                                                                                    echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name 2>&1 | tee Results/$name_folder/sim.log" >> "$temp_file"
+                                                                                    echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" >> "$temp_file"
                                                                                                                                                                 
                                                                                     if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
                                                                                         rm out_log.ans
@@ -174,25 +172,33 @@ echo " --- Number of simulations: $SIM_COUNT --- \n"
 
 # --- PREPARE LIST ---
 # 1. Create the initial list
-cat "$temp_file" > "all_cmds_raw.txt"
+
+JOB_ID=${SLURM_ARRAY_JOB_ID:-$$}
+RAW_FILE="all_cmds_raw_${JOB_ID}.txt"
+WEIGHTED_FILE="weighted_tasks_${JOB_ID}.txt"
+
+
+
+cat "$temp_file" > "$RAW_FILE"
 rm "$temp_file"
 
 # 2. WEIGHTED SORTING (The "NXR" Fix)
 # In your echo command, $nxr is the 7th argument.
 # This sorts the file so the heaviest simulations (highest NXR) are at the top.
-awk '{print $7, $0}' "all_cmds_raw.txt" | sort -rn | cut -d' ' -f2- > "weighted_tasks.txt"
+awk '{print $8, $0}' "$RAW_FILE" | sort -rn | cut -d' ' -f2- > "$WEIGHTED_FILE"
 
 # 3. Get node info
-TOTAL_TASKS=$(wc -l < "weighted_tasks.txt")
+TOTAL_TASKS=$(wc -l < "$WEIGHTED_FILE")
 NODE_ID=${SLURM_ARRAY_TASK_ID:-0}           
 TOTAL_NODES=${SLURM_ARRAY_TASK_COUNT:-1}    
 
 # 4. INTERLEAVED SELECTION (The "Deck of Cards" Fix)
 # This ensures Node 0 doesn't get ALL the heavy tasks. 
 # It takes 1 heavy, then 1 light, etc.
-NODE_TASKS_FILE="tasks_node_${NODE_ID}.txt"
+NODE_TASKS_FILE="tasks_node_${JOB_ID}_${NODE_ID}.txt"
 awk -v id="$NODE_ID" -v tot="$TOTAL_NODES" \
-'((NR-1) % tot) == id { print $0 }' "weighted_tasks.txt" > "$NODE_TASKS_FILE"
+'((NR-1) % tot) == id { print $0 }' "$WEIGHTED_FILE" > "$NODE_TASKS_FILE"
+
 
 TASKS_IN_THIS_NODE=$(wc -l < "$NODE_TASKS_FILE")
 
@@ -230,9 +236,8 @@ fi
 # otherwise nodes might delete files while others are reading them.
 rm "$NODE_TASKS_FILE"
 
-if [ "$NODE_ID" -eq $((TOTAL_NODES - 1)) ]; then
-    sleep 10 # Give others a moment to finish reading
-    rm "weighted_tasks.txt" "all_cmds_raw.txt"
+if [ "$NODE_ID" -eq 0 ]; then ## Only Node 0 handles deleting the shared global lists
+    sleep 15 
+    rm -f "$RAW_FILE" "$WEIGHTED_FILE"
 fi
-
 echo "ALL JOBS FINISHED ON NODE $NODE_ID!!!"
