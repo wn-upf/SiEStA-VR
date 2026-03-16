@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
+use regex::Regex;
 
 use crate::lib::{
     airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential,
@@ -1973,91 +1974,47 @@ pub struct LinkConfig {
     pub _frequency_ghz: f64, // 5 or 6
     pub bandwidth_mhz: u16,  // 80, 160, 320
 }
-
-// Helper function to initialize typical MLO setup
+// Helper for the fallback case
+fn default_mloconfig(config: &str) -> Vec<LinkConfig> {
+    print_red!("WARNING WRONG MLO STRING ({config}) || DEFAULTING TO SLO80!!", );
+    vec![LinkConfig {
+        link_id: 0,
+        _frequency_ghz: 5.0,
+        bandwidth_mhz: 80,
+    }]
+}
 pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
-    let a = match config {
-        "MLO0" => {
-            // SLO
-            vec![LinkConfig {
+    // Compile regex (in production, use lazy_static or OnceLock for performance)
+    let re = Regex::new(r"^(SLO|MLO)(\d+)(?:-(\d+))?$").unwrap();
+
+    let links = if let Some(caps) = re.captures(config) {
+        let mode = &caps[1];
+        let bw1 = caps[2].parse::<u16>().unwrap_or(80);
+
+        match mode {
+            "SLO" => vec![LinkConfig {
                 link_id: 0,
                 _frequency_ghz: 5.0,
-                bandwidth_mhz: 40,
-            }]
+                bandwidth_mhz: bw1,
+            }],
+            "MLO" => {
+                // If the second bandwidth is missing (e.g., "MLO80"), default to bw1
+                let bw2 = caps.get(3)
+                    .map_or(bw1, |m| m.as_str().parse().unwrap_or(80));
+                
+                vec![
+                    LinkConfig { link_id: 0, _frequency_ghz: 5.0, bandwidth_mhz: bw1 },
+                    LinkConfig { link_id: 1, _frequency_ghz: 6.0, bandwidth_mhz: bw2 },
+                ]
+            }
+            _ => default_mloconfig(config),
         }
-        "MLO1" => {
-            // MLO 80_80 MHz channels
-            vec![
-                LinkConfig {
-                    link_id: 0,
-                    _frequency_ghz: 5.0,
-                    bandwidth_mhz: 80,
-                },
-                LinkConfig {
-                    link_id: 1,
-                    _frequency_ghz: 6.0,
-                    bandwidth_mhz: 80,
-                },
-            ]
-        }
-        "MLO2" => {
-            // MLO 80_160 MHz channels
-            vec![
-                LinkConfig {
-                    link_id: 0,
-                    _frequency_ghz: 5.0,
-                    bandwidth_mhz: 80,
-                },
-                LinkConfig {
-                    link_id: 1,
-                    _frequency_ghz: 6.0,
-                    bandwidth_mhz: 160,
-                },
-            ]
-        }
-        "MLO3" => {
-            // MLO 80_320 MHz channels
-            vec![
-                LinkConfig {
-                    link_id: 0,
-                    _frequency_ghz: 5.0,
-                    bandwidth_mhz: 80,
-                },
-                LinkConfig {
-                    link_id: 1,
-                    _frequency_ghz: 6.0,
-                    bandwidth_mhz: 320,
-                },
-            ]
-        }
-
-        "MLO4" => {
-            // MLO 160_320 MHz channels
-            vec![
-                LinkConfig {
-                    link_id: 0,
-                    _frequency_ghz: 5.0,
-                    bandwidth_mhz: 160,
-                },
-                LinkConfig {
-                    link_id: 1,
-                    _frequency_ghz: 6.0,
-                    bandwidth_mhz: 320,
-                },
-            ]
-        }
-
-        _ => {
-            print_red!("WARNING WRONG MLO STRING ({config}) || DEFAULTING TO SLO!!",);
-            vec![LinkConfig {
-                link_id: 0,
-                _frequency_ghz: 5.0,
-                bandwidth_mhz: 80,
-            }]
-        }
+    } else {
+        default_mloconfig(config)
     };
-    println!("Creating MLO Config!\n{:#?}", a);
-    a
+
+    println!("Creating MLO Config!\n{:#?}", links);
+    links
 }
 
 #[derive(Clone, Debug)]

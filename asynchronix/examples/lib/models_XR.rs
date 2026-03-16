@@ -123,7 +123,7 @@ pub const MAX_MBPS_LADDER: f32 = 100.0;
 pub const MIN_MBPS_LADDER: f32 = 10.0; 
 pub const NESTVR_STEP_COUNT: usize = 10; 
 
-pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = false;
+pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = true;
 pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100;
 pub const SPINNER_LOSS_THRESHOLD: usize = 10; // "N" frames
 
