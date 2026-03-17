@@ -407,7 +407,7 @@ impl StatisticsManager {
         rtt: Duration,
         now: TaiTime<0>,
         current_bitrate_target_mbps: f32,
-    ) -> (f32, f32) {
+    ) -> (f32, f32, f32, f32, f32) {
         // println!("--- DEBUG: report_network_statistics CALLED! ---");
         self.packets_skipped_total += network_stats.frames_skipped as usize;
         self.packets_skipped_partial_sum += network_stats.frames_skipped as usize;
@@ -505,6 +505,7 @@ impl StatisticsManager {
         let mut flr_deadline = self
             .flr_shardloss_count
             .sum_flr(crate::taitime_to_f64!(now) as f32);
+
         let mut shardloss_deadline = self
             .flr_shardloss_count
             .sum_shard_loss(crate::taitime_to_f64!(now) as f32);
@@ -514,10 +515,9 @@ impl StatisticsManager {
                 .checked_duration_since(TaiTime::EPOCH)
                 .unwrap()
                 .as_secs_f64(),
+
             frame_index: network_stats.frame_index as usize,
-
             frame_size_bytes: network_stats.bytes_in_frame as usize,
-
             server_fps: self.framerate_server,
 
             frame_span_ms: network_stats.frame_span * 1000.0,
@@ -577,13 +577,14 @@ impl StatisticsManager {
             flr_deadline: self.last_stats.flr_deadline,
             shardloss_deadline: self.last_stats.shardloss_deadline,
         };
+
         self.csv_sink.write(row);
 
         // // Call method to save data to CSV
         // if self.save_network_stats_to_csv().is_err() {
         //     println!("ERROR HERE CSV!!");
         // }
-        return (peak_network_throughput_bps, frame_interarrival);
+        return (peak_network_throughput_bps, frame_interarrival, self.last_stats.filtered_ow_delay_ms, self.last_stats.flr_deadline as f32, self.last_stats.rtt_ms,);
     }
 
     pub fn report_input_acquired(&mut self, target_timestamp: Duration) {

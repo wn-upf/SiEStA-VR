@@ -1514,6 +1514,7 @@ impl StreamSocket {
             video_chunk_duration: self.video_chunk_duration,
             codec_selection,
             results_path: results_path.to_string(), 
+            emu_frame_table: None, 
             // col_cache: HashMap::new(),
         }
     }
@@ -2437,6 +2438,8 @@ pub struct StreamSender<H> {
 
     pub codec_selection: VideoCodec,
     pub results_path: String, 
+    pub emu_frame_table: Option<Arc<FrameSizeTable>>,
+
 }
 
 #[allow(unused)]
@@ -2538,7 +2541,7 @@ impl<H: Serialize> StreamSender<H> {
         // Compose filename with suffix
         let file_with_fps;
 
-        if final_file == "snow" || final_file == "swordsmith" {
+        if final_file.contains("snow")  || final_file == "swordsmith" {
             file_with_fps = format!("{final_file}{fps_suffix}");
         } else {
             file_with_fps = final_file.to_string();
@@ -2780,6 +2783,10 @@ impl<H: Serialize> StreamSender<H> {
                             .append(true)
                             .open(&csv_path_emu)
                             .map_err(|e| anyhow::anyhow!("Failed to open existing CSV: {}", e))?;
+
+                            self.csv_trace.path = csv_path_emu.into(); // update the path and skip this block
+
+
                         // print_green!("EMU EFFECTS CSV already exists; opened existing: {csv_path_emu}", );
                     }
                     Err(e) => return Err(anyhow::anyhow!("Failed to create/open CSV: {}", e)),
@@ -2802,7 +2809,17 @@ impl<H: Serialize> StreamSender<H> {
             } else {
                 // --- OLD MODE: Bitrate interpolation ---
                 let fps = framerate.round() as u32;
-                let table = get_table(final_file, fps, self.codec_selection)?; // global cached
+                // let table = get_table(final_file, fps, self.codec_selection)?; // global cached
+
+                let table = if let Some(t) = &self.emu_frame_table {
+                    t.clone()
+                } else {
+                    let t = get_table(final_file, fps, self.codec_selection)?;
+                    self.emu_frame_table = Some(t.clone());
+                    t
+                };
+
+
                 
                 table.bytes_interp_cached(
                     current_bitrate_mbps as f32,
@@ -2812,8 +2829,8 @@ impl<H: Serialize> StreamSender<H> {
                 )
             };
 
-            ensure_len_uninit(&mut self.tmp_buf, bytes_this_frame);
-            buffer = self.tmp_buf.clone();
+            buffer.clear(); // Sets length to 0, but keeps capacity (no deallocation)
+            buffer.resize(bytes_this_frame, 7); // Fills with 7s (for good luck). Very fast if capacity is sufficient.
 
         }
 
@@ -3224,17 +3241,6 @@ impl FrameSizeTable {
             codec_str,
         })
     }
-}
-
-#[inline]
-fn ensure_len_uninit(buf: &mut Vec<u8>, size: usize) {
-    if buf.capacity() < size {
-        // reserve_exact avoids overgrowth if sizes vary a lot
-        buf.reserve_exact(size - buf.capacity());
-    }
-    unsafe {
-        buf.set_len(size);
-    } // do NOT read before you write if anyone depends on bytes, while unsafe code it seems to work and helps make things fast
 }
 
 use dashmap::DashMap;

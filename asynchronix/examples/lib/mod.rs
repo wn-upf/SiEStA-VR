@@ -9,6 +9,7 @@ use tai_time::TaiTime;
 
 use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
+use crate::lib::models_XR::PerfectInfoBitrateMessage;
 use crate::lib::models_mm1k::STR_PLUS_MODE_MLO;
 use colored::Colorize;
 use rand::Rng;
@@ -739,6 +740,56 @@ pub fn render_text(
     }
 }
 
+
+
+#[derive(PartialEq)]
+pub enum GraphType {
+    Bar,
+    Line,
+}
+
+// Bresenham's line algorithm for raw pixel buffers
+fn draw_thick_line(
+    buffer: &mut [u32],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    color: u32,
+    thickness: isize,
+) {
+    let dx = (x1 as isize - x0 as isize).abs();
+    let dy = -(y1 as isize - y0 as isize).abs();
+    let mut err = dx + dy;
+    let mut x = x0 as isize;
+    let mut y = y0 as isize;
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+
+    loop {
+        // Apply thickness by drawing adjacent pixels
+        for ty in 0..thickness {
+            for tx in 0..thickness {
+                let px = x + tx;
+                let py = y + ty;
+                if px >= 0 && py >= 0 {
+                    let pu = px as usize;
+                    let pv = py as usize;
+                    if pv < buffer.len() / stride && pu < stride {
+                        buffer[pv * stride + pu] = color;
+                    }
+                }
+            }
+        }
+
+        if x == x1 as isize && y == y1 as isize { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x += sx; }
+        if e2 <= dx { err += dx; y += sy; }
+    }
+}
+
 fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time: f32) {
     let center_x = width as f32 / 2.0;
     let center_y = height as f32 / 2.0;
@@ -783,17 +834,152 @@ fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time:
     }
 }
 
+pub fn render_stat_graph(
+    buffer: &mut [u32],
+    history: &VecDeque<f32>,
+    x_offset: usize,
+    y_offset: usize,
+    stride: usize,
+    graph_height: usize,
+    y_range_override: Option<(f32, f32)>, 
+    title: &str,
+    unit: &str,
+    graph_type: GraphType,
+    color_orig: u32,
+) {
+    if history.is_empty() { return; }
+
+    let bar_width = 7;
+    let spacing = 2;
+    let graph_width = history.len() * (bar_width + spacing);
+    let title_margin = 40;
+    let label_margin = 75;
+
+    // 1. Draw Background Plate
+    let bg_y_start = y_offset.saturating_sub(title_margin + 10);
+    let bg_y_end = y_offset + graph_height + 20;
+    let bg_x_start = x_offset.saturating_sub(label_margin + 20);
+    let bg_x_end = x_offset + graph_width + 50;
+
+    for y in bg_y_start..bg_y_end {
+        if y >= buffer.len() / stride { continue; }
+        for x in bg_x_start..bg_x_end {
+            if x >= stride { continue; }
+            let idx = y * stride + x;
+            let current = buffer[idx];
+            let r = ((current >> 16) & 0xFF) / 2;
+            let g = ((current >> 8) & 0xFF) / 2;
+            let b = (current & 0xFF) / 2;
+            buffer[idx] = (r << 16) | (g << 8) | b;
+        }
+    }
+
+    // 2. Determine Min/Max Range for Y-Axis
+    let (min_val, max_val) = y_range_override.unwrap_or_else(|| {
+        let max = history.iter().copied().fold(0.0f32, f32::max);
+        let min = history.iter().copied().fold(0.0f32, f32::min);
+        let calculated_max = if max < 1.0 { 1.0 } else { max };
+        let calculated_min = if min > 0.0 { 0.0 } else { min };
+        (calculated_min, calculated_max)
+    });
+    
+    // Prevent division by zero if min == max
+    let range = if (max_val - min_val).abs() < f32::EPSILON { 1.0 } else { max_val - min_val };
+
+    // Title & Unit
+    render_text(buffer, title, x_offset, y_offset.saturating_sub(title_margin), stride, 0xFFFFFF, 3);
+    render_text(buffer, unit, x_offset.saturating_sub(label_margin), y_offset.saturating_sub(title_margin), stride, 0xCCCCCC, 2);
+
+    // 3. Draw Grid & Y-Axis Labels
+    for i in 0..=4 {
+        let visual_pct = i as f32 * 0.25;
+        let marker_y = y_offset + graph_height - (visual_pct * graph_height as f32) as usize;
+        let label_val = min_val + (range * visual_pct); // Apply min_val offset
+
+        if marker_y < buffer.len() / stride {
+            for px in x_offset..(x_offset + graph_width) {
+                if px < stride { buffer[marker_y * stride + px] = 0x555555; }
+            }
+        }
+        render_text(buffer, &format!("{:.1}", label_val), x_offset.saturating_sub(label_margin), marker_y.saturating_sub(8), stride, 0xCCCCCC, 2);
+    }
+
+    // 4. Render Data
+    let get_y = |val: f32| -> usize {
+        let norm = ((val - min_val) / range).clamp(0.0, 1.0);
+        y_offset + graph_height - (norm * graph_height as f32) as usize
+    };
+
+    // Find where "0.0" sits on the Y-axis so bar charts grow up/down correctly
+    let zero_y = get_y(0.0f32.clamp(min_val, max_val));
+
+    match graph_type {
+        GraphType::Bar => {
+            for (i, &val) in history.iter().enumerate() {
+                
+                // Change the color for flr specific bar based on its value
+                let bar_color = if title == "FLR" && val <= 0.0001 {
+                    0x222244 // Dark Grey
+                } else {
+                    color_orig
+                };
+                // -----------------------
+
+                let py_val = get_y(val);
+                
+                // Determine top and bottom of the bar relative to the zero-line
+                let (py_top, py_bottom) = if py_val < zero_y {
+                    (py_val, zero_y) // Positive value
+                } else {
+                    (zero_y, py_val) // Negative value
+                };
+
+                let bar_h = py_bottom.saturating_sub(py_top);
+                
+                for bh in 0..=bar_h {
+                    let py = py_bottom.saturating_sub(bh);
+                    if py >= buffer.len() / stride { continue; }
+                    for bw in 0..bar_width {
+                        let px = x_offset + (i * (bar_width + spacing)) + bw;
+                        if px < stride { 
+                            buffer[py * stride + px] = bar_color; // Use our new variable here
+                        }
+                    }
+                }
+            }
+        }
+        GraphType::Line => {
+            let mut prev_point: Option<(usize, usize)> = None;
+            for (i, &val) in history.iter().enumerate() {
+                let px = x_offset + (i * (bar_width + spacing)) + (bar_width / 2);
+                let py = get_y(val);
+
+                if let Some((prev_x, prev_y)) = prev_point {
+                    draw_thick_line(buffer, stride, prev_x, prev_y, px, py, color_orig, 2); // Use color_orig directly here
+                }
+                prev_point = Some((px, py));
+                
+                if py < buffer.len() / stride && px < stride {
+                    buffer[py * stride + px] = 0xFFFFFF; // White dot
+                }
+            }
+        }
+    }
+}
+
+
 pub fn render_graph(
     buffer: &mut [u32],
     history: &VecDeque<f32>,
     x_offset: usize,
     y_offset: usize,
     stride: usize,
-    target_bps: f32,
+    perfect_info_msg: PerfectInfoBitrateMessage, 
     fps: f32,
     graph_height: usize,
     max_size_kb: f32,
     use_log: bool,
+
 ) {
     // 1. MADE WIDER: Increased width and spacing
     let bar_width = 7;
@@ -861,6 +1047,8 @@ pub fn render_graph(
             (kb_val / max_size_kb).min(1.0).max(0.0)
         }
     };
+
+    let target_bps = perfect_info_msg.bitrate_mbps * 1_000_000.0; 
 
     let current_target_kb = (target_bps / (8.0 * fps)) / 1024.0;
 

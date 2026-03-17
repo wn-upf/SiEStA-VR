@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --export=ALL
-#SBATCH -J xr_sims               # job name
+#SBATCH -J ABR_5m            # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # Nodes PER TASK (Always 1 for arrays)
 #SBATCH --array=0-1             # <--- INPUT: Run n nodes total (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
 #SBATCH --mem=64G                # memory
 #SBATCH --time=96:00:00          # max walltime
-#SBATCH --cpus-per-task=30       # CPUs per node
+#SBATCH --cpus-per-task=24       # CPUs per node
 #SBATCH -o logs_hpc/%x_%A_%a.out # %A=Job ID, %a=Array Index (Log separation)
 #SBATCH -e logs_hpc/%x_%A_%a.err
 
@@ -18,24 +18,22 @@ module load x264
 
 export PATH=$HOME/.local/bin:$PATH
 
-NUMBER_OF_JOBS=10
-SERIAL_EXECUTION=0
+NUMBER_OF_JOBS=8
+SERIAL_EXECUTION=1
 
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
 
-results_path_name="Results_figMLO_allusers_RWALK_10seeds_ABR"
+results_path_name="Results_MLO_ABR_10seeds_5m"
 simTime=45.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
 MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
-RANDOM_SEEDS=({1..5})
-# RANDOM_SEEDS=(1)
-
+RANDOM_SEEDS=({1..10})
 ############################################################################# <- BG Traffic
 N_BGs=( 0 )                    ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
@@ -43,10 +41,10 @@ rates_bps_BGtraffic=( 5000 )    ## Packets per second
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
-MLO_CONFIGS=( "SLO80" "MLO80-80" "MLO80-320") ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels 
-# MLO_CONFIGS=( "MLO0" ) ## MLO0: SLO -> 80 Mhz, MLO1 -> MLO 80_80 MHz , MLO2 -> MLO 80_160 MH< , MLO3 -> MLO 80_320 MHz channels ## MLO 4 -> 160-320 MHz
+MLO_CONFIGS=( "SLO80" "MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
+# MLO_CONFIGS=( "SLO80"  )                         ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 
-RANDOMWALK_TEST=1            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
+RANDOMWALK_TEST=0            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 distance_list=( 5.0 )         ## Distance to AP of users                                     (ignored when RANDOMWALK_TEST==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
@@ -55,19 +53,18 @@ packs_per_ampdu=( 64 )
 
 ############################################################################# <- VR streaming Parameters
 # CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
-CODEC_CHOICES=( "HEVC" "AV1")
-N_XR=( 1 2 3 4 5 6 7 8 9 10 11 12 ) 
+CODEC_CHOICES=( "HEVC" )
+N_XR=( 9 10) 
 # N_XR=( 1 ) 
 
 initial_bitrate_mbps=( 100.0 )  
 fps_list=( 90.0 )    
-ABR_ENABLED=( 1 2 )               ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+ABR_ENABLED=( 1 2 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
 video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
-intrarefresh_choice=( 1 )       ## ONly if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
-GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor 
-
+intrarefresh_choice=( 1 )       ## Only if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
+GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor to them
 ############################################################################# <- RL training Parameters
 observation_type=1              ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 
 reward_mode=0
@@ -185,7 +182,20 @@ rm "$temp_file"
 # 2. WEIGHTED SORTING (The "NXR" Fix)
 # In your echo command, $nxr is the 7th argument.
 # This sorts the file so the heaviest simulations (highest NXR) are at the top.
-awk '{print $8, $0}' "$RAW_FILE" | sort -rn | cut -d' ' -f2- > "$WEIGHTED_FILE"
+# awk '{print $8, $0}' "$RAW_FILE" | sort -rn | cut -d' ' -f2- > "$WEIGHTED_FILE"
+
+awk '{
+    mlo_weight = 1; # Default weight
+    
+    if ($27 == "MLO80-320") { mlo_weight = 2 }
+    else if ($27 == "MLO80-80") { mlo_weight = 2 }
+    else if ($27 == "SLO80") { mlo_weight = 1 }
+    else {mlo_weight = 2}
+    
+    # Prepend the NXR and the MLO weight to the line
+    print $8, mlo_weight, $0
+}' "$RAW_FILE" | sort -k1,1rn -k2,2rn | cut -d' ' -f3- > "$WEIGHTED_FILE"
+
 
 # 3. Get node info
 TOTAL_TASKS=$(wc -l < "$WEIGHTED_FILE")

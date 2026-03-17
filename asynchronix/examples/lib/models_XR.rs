@@ -4,7 +4,7 @@ use crate::lib::alvr_control_socket::{
 use crate::lib::gcc_nada_estimator::{GccBandwidthEstimator, GCC_INIT_CONFIGURED_BITRATE};
 use crate::lib::{
     alvr_stream_socket::{StreamReceiver, VideoCodec},
-    BATCH_SIZE_CSV_VIDEO,
+    BATCH_SIZE_CSV_VIDEO, GraphType, render_stat_graph
 };
 // use async_std::future::pending;
 use crate::lib::alvr_packets::{DeviceMotion, Pose};
@@ -134,7 +134,7 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 #[allow(unused)]
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.35; // X:1 scaling for 4k visuals in lower res screens
+pub const SCALE_FACTOR_WINDOW: f64 = 0.2; // X:1 scaling for 4k visuals in lower res screens
 pub const SCALE_FACTOR_GRAPH: f32 = 0.6;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -154,8 +154,17 @@ pub const KEEP_FRAMES_DISK_INDEX: usize = 200;
 pub const ALPHA_THROUGHPUT: f32 = 0.1;
 pub const ALPHA_EWMA_FOWD_OBS: f32 = 0.1;
 const RL_WINDOW_OBSERVATION_SIZE: usize = 5;
-const GRAPH_HUD_HEIGHT: usize = 470;
+const GRAPH_HUD_HEIGHT: usize = 800;
 
+const MAX_STAT_HISTORY_GRAPH: usize = 256;
+
+// Group the histories to require only one Mutex lock per frame
+#[derive(Default)]
+pub struct ClientHistory {
+    pub ow_delay: VecDeque<f32>,
+    pub rtt: VecDeque<f32>,
+    pub flr: VecDeque<f32>,
+}
 static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
 // Wrapper for Command to match your syntax
@@ -197,10 +206,13 @@ pub struct FramePair {
     reference_raw: Option<Vec<u8>>,
     frame_id: usize,
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PerfectInfoBitrateMessage {
     bitrate_ladder_bps: Option<Vec<f32>>,
-    bitrate_mbps: f32,
+    pub bitrate_mbps: f32,
+    pub last_rtt_ms: f32, 
+    pub last_owdg_ms: f32, 
+    pub last_flr_window: f32, 
 }
 
 fn get_counter() -> &'static AtomicUsize {
@@ -2106,7 +2118,7 @@ impl BitrateManager {
                 if max_bps != 0.0 && min_bps != 0.0 {
                     let mut vec_bitrates = Vec::new();
 
-                    let nest_bitrate_step_count = 10;
+                    let nest_bitrate_step_count = 9;
 
                     let bitrate_step_size_bps =
                         (max_bps - min_bps) / nest_bitrate_step_count as f32;
@@ -2122,6 +2134,8 @@ impl BitrateManager {
 
                     bitrate_ladder_std_bps = vec_bitrates.clone();
 
+
+                    print_magenta!("BITRATE LADDER FOR NEST: {:?}", vec_bitrates); 
                     // let bitrate_step_size_bps = bitrate_step_size_bps;
 
                     // let last_target_bitrate_bps = upper_bound_bitrate(
@@ -3364,6 +3378,10 @@ pub struct XRServer {
 
     pub edca_be_mode: bool,
     pub codec_selection: VideoCodec,
+
+    last_rtt_ms_perfect_info: f32,   
+    last_owdg_ms_perfect_info: f32,   
+    last_flr_window_perfect_info: f32, 
 }
 #[allow(unused)]
 impl XRServer {
@@ -3503,6 +3521,9 @@ impl XRServer {
             edca_be_mode,
             codec_selection,
             results_path: results_path_name.to_string(), 
+            last_flr_window_perfect_info: 0.0, 
+            last_owdg_ms_perfect_info: 0.0, 
+            last_rtt_ms_perfect_info: 0.0, 
         }
     }
 
@@ -3627,13 +3648,17 @@ impl XRServer {
                         // debug_bgprint!(DebugColor::Teal, "RTT = {:.9}", rtt.as_secs_f64());
                         let netstats = network_stats.clone();
 
-                        let (peak_network_throughput_bps, frame_interarrival_s) =
+                        let (peak_network_throughput_bps, frame_interarrival_s, filtered_ow, deadline_frames_flr, rtt_ms) =
                             self.STATISTICS_MANAGER.report_network_statistics(
                                 network_stats.clone(),
                                 rtt,
                                 now,
                                 self.bitrate_manager.last_target_bitrate_bps,
                             );
+                        
+                        self.last_rtt_ms_perfect_info = rtt_ms; 
+                        self.last_flr_window_perfect_info = deadline_frames_flr; 
+                        self.last_owdg_ms_perfect_info = filtered_ow; 
 
                         // BITRATE_MANAGER.lock().report_network_statistics
                         self.bitrate_manager.report_network_statistics_abr(
@@ -3687,12 +3712,16 @@ impl XRServer {
                     let shards_lost = inner.shards_lost;
 
                     for (frame, shard) in frames_lost.iter().zip(shards_lost.iter()) {
-                        print_red!(
-                            "[Deadline Server {}] Frame {} lost {} shards",
-                            self.ip_self,
-                            frame,
-                            shard
-                        );
+                        if DEBUG_PRINT_ENABLED{
+                            print_red!(
+                                "[Deadline Server {}] Frame {} lost {} shards",
+                                self.ip_self,
+                                frame,
+                                shard
+                            );
+
+                        }
+                       
                         let time_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32();
                         self.STATISTICS_MANAGER.report_shard_and_frame_loss(
                             1 as usize,
@@ -4181,9 +4210,16 @@ impl XRServer {
                             self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                         self.bitrate_manager.last_update_instant = now;
 
+                        let last_rtt_ms = self.last_rtt_ms_perfect_info;  
+                        let last_owdg_ms = self.last_owdg_ms_perfect_info;  
+                        let last_flr_window = self.last_flr_window_perfect_info;  
+
                         let perfect_info_message = PerfectInfoBitrateMessage {
                             bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),
                             bitrate_mbps: last_bitrate_mbps,
+                            last_rtt_ms, 
+                            last_owdg_ms, 
+                            last_flr_window, 
                         };
 
                         self.output_perfect_information_bitrate
@@ -4219,13 +4255,16 @@ impl XRServer {
                         }
                     }
 
-                    let last_bitrate_mbps =
+                    let (last_bitrate_mbps)  =
                         self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
 
                     let perfect_info_message = PerfectInfoBitrateMessage {
                         bitrate_ladder_bps: self.bitrate_manager.bitrate_ladder_bps.clone(),
                         bitrate_mbps: last_bitrate_mbps,
+                        last_rtt_ms: self.last_rtt_ms_perfect_info, 
+                        last_owdg_ms: self.last_owdg_ms_perfect_info, 
+                        last_flr_window: self.last_flr_window_perfect_info, 
                     };
                     
                     self.output_perfect_information_bitrate
@@ -4309,8 +4348,8 @@ impl XRServer {
                 let floor = 0.5 * ideal;
 
                 let time_until_next_frame = if FPS_RANDOMIZED_EPSILON_RENDERING_SERVER {
-                    let normal: Normal<f32> = Normal::new(0.0, 0.001).unwrap(); // σ = 0.001s
-                    let epsilon = normal.sample(&mut rand::thread_rng());
+
+                    let epsilon = rand::thread_rng().gen_range(-0.001..=0.001); 
                     let dt = (ideal + epsilon).max(floor);
                     Duration::from_secs_f32(dt)
                 } else {
@@ -4923,7 +4962,7 @@ pub struct XRClient {
     last_seen_id: usize,
 
     last_throughput_avg: f32,
-    last_bitrate_perfect_info_update_mbps: f32,
+    last_perfect_info_update: PerfectInfoBitrateMessage,
     bitrate_ladder_perfect_info_update: Vec<f32>,
 
     frame_size_exp_avg: f32,
@@ -4947,6 +4986,8 @@ pub struct XRClient {
     frame_size_history_vec: VecDeque<usize>,
     window_tx: Option<UnboundedSender<WindowCommand>>, // The handle to talk to the window
     consecutive_lost_counter: usize,
+
+    pub client_history_metrics: ClientHistory, 
 }
 
 #[allow(unused)]
@@ -4993,8 +5034,7 @@ impl XRClient {
             Self::spawn_display_thread(rx, initial_title, window_width, total_height);
         }
 
-        // let everest_enabled = abr_mode == 2;
-        let everest_enabled = true; // to enable info on heuristics for RL mode
+        let everest_enabled = abr_mode == 2;
 
         Self {
             decoder_queue: DroppingVecDeque::new(DECODER_BUFFERING_FRAMES),
@@ -5070,7 +5110,7 @@ impl XRClient {
             last_throughput_avg: 0.0,
 
             original_decoder: None,
-            last_bitrate_perfect_info_update_mbps: 0.0,
+            last_perfect_info_update: PerfectInfoBitrateMessage::default(),
 
             frame_size_exp_avg: 0.0,
             d_short_exp_avg: 0.0,
@@ -5091,6 +5131,7 @@ impl XRClient {
             frame_size_history_vec: VecDeque::from(vec![0; DISPLAY_GRAPH_MAX_FRAMES]),
             window_tx: Some(tx), // Store the tokio sender
             consecutive_lost_counter: 0,
+            client_history_metrics: ClientHistory::default(), // for metrics visualization
         }
     }
 
@@ -5371,23 +5412,6 @@ impl XRClient {
         vecc
     }
 
-    // pub async fn send_tracking(&mut self, tracking: Tracking, now: TaiTime<0>) {
-    //     if let Some(mut sender) = self.output_app_tracking_sender.clone() {
-    //         let arc_inner_app_receiver = sender.app_network_interface.clone();
-
-    //         let send_result = sender.send_header_tracking(&tracking, now);
-    //         let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
-
-    //         XRClient::read_app_send_network_interface(
-    //             self,
-    //             (),
-    //             now,
-    //             buffer,
-    //             arc_inner_app_receiver,
-    //         )
-    //         .await; // FUNCTION TO HANDLE NETWORK PACKETS!
-    //     }
-    // }
 
     fn read_app_send_network_interface<'a>(
         &'a mut self,
@@ -5475,14 +5499,6 @@ impl XRClient {
                                 };
                                 packet.data_inner = buffer[..packet_length as usize].to_vec();
 
-                                // if packet.header_alvr.shard_index == 0 {
-                                //     println!(
-                                //         "{:.9}-CLIENT {} sending {:#?}",
-                                //         now.duration_since(self.t_0).as_secs_f64(),
-                                //         self.server_ip,
-                                //         packet.header_alvr
-                                //     );
-                                // }
 
                                 if !self.edca_be_mode {
                                     if stream_id == TRACKING {
@@ -5550,10 +5566,10 @@ impl XRClient {
         packetz.header_alvr.stream_id = CONTROL_STREAM;
         packetz.header_alvr.next_packet_index = 2;
 
-        if matches!(packet, ClientControlPacket::NetworkStatistics(..)) {
-            packetz.edca_ac = EdcaAc::Video;
+        if matches!(packet, ClientControlPacket::NetworkStatistics(..)) {       // All UL traffic is given the AC_VO for max priority in channel access
+            packetz.edca_ac = EdcaAc::Voice;                                
         } else if matches!(packet, ClientControlPacket::DeadlineShardLossStat(..)) {
-            packetz.edca_ac = EdcaAc::BestEffort;
+            packetz.edca_ac = EdcaAc::Voice;
         }
 
         context
@@ -5842,7 +5858,7 @@ impl XRClient {
                             + (1.0 - interarrival / T_LONG_EVEREST_S) * self.d_long_exp_avg;
 
                         // let d_lower_everest =
-                        let mut bitrate_mbps = self.last_bitrate_perfect_info_update_mbps;
+                        let mut bitrate_mbps = self.last_perfect_info_update.bitrate_mbps; // we assume the client always has perfect knowledge of the current bitrate. 
                         let bitrate_bps_comp = bitrate_mbps * 1e6;
 
                         if !self.bitrate_ladder_perfect_info_update.is_empty() {
@@ -6058,206 +6074,6 @@ impl XRClient {
         }
     }
 
-    async fn cleanup_old_frames_vmaf(
-        &mut self,
-        now: TaiTime<0>,
-        current_frame_id: usize,
-        ip: IpAddr,
-    ) -> Result<()> {
-        // Only clean up frames that are at least 100 frames behind
-        if current_frame_id <= KEEP_FRAMES_DISK_INDEX {
-            return Ok(());
-        }
-
-        let oldest_frame_to_keep = current_frame_id - KEEP_FRAMES_DISK_INDEX;
-        // let base_dir = &format!("Sink_for_video/{}", &self.name_folder);
-
-        // // Define paths to reference and lossy directories
-        // let ref_dir = format!("{}/{}/reference_rgb", base_dir, ip);
-        // let lossy_dir = format!("{}/{}/lossy_rgb", base_dir, ip);
-
-        self.flush_vmaf_buffer(now).await?;
-
-        // Function to remove older frames from a directory
-        let remove_old_frames = |dir: &str| -> Result<()> {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.filter_map(Result::ok) {
-                    let path = entry.path();
-                    if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-                        // Parse frame number from filename (e.g., "frame_0042.rgb")
-                        if let Some(frame_str) = filename
-                            .strip_prefix("frame_")
-                            .and_then(|s| s.strip_suffix(".rgb"))
-                        {
-                            if let Ok(frame_num) = frame_str.parse::<usize>() {
-                                if frame_num < oldest_frame_to_keep {
-                                    if let Err(e) = std::fs::remove_file(&path) {
-                                        eprintln!(
-                                            "Failed to remove old frame {}: {}",
-                                            path.display(),
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-
-        // // Clean up both directories
-        // remove_old_frames(&ref_dir)?;
-        // remove_old_frames(&lossy_dir)?;
-
-        if current_frame_id % KEEP_FRAMES_DISK_INDEX == 0 {
-            println!("Cleaned up frames older than {}", oldest_frame_to_keep);
-        }
-
-        Ok(())
-    }
-
-    pub async fn vmaf_analysis(
-        &mut self,
-        sample: Vec<u8>,
-        ref_sample: Vec<u8>,
-        now: TaiTime<0>,
-        frame_id: usize,
-        ip: IpAddr,
-    ) -> Result<()> {
-        // Skip if either sample is empty
-        if sample.is_empty() || ref_sample.is_empty() {
-            println!(
-                "Skipping VMAF analysis for frame {} - sample sizes: {}, ref: {}",
-                frame_id,
-                sample.len(),
-                ref_sample.len()
-            );
-            return Ok(());
-        }
-
-        // Add current frame to buffer
-        self.vmaf_frame_buffer
-            .push_back((sample, ref_sample, now, frame_id, ip));
-
-        // Only process if we have enough frames
-        if self.vmaf_frame_buffer.len() < self.vmaf_batch_size {
-            return Ok(());
-        }
-
-        // Process the accumulated frames
-        println!(
-            "Processing batch of {} frames for VMAF analysis",
-            self.vmaf_frame_buffer.len()
-        );
-
-        // Ensure metrics logger is initialized
-        if self.metrics_logger.is_none() {
-            println!("INITIALIZING LOGGER IN FOLDER: {}", self.name_folder);
-
-            match MetricsLogger::new(ip, &self.name_folder, &self.results_path) {
-                Ok(logger) => {
-                    println!("Initialized metrics logger for VMAF analysis");
-                    self.metrics_logger = Some(logger);
-                }
-                Err(e) => {
-                    eprintln!("Failed to initialize metrics logger: {}", e);
-                    self.vmaf_frame_buffer.clear(); // Clear buffer on error
-                    return Ok(());
-                }
-            }
-        }
-
-        // Process all frames in buffer
-        while !self.vmaf_frame_buffer.is_empty() {
-            // Take one frame from the buffer
-            if let Some((frame_sample, frame_ref, frame_time, frame_id, frame_ip)) =
-                self.vmaf_frame_buffer.pop_front()
-            {
-                // Create directories for temporary storage if they don't exist
-                let base_dir = format!("Sink_for_video/{}", &self.name_folder);
-                if let Err(e) = std::fs::create_dir_all(&base_dir) {
-                    eprintln!("Failed to create directory {}: {}", base_dir, e);
-                    continue;
-                }
-
-                // Save frames to temporary files
-                let ref_path = format!(
-                    "{}/{}/reference_rgb/frame_{:04}.rgb",
-                    base_dir, frame_ip, frame_id
-                );
-                let lossy_path = format!(
-                    "{}/{}/lossy_rgb/frame_{:04}.rgb",
-                    base_dir, frame_ip, frame_id
-                );
-
-                // Create parent directories
-                if let Err(e) =
-                    std::fs::create_dir_all(format!("{}/{}/reference_rgb", base_dir, frame_ip))
-                {
-                    eprintln!("Failed to create reference directory: {}", e);
-                    continue;
-                }
-                if let Err(e) =
-                    std::fs::create_dir_all(format!("{}/{}/lossy_rgb", base_dir, frame_ip))
-                {
-                    eprintln!("Failed to create lossy directory: {}", e);
-                    continue;
-                }
-
-                // Write frames to disk
-                if let Err(e) = std::fs::write(&ref_path, &frame_ref) {
-                    eprintln!("Failed to write reference frame: {}", e);
-                    continue;
-                }
-                if let Err(e) = std::fs::write(&lossy_path, &frame_sample) {
-                    eprintln!("Failed to write lossy frame: {}", e);
-                    continue;
-                }
-
-                let timestamp_ms = frame_time.duration_since(self.t_0).as_secs_f64();
-
-                // Process frame metrics
-                if let Some(logger) = &self.metrics_logger {
-                    logger.process_frame_metrics(
-                        frame_id as u64,
-                        timestamp_ms,
-                        &ref_path,
-                        &lossy_path,
-                        frame_ip,
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn flush_vmaf_buffer(&mut self, now: TaiTime<0>) -> Result<()> {
-        // If there are any frames left in the buffer, process them
-        if !self.vmaf_frame_buffer.is_empty() {
-            println!(
-                "Flushing {} remaining frames in VMAF buffer",
-                self.vmaf_frame_buffer.len()
-            );
-
-            // Get IP from the first frame in buffer (or use a default)
-            let default_ip = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
-            let ip = self
-                .vmaf_frame_buffer
-                .front()
-                .map(|f| f.4)
-                .unwrap_or(default_ip);
-
-            // Call vmaf_analysis with empty frames to trigger processing of buffer
-            self.vmaf_analysis(Vec::new(), Vec::new(), now, 0, ip)
-                .await?;
-        }
-
-        Ok(())
-    }
-
     pub fn vsync<'a>(
         &'a mut self,
         _: (),
@@ -6442,7 +6258,7 @@ impl XRClient {
                     &mut display_buffer,         // Pass the buffer
                     window_width,                // Pass the stride
                     now,
-                    self.last_bitrate_perfect_info_update_mbps,
+                    self.last_perfect_info_update.clone(),
                     lost_frames_aux,
                     &mut self.lost_frames_buffer,
                     &self.bm_string,
@@ -6451,6 +6267,7 @@ impl XRClient {
                     self.framerate,
                     self.codec_selection,
                     SCALE_FACTOR_GRAPH,
+                    &mut self.client_history_metrics, 
                 );
 
                 // Reset tracking
@@ -6530,20 +6347,18 @@ impl XRClient {
         }
     }
 
-    pub async fn input_perfect_information_bitrate(
+    pub async fn input_perfect_information_bitrate( // Metrics used only for visualization in decoder window, also we assume Client knows bitrate in real time.  
         &mut self,
         bitrate_msg: PerfectInfoBitrateMessage,
         context: &Context<Self>,
     ) {
         let now = context.scheduler.time();
+        self.last_perfect_info_update = bitrate_msg.clone();
 
-        let bitrate = bitrate_msg.bitrate_mbps;
-        // if self.bitrate_ladder_perfect_info_update.is_none(){
         if let Some(veccc) = bitrate_msg.bitrate_ladder_bps {
             self.bitrate_ladder_perfect_info_update = veccc;
         }
         // crate::print_brown!("{} - perfect bitrate input: {} | Bitrate ladder : {:#?}", format_elapsed!(now), bitrate, self.bitrate_ladder_perfect_info_update);
-        self.last_bitrate_perfect_info_update_mbps = bitrate;
     }
 
     pub async fn input_coordinates_STA(&mut self, coords: Coords, context: &Context<Self>) {
@@ -6755,10 +6570,10 @@ fn render_text_with_alpha(
 pub fn display_single_frame_with_info_buffered(
     raw_frame: &[u8],
     frame_id: usize,
-    display_buffer: &mut [u32], // <--- Change 1: Pass the slice
-    stride: usize,              // <--- Change 2: Need width for indexing
+    display_buffer: &mut [u32],
+    stride: usize,             
     now: TaiTime<0>,
-    bitrate_mbps: f32,
+    last_info_update: PerfectInfoBitrateMessage,
     lost_frames: VecDeque<(u32, u32)>,
     lost_frames_buffer: &mut LostFramesBuffer,
     bm: &str,
@@ -6767,6 +6582,7 @@ pub fn display_single_frame_with_info_buffered(
     framerate: f32,
     codec_type: VideoCodec,
     graph_scale_factor: f32,
+    history: &mut ClientHistory, 
 ) -> bool {
     // 1) Compute scaled dimensions
     let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
@@ -6818,179 +6634,130 @@ pub fn display_single_frame_with_info_buffered(
     let bottom_padding = 20;
     let graph_y_pos = total_h.saturating_sub(bottom_padding + target_graph_height);
 
+
+   // 5) Update Static Histories
+   if history.ow_delay.is_empty() {
+        history.ow_delay.resize(MAX_STAT_HISTORY_GRAPH, 0.0);
+    }
+    history.ow_delay.push_back(last_info_update.last_owdg_ms as f32);
+    if history.ow_delay.len() > MAX_STAT_HISTORY_GRAPH { history.ow_delay.pop_front(); }
+
+    if history.rtt.is_empty() {
+        history.rtt.resize(MAX_STAT_HISTORY_GRAPH, 0.0);
+    }
+    history.rtt.push_back(last_info_update.last_rtt_ms as f32);
+    if history.rtt.len() > MAX_STAT_HISTORY_GRAPH { history.rtt.pop_front(); }
+
+    if history.flr.is_empty() {
+        history.flr.resize(MAX_STAT_HISTORY_GRAPH, 0.0);
+    }
+    history.flr.push_back(last_info_update.last_flr_window as f32 / framerate );
+    if history.flr.len() > MAX_STAT_HISTORY_GRAPH { history.flr.pop_front(); }
+
+
+    // 6) Layout Math for Stacked Graphs
+   // 6) Layout Math for Stacked Graphs
+    let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
+    let target_graph_height = (90.0 * graph_scale_factor) as usize; 
+    let vertical_spacing = target_graph_height + 60; 
+    let mut current_y = scaled_h + 210; 
+    let graph_x = 85;
+
+    // --- GRAPH 1: Frame Size ---
     crate::lib::render_graph(
-        display_buffer, // <--- Pass external buffer
-        &history_f32,
-        85,
-        graph_y_pos,
-        stride, // <--- Pass stride
-        bitrate_mbps * 1_000_000.0,
-        framerate,
-        target_graph_height,
-        200_000.0,
-        true,
+        display_buffer, &history_f32, graph_x, current_y, stride,
+        last_info_update.clone(), framerate, target_graph_height, 200_000.0, true,
+    );
+    current_y += vertical_spacing;
+
+    // --- GRAPH 2: OW Delay (Line) ---
+    render_stat_graph(
+        display_buffer, &history.ow_delay, graph_x, current_y, stride, 
+        target_graph_height, Some((-3.0, 3.0)), "OW Delay", "[ms]", GraphType::Line, 0x00FFFF
+    );
+    current_y += vertical_spacing;
+
+    // --- GRAPH 3: RTT (Line) ---
+    render_stat_graph(
+        display_buffer, &history.rtt, graph_x, current_y, stride, 
+        target_graph_height, Some((0.0, 50.0)), "RTT", "[ms]", GraphType::Line, 0xFFA500
+    );
+    current_y += vertical_spacing;
+
+    // --- GRAPH 4: FLR (Bar) ---
+    render_stat_graph(
+        display_buffer, &history.flr, graph_x, current_y, stride, 
+        target_graph_height, Some((0.0, 0.1)), "FLR", "[%]", GraphType::Bar, 0xFF4444
     );
 
-    // 6) Render Text
+    // 7) Render Text (Right Side Info Grid)
     let margin = 10;
-    let line_h = 25;
-    let line_hh = 100;
-
-    const SCALE_TEXT_WINDOW: usize = 3;
-    // --- RIGHT SIDE ELEMENTS ---
-    let right_margin = 600;
+    const SCALE_TEXT_WINDOW: usize = 2;
+    
+    // THE FIX: Changed from 600 to 480 to push the box neatly against the right edge
+    let right_margin = 480; 
     let right_x = scaled_w.saturating_sub(right_margin);
-
-    // let right_margin = 600;
-    // let text_x = scaled_w.saturating_sub(right_margin);
-    // let first_y = scaled_h + 30;
-
-    // // Existing Codec position
-    // let right_margin = 600;
-    // let text_x = scaled_w.saturating_sub(right_margin);
-    // let line_spacing = 50; // Vertical distance between lines
-
-    // // 1. Render Codec (Already in your code)
-    // // --- Step 6: Render Text (Unified HUD) ---
-    // let flashy_yellow = 0xFFFF00;
-
-    // // Vertical Alignment Variables
-    // let first_y = scaled_h + 30;  // Same starting Y for both sides
-    // let line_spacing = 33;        // Same spacing for both sides
-
-    // // 1. Codec
-    // render_text(
-    //     display_buffer,
-    //     &format!("Codec: {}", codec_type),
-    //     right_x,
-    //     first_y,
-    //     stride,
-    //     flashy_yellow,
-    //     SCALE_TEXT_WINDOW,
-    // );
-
-    // // 2. Last Seen Frame ID
-    // render_text(
-    //     display_buffer,
-    //     &format!("Frame ID: {}", frame_id),
-    //     right_x,
-    //     first_y + line_spacing,
-    //     stride,
-    //     flashy_yellow,
-    //     SCALE_TEXT_WINDOW,
-    // );
-
-    // // 3. Video Timestep
-    // render_text(
-    //     display_buffer,
-    //     &format!("Time:  {:5.5}", format_elapsed!(now)),
-    //     right_x,
-    //     first_y + (line_spacing * 2),
-    //     stride,
-    //     flashy_yellow,
-    //     SCALE_TEXT_WINDOW,
-    // );
-    //   // 1. Bitrate (now in flashy yellow, aligned with Codec)
-    // render_text(
-    //     display_buffer,
-    //     &format!("Bitrate: {:.2} Mbps", bitrate_mbps),
-    //     right_x,
-    //     first_y + (line_spacing * 3),
-    //     stride,
-    //     flashy_yellow,
-    //     SCALE_TEXT_WINDOW,
-    // );
-
-    // // 2. ABR Mode (now in flashy yellow, aligned with Frame ID)
-    // render_text(
-    //     display_buffer,
-    //     &format!("{}", bm),
-    //     right_x,
-    //     first_y + (line_spacing * 4),
-    //     stride,
-    //     flashy_yellow,
-    //     SCALE_TEXT_WINDOW,
-    // );
-    let first_y: usize = scaled_h + 30;
+    
+    // Align the HUD Grid with the top of the HUD area
+    let first_y: usize = scaled_h + 30; 
     let flashy_yellow = 0xFFFF00;
-    let row_height = 33; // Vertical spacing between rows
-    let cell_width = 450; // Total width for the Key-Value pair block
-    let bar_position = Some(180); // Pixels from the left of the cell
-                                  // --- HUD GRID RENDERING ---
+    let row_height = 22; 
+    let cell_width = 350; 
+    let bar_position = Some(180); 
 
     let time_str = format!("{:.6}", format_elapsed!(now));
     crate::render_hud_grid!(
         display_buffer,
-        stride,
-        right_x,
-        first_y,
-        flashy_yellow,
-        SCALE_TEXT_WINDOW,
-        cell_width,
-        row_height,
-        true,         // Enable Box
-        bar_position, // Enable Bar at 180px
+        stride, right_x, first_y, flashy_yellow, SCALE_TEXT_WINDOW,
+        cell_width, row_height, true, bar_position,
         [
             ("Time", &time_str),
             ("Frame ID", frame_id),
             ("Codec", codec_type),
             ("ABR Mode", bm),
-            ("Bitrate", format!("{:.2} Mbps", bitrate_mbps))
+            ("Bitrate", format!("{:.2} Mbps", last_info_update.bitrate_mbps))
         ]
     );
-
-    // 7) Handle lost-frames buffer updates
+    
+    // 8) Handle lost-frames buffer updates
     if !lost_frames.is_empty() {
         for (frames, shards) in lost_frames {
             let msg = format!(
                 "T: {:5.5} Frame lost: {} - Missing shards: {}",
-                format_elapsed!(now),
-                frames,
-                shards,
+                format_elapsed!(now), frames, shards,
             );
             lost_frames_buffer.add_message(msg);
         }
     }
 
-    // 8) Render rolling messages in the gap between video and graph
-    let message_margin = 10;
-    let message_line_height = 25;
-
-    // The "ceiling" is the bottom of the video
-    let gap_start_y = scaled_h + message_margin;
-    // The "floor" is the top of the graph
-    let gap_end_y = graph_y_pos.saturating_sub(message_margin);
+    // 9) Render rolling messages (Frame loss)
+    let message_margin = 20;     // Margin from the bottom/side of the video
+    let message_line_height = 30; 
+    let video_bottom_y = scaled_h.saturating_sub(message_margin);
 
     for (i, entry) in lost_frames_buffer.messages.iter().rev().enumerate() {
         let opacity = calculate_opacity(entry);
-        if opacity == 0 {
-            continue;
-        }
+        if opacity == 0 { continue; }
 
-        // Calculate Y: Start at gap_start_y and move down for each message
-        let y_pos = gap_start_y + (i * message_line_height);
+        // Stack messages UPWARDS from the bottom of the video
+        let y_pos = video_bottom_y.saturating_sub((i + 1) * message_line_height);
 
-        // Check if we are about to overlap the graph
-        if y_pos + message_line_height < gap_end_y {
+        // Safety: Don't render if it's pushed off the top of the video
+        if y_pos > message_margin {
             render_text_with_alpha(
-                display_buffer,
-                &entry.text,
-                margin, // Keep left margin
-                y_pos,
+                display_buffer, 
+                &entry.text, 
+                message_margin, // X position (left margin)
+                y_pos, 
                 stride,
-                0xFF0000, // Red for errors
-                2,        // Scale
+                0xFF0000, 
+                2, 
                 opacity,
             );
         } else {
-            // Optional: break if we run out of space to avoid
-            // drawing messages over the graph
             break;
         }
     }
-
-    // Note: Window Title update is removed.
-    // The caller must construct the title string and pass it to the Window Actor.
 
     true
 }
@@ -7095,60 +6862,61 @@ impl STA_extended {
         }
     }
 
+    pub fn move_coordinates_everest<'a>(
+            &'a mut self,
+            _: (),
+            context: &'a Context<Self>,
+        ) -> impl Future<Output = ()> + Send + 'a {
+            async move {
+                const LIMIT_RADIUS: f64 = 11.5; 
+                const STEP_SIZE: f64 = 0.02; 
+                const DELTA_T: f64 = 0.01;
+                // Persistence factor: 0.0 is pure random, 0.9 is very "straight" lines
+                const PERSISTENCE: f64 = 0.65; 
 
-    pub fn move_coordinates_everest<'a>(  // More 'random walk' version
-        &'a mut self,
-        _: (),
-        context: &'a Context<Self>,
-    ) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            const LIMIT_RADIUS: f64 = 11.5; 
-            const STEP_SIZE: f64 = 0.02; 
-            const DELTA_T: f64 = 0.01;
-            // Persistence factor: 0.0 is pure random, 0.9 is very "straight" lines
-            const PERSISTENCE: f64 = 0.65; 
+                {
+                    let mut rng = rand::thread_rng();
 
-            {
-                let mut rng = rand::thread_rng();
-
-                // 1. Correlated Angle (Smooths the movement)
-                let random_offset = rng.gen_range(-PI/4.0..PI/4.0);
-                self.current_angle = (self.current_angle * PERSISTENCE) + (random_offset * (1.0 - PERSISTENCE));
-
-                let dx = STEP_SIZE * self.current_angle.cos();
-                let dy = STEP_SIZE * self.current_angle.sin();
-
-                let mut new_x = self.sta_coordinates.x + dx;
-                let mut new_y = self.sta_coordinates.y + dy;
-
-                // 2. True Circular Boundary Check
-                let rel_x = new_x - self.orig_sta_coordinates.x;
-                let rel_y = new_y - self.orig_sta_coordinates.y;
-                let dist_from_center = (rel_x.powi(2) + rel_y.powi(2)).sqrt();
-
-                if dist_from_center > LIMIT_RADIUS {
-                    // Reflective logic: point back toward the center
-                    let angle_to_center = f64::atan2(-rel_y, -rel_x);
-                    self.current_angle = angle_to_center + rng.gen_range(-PI/4.0..PI/4.0);
+                    // 1. True Correlated Angle (Smooths the movement in all 360 degrees)
+                    let random_offset = rng.gen_range(-std::f64::consts::PI/4.0..std::f64::consts::PI/4.0);
                     
-                    // Keep it just inside the boundary
-                    new_x = self.orig_sta_coordinates.x + (rel_x / dist_from_center) * (LIMIT_RADIUS - 0.01);
-                    new_y = self.orig_sta_coordinates.y + (rel_y / dist_from_center) * (LIMIT_RADIUS - 0.01);
+                    // [FIX APPLIED HERE]: We ADD the offset to the current angle rather than decaying the angle itself.
+                    self.current_angle += random_offset * (1.0 - PERSISTENCE);
+
+                    let dx = STEP_SIZE * self.current_angle.cos();
+                    let dy = STEP_SIZE * self.current_angle.sin();
+
+                    let mut new_x = self.sta_coordinates.x + dx;
+                    let mut new_y = self.sta_coordinates.y + dy;
+
+                    // 2. True Circular Boundary Check
+                    let rel_x = new_x - self.orig_sta_coordinates.x;
+                    let rel_y = new_y - self.orig_sta_coordinates.y;
+                    let dist_from_center = (rel_x.powi(2) + rel_y.powi(2)).sqrt();
+
+                    if dist_from_center > LIMIT_RADIUS {
+                        // Reflective logic: point back toward the center
+                        let angle_to_center = f64::atan2(-rel_y, -rel_x);
+                        self.current_angle = angle_to_center + rng.gen_range(-std::f64::consts::PI/4.0..std::f64::consts::PI/4.0);
+                        
+                        // Keep it just inside the boundary
+                        new_x = self.orig_sta_coordinates.x + (rel_x / dist_from_center) * (LIMIT_RADIUS - 0.01);
+                        new_y = self.orig_sta_coordinates.y + (rel_y / dist_from_center) * (LIMIT_RADIUS - 0.01);
+                    }
+
+                    self.sta_coordinates.x = new_x;
+                    self.sta_coordinates.y = new_y;
                 }
 
-                self.sta_coordinates.x = new_x;
-                self.sta_coordinates.y = new_y;
+                self.outport_coords_xrclient.send(self.sta_coordinates.clone()).await;
+
+                context.scheduler.schedule_event(
+                    std::time::Duration::from_secs_f64(DELTA_T),
+                    Self::move_coordinates_everest,
+                    (),
+                ).unwrap();
             }
-
-            self.outport_coords_xrclient.send(self.sta_coordinates.clone()).await;
-
-            context.scheduler.schedule_event(
-                Duration::from_secs_f64(DELTA_T),
-                Self::move_coordinates_everest,
-                (),
-            ).unwrap();
         }
-    }
 
     pub fn move_coordinates(&mut self, distance_to_move: f64) {
         // brownian movement for STA

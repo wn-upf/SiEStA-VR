@@ -62,7 +62,7 @@ pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
 pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
-pub const REFILL_INTERVAL: Duration = Duration::from_micros(5);
+pub const REFILL_INTERVAL_TBF: Duration = Duration::from_micros(500);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
 
 pub const DEBUG_EDCA: bool = false;
@@ -1163,7 +1163,7 @@ impl QueueMechanism {
         // let mut _dbg_delay  = Duration::ZERO;
         // let _dbg_packet = packet.clone();
 
-        if self.network_emulator.last_update_time + REFILL_INTERVAL <= now {
+        if self.network_emulator.last_update_time + REFILL_INTERVAL_TBF <= now {
             self.network_emulator.refill_all_buckets(now);
         }
         self.log_active_bw_patterns(now, &packet);
