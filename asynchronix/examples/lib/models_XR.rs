@@ -164,6 +164,7 @@ pub struct ClientHistory {
     pub ow_delay: VecDeque<f32>,
     pub rtt: VecDeque<f32>,
     pub flr: VecDeque<f32>,
+    pub trajectory: VecDeque<Vec3>, 
 }
 static PRINT_COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
 
@@ -625,25 +626,27 @@ impl HevcDecoder {
 
         let decoder_string3 = decoder_string.clone(); // Stderr handler with improved debug output
 
-        const LOG_ERRORS_HEVC_DECODER: bool = true;
+        const LOG_ERRORS_HEVC_DECODER: bool = false;
 
         let mut stderr_container;
-        if LOG_ERRORS_HEVC_DECODER {
-            let stderr_handle = std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                for line in reader.lines() {
+        let stderr_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                
+                if LOG_ERRORS_HEVC_DECODER{
                     match line {
-                        Ok(l) => eprintln!("[{} HEVC]: {}", decoder_string3, l),
-                        Err(_) => break,
-                    }
+                    Ok(l) => eprintln!("[{} HEVC]: {}", decoder_string3, l),
+                    Err(_) => break,
                 }
+                }
+                else{
+                    // keep quiet
+                }
+            }
 
-                println!("{decoder_string3} Decoder stderr reader thread exit");
-            });
-            stderr_container = Some(stderr_handle);
-        } else {
-            stderr_container = None;
-        }
+            println!("{decoder_string3} Decoder stderr reader thread exit");
+        });
+        stderr_container = Some(stderr_handle);
 
         println!(
             "{decoder_str} 📹 HevcDecoder initialized with {}x{} resolution",
@@ -6191,7 +6194,11 @@ impl XRClient {
                     }
                     // Update Stats
                     self.last_processed_frame_id = id_f;
-                    self.frame_size_history_vec.pop_front();
+
+                    if self.frame_size_history_vec.len() > MAX_STAT_HISTORY_GRAPH {
+                        self.frame_size_history_vec.pop_front();
+                    }
+                    
                     self.frame_size_history_vec.push_back(video_frame.len());
 
                     // Keyframe logic
@@ -6268,6 +6275,7 @@ impl XRClient {
                     self.codec_selection,
                     SCALE_FACTOR_GRAPH,
                     &mut self.client_history_metrics, 
+                    self.current_coordinates_tracking, 
                 );
 
                 // Reset tracking
@@ -6362,6 +6370,7 @@ impl XRClient {
     }
 
     pub async fn input_coordinates_STA(&mut self, coords: Coords, context: &Context<Self>) {
+        // print_red!("Updating coords: {:?}", coords); 
         self.current_coordinates_tracking = self.coords_to_vec3(coords); // not much else to do, tracking output will just use the last value 3*FPS. Angular velocities might be considered in future, but not yet; TODO
     }
 
@@ -6583,6 +6592,7 @@ pub fn display_single_frame_with_info_buffered(
     codec_type: VideoCodec,
     graph_scale_factor: f32,
     history: &mut ClientHistory, 
+    client_coords: Vec3, 
 ) -> bool {
     // 1) Compute scaled dimensions
     let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
@@ -6639,20 +6649,28 @@ pub fn display_single_frame_with_info_buffered(
    if history.ow_delay.is_empty() {
         history.ow_delay.resize(MAX_STAT_HISTORY_GRAPH, 0.0);
     }
-    history.ow_delay.push_back(last_info_update.last_owdg_ms as f32);
-    if history.ow_delay.len() > MAX_STAT_HISTORY_GRAPH { history.ow_delay.pop_front(); }
-
     if history.rtt.is_empty() {
         history.rtt.resize(MAX_STAT_HISTORY_GRAPH, 0.0);
     }
-    history.rtt.push_back(last_info_update.last_rtt_ms as f32);
-    if history.rtt.len() > MAX_STAT_HISTORY_GRAPH { history.rtt.pop_front(); }
-
     if history.flr.is_empty() {
         history.flr.resize(MAX_STAT_HISTORY_GRAPH, 0.0);
     }
+    // if history.trajectory.is_empty(){
+    //     history.trajectory.resize(MAX_STAT_HISTORY_GRAPH, Vec3::default())
+    // }
+
+    history.ow_delay.push_back(last_info_update.last_owdg_ms as f32);
+    if history.ow_delay.len() > MAX_STAT_HISTORY_GRAPH { history.ow_delay.pop_front(); }
+    history.rtt.push_back(last_info_update.last_rtt_ms as f32);
+    if history.rtt.len() > MAX_STAT_HISTORY_GRAPH { history.rtt.pop_front(); }
+
     history.flr.push_back(last_info_update.last_flr_window as f32 / framerate );
     if history.flr.len() > MAX_STAT_HISTORY_GRAPH { history.flr.pop_front(); }
+
+    history.trajectory.push_back(client_coords); 
+    if history.trajectory.len() > 9000 { // Keep last 300 frames (~100 seconds at 30fps)
+        history.trajectory.pop_front();
+    }
 
 
     // 6) Layout Math for Stacked Graphs
@@ -6660,60 +6678,92 @@ pub fn display_single_frame_with_info_buffered(
     let history_f32: VecDeque<f32> = size_history.iter().map(|&x| x as f32).collect();
     let target_graph_height = (90.0 * graph_scale_factor) as usize; 
     let vertical_spacing = target_graph_height + 60; 
-    let mut current_y = scaled_h + 210; 
+    let mut current_y = scaled_h + 270; 
     let graph_x = 85;
 
-    // --- GRAPH 1: Frame Size ---
-    crate::lib::render_graph(
-        display_buffer, &history_f32, graph_x, current_y, stride,
-        last_info_update.clone(), framerate, target_graph_height, 200_000.0, true,
+
+    render_stat_graph(
+        display_buffer, &history_f32, graph_x, current_y, stride, 
+        target_graph_height, Some((0.0, 200_000.0)), "Frame size", "[kB]", GraphType::Bar, 0x00FFFF, Some(last_info_update.clone()), framerate,
     );
     current_y += vertical_spacing;
 
     // --- GRAPH 2: OW Delay (Line) ---
     render_stat_graph(
         display_buffer, &history.ow_delay, graph_x, current_y, stride, 
-        target_graph_height, Some((-3.0, 3.0)), "OW Delay", "[ms]", GraphType::Line, 0x00FFFF
+        target_graph_height, Some((-3.0, 3.0)), "OW Delay", "[ms]", GraphType::Line, 0x00FFFF, None, framerate,
     );
     current_y += vertical_spacing;
 
     // --- GRAPH 3: RTT (Line) ---
     render_stat_graph(
         display_buffer, &history.rtt, graph_x, current_y, stride, 
-        target_graph_height, Some((0.0, 50.0)), "RTT", "[ms]", GraphType::Line, 0xFFA500
+        target_graph_height, Some((0.0, 50.0)), "RTT", "[ms]", GraphType::Line, 0xFFA500, None, framerate,
     );
     current_y += vertical_spacing;
 
     // --- GRAPH 4: FLR (Bar) ---
     render_stat_graph(
         display_buffer, &history.flr, graph_x, current_y, stride, 
-        target_graph_height, Some((0.0, 0.1)), "FLR", "[%]", GraphType::Bar, 0xFF4444
+        target_graph_height, Some((0.0, 0.1)), "FLR", "[%]", GraphType::Bar, 0xFF4444, None, framerate,
+    );
+
+    // Client Trajectory graph: (x,y,z)
+   // --- SIDE-BY-SIDE LAYOUT (Trajectory Graph + Info Grid) ---
+    // 1. Shared constants for clean alignment
+    let layout_y = scaled_h + 40; // Common top edge (leaves room for the trajectory title)
+    let padding_right = 20;       // Gap from the right edge of the screen
+    let gap_between = 50;         // Gap between the Graph and the Grid
+
+    // 2. Info Grid Dimensions (Rightmost element)
+    let grid_cell_width = 350;
+    let grid_x = scaled_w.saturating_sub(grid_cell_width + padding_right);
+    
+    // 3. Trajectory Graph Dimensions (Placed immediately left of the Grid)
+    let cell_size = 12; 
+    let traj_graph_w = 24 * cell_size; // 288px
+    let traj_x = grid_x.saturating_sub(traj_graph_w + gap_between);
+    
+    // Adjust world scale. Higher = more zoomed out.
+    let world_scale = 2.0; 
+
+    // Render Trajectory Graph
+    crate::lib::render_trajectory_graph(
+        display_buffer,
+        stride,
+        &history.trajectory,
+        traj_x,
+        layout_y,
+        cell_size,
+        framerate,
+        world_scale
     );
 
     // 7) Render Text (Right Side Info Grid)
-    let margin = 10;
     const SCALE_TEXT_WINDOW: usize = 2;
-    
-    // THE FIX: Changed from 600 to 480 to push the box neatly against the right edge
-    let right_margin = 480; 
-    let right_x = scaled_w.saturating_sub(right_margin);
-    
-    // Align the HUD Grid with the top of the HUD area
-    let first_y: usize = scaled_h + 30; 
     let flashy_yellow = 0xFFFF00;
-    let row_height = 22; 
-    let cell_width = 350; 
+    let row_height = 24; // Slightly increased for better breathability
     let bar_position = Some(180); 
 
     let time_str = format!("{:.6}", format_elapsed!(now));
+    
+    // Render Info Grid
     crate::render_hud_grid!(
         display_buffer,
-        stride, right_x, first_y, flashy_yellow, SCALE_TEXT_WINDOW,
-        cell_width, row_height, true, bar_position,
+        stride, 
+        grid_x, 
+        layout_y, 
+        flashy_yellow, 
+        SCALE_TEXT_WINDOW,
+        grid_cell_width, 
+        row_height, 
+        true, 
+        bar_position,
         [
             ("Time", &time_str),
             ("Frame ID", frame_id),
             ("Codec", codec_type),
+            ("Framerate",format!("{:.0} FPS", framerate)),
             ("ABR Mode", bm),
             ("Bitrate", format!("{:.2} Mbps", last_info_update.bitrate_mbps))
         ]

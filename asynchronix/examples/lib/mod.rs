@@ -10,7 +10,7 @@ use tai_time::TaiTime;
 use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
 use crate::lib::models_XR::PerfectInfoBitrateMessage;
-use crate::lib::models_mm1k::STR_PLUS_MODE_MLO;
+use crate::lib::models_mm1k::{STR_PLUS_MODE_MLO, AP_X, AP_Y};
 use colored::Colorize;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = false;
+pub const USE_FFMPEG_DEMO: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -834,6 +834,223 @@ fn render_loading_spinner(buffer: &mut [u32], width: usize, height: usize, time:
     }
 }
 
+pub fn render_trajectory_graph(
+    buffer: &mut [u32],
+    stride: usize,
+    trajectory: &VecDeque<glam::Vec3>, // <-- FIX 1: Accept Vec3 instead of (f32, f32)
+    x_offset: usize,
+    y_offset: usize,
+    cell_size: usize,
+    fps: f32,
+    world_scale: f32,
+) {
+    if trajectory.is_empty() { return; }
+
+    let cols = 24;
+    let rows = 12;
+    let graph_w = cols * cell_size;
+    let graph_h = rows * cell_size;
+
+    // 1. Draw Background Plate & 24x12 Grid
+    for y in 0..graph_h {
+        let py = y_offset + y;
+        if py >= buffer.len() / stride { continue; }
+
+        for x in 0..graph_w {
+            let px = x_offset + x;
+            if px >= stride { continue; }
+
+            let idx = py * stride + px;
+            
+            // Draw Center Crosshairs brighter, standard grid lines darker
+            let is_center_x = x == (cols / 2) * cell_size;
+            let is_center_y = y == (rows / 2) * cell_size;
+            let is_grid_x = x % cell_size == 0;
+            let is_grid_y = y % cell_size == 0;
+
+            if is_center_x || is_center_y {
+                buffer[idx] = 0x888888; // Bright Grey axes
+            } else if is_grid_x || is_grid_y {
+                buffer[idx] = 0x333333; // Dark Grey grid
+            } else {
+                // Dim the background
+                let current = buffer[idx];
+                let r = ((current >> 16) & 0xFF) / 4;
+                let g = ((current >> 8) & 0xFF) / 4;
+                let b = (current & 0xFF) / 4;
+                buffer[idx] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    // Border
+    for x in 0..graph_w {
+        if x_offset + x < stride {
+            if y_offset < buffer.len() / stride { buffer[y_offset * stride + x_offset + x] = 0xAAAAAA; }
+            if y_offset + graph_h < buffer.len() / stride { buffer[(y_offset + graph_h) * stride + x_offset + x] = 0xAAAAAA; }
+        }
+    }
+
+    // Helper to map World Space (0,0 at center) to Pixel Space
+    let get_pixel_coords = |world_x: f32, world_y: f32| -> (usize, usize) {
+        // Shift the world coordinates so AP is at the center (0,0)
+        let relative_x = world_x - AP_X as f32;
+        let relative_y = world_y - AP_Y as f32;
+
+        let px_offset = (relative_x / world_scale) * cell_size as f32;
+        // Assuming your standard 2D top-down view maps Y-up to pixel-down (subtraction)
+        let py_offset = (relative_y / world_scale) * cell_size as f32; 
+
+        let center_px = (cols / 2) * cell_size;
+        let center_py = (rows / 2) * cell_size;
+
+        let final_x = (center_px as f32 + px_offset).clamp(0.0, graph_w as f32 - 1.0) as usize;
+        let final_y = (center_py as f32 - py_offset).clamp(0.0, graph_h as f32 - 1.0) as usize; 
+
+        (x_offset + final_x, y_offset + final_y)
+    };
+
+    // 2. Draw Trajectory Lines
+    let mut prev_point: Option<(usize, usize)> = None;
+    let window_size = fps.round() as usize;
+    let total_points = trajectory.len();
+
+    for (i, pos) in trajectory.iter().enumerate() {
+
+        let (px, py) = get_pixel_coords(pos.x, pos.y); 
+
+        if let Some((prev_x, prev_y)) = prev_point {
+            let color = if i >= total_points.saturating_sub(window_size) {
+                0xFF3333 // Bright Red for recent frames
+            } else {
+                0xDDDDDD // Off-White for older history
+            };
+
+            draw_thick_line(buffer, stride, prev_x, prev_y, px, py, color, 3);
+        }
+        prev_point = Some((px, py));
+    }
+
+    if let Some(current_pos) = trajectory.back() {
+        let (px, py) = get_pixel_coords(current_pos.x, current_pos.y);
+        let dot_radius = 4; 
+        let dot_color = 0xFF0000; 
+
+        // Draw the red dot
+        for dy in 0..=(dot_radius * 2) {
+            let cy = py + dy;
+            let final_y = cy.saturating_sub(dot_radius);
+            
+            if final_y >= buffer.len() / stride { continue; }
+
+            for dx in 0..=(dot_radius * 2) {
+                let cx = px + dx;
+                let final_x = cx.saturating_sub(dot_radius);
+                
+                if final_x < stride {
+                    buffer[final_y * stride + final_x] = dot_color;
+                }
+            }
+        }
+
+        // NEW: Draw coordinates text next to the red dot
+        let coord_str = format!("({:.1}, {:.1})", current_pos.x, current_pos.y);
+        
+        // Offset the text by 8 pixels right and 8 pixels up so it doesn't overlap the dot
+        let text_x = (px + 8).min(stride.saturating_sub(1));
+        let text_y = py.saturating_sub(8);
+        
+        render_text(buffer, &coord_str, text_x, text_y, stride, 0xFF0000, 1);
+    }
+    // DRAW THE AP // 
+    let center_x_px = x_offset + (cols / 2) * cell_size;
+    let center_y_px = y_offset + (rows / 2) * cell_size;
+    let ap_dot_radius = 3;
+    let ap_color = 0xFFFFFF; // White
+
+    // Draw the white square/dot
+    for dy in 0..=(ap_dot_radius * 2) {
+        let cy = center_y_px + dy;
+        let final_y = cy.saturating_sub(ap_dot_radius);
+        
+        if final_y >= buffer.len() / stride { continue; }
+
+        for dx in 0..=(ap_dot_radius * 2) {
+            let cx = center_x_px + dx;
+            let final_x = cx.saturating_sub(ap_dot_radius);
+            
+            if final_x < stride {
+                buffer[final_y * stride + final_x] = ap_color;
+            }
+        }
+    }
+
+    // Render "AP" text slightly offset from the dot so they don't overlap
+    render_text(
+        buffer, 
+        "AP", 
+        center_x_px + 6, 
+        center_y_px.saturating_sub(12), 
+        stride, 
+        0xFFFFFF, 
+        1 // Using scale 1 so it doesn't overpower the graph
+    );
+
+
+    // Render Title
+    render_text(buffer, "Client trajectory (X,Y)", x_offset, y_offset.saturating_sub(25), stride, 0xFFFFFF, 2);
+
+
+    // 4. Draw 5-meter markers on the axes
+    // Calculate the maximum visible distance in meters from the center AP
+    let max_x_meters = ((cols / 2) as f32 * world_scale).ceil() as i32;
+    let max_y_meters = ((rows / 2) as f32 * world_scale).ceil() as i32;
+
+    let marker_color = 0xAAAAAA; // Light grey for the text and ticks
+
+    // Draw X-axis markers (Horizontal axis, Y = AP_Y)
+    for m in (-max_x_meters..=max_x_meters).step_by(5) {
+        if m == 0 { continue; } // Skip 0 since the AP label is already there
+        
+        let world_x = AP_X as f32 + m as f32;
+        let (px, py) = get_pixel_coords(world_x, AP_Y as f32);
+        
+        // Draw a small vertical tick mark
+        for dy in 0..=4 {
+            let tick_y = (py + dy).saturating_sub(2);
+            if tick_y < buffer.len() / stride && px < stride {
+                buffer[tick_y * stride + px] = marker_color;
+            }
+        }
+
+        // Render the text slightly below the tick mark
+        let label = format!("{}m", m);
+        render_text(buffer, &label, px.saturating_sub(4), py + 6, stride, marker_color, 1);
+    }
+
+    // Draw Y-axis markers (Vertical axis, X = AP_X)
+    for m in (-max_y_meters..=max_y_meters).step_by(5) {
+        if m == 0 { continue; } 
+        
+        let world_y = AP_Y as f32 + m as f32;
+        let (px, py) = get_pixel_coords(AP_X as f32, world_y);
+        
+        // Draw a small horizontal tick mark
+        for dx in 0..=4 {
+            let tick_x = (px + dx).saturating_sub(2);
+            if tick_x < stride && py < buffer.len() / stride {
+                buffer[py * stride + tick_x] = marker_color;
+            }
+        }
+
+        // Render the text slightly to the right of the tick mark
+        let label = format!("{}m", m);
+        render_text(buffer, &label, px + 6, py.saturating_sub(4), stride, marker_color, 1);
+    }
+}
+
+
+
 pub fn render_stat_graph(
     buffer: &mut [u32],
     history: &VecDeque<f32>,
@@ -846,20 +1063,34 @@ pub fn render_stat_graph(
     unit: &str,
     graph_type: GraphType,
     color_orig: u32,
+    info_update: Option<PerfectInfoBitrateMessage>, 
+    fps: f32, 
+
 ) {
     if history.is_empty() { return; }
 
-    let bar_width = 7;
-    let spacing = 2;
-    let graph_width = history.len() * (bar_width + spacing);
+    let bar_width = 2;
+    let spacing = 1;
+    
+    // --- FIX: Cap the graph width so it doesn't exceed the window (stride) ---
+    // Leave a 20px padding on the right side of the screen
+    let max_allowed_width = stride.saturating_sub(x_offset + 20); 
+    let max_items = max_allowed_width / (bar_width + spacing);
+    
+    // Determine how many items we can actually draw
+    let items_to_draw = std::cmp::min(history.len(), max_items);
+    let graph_width = items_to_draw * (bar_width + spacing);
+    // -------------------------------------------------------------------------
+
     let title_margin = 40;
     let label_margin = 75;
 
     // 1. Draw Background Plate
     let bg_y_start = y_offset.saturating_sub(title_margin + 10);
-    let bg_y_end = y_offset + graph_height + 20;
+    let bg_y_end = y_offset + graph_height + 30; 
     let bg_x_start = x_offset.saturating_sub(label_margin + 20);
-    let bg_x_end = x_offset + graph_width + 50;
+    // Ensure the background plate also respects the window bounds
+    let bg_x_end = std::cmp::min(x_offset + graph_width + 50, stride); 
 
     for y in bg_y_start..bg_y_end {
         if y >= buffer.len() / stride { continue; }
@@ -887,21 +1118,24 @@ pub fn render_stat_graph(
     let range = if (max_val - min_val).abs() < f32::EPSILON { 1.0 } else { max_val - min_val };
 
     // Title & Unit
-    render_text(buffer, title, x_offset, y_offset.saturating_sub(title_margin), stride, 0xFFFFFF, 3);
+    render_text(buffer, title, x_offset, y_offset.saturating_sub(title_margin), stride, 0xFFFFFF, 2);
     render_text(buffer, unit, x_offset.saturating_sub(label_margin), y_offset.saturating_sub(title_margin), stride, 0xCCCCCC, 2);
 
     // 3. Draw Grid & Y-Axis Labels
     for i in 0..=4 {
         let visual_pct = i as f32 * 0.25;
         let marker_y = y_offset + graph_height - (visual_pct * graph_height as f32) as usize;
-        let label_val = min_val + (range * visual_pct); // Apply min_val offset
+        let label_val = min_val + (range * visual_pct);
 
         if marker_y < buffer.len() / stride {
             for px in x_offset..(x_offset + graph_width) {
                 if px < stride { buffer[marker_y * stride + px] = 0x555555; }
             }
         }
-        render_text(buffer, &format!("{:.1}", label_val), x_offset.saturating_sub(label_margin), marker_y.saturating_sub(8), stride, 0xCCCCCC, 2);
+        
+        // --- FIX: Changed the final argument from 2 to 1 to reduce Y-axis text scale ---
+        render_text(buffer, &format!("{:.1}", label_val), x_offset.saturating_sub(label_margin), marker_y.saturating_sub(8), stride, 0xCCCCCC, 1);
+        // -------------------------------------------------------------------------------
     }
 
     // 4. Render Data
@@ -910,64 +1144,153 @@ pub fn render_stat_graph(
         y_offset + graph_height - (norm * graph_height as f32) as usize
     };
 
-    // Find where "0.0" sits on the Y-axis so bar charts grow up/down correctly
     let zero_y = get_y(0.0f32.clamp(min_val, max_val));
 
-    match graph_type {
-        GraphType::Bar => {
-            for (i, &val) in history.iter().enumerate() {
-                
-                // Change the color for flr specific bar based on its value
-                let bar_color = if title == "FLR" && val <= 0.0001 {
-                    0x222244 // Dark Grey
-                } else {
-                    color_orig
-                };
-                // -----------------------
+    let zero_y = get_y(0.0f32.clamp(min_val, max_val));
 
-                let py_val = get_y(val);
-                
-                // Determine top and bottom of the bar relative to the zero-line
-                let (py_top, py_bottom) = if py_val < zero_y {
-                    (py_val, zero_y) // Positive value
-                } else {
-                    (zero_y, py_val) // Negative value
-                };
+        match graph_type {
+            GraphType::Bar => {
+                // 4a. Draw the bars first
+                for (i, &val) in history.iter().take(items_to_draw).enumerate() {
+                    
+                    let bar_color = if title == "FLR" && val <= 0.0001 {
+                        0x222244 
+                    } else {
+                        color_orig
+                    };
 
-                let bar_h = py_bottom.saturating_sub(py_top);
-                
-                for bh in 0..=bar_h {
-                    let py = py_bottom.saturating_sub(bh);
-                    if py >= buffer.len() / stride { continue; }
-                    for bw in 0..bar_width {
-                        let px = x_offset + (i * (bar_width + spacing)) + bw;
-                        if px < stride { 
-                            buffer[py * stride + px] = bar_color; // Use our new variable here
+                    let py_val = get_y(val);
+                    
+                    let (py_top, py_bottom) = if py_val < zero_y {
+                        (py_val, zero_y) 
+                    } else {
+                        (zero_y, py_val) 
+                    };
+
+                    let bar_h = py_bottom.saturating_sub(py_top);
+                    
+                    for bh in 0..=bar_h {
+                        let py = py_bottom.saturating_sub(bh);
+                        if py >= buffer.len() / stride { continue; }
+                        for bw in 0..bar_width {
+                            let px = x_offset + (i * (bar_width + spacing)) + bw;
+                            if px < stride { 
+                                buffer[py * stride + px] = bar_color; 
+                            }
                         }
                     }
                 }
+
+                // --- NEW: 4b. Draw Dynamic Target Line (If info is provided) ---
+                if let Some(info) = &info_update {
+                    
+                    let target_val: f32 = match title {
+                        "Frame size" => {
+                            // 1. Convert Mbps to total bits per second
+                            let target_bps = info.bitrate_mbps * 1_000_000.0; 
+                            
+                            // 2. Divide by (8 * fps) to get target BYTES per frame.
+                            // (Because your size_history array is currently in raw bytes)
+                            target_bps / (8.0 * fps)
+                        },
+                        "FLR" => 0.05, // Put your actual FLR target here
+                        _ => 0.0,      // Default fallback
+                    };
+
+                    let target_y_base = get_y(target_val);
+                    let line_thickness = 3;
+                    let col_tgt = 0xFF00FF; // Flashy Magenta
+
+                    // Only draw if the target is vertically on-screen
+                    if target_y_base < buffer.len() / stride {
+                        
+                        // Draw the horizontal line
+                        for ty in 0..line_thickness {
+                            let target_y = target_y_base.saturating_sub(ty);
+                            if target_y >= buffer.len() / stride { continue; }
+
+                            for px in x_offset..(x_offset + graph_width) {
+                                if px < stride {
+                                    // Overwrite pixels to put the line "on top" of the bars
+                                    buffer[target_y * stride + px] = col_tgt;
+                                }
+                            }
+                        }
+
+                        // Draw the label to the right, safely bounded by stride
+                        let text_x = std::cmp::min(x_offset + graph_width + 10, stride.saturating_sub(60));
+                        render_text(
+                            buffer,
+                            // Adjust the text to show the correct units (Bytes)
+                            &format!("TGT: {:.0} B", target_val), 
+                            text_x,
+                            target_y_base.saturating_sub(8),
+                            stride,
+                            col_tgt,
+                            1,
+                        );
+                    }
+                }
+                // ---------------------------------------------------------------
             }
-        }
         GraphType::Line => {
             let mut prev_point: Option<(usize, usize)> = None;
-            for (i, &val) in history.iter().enumerate() {
+            // --- FIX: Add `.take(items_to_draw)` to prevent rendering off-screen ---
+            for (i, &val) in history.iter().take(items_to_draw).enumerate() {
                 let px = x_offset + (i * (bar_width + spacing)) + (bar_width / 2);
                 let py = get_y(val);
 
                 if let Some((prev_x, prev_y)) = prev_point {
-                    draw_thick_line(buffer, stride, prev_x, prev_y, px, py, color_orig, 2); // Use color_orig directly here
+                    draw_thick_line(buffer, stride, prev_x, prev_y, px, py, color_orig, 2); 
                 }
                 prev_point = Some((px, py));
                 
                 if py < buffer.len() / stride && px < stride {
-                    buffer[py * stride + px] = 0xFFFFFF; // White dot
+                    buffer[py * stride + px] = 0xFFFFFF; 
                 }
             }
         }
     }
+
+    // 5. Draw X-Axis Ticks (Multiples of FPS and Max)
+    let fps_u = fps.round() as usize;
+    let axis_y = y_offset + graph_height;
+    
+    if fps_u > 0 && items_to_draw > 0 {
+        // We use a separate loop to ensure ticks are drawn ON TOP of any lines/bars
+        for i in 0..items_to_draw {
+            // Check if it's a multiple of the framerate OR the very last item drawn
+            if i > 0 && (i % fps_u == 0 || i == items_to_draw - 1) {
+                let px = x_offset + (i * (bar_width + spacing)) + (bar_width / 2);
+                
+                // Draw a 5-pixel tall downward tick line
+                for ty in 0..5 {
+                    let tick_y = axis_y + ty;
+                    if tick_y < buffer.len() / stride && px < stride {
+                        buffer[tick_y * stride + px] = 0xAAAAAA; // Light grey tick
+                    }
+                }
+                
+                // Render the frame number label
+                let label = format!("{}", i);
+                // Roughly center the text under the tick (assuming ~6px width per char at scale 1)
+                let text_x = px.saturating_sub(label.len() * 3); 
+                
+                render_text(
+                    buffer,
+                    &label,
+                    text_x,
+                    axis_y + 8, // Place text below the tick
+                    stride,
+                    0xAAAAAA,
+                    1, // Small text size
+                );
+            }
+        }
+    }
+
+
 }
-
-
 pub fn render_graph(
     buffer: &mut [u32],
     history: &VecDeque<f32>,

@@ -17,13 +17,13 @@ use crate::lib::models_XR::{HEIGHT_ENCODER, WIDTH_ENCODER};
 use lib::alvr_stream_socket::{ChunkedHevcEncoder, ChunkedSoftwareHevcEncoder};
 
 pub const CSV_FOLDER_STR: &str = "aaa_csv_framesizes";
-pub const VIDEO_NAME: &str = "snow_short";
+pub const VIDEO_NAME: &str = "furbo";
 
 const CHUNK_DURATION: f64 = 5.0;
 const NUM_SEMAPHORES: usize = 3; // NUMBER OF PARALLEL TASKS.
 
 const FRAMERATE_VALUES: [u32; 3] = [60, 90, 120];
-const CODECS_TO_RUN: [VideoCodec; 1] = [VideoCodec::HEVC];
+const CODECS_TO_RUN: [VideoCodec; 2] = [VideoCodec::HEVC, VideoCodec::AV1];
 
 // Instead of consts, we use a small helper
 fn get_paths() -> (PathBuf, PathBuf) {
@@ -289,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
     let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
 
     // Define the new configurations to loop through
-    let intra_options = [true, false];
+    let intra_options = [true];
 
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES));
     let mut tasks = Vec::new();
@@ -307,7 +307,7 @@ async fn main() -> anyhow::Result<()> {
                 let current_gop_options = if intra_refresh {
                     vec![max_chunk_gop] 
                 } else {
-                    vec![60, 120, max_chunk_gop]
+                    vec![120]
                 };
 
                 for &gop_size in &current_gop_options {

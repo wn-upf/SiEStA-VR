@@ -2541,11 +2541,9 @@ impl<H: Serialize> StreamSender<H> {
         // Compose filename with suffix
         let file_with_fps;
 
-        if final_file.contains("snow")  || final_file == "swordsmith" {
-            file_with_fps = format!("{final_file}{fps_suffix}");
-        } else {
-            file_with_fps = final_file.to_string();
-        }
+        // if final_file.contains("snow")  || final_file == "swordsmith" || final{
+        file_with_fps = format!("{final_file}{fps_suffix}");
+
 
         let input_path = get_prefix_path(&format!("video_samples_vmaf/{}", file_with_fps));
 
@@ -3091,7 +3089,7 @@ impl ReceiverDataStats {
 // }
 #[allow(unused)]
 #[derive(Clone)]
-struct FrameSizeTable {
+pub struct FrameSizeTable {
     _fps: u32,
     codec_str: String,
     mbps_cols: Vec<u32>,            // e.g. [5,10,15,...]
