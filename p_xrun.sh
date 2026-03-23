@@ -22,7 +22,10 @@ DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
-results_path_name="Results_allABR_10seeds_5m_CBR"
+
+
+results_path_name="Results_MLO_rwalk_10seeds_${SLURM_ARRAY_JOB_ID}"
+
 simTime=45.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
@@ -80,7 +83,14 @@ handle_interrupt() {
 # Set up the trap for SIGINT (Ctrl+C)
 trap handle_interrupt SIGINT
 
-sleep 4 ## for being able to see if there were any errors before sims start, else it would use the last best compiled code
+
+if [ "${SLURM_ARRAY_TASK_ID:-0}" -eq 0 ]; then
+    mkdir -p "$results_path_name"
+    cp "$0" "$results_path_name/run_script_backup.sh"
+fi
+
+
+# sleep 4 ## for being able to see if there were any errors before sims start, else it would use the last best compiled code
 
 for test in "${EMU_TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
@@ -165,7 +175,10 @@ echo " --- Number of simulations: $SIM_COUNT --- \n"
 
 NODE_ID=${SLURM_ARRAY_TASK_ID:-0} 
 RAW_FILE="all_cmds_raw_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
-WEIGHTED_FILE="weighted_tasks_${JOB_ID}_${NODE_ID}.txt"
+WEIGHTED_FILE="weighted_tasks_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
+NODE_TASKS_FILE="tasks_node_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
+
+
 
 cat "$temp_file" > "$RAW_FILE"
 rm "$temp_file"

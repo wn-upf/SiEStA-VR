@@ -159,7 +159,8 @@ impl CsvSink {
         let path = dir.join(format!("{file_stem}.csv"));
 
         // Open for append only, not read
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+
+        let file = OpenOptions::new().create(true).write(true).truncate(true).open(&path)?;
 
         // Recheck header by scanning first byte, not metadata length
         let is_empty = {
