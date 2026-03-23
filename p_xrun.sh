@@ -1,32 +1,28 @@
 #!/bin/bash
 #SBATCH --export=ALL
-#SBATCH -J 2CBR_5m         # job name
+#SBATCH -J AllABR         # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # Nodes PER TASK (Always 1 for arrays)
 #SBATCH --array=0-3             # <--- INPUT: Run n nodes total (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
 #SBATCH --mem=64G                # memory
 #SBATCH --time=96:00:00          # max walltime
-#SBATCH --cpus-per-task=24       # CPUs per node
+#SBATCH --cpus-per-task=15       # CPUs per node
 #SBATCH -o logs_hpc/%x_%A_%a.out # %A=Job ID, %a=Array Index (Log separation)
 #SBATCH -e logs_hpc/%x_%A_%a.err
 
 source ~/.bashrc
-
 module load CUDA
 module load x265
 module load x264
 
 export PATH=$HOME/.local/bin:$PATH
-
-NUMBER_OF_JOBS=10
+NUMBER_OF_JOBS=15
 SERIAL_EXECUTION=0
-
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
-
-results_path_name="Results_MLO_CBR_10seeds_5m_try2"
+results_path_name="Results_allABR_10seeds_5m_CBR"
 simTime=45.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
@@ -41,25 +37,23 @@ rates_bps_BGtraffic=( 5000 )    ## Packets per second
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
-MLO_CONFIGS=( "SLO80" "MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
+MLO_CONFIGS=( "SLO80" ) ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 # MLO_CONFIGS=( "SLO80"  )                         ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 
-RANDOMWALK_TEST=1            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
+RANDOMWALK_TEST=0            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 distance_list=( 5.0 )         ## Distance to AP of users                                     (ignored when RANDOMWALK_TEST==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
 PL=0.1
 packs_per_ampdu=( 64 )
-
 ############################################################################# <- VR streaming Parameters
 # CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
 CODEC_CHOICES=( "HEVC" )
-N_XR=( 1 2 3 4 5 6 7 8 9 10) 
+N_XR=( 1 2 3 4 5 6 7 8 ) 
 # N_XR=( 1 ) 
-
-initial_bitrate_mbps=( 10.0 100.0 )  
+initial_bitrate_mbps=( 100.0 )  
 fps_list=( 90.0 )    
-ABR_ENABLED=( 0 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+ABR_ENABLED=( 1 2 4 5 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
 video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
@@ -170,9 +164,8 @@ echo " --- Number of simulations: $SIM_COUNT --- \n"
 
 
 NODE_ID=${SLURM_ARRAY_TASK_ID:-0} 
-RAW_FILE="all_cmds_raw_${JOB_ID}_${NODE_ID}.txt"
+RAW_FILE="all_cmds_raw_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
 WEIGHTED_FILE="weighted_tasks_${JOB_ID}_${NODE_ID}.txt"
-
 
 cat "$temp_file" > "$RAW_FILE"
 rm "$temp_file"

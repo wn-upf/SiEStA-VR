@@ -59,7 +59,7 @@ pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(300);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 10.0;
+pub const OFFSET_VIDEO: f64 = 40.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -2576,8 +2576,8 @@ impl<H: Serialize> StreamSender<H> {
                 //     self.ffmpeg_maxbitrate_encoder.is_some()
                 // );
 
-                // let random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
-                let random_offset = OFFSET_VIDEO;
+                let random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
+                // let random_offset = OFFSET_VIDEO;
 
                 let third_octet = get_third_octet(ip).unwrap();
 
@@ -2654,7 +2654,7 @@ impl<H: Serialize> StreamSender<H> {
                         &bitrate_cmd,
                         self.video_chunk_duration as f64, // Chunk duration in seconds
                         format!("[HEVC ENCODER {}]", ip),
-                        OFFSET_VIDEO,
+                        random_offset,
                         framerate,
                         gop_size,
                         intra_refresh,

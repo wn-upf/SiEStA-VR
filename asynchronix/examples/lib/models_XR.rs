@@ -4235,7 +4235,6 @@ impl XRServer {
                     }
                 } else {
                     // EveRest classic, GCC, FovOptix are applied per-frame.
-
                     // println!()
                     if matches!(
                         self.bitrate_manager.bitrate_mode,

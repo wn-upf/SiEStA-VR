@@ -24,7 +24,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 pub const BATCH_SIZE_CSV_QUEUE: usize = 256 * 4;
-pub const BATCH_SIZE_CSV_VIDEO: usize = 256; 
+pub const BATCH_SIZE_CSV_VIDEO: usize = 64; 
 
 const LEGACY_PHY_DURATION:f64= 20E-6; // microseconds
 const PHY_DURATION: f64 = 100E-6;
@@ -74,7 +74,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = true;
+pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -1133,8 +1133,15 @@ pub fn render_stat_graph(
             }
         }
         
+        let label_str = if title == "FLR"{
+            format!("{:.2}", label_val)
+        }
+        else{
+            format!("{:.1}", label_val)
+        }; 
+
         // --- FIX: Changed the final argument from 2 to 1 to reduce Y-axis text scale ---
-        render_text(buffer, &format!("{:.1}", label_val), x_offset.saturating_sub(label_margin), marker_y.saturating_sub(8), stride, 0xCCCCCC, 1);
+        render_text(buffer, &label_str, x_offset.saturating_sub(label_margin), marker_y.saturating_sub(8), stride, 0xCCCCCC, 1);
         // -------------------------------------------------------------------------------
     }
 

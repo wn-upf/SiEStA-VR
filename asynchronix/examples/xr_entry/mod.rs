@@ -37,10 +37,23 @@ pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
 pub const NUM_INPUT_ARGS_SIM: usize = 32;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
-/// Draw a uniform random starting point inside the room.
+
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
-    let x = rng.gen_range(0.0..ROOM_W / 1.5); // adjust to make distances shorter by 1.5
-    let y = rng.gen_range(0.0..ROOM_H / 1.5); // adjust to make distances shorter by 1.5
+    // Determine the total spread area (shorter by 1.5)
+    let spread_w = ROOM_W / 1.5; 
+    let spread_h = ROOM_H / 1.5; 
+    
+    // Calculate the min and max bounds centered on the AP
+    let min_x = AP_X - (spread_w / 2.0);
+    let max_x = AP_X + (spread_w / 2.0);
+    
+    let min_y = AP_Y - (spread_h / 2.0);
+    let max_y = AP_Y + (spread_h / 2.0);
+
+    // Generate random coordinates within those bounds
+    let x = rng.gen_range(min_x..max_x);
+    let y = rng.gen_range(min_y..max_y);
+    
     Coords::with_coords(x, y, 0.0)
 }
 
