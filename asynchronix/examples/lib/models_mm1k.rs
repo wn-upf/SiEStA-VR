@@ -34,7 +34,7 @@ use crate::lib::{
     airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential,
     perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
     WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
-    P_TX, SLOT, UPLINK_QUEUE_SIZE,
+    P_TX, UPLINK_QUEUE_SIZE,
 };
 
 use rand::SeedableRng;
@@ -2907,7 +2907,7 @@ impl QueueModule {
                             // This prevents an immediate call and starts the 9µs slot timer loop correctly.
                             ctx.scheduler
                                 .schedule_event(
-                                    Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                    Duration::from_micros(SLOT_TIME_US), // SLOT = 9e-6
                                     Self::deque_schedule_service,
                                     (),
                                 )
@@ -2990,7 +2990,7 @@ impl QueueModule {
                         context
                             .scheduler
                             .schedule_event(
-                                Duration::from_secs_f64(SLOT), // SLOT = 9e-6
+                                Duration::from_micros(SLOT_TIME_US), // SLOT = 9e-6
                                 Self::deque_schedule_service,
                                 (),
                             )
@@ -3317,32 +3317,7 @@ impl QueueModule {
                 cloned_packet.queue_out_instant = now;
                 cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
 
-                // Update stats before moving packet
-                if let Some(stats_tx) = &self.stats_tx {
-                    let stats_update = StatsUpdate {
-                        T_s: resultz,
-                        T_q: now
-                            .duration_since(cloned_packet.queue_in_instant)
-                            .as_secs_f64(),
-                        blocked_packet_counter: self.blocked_packet_counter,
-                        arrived_packet_counter: self.arrived_packet_counter,
-                        queue_length_when_out: cloned_packet.queue_length_when_out,
-                        sta_src_id: cloned_packet.sta_src_id,
-                        sta_dest_id: cloned_packet.sta_dest_id,
-                        packet_id: cloned_packet.packet_id as i32,
-                        now,
-                        length_packet: cloned_packet.length_packet_bits,
-                        ampdu_id: self.ampdu_id,
-                        is_collision: false,
-                        collision_backoff: 0.0,
-                        link_id: link_id,
-                    };
-
-                    stats_tx
-                        .send(stats_update)
-                        .expect("Failed to send stats update");
-                }
-
+                
                 // Add the cloned packet to the AMPDU
                 self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
                 self.aux_ampdu_serviced.total_length = new_total_length;
@@ -3381,7 +3356,29 @@ impl QueueModule {
                 );
                 self.blocked_packet_counter += 1;
             } else {
-                // Successful transmission
+                // Successful transmission, update stats. 
+                if let Some(stats_tx) = &self.stats_tx {
+                    let stats_update = StatsUpdate {
+                        T_s: resultz,
+                        T_q: packet.T_q.as_secs_f64(), 
+                        blocked_packet_counter: self.blocked_packet_counter,
+                        arrived_packet_counter: self.arrived_packet_counter,
+                        queue_length_when_out: packet.queue_length_when_out,
+                        sta_src_id: packet.sta_src_id,
+                        sta_dest_id: packet.sta_dest_id,
+                        packet_id: packet.packet_id as i32,
+                        now,
+                        length_packet: packet.length_packet_bits,
+                        ampdu_id: self.ampdu_id,
+                        is_collision: false,
+                        collision_backoff: 0.0,
+                        link_id: link_id,
+                    };
+
+                    stats_tx
+                        .send(stats_update)
+                        .expect("Failed to send stats update");
+                }
                 new_ampdu_packets.push(packet);
             }
         }
@@ -3745,7 +3742,7 @@ impl QueueModule {
                     context
                         .scheduler
                         .schedule_event(
-                            Duration::from_secs_f64(SLOT),
+                            Duration::from_micros(SLOT_TIME_US),
                             Self::deque_schedule_service,
                             (),
                         )
@@ -3824,7 +3821,7 @@ impl QueueModule {
                     context
                         .scheduler
                         .schedule_event(
-                            Duration::from_secs_f64(SLOT),
+                            Duration::from_micros(SLOT_TIME_US),
                             Self::deque_schedule_service,
                             (),
                         )

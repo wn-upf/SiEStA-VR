@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --export=ALL
-#SBATCH -J AllABR         # job name
+#SBATCH -J MLOrwalk         # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # Nodes PER TASK (Always 1 for arrays)
 #SBATCH --array=0-3             # <--- INPUT: Run n nodes total (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
@@ -16,35 +16,38 @@ module load x265
 module load x264
 
 export PATH=$HOME/.local/bin:$PATH
-NUMBER_OF_JOBS=15
-SERIAL_EXECUTION=0
+
+#############################################################################
+
+NUMBER_OF_JOBS=10
+SERIAL_EXECUTION=1
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
 
 
-results_path_name="Results_MLO_rwalk_10seeds_${SLURM_ARRAY_JOB_ID}"
+results_path_name="Results_MLOrwalk_10seeds_${SLURM_ARRAY_JOB_ID}"
 
-simTime=45.0
+simTime=10.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
 MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
-RANDOM_SEEDS=({1..10})
+RANDOM_SEEDS=({1..3})
 ############################################################################# <- BG Traffic
-N_BGs=( 0 )                    ## Nº of BG STAs
+N_BGs=( 1 )                    ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
-rates_bps_BGtraffic=( 5000 )    ## Packets per second 
+rates_bps_BGtraffic=( 5000 10000 20000 50000 100000 200000 500000 ) 
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
-MLO_CONFIGS=( "SLO80" ) ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
+MLO_CONFIGS=( "MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 # MLO_CONFIGS=( "SLO80"  )                         ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 
 RANDOMWALK_TEST=0            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
-distance_list=( 5.0 )         ## Distance to AP of users                                     (ignored when RANDOMWALK_TEST==1)
+distance_list=( 2.5 )         ## Distance to AP of users                                     (ignored when RANDOMWALK_TEST==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
 PL=0.1
@@ -52,11 +55,11 @@ packs_per_ampdu=( 64 )
 ############################################################################# <- VR streaming Parameters
 # CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
 CODEC_CHOICES=( "HEVC" )
-N_XR=( 1 2 3 4 5 6 7 8 ) 
-# N_XR=( 1 ) 
+# N_XR=( 1 2 3 4 5 6 7 8 9 10 ) 
+N_XR=( 0 ) 
 initial_bitrate_mbps=( 100.0 )  
 fps_list=( 90.0 )    
-ABR_ENABLED=( 1 2 4 5 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+ABR_ENABLED=( 0 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
 video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
@@ -66,7 +69,7 @@ GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure G
 observation_type=1              ## 0-> Raw unscaled obs, 1 -> Scaled in 'expected'/hardcoded bounds, 2-> Running Normalization. 
 reward_mode=0
 temp_file=$(mktemp)
-SHUFFLED_CMDS=$(mktemp)
+
 #########################################################################################################################
 SWEEP_ID="wn-upf/asynchronix-python_RL/i9igunmc" # ID for the W&B sweep for the agent.
 CONDA_ENVV="vr_sim"
@@ -84,8 +87,10 @@ handle_interrupt() {
 trap handle_interrupt SIGINT
 
 
+mkdir -p "$results_path_name"
+
+# Only Node 0 handles the script backup
 if [ "${SLURM_ARRAY_TASK_ID:-0}" -eq 0 ]; then
-    mkdir -p "$results_path_name"
     cp "$0" "$results_path_name/run_script_backup.sh"
 fi
 
@@ -125,21 +130,21 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                                         sleep 5
                                                                                     fi
 
-                                                                                    # --- Profiling Block using samply ---
-                                                                                    if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
-                                                                                        echo "--- Starting Profiling Run for XR_sim with samply ---"
+                                                                                    # # --- Profiling Block using samply ---
+                                                                                    # if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
+                                                                                    #     echo "--- Starting Profiling Run for XR_sim with samply ---"
 
-                                                                                        # Define the output file
-                                                                                        PROFILE_HTML_FILE="XR_sim_profile.html"
+                                                                                    #     # Define the output file
+                                                                                    #     PROFILE_HTML_FILE="XR_sim_profile.html"
 
-                                                                                        # Run samply against your binary and arguments. 
-                                                                                        # The -o flag tells samply where to save the profile.
-                                                                                        samply record -o $PROFILE_HTML_FILE -- \
-                                                                                            ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
+                                                                                    #     # Run samply against your binary and arguments. 
+                                                                                    #     # The -o flag tells samply where to save the profile.
+                                                                                    #     samply record -o $PROFILE_HTML_FILE -- \
+                                                                                    #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
 
-                                                                                        echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
-                                                                                        exit 0 # Exit the job after generating the profile
-                                                                                    fi 
+                                                                                    #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
+                                                                                    #     exit 0 # Exit the job after generating the profile
+                                                                                    # fi 
                                                                                 done
                                                                             done
                                                                         done
@@ -178,8 +183,6 @@ RAW_FILE="all_cmds_raw_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
 WEIGHTED_FILE="weighted_tasks_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
 NODE_TASKS_FILE="tasks_node_${SLURM_ARRAY_JOB_ID}_${NODE_ID}.txt"
 
-
-
 cat "$temp_file" > "$RAW_FILE"
 rm "$temp_file"
 
@@ -217,7 +220,7 @@ TOTAL_NODES=${SLURM_ARRAY_TASK_COUNT:-1}
 # 4. INTERLEAVED SELECTION (The "Deck of Cards" Fix)
 # This ensures Node 0 doesn't get ALL the heavy tasks. 
 # It takes 1 heavy, then 1 light, etc.
-NODE_TASKS_FILE="tasks_node_${JOB_ID}_${NODE_ID}.txt"
+
 awk -v id="$NODE_ID" -v tot="$TOTAL_NODES" \
 '((NR-1) % tot) == id { print $0 }' "$WEIGHTED_FILE" > "$NODE_TASKS_FILE"
 
@@ -252,11 +255,6 @@ else
     # We use --halt now,1 to stop if a job fails
     parallel -j "$NUMBER_OF_JOBS" < "$NODE_TASKS_FILE"
 fi
-
-# --- CLEANUP ---
-# Only delete the global files if this is the last node, 
-# otherwise nodes might delete files while others are reading them.
-rm "$NODE_TASKS_FILE"
 
 # --- CLEANUP ---
 rm -f "$NODE_TASKS_FILE" "$RAW_FILE" "$WEIGHTED_FILE"

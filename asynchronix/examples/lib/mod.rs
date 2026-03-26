@@ -26,19 +26,26 @@ use std::path::PathBuf;
 pub const BATCH_SIZE_CSV_QUEUE: usize = 256 * 4;
 pub const BATCH_SIZE_CSV_VIDEO: usize = 64; 
 
-const LEGACY_PHY_DURATION:f64= 20E-6; // microseconds
-const PHY_DURATION: f64 = 100E-6;
-const SLOT: f64 = 9E-6;
-const SIFS: f64 = 16E-6;
-// const CW_MIN: i32 = 8;
-// const DIFS: f64 = 2.0 * SLOT + SIFS; // unused with EDCA
 
-// pub const DEFAULT_TMAX_AGG: f64 = 4.85E-3; // Max time for AMPDU, in our model AMPDU ~= PPDU/AMSDU, so we change to 5.4 ms
+// const PE_DURATION: f64 = 16E-6;         // 802.11ax/be Packet Extension (4-20 us, Max 20us for QAM-4096 STAs)
+const PE_DURATION: f64 = 0.0;         // not considered, matching WLAN toolbox
 
+pub const LEGACY_PHY_DURATION:f64 = 20E-6; // microseconds
+// pub const PHY_DURATION: f64 = 100E-6;
+pub const EHT_PHY_DURATION: f64 = 76E-6;    // 802.11be Preamble    // L-STF      :   8.00 us
+                                                                    // L-LTF      :   8.00 us
+                                                                    // L-SIG      :   4.00 us
+                                                                    // RL-SIG     :   4.00 us
+                                                                    // U-SIG      :   8.00 us
+                                                                    // EHT-SIG    :   8.00 us
+                                                                    // EHT-STF    :   4.00 us
+                                                                    // EHT-LTF    :  32.00 us
+pub const SLOT: f64 = 9E-6;
+pub const SIFS: f64 = 16E-6;
+
+pub const SYMBOL_TIME_LEGACY: f64 = 4E-6; 
+pub const SYMBOL_TIME_11AX: f64 = 16E-6; // 12.8 us symbol + 3.2 us guard interval. 
 pub const DEFAULT_TMAX_AGG: f64 = 5.484E-3; 
-
-// pub const MAX_AMPDU_SIZE: i32 = 1024; // changed to 1024, TransmissionFormat being "EHT-SU" in Matlab
-// pub const AMPDU_BYTES_CAP: usize = 65535; // byte limit for AMPDUs (source: matlab) //  UNUSED
 pub const P_TX: f64 = 20.0;
 #[allow(unused)]
 pub const UPLINK_QUEUE_SIZE: usize = 1024;
@@ -2834,114 +2841,16 @@ pub fn collision_delay() -> f32 {
     T_collision as f32
 }
 
-// pub fn frametransmission_delay( // LEGACY: todo DELETE
-//     total_bits_transmitted: f64,
-//     n_mpdus: i32,
-//     coords_src: Coords,
-//     coords_dest: Coords,
-//     p_tx: f64,
-// ) -> ResultsFrameTXDelay {
-//     let mut effPt = p_tx;
-
-//     let SU_spatial_streams = 2.0;
-
-//     if SU_spatial_streams > 1.0 {
-//         effPt = effPt - 3.0 * SU_spatial_streams
-//     };
-
-//     let channel_width: usize = CHANNEL_WIDTH;
-
-//     // Effective Pt
-
-//     if channel_width > 20 {
-//         effPt = effPt - 3.0 * (channel_width as f64 / 20.0);
-//     }
-//     let distance = calculate_distance(
-//         coords_src.x,
-//         coords_src.y,
-//         coords_src.z,
-//         coords_dest.x,
-//         coords_dest.y,
-//         coords_dest.z,
-//     );
-//     // print_pink!("coords_src: {}, coords_dest: {}, DISTANCE = {} ", coords_src.x, coords_dest.x, distance);
-//     let PL = path_loss(distance);
-//     let Pr = effPt - PL;
-
-//     // println!("AP to STA: I'm at {:?} and you're at {:?} |  Distance = {:.2}, PL = {:.2}, P_rx = {:.1}", coords_src, coords_dest, distance, PL, Pr);
-
-//     let (bits_symbol, coding_rate) = match Pr {
-//         _ if Pr < -82.0 => (1, 1.0 / 2.0),
-//         _ if Pr >= -82.0 && Pr < -79.0 => (1, 1.0 / 2.0),
-//         _ if Pr >= -79.0 && Pr < -77.0 => (2, 1.0 / 2.0),
-//         _ if Pr >= -77.0 && Pr < -74.0 => (2, 3.0 / 4.0),
-//         _ if Pr >= -74.0 && Pr < -70.0 => (4, 1.0 / 2.0),
-//         _ if Pr >= -70.0 && Pr < -66.0 => (4, 3.0 / 4.0),
-//         _ if Pr >= -66.0 && Pr < -65.0 => (6, 1.0 / 2.0),
-//         _ if Pr >= -65.0 && Pr < -64.0 => (6, 2.0 / 3.0),
-//         _ if Pr >= -64.0 && Pr < -59.0 => (6, 3.0 / 4.0),
-//         _ if Pr >= -59.0 && Pr < -57.0 => (8, 3.0 / 4.0),
-//         _ if Pr >= -57.0 && Pr < -55.0 => (6, 5.0 / 6.0),
-//         _ if Pr >= -55.0 && Pr < -53.0 => (10, 3.0 / 4.0),
-//         _ if Pr >= -53.0 && Pr < -49.0 => (10, 5.0 / 6.0),
-//         _ if Pr >= -49.0 && Pr < -46.0 => (12, 3.0 / 4.0), // MCS 12, TODO: find a good reference for 802.11be SNR
-//         _ if Pr >= -46.0 => (12, 5.0 / 6.0),               // MCS 13
-//         _ => (1, 1.0 / 2.0),                               // Catch-all for Pr out of range
-//     };
-
-//     // println!("P_rx = {}", Pr);
-
-//     let Subcarriers = match channel_width {
-//         // https://www.arubanetworks.com/assets/wp/WP_802.11AX.pdf, page 12
-//         80 => 980,
-//         40 => 468,
-//         20 => 234,
-//         _ => 0, // Default case,  fallback
-//     };
-
-//     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
-
-//     let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
-
-//     let L: f64 = total_bits_transmitted / n_mpdus as f64;
-
-//     let SF = 16.0;
-//     let TB = 18.0;
-//     let MD = 32.0;
-//     let MAC_H_size = 240.0;
-
-//     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
-//     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
-//     let T_DATA: f64 =
-//         PHY_DURATION + ((SF + n_mpdus as f64 * (MD + MAC_H_size + L) + TB) / ORate).ceil() * 16E-6;
-//     let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
-
-//     let T_DETERMINISTIC_BACKOFF: f64 = (CW_MIN as f64 - 1.0) / 2.0 * SLOT; // add small time constant between consecutive TX to model backoff
-//                                                                       // let T_BACKOFF = time_of_BinaryExponentialBackoff(); // make random BO at least for the 1st time
-
-//     let T =
-//         T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK + DIFS + SLOT + T_DETERMINISTIC_BACKOFF;
-
-//     // println!("[DEBUUUG FT_DELAY] L_total = {:.2}, N_MPDUs = {}, T_s : {},  x: {:.1}, y: {:.1}\n", total_bits_transmitted, n_mpdus, T, coords_dest.x, coords_dest.y );
-//     // println!("T = {:?}", T);
-//     ResultsFrameTXDelay {
-//         pathloss: PL,
-//         p_rx: Pr,
-//         // o_rate: ORate,
-//         service_delay: T,
-//         data_service_delay: T_DATA,
-//     }
-// }
-
 #[inline]
 pub fn airtime_ampdu(
-    total_bits_transmitted: f64,
+    total_bits_transmitted_app: f64,
     n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
     _p_tx_orig: f64,
     channel_width: usize,
 ) -> (f64, u8) {
+    
     let p_tx_cheated = match channel_width { // small hack, higher widths get higher P_tx
         20 => 20.0,
         40 => 20.0,
@@ -2954,14 +2863,6 @@ pub fn airtime_ampdu(
     let effPt: f64 = p_tx_cheated;
 
     let SU_spatial_streams = 2.0;
-
-    // if SU_spatial_streams > 1.0 {   // TODO: AMEND THE USE OF THESE
-    //     effPt = effPt - 3.0 * SU_spatial_streams
-    // };
-    // // Effective Pt
-    // if channel_width > 20 {
-    //     effPt = effPt - 3.0 * (channel_width as f64 / 20.0); // linear formula too restrictive, seems to be log?
-    // }
 
     let distance = calculate_distance(
         coords_src.x,
@@ -3019,30 +2920,42 @@ pub fn airtime_ampdu(
         _ => 0, // Default case,  fallback
     };
 
-    // print_dblue!("distance = {:.1} ----> MCS = {:.0}",distance,  _mcs_val);
-
-    // print_dblue!("ChanWidth: {} -> Subcarriers: {}", channel_width, Subcarriers); 
-
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
+    // let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0; // 6 Mbps conservative rate
+    let OBasicRate: f64 = 1.0 / 2.0 * 4.0 * 48.0; // evaluates to 96.0 bits/symbol, 4 bit symbol (16-QAM) * 1/2 CR * 48 subcarriers
 
-    let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
-
-    let L: f64 = total_bits_transmitted / n_mpdus as f64; // TODO: Check if it's correct to have a size as f32 (in reality not, but as avg model? )
+    let app_payload_per_mpdu = total_bits_transmitted_app / n_mpdus as f64; 
+    
+    // 2. Network Stack Overhead: LLC/SNAP (8B) + IPv4 (20B) + UDP (8B) = 36 Bytes (288 bits)
+    let L_avg = app_payload_per_mpdu + 288.0; // added protocol headers per-MPDU
+    // let L: f64 = total_bits_transmitted / n_mpdus as f64; // TODO: Check if it's correct to have a size as f32 (in reality not, but as avg model? )
 
     let SF = 16.0;
     let TB = 18.0;
     let MD = 32.0;
-    let MAC_H_size = 240.0;
+    let MAC_H_size = 288.0; // FC, EHT control, Addresses, FCS, QoS control, etc. overhead in bits.  
 
-    let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
-    let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
+    let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY; // legacy symbol time is 4E-6
+    let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY;
     
-    let mpdu_length_bits = L + MAC_H_size; // Payload + MAC Header
-    let padded_mpdu_size = ((mpdu_length_bits / 32.0).ceil() * 32.0); // Round up to 32-bit boundary
+    let mpdu_length_bits = L_avg + MAC_H_size; // Payload + MAC Header
+    let padded_mpdu_size = (mpdu_length_bits / 32.0).ceil() * 32.0 ; // Round up to 32-bit boundary for padding
     
-    let T_DATA: f64 = PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * 16E-6; // 802.11ax symbol time 4 times greates for 16E-6 s
-    let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + 240.0 + TB) / OBasicRate).ceil() * 4E-6;
+    let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
+    
+    let ba_base_bytes = 24.0; // Frame Control, Dur, RA, TA, BA Ctrl, Seq Ctrl, FCS
+    let ba_bitmap_bytes = if n_mpdus <= 64 {
+        8.0  // Standard Compressed (64 bits)
+    } else {
+        32.0 // HE Extended Compressed (256 bits)
+    };
+
+    let block_ack_bits = (ba_base_bytes + ba_bitmap_bytes) * 8.0; // 256 bits with 64-sized A-MPDUs
+    
+    let T_ACK: f64 = LEGACY_PHY_DURATION + ((SF + block_ack_bits + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY; 
+
     let phy_time = T_RTS + SIFS + T_CTS + SIFS + T_DATA + SIFS + T_ACK; // ⬅  removed DIFS + SLOT + BO, it happens in EDCA now.
+    // let phy_time = T_DATA + SIFS + T_ACK; //  (without RTS/CTS, todo: set based on constant/input arg.)
 
     // let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;                            // ONLY FOR DEBUG
     // let _rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;              // ONLY FOR DEBUG

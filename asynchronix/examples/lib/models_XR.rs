@@ -7100,7 +7100,6 @@ impl STA_extended {
                     &mut self.random_seed,
                 ));
 
-                // if self.is_ul_bg==2 {time_interarrival /= 2 }; // If DL + UL, since traffic is "split" we do ·2 the frequency on each, still sampled from same Poisson.
 
                 time_interarrival = max(time_interarrival, Duration::from_nanos(1));
 
@@ -7115,7 +7114,7 @@ impl STA_extended {
                 packet.sta_src_coords = sta_coords;
                 // println!("src coords: {:?}", sta_coords);
 
-                // print_dblue!(
+                // crate::print_dblue!(
                 //     "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
                 //     format_elapsed!(context.scheduler.time()),
                 //     self.sta_id,
