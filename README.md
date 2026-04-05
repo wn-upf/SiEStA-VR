@@ -19,7 +19,7 @@
 
 ---
 
-## 🏗️ Architecture & Pipeline
+## ⚙️ Architecture and Pipeline
 
 The simulator is designed to handle multiple $N_{XR}$ VR sessions concurrently with a synchronized simulation time reference across all devices in the network. It supports both static user positions and dynamic mobility (via random walk) with configurable distances to the Access Point (AP). The VR streaming simulated sessions follow the bidirectional pipeline illustrated below:
 
@@ -48,7 +48,6 @@ For faster execution without real-time transcoding, set `USE_FFMPEG_DEMO = False
 
 ---
 
-
 ## 📊 Simulation Outputs & Telemetry (CSV Logs)
 The simulator has a debug feature when setting `DEBUG_PRINT_ENABLED = True`, where most components of a VR session at the lowest level produce events logging the simulation timestamp and information about the ongoing processes for each VR session, using macros for coloring the terminal output. Similar debugging features are found with `DEBUG_EDCA` and `DEBUG_MLO`, more focused on the respective mechanisms. If `SERIAL_EXECUTION=1` in the bash script, the entire output of a simulation is saved into an ANSI file named `out_log.ans`, which can be inspected for debugging purposes during or after a simulation. For speed, most debugging prints are disabled as the default. 
 
@@ -65,7 +64,6 @@ For datalogging, upon execution of each simulated scenario the framework generat
 ```
 
 Inside these folders, granular CSV files capture dynamics bridging the 802.11be MAC layer all the way up to the VR application layer.
-
 For a simulation configuring $N_{XR}$ total users, telemetry is divided per-user using an identifier ranging from `0` to `N_XR - 1` (e.g., `XR_stats_0.csv`, `XR_stats_1.csv`).
 
 | Generated File | Description & Core Data Columns |
@@ -73,8 +71,7 @@ For a simulation configuring $N_{XR}$ total users, telemetry is divided per-user
 | **`QUEUE_stats.csv`** | **Global MAC-Layer Metrics:** Provides an event-by-event log of *every* MPDU traversing the simulation network. Logs include `packet_ID`, STA source and destination IDs, MAC `queue_size` during the transmission of the packet, transmission time (`T_s`), MAC queuing delay (`T_q`), aggregation size ( when classifying by `AMPDU_ID`), collisions (`is_collision`), contention windows (`CW_value`), Access Category (`EDCA_AC`), MAC retry counters (`backoff_retry_counter`), and which interface was utilized (`link_id` — crucial for MLO evaluation). |
 | **`XR_stats_{id}.csv`** | **Application-Level VR Metrics:** Per-frame QoS telemetry evaluated directly at the VR client. Tracks variables vital to user QoE, including: `frame_size_bytes`, `server_fps`, `ow_delay_ms` (one-way delay), `rtt_ms` (Video Frame RTT), `frame_jitter_ms`, `instant_network_throughput_bps`, `decoder_jitterbuffer_level`, `rebuffering_events`, and frame/shard losses (`flr_sum_deadline`). |
 | **`TRACKING_stats_{id}.csv`** | **Uplink Mobility Tracking:** Records the kinematics of the VR headset. Includes the high-frequency polling `timestamp`, the device coordinates (`pos_x`, `pos_y`, `pos_z`), and the generation `interarrival_ms` defining the uplink tracking data rate. |
-| **`trace_emu_effects_{id}.csv`** | **Network Emulation Dynamics:** Traces the exact timing and parameters of the exogenous synthetic network effects (if any) applied to a user's connection pipeline. It tracks bandwidth limits (`bw_max_bps`), jitter variances (`jit_variance`), and forced `drop_probability`, specially useful for reproducibility when bandwidth effects are randomly spread over a simulation (e.g., when the `EMU_TEST_TYPE` setting is set to `"RANDOM"`).  
-
+| **`trace_emu_effects_{id}.csv`** | **Network Emulation Dynamics:** Traces the exact timing and parameters of the exogenous synthetic network effects (if any) applied to a user's connection pipeline. It tracks bandwidth limits (`bw_max_bps`), jitter variances (`jit_variance`), and forced `drop_probability`, specially useful for reproducibility when bandwidth effects are randomly spread over a simulation (e.g., when the `EMU_TEST_TYPE` setting is set to `"RANDOM"`). |  
 
 ## 💻 Simulation Configuration & Execution
 
@@ -127,21 +124,22 @@ Before running, opening `p_xrun.sh` is recommended for adjusting the arrays and 
 | `EMU_TEST_TYPE` | Injects synthetic network anomalies: `"BW"` (Bandwidth limit), `"JI"` (Jitter), `"PL"` (Packet Loss), `"RANDOM"`, or `"STD"` (Standard/None). |
 
 ### Running the Simulator
-A feature of how the repository has been structured (A fork of an earlier build of NeXosim, renaming the `examples` to `orig_examples` and using the folder for the networking engine of SiEsTam libraries and VMAF evaluation scripts), the simulator can be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, we opt for iteration over lists of scenarios with a bash script.  
-**On any standard computer with the required dependencies: **
+A feature of how the repository has been structured ( Renaming the original asynchronix `examples` to `orig_examples` and using the `examples` folder just for SiESTA-VR), the simulator can technically be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, it is more encouraged to opt for execution from a bash script that iterates over input argument combinations.  
+**On any computer with the required dependencies: **
 Simply running the bash script with: 
 ```bash
 ./p_xrun.sh
 ```
-
 **On an HPC Cluster (SLURM):**
-Submit the job array using `sbatch`. The script utilizes weighted interleaving to balance heavy tasks (such as MLO simulations with many VR users) across computing nodes. Simulations involving 1-6 users are relatively fast, with the more complex scenarios the number of simulated events increases exponentially.
+Submit the job array using `sbatch`. The script utilizes weighted interleaving to balance heavy tasks (such as MLO simulations with many VR users) across the selected computing nodes and number of CPUs per node. Simulations involving 1-6 users are relatively fast, with the more complex scenarios the number of simulated events increases exponentially.
 
 ```bash
 sbatch p_xrun.sh
 ```
+---
 
+## 🎞️🔍 VMAF evaluation: 
 
-### VMAF evaluation: 
+After a simulation is finished, the frame IDs logged for each user on a simulated scenario folder can be passed through an offline evaluation script (`cargo run --release --example vmaf_av1_hevc`), which synchronizes frame pairs from the recorded simulation and a reference video sample, and feeds them to parallel workers that compare decoded frames via VMAF and SSIM. We only consider VMAF in scenarios with no loss for our scenarios (due to VMAF not being originally thought for such type of Error Concealment artifacts), however frame IDs can be used for evaluation via slightly modifying the script, to 'lose' the frames which do not have a frame ID in the `XR_stats_0.csv` evaluated. 
 
-After a simulation is finished, the frame IDs logged for each user on a simulated scenario folder can be passed through an offline evaluation script (`cargo run --release --example `), which passes synchronized frame pairs from the recorded simulation to parallel workers that compare decoded frames against the reference. We only consider VMAF in scenarios with no loss for our scenarios (due to VMAF not being originally thought for such type of Error Concealment artifacts), however frame IDs can be used for evaluation via slightly modifying the script, to 'lose' the frames which do no have a frame ID in the `XR_stats_0.csv` evaluated. The method used in the paper only considers a scenario with ideal conditions with a single user, and tests every scenario folder found inside the path set by the  `results_scenarios_folder` string in the main function. Running the script results in `VMAF_metrics_loss_0.csv` files being logged on each scenario folder, containing the per-frame VMAF and SSIM scores from the evaluation. It should be noted that VMAF is computationally expensive, and evaluation with this method can take multiple hours if the evaluated folder contains many scenarios or simulation times are long.  
+The method used for the results presented in the paper only considers a scenario with ideal conditions with a single user, and tests every scenario folder found inside the path set by the `results_scenarios_folder` string in the main function. Running the script results in `VMAF_metrics_loss_0.csv` files being logged on each scenario folder, containing the per-frame VMAF and SSIM scores from the evaluation. It should be noted that VMAF is computationally expensive, and evaluation with this method can take multiple hours if the evaluated folder contains many scenarios or simulation times are long.  
