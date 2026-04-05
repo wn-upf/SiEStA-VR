@@ -1414,8 +1414,12 @@ pub async fn process_trace_vs_original(
                     // Try to send a permit to BOTH producers.
                     // 'try_send' is non-blocking: if the pacer channel is full (tasks haven't 
                     // picked up previous permits yet), this simply does nothing, which is correct.
-                    let _ = tx_pacer_enc.try_send(());
-                    let _ = tx_pacer_ref.try_send(());
+                    // let _ = tx_pacer_enc.try_send(());
+                    // let _ = tx_pacer_ref.try_send(());
+                    if !tx_pacer_enc.is_full() && !tx_pacer_ref.is_full() {
+                        let _ = tx_pacer_enc.try_send(());
+                        let _ = tx_pacer_ref.try_send(());
+                    }
                 }
 
 
@@ -1444,27 +1448,24 @@ pub async fn process_trace_vs_original(
                 // --- 2. DECODE & MANAGE OVERFLOW ---
                 // Now we extract frames. If the SyncManager buffer is full, 
                 // we must make room by dropping OLD frames, not by blocking new ones.
-                while let Some((rgb, _)) = dec_enc.next_decoded_frame() {
-                    
-                    if let Some(visual_id) = digit_reader.recognize(&rgb, WIDTH_ENCODER) {
+                if sync_manager.dist_buffer.len() < MAX_VMAF_BUFFER_SIZE {
+                    while let Some((rgb, _)) = dec_enc.next_decoded_frame() {
                         
-                        // Filter ancient garbage (standard logic)
-                        if let Some(last) = digit_reader.last_seen_id {
-                            if visual_id < last.saturating_sub(300) { continue; }
-                        }
+                        if let Some(visual_id) = digit_reader.recognize(&rgb, WIDTH_ENCODER) {
+                            
+                            // Filter ancient garbage (standard logic)
+                            if let Some(last) = digit_reader.last_seen_id {
+                                if visual_id < last.saturating_sub(300) { continue; }
+                            }
 
-                        // === OVERFLOW PROTECTION ===
-                        // If buffer is full, force drop the OLDEST frame to make room.
-                        // This prevents the "Buf: D57" deadlock.
-                        if sync_manager.dist_buffer.len() >= MAX_VMAF_BUFFER_SIZE {
-                            // Find the oldest ID to evict
-                            if let Some(&oldest_id) = sync_manager.dist_ids.iter().next() {
-                                sync_manager.drop_dist(oldest_id, "Overflow Protection (Buffer Full)");
+                            // Insert the valid frame
+                            sync_manager.insert_dist_frame(visual_id, FrameBuf { rgb, synthetic: false });
+                            
+                            // Stop extracting from decoder if we hit the limit
+                            if sync_manager.dist_buffer.len() >= MAX_VMAF_BUFFER_SIZE {
+                                break;
                             }
                         }
-
-                        // Now safe to insert
-                        sync_manager.insert_dist_frame(visual_id, FrameBuf { rgb, synthetic: false });
                     }
                 }
 
@@ -1579,7 +1580,9 @@ impl SendWindow {
 #[tokio::main]
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_d1.5m_allbitrate_allfps_1seed"; 
+    // let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_d1.5m_allbitrate_allfps_1seed"; 
+    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/new_res"; 
+
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
     // Regex compilation (done once)
