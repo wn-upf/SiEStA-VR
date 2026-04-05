@@ -4,7 +4,7 @@
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Wi-Fi 7](https://img.shields.io/badge/Protocol-IEEE%20802.11be-blue.svg)](https://en.wikipedia.org/wiki/IEEE_802.11be)
 
-**SiESTA-VR** is a high-fidelity, discrete-event simulation framework designed to evaluate the stringent latency and throughput requirements of next-generation wireless networks. Built on the asynchronous **NeXosim** library in Rust, it provides a robust environment for researching Cloud VR interactive streaming over **IEEE 802.11be (Wi-Fi 7)**.
+**SiESTA-VR** is a high-fidelity, discrete-event simulation framework designed to evaluate the stringent latency and throughput requirements of next-generation wireless networks. Built on a fork of the asynchronous [**NeXosim**](https://github.com/asynchronics/nexosim) library in Rust, it provides a robust environment for researching Cloud VR interactive streaming over **IEEE 802.11be (Wi-Fi 7)**.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## 🏗️ Architecture & Pipeline
 
-The simulator is designed to handle multiple $N_{XR}$ VR sessions concurrently. It supports both static user positions and dynamic mobility (via random walk) with configurable distances to the Access Point (AP). The VR streaming simulated sessions follow the bidirectional pipeline illustrated below:
+The simulator is designed to handle multiple $N_{XR}$ VR sessions concurrently with a synchronized simulation time reference across all devices in the network. It supports both static user positions and dynamic mobility (via random walk) with configurable distances to the Access Point (AP). The VR streaming simulated sessions follow the bidirectional pipeline illustrated below:
 
 ![VR Emulation Pipeline](assets/VR_emu_pipeline.png)
 
@@ -34,7 +34,7 @@ The simulator is designed to handle multiple $N_{XR}$ VR sessions concurrently. 
 To compute VMAF metrics and handle video transcoding recorded from simulations, this simulator requires:
 * **Rust Toolchain**: (Latest stable release)
 * **FFMPEG v7.1**: [Download here](https://ffmpeg.org/download.html)
-* **libvmaf**: [GitHub Repository](https://github.com/Netflix/vmaf/tree/master/libvmaf)
+* **libvmaf (Optional, for offline VMAF/SSIM evaluation)**: [GitHub Repository](https://github.com/Netflix/vmaf/tree/master/libvmaf)
 
 ### Asset Configuration
 
@@ -48,11 +48,39 @@ For faster execution without real-time transcoding, set `USE_FFMPEG_DEMO = False
 
 ---
 
+
+## 📊 Simulation Outputs & Telemetry (CSV Logs)
+The simulator has a debug feature when setting `DEBUG_PRINT_ENABLED = True`, where most components of a VR session at the lowest level produce events logging the simulation timestamp and information about the ongoing processes for each VR session, using macros for coloring the terminal output. Similar debugging features are found with `DEBUG_EDCA` and `DEBUG_MLO`, more focused on the respective mechanisms. If `SERIAL_EXECUTION=1` in the bash script, the entire output of a simulation is saved into an ANSI file named `out_log.ans`, which can be inspected for debugging purposes during or after a simulation. For speed, most debugging prints are disabled as the default. 
+
+When `USE_FFMPEG_DEMO = True`, every simulated VR client generates a window with a Graphical User Interface (GUI) showing the decoded video and simulation parameters, user trajectory and a sliding window of QoS metrics. This is exemplified in the next figure, which shows the per-user GUIs of 3 CBR users streaming while performing a random walk:
+![VR Client GUI](assets/Siesta_gui.png)
+
+
+For datalogging, upon execution of each simulated scenario the framework generates a uniquely named directory based on the specific input arguments to the simulation. Specifically, the lengthy folder scenario name creates a subfolder inside the `results_path_name` destination path, based on the following string: 
+```rust
+    let name_folder = format!(
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
+        stoptime, distance, initial_bitrate, fps_arg, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
+    );
+```
+
+Inside these folders, granular CSV files capture dynamics bridging the 802.11be MAC layer all the way up to the VR application layer.
+
+For a simulation configuring $N_{XR}$ total users, telemetry is divided per-user using an identifier ranging from `0` to `N_XR - 1` (e.g., `XR_stats_0.csv`, `XR_stats_1.csv`).
+
+| Generated File | Description & Core Data Columns |
+| :--- | :--- |
+| **`QUEUE_stats.csv`** | **Global MAC-Layer Metrics:** Provides an event-by-event log of *every* MPDU traversing the simulation network. Logs include `packet_ID`, STA source and destination IDs, MAC `queue_size` during the transmission of the packet, transmission time (`T_s`), MAC queuing delay (`T_q`), aggregation size ( when classifying by `AMPDU_ID`), collisions (`is_collision`), contention windows (`CW_value`), Access Category (`EDCA_AC`), MAC retry counters (`backoff_retry_counter`), and which interface was utilized (`link_id` — crucial for MLO evaluation). |
+| **`XR_stats_{id}.csv`** | **Application-Level VR Metrics:** Per-frame QoS telemetry evaluated directly at the VR client. Tracks variables vital to user QoE, including: `frame_size_bytes`, `server_fps`, `ow_delay_ms` (one-way delay), `rtt_ms` (Video Frame RTT), `frame_jitter_ms`, `instant_network_throughput_bps`, `decoder_jitterbuffer_level`, `rebuffering_events`, and frame/shard losses (`flr_sum_deadline`). |
+| **`TRACKING_stats_{id}.csv`** | **Uplink Mobility Tracking:** Records the kinematics of the VR headset. Includes the high-frequency polling `timestamp`, the device coordinates (`pos_x`, `pos_y`, `pos_z`), and the generation `interarrival_ms` defining the uplink tracking data rate. |
+| **`trace_emu_effects_{id}.csv`** | **Network Emulation Dynamics:** Traces the exact timing and parameters of the exogenous synthetic network effects (if any) applied to a user's connection pipeline. It tracks bandwidth limits (`bw_max_bps`), jitter variances (`jit_variance`), and forced `drop_probability`, specially useful for reproducibility when bandwidth effects are randomly spread over a simulation (e.g., when the `EMU_TEST_TYPE` setting is set to `"RANDOM"`).  
+
+
 ## 💻 Simulation Configuration & Execution
 
-SiESTA-VR utilizes the `p_xrun.sh` bash script to manage execution. The script is heavily optimized for **SLURM-based High-Performance Computing (HPC)** environments but can be adapted for local execution. It iterates over arrays of variables to automatically generate and simulate massive parameter sweep combinations.
+SiESTA-VR utilizes the `p_xrun.sh` bash script to manage execution. The script is heavily optimized for **SLURM-based High-Performance Computing (HPC)** environments but supports local execution (with minor warnings). It iterates over arrays of variables to automatically generate and simulate massive parameter sweep combinations, which can be serially executed or run in parallel over multiple nodes.
 
-Before running, open `p_xrun.sh` and adjust the arrays and variables to design your experiment space:
+Before running, opening `p_xrun.sh` is recommended for adjusting the arrays and variables to design the experiment space. For a description of the main simulation parameters:
 
 ### 1. Wi-Fi & Network Topology Settings
 | Variable | Description |
@@ -99,7 +127,12 @@ Before running, open `p_xrun.sh` and adjust the arrays and variables to design y
 | `EMU_TEST_TYPE` | Injects synthetic network anomalies: `"BW"` (Bandwidth limit), `"JI"` (Jitter), `"PL"` (Packet Loss), `"RANDOM"`, or `"STD"` (Standard/None). |
 
 ### Running the Simulator
-The simulator can technically be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, we opt for iteration over lists of scenarios with a bash script.  
+A feature of how the repository has been structured (A fork of an earlier build of NeXosim, renaming the `examples` to `orig_examples` and using the folder for the networking engine of SiEsTam libraries and VMAF evaluation scripts), the simulator can be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, we opt for iteration over lists of scenarios with a bash script.  
+**On any standard computer with the required dependencies: **
+Simply running the bash script with: 
+```bash
+./p_xrun.sh
+```
 
 **On an HPC Cluster (SLURM):**
 Submit the job array using `sbatch`. The script utilizes weighted interleaving to balance heavy tasks (such as MLO simulations with many VR users) across computing nodes. Simulations involving 1-6 users are relatively fast, with the more complex scenarios the number of simulated events increases exponentially.
@@ -107,28 +140,8 @@ Submit the job array using `sbatch`. The script utilizes weighted interleaving t
 ```bash
 sbatch p_xrun.sh
 ```
-Or alternatively, simply running the bash script in a standard computer:
-```bash
-./xrun.sh
-```
 
-## 📊 Simulation Outputs & Telemetry (CSV Logs)
 
-Upon execution, the framework generates a uniquely named directory for each simulated scenario based on the specific parameter combination evaluated. Specifically, the lengthy folder scenario name is based on the following: 
-```rust
-    let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
-        stoptime, distance, initial_bitrate, fps_arg, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
-    );
-```
+### VMAF evaluation: 
 
-Inside these folders, granular CSV files capture dynamics bridging the 802.11be MAC layer all the way up to the VR application layer.
-
-For a simulation configuring $N_{XR}$ total users, telemetry is divided per-user using an identifier ranging from `0` to `N_XR - 1` (e.g., `XR_stats_0.csv`, `XR_stats_1.csv`).
-
-| Generated File | Description & Core Data Columns |
-| :--- | :--- |
-| **`QUEUE_stats.csv`** | **Global MAC-Layer Telemetry:** Provides an event-by-event log of *every* MPDU traversing the simulation network. Logs include `packet_ID`, `queue_size`, transmission time (`T_s`), queuing delay (`T_q`), aggregation size (`AMPDU_ID`), collisions (`is_collision`), contention windows (`CW_value`), Access Category (`EDCA_AC`), retry counters (`backoff_retry_counter`), and which interface was utilized (`link_id` — crucial for MLO evaluation). |
-| **`XR_stats_{id}.csv`** | **Application-Level VR Metrics:** Per-frame QoS telemetry evaluated directly at the VR client. Tracks variables vital to user QoE, including: `frame_size_bytes`, `server_fps`, `ow_delay_ms` (one-way delay), `rtt_ms` (Video Frame RTT), `frame_jitter_ms`, `instant_network_throughput_bps`, `decoder_jitterbuffer_level`, `rebuffering_events`, and frame/shard losses (`flr_sum_deadline`). |
-| **`TRACKING_stats_{id}.csv`** | **Uplink Mobility Tracking:** Records the kinematics of the VR headset. Includes the high-frequency polling `timestamp`, the device coordinates (`pos_x`, `pos_y`, `pos_z`), and the generation `interarrival_ms` defining the uplink tracking data rate. |
-| **`trace_emu_effects_{id}.csv`** | **Network Emulation Dynamics:** Traces the exact timing and parameters of the exogenous synthetic network effects applied to a user's connection pipeline. It tracks bandwidth limits (`bw_max_bps`), jitter variances (`jit_variance`), and forced `drop_probability`. |
+After a simulation is finished, the frame IDs logged for each user on a simulated scenario folder can be passed through an offline evaluation script (`cargo run --release --example `), which passes synchronized frame pairs from the recorded simulation to parallel workers that compare decoded frames against the reference. We only consider VMAF in scenarios with no loss for our scenarios (due to VMAF not being originally thought for such type of Error Concealment artifacts), however frame IDs can be used for evaluation via slightly modifying the script, to 'lose' the frames which do no have a frame ID in the `XR_stats_0.csv` evaluated. The method used in the paper only considers a scenario with ideal conditions with a single user, and tests every scenario folder found inside the path set by the  `results_scenarios_folder` string in the main function. Running the script results in `VMAF_metrics_loss_0.csv` files being logged on each scenario folder, containing the per-frame VMAF and SSIM scores from the evaluation. It should be noted that VMAF is computationally expensive, and evaluation with this method can take multiple hours if the evaluated folder contains many scenarios or simulation times are long.  
