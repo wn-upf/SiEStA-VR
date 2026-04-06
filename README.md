@@ -21,7 +21,7 @@
 
 ## ⚙️ Architecture and Pipeline
 
-The simulator is designed to handle multiple $N_{XR}$ VR sessions concurrently with a synchronized simulation time reference across all devices in the network. It supports both static user positions and dynamic mobility (via random walk) with configurable distances to the Access Point (AP). The VR streaming simulated sessions follow the bidirectional pipeline illustrated below:
+The simulator is designed to handle multiple VR sessions concurrently, with a synchronized simulation time across all devices in the network. It supports static user positions and dynamic mobility (via random walk) with configurable distances to the Access Point (AP). The VR streaming simulated sessions follow the bidirectional pipeline illustrated below:
 
 ![VR Emulation Pipeline](assets/VR_emu_pipeline.png)
 
@@ -48,14 +48,14 @@ For faster execution without real-time transcoding, set `USE_FFMPEG_DEMO = False
 
 ---
 
-## 📊 Simulation Outputs & Telemetry (CSV Logs)
+## 📊 Simulation Outputs: 
 The simulator has a debug feature when setting `DEBUG_PRINT_ENABLED = True`, where most components of a VR session at the lowest level produce events logging the simulation timestamp and information about the ongoing processes for each VR session, using macros for coloring the terminal output. Similar debugging features are found with `DEBUG_EDCA` and `DEBUG_MLO`, more focused on the respective mechanisms. If `SERIAL_EXECUTION=1` in the bash script, the entire output of a simulation is saved into an ANSI file named `out_log.ans`, which can be inspected for debugging purposes during or after a simulation. For speed, most debugging prints are disabled as the default. 
 
 When `USE_FFMPEG_DEMO = True`, every simulated VR client generates a window with a Graphical User Interface (GUI) showing the decoded video and simulation parameters, user trajectory and a sliding window of QoS metrics. This is exemplified in the next figure, which shows the per-user GUIs of 3 CBR users streaming while performing a random walk:
 ![VR Client GUI](assets/Siesta_gui.png)
 
 
-For datalogging, upon execution of each simulated scenario the framework generates a uniquely named directory based on the specific input arguments to the simulation. Specifically, the lengthy folder scenario name creates a subfolder inside the `results_path_name` destination path, based on the following string: 
+For dataset creation, upon execution of each simulated scenario the framework generates a uniquely named directory based on the specific input arguments to the simulation. Specifically, the lengthy folder scenario name creates a subfolder inside the `results_path_name` destination path, based on the following string: 
 ```rust
     let name_folder = format!(
         "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
@@ -63,7 +63,7 @@ For datalogging, upon execution of each simulated scenario the framework generat
     );
 ```
 
-Inside these folders, granular CSV files capture dynamics bridging the 802.11be MAC layer all the way up to the VR application layer.
+Inside these folders, granular CSV files capture metrics bridging the 802.11be MAC layer all the way up to the VR application layer.
 For a simulation configuring $N_{XR}$ total users, telemetry is divided per-user using an identifier ranging from `0` to `N_XR - 1` (e.g., `XR_stats_0.csv`, `XR_stats_1.csv`).
 
 | Generated File | Description & Core Data Columns |
@@ -125,8 +125,8 @@ Before running, opening `p_xrun.sh` is recommended for adjusting the arrays and 
 
 ### Running the Simulator
 A feature of how the repository has been structured ( Renaming the original asynchronix `examples` to `orig_examples` and using the `examples` folder just for SiESTA-VR), the simulator can technically be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, it is more encouraged to opt for execution from a bash script that iterates over input argument combinations.  
-**On any computer with the required dependencies: **
-Simply running the bash script with: 
+**On any computer with the required dependencies:**
+Adjust `NUMBER_OF_JOBS` and `SERIAL_EXECUTION`, and run the bash script with: 
 ```bash
 ./p_xrun.sh
 ```
