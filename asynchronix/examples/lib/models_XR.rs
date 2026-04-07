@@ -4350,13 +4350,23 @@ impl XRServer {
                 let floor = 0.5 * ideal;
 
                 let time_until_next_frame = if FPS_RANDOMIZED_EPSILON_RENDERING_SERVER {
+                    let mut rng = rand::thread_rng();
+                    
+                    // Explicitly define the bounds as f32 or f64 to avoid inference issues
+                    let low: f32 = -0.001;
+                    let high: f32 = 0.001;
 
-                    let epsilon = rand::thread_rng().gen_range(-0.001..=0.001); 
+                    // Use a manual check: only sample if the range is valid
+                    let epsilon = if low < high {
+                        rng.gen_range(low..=high)
+                    } else {
+                        0.0 // Fallback if math fails
+                    };
+
                     let dt = (ideal + epsilon).max(floor);
                     Duration::from_secs_f32(dt)
-                } else {
-                    let dt = ideal;
-                    Duration::from_secs_f32(dt)
+                }else {
+                       Duration::ZERO // Fallback if math fails
                 };
 
                 self.bitrate_manager.report_encoded_frame_server(now);

@@ -698,7 +698,12 @@ impl ChunkedHevcEncoder {
 
         let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al. 
         let bufsize_str = format!("{:.0}k", bufsize_kbits);
+        
 
+        let fovea_w = 1000;
+        let fovea_h = 1000;
+        let fovea_x = (self.width - fovea_w) / 2;
+        let fovea_y = (self.height - fovea_h) / 2;
 
         println!(
             "{} - {} CHUNKING with bitrate {} Mbps",
@@ -723,13 +728,30 @@ impl ChunkedHevcEncoder {
                 .input(&self.input)
                 .args(&[
                     "-vf", &format!(
-                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,\
+                        addroi=x={}:y={}:w={}:h={}:qoffset=-15,\
+                        drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
                         self.width, 
-                        self.height, 
+                        self.height,
+                        fovea_x,
+                        fovea_y,
+                        fovea_w,
+                        fovea_h,
                         start_frame_idx
                     ),
                 ])
+                // Add NVENC specific Spatial AQ flags to ensure the hardware respects the ROI
+                .args(&["-spatial-aq", "1"])
+                .args(&["-aq-strength", "15"])
+                // .args(&[
+                //     "-vf", &format!(
+                //         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                //         "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                //         self.width, 
+                //         self.height, 
+                //         start_frame_idx
+                //     ),
+                // ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-fps_mode", "passthrough"])

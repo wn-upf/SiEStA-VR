@@ -81,7 +81,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = false;
+pub const USE_FFMPEG_DEMO: bool = true;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -2942,7 +2942,17 @@ pub fn airtime_ampdu(
     let padded_mpdu_size = (mpdu_length_bits / 32.0).ceil() * 32.0 ; // Round up to 32-bit boundary for padding
     
     let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
-    
+
+    // pub const EHT_PHY_DURATION: f64 = 76E-6;    // 802.11be Preamble    // L-STF      :   8.00 us
+    //                                                                 // L-LTF      :   8.00 us
+    //                                                                 // L-SIG      :   4.00 us
+    //                                                                 // RL-SIG     :   4.00 us
+    //                                                                 // U-SIG      :   8.00 us
+    //                                                                 // EHT-SIG    :   8.00 us
+    //                                                                 // EHT-STF    :   4.00 us
+    //                                                                 // EHT-LTF    :  32.00 us
+
+
     let ba_base_bytes = 24.0; // Frame Control, Dur, RA, TA, BA Ctrl, Seq Ctrl, FCS
     let ba_bitmap_bytes = if n_mpdus <= 64 {
         8.0  // Standard Compressed (64 bits)
