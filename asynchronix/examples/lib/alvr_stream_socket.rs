@@ -59,7 +59,7 @@ pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(300);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 10.0;
+pub const OFFSET_VIDEO: f64 = 15.0;
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -149,6 +149,9 @@ pub struct ChunkedAv1Encoder {
 
     aggregation_buffer: Vec<u8>, // to aggregate multiple OBUs into full frame.
     chunk_index: usize,
+
+
+    use_foveation: bool, 
 }
 #[allow(unused)]
 impl ChunkedAv1Encoder {
@@ -163,6 +166,7 @@ impl ChunkedAv1Encoder {
         framerate: f32,
         gop_size: usize,
         intra_refresh: bool,
+        use_foveation: bool, 
     ) -> Self {
         println!("Initializing ChunkedAv1Encoder");
         let (frame_tx, frame_rx) = bounded(1000);
@@ -184,6 +188,7 @@ impl ChunkedAv1Encoder {
             framerate,
             aggregation_buffer: Vec::new(),
             chunk_index: 0, 
+            use_foveation, 
         }
     }
 
@@ -230,6 +235,38 @@ impl ChunkedAv1Encoder {
         let bufsize_kbits = bitrate_mbps * 1000.0 * (bufsize_ms / 1000.0);
         let bufsize_str = format!("{:.0}k", bufsize_kbits);
 
+
+        let fovea_w = 1000;
+        let fovea_h = 1000;
+        let fovea_x = (self.width - fovea_w) / 2;
+        let fovea_y = (self.height - fovea_h) / 2;
+
+        let filter_complex_foveation = if self.use_foveation {
+            &format!(
+                        "[0:v]scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p[scaled]; \
+                        [scaled]split=2[bg][fg]; \
+                        [bg]boxblur=luma_radius=10:chroma_radius=10[blurred]; \
+                        [fg]crop=w={}:h={}:x={}:y={}[sharp]; \
+                        [blurred][sharp]overlay=x={}:y={}[foveated]; \
+                        [foveated]drawbox=x={}:y={}:w={}:h={}:color=red@0.8:t=4, \
+                        drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        self.width, self.height,
+                        fovea_w, fovea_h, fovea_x, fovea_y, // crop sharp center
+                        fovea_x, fovea_y,                   // overlay position
+                        fovea_x, fovea_y, fovea_w, fovea_h, // drawbox
+                        start_frame_idx
+                    ) 
+        }
+        else{    
+            &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
+                    )
+        }; 
+
         let mut command = FfmpegCommand::new();
         // SVT-AV1 Arguments from av1_testbed.rs
         let mut child = command
@@ -242,13 +279,7 @@ impl ChunkedAv1Encoder {
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .input(&self.input)
             .args(&[
-                    "-vf", &format!(
-                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                        self.width, 
-                        self.height, 
-                        start_frame_idx
-                    ),
+                    "-vf", filter_complex_foveation, 
                 ])
             .args(&["-c:v", "libsvtav1"]) // Using SVT-AV1
             .args(&["-preset", "9"])      // High speed preset for RTC
@@ -379,6 +410,7 @@ pub struct ChunkedSoftwareHevcEncoder {
     gop_size: usize,
     intra_refresh: bool,
     chunk_index: usize, 
+    use_foveation: bool, 
 }
 
 #[allow(unused)]
@@ -394,6 +426,7 @@ impl ChunkedSoftwareHevcEncoder {
         framerate: f32,
         gop_size: usize,
         intra_refresh: bool,
+        use_foveation: bool, 
     ) -> Self {
         println!("Initializing ChunkedSoftwareHevcEncoder (libx265)");
         let (frame_tx, frame_rx) = bounded(1000);
@@ -414,6 +447,7 @@ impl ChunkedSoftwareHevcEncoder {
             gop_size,
             intra_refresh,
             chunk_index: 0, 
+            use_foveation, 
         }
     }
 
@@ -452,6 +486,40 @@ impl ChunkedSoftwareHevcEncoder {
 
         let mut command = FfmpegCommand::new();
 
+
+        let fovea_w = 1000;
+        let fovea_h = 1000;
+        let fovea_x = (self.width - fovea_w) / 2;
+        let fovea_y = (self.height - fovea_h) / 2;
+
+        let filter_complex_foveation = if self.use_foveation {
+            &format!(
+                        "[0:v]scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p[scaled]; \
+                        [scaled]split=2[bg][fg]; \
+                        [bg]boxblur=luma_radius=10:chroma_radius=10[blurred]; \
+                        [fg]crop=w={}:h={}:x={}:y={}[sharp]; \
+                        [blurred][sharp]overlay=x={}:y={}[foveated]; \
+                        [foveated]drawbox=x={}:y={}:w={}:h={}:color=red@0.8:t=4, \
+                        drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        self.width, self.height,
+                        fovea_w, fovea_h, fovea_x, fovea_y, // crop sharp center
+                        fovea_x, fovea_y,                   // overlay position
+                        fovea_x, fovea_y, fovea_w, fovea_h, // drawbox
+                        start_frame_idx
+                    ) 
+        }
+        else{    
+            &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
+                    )
+        }; 
+
+
+
         // Common arguments for both modes
         command
             .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
@@ -462,13 +530,7 @@ impl ChunkedSoftwareHevcEncoder {
             .args(&["-stats_period", "8"])
             .input(&self.input)
             .args(&[
-                    "-vf", &format!(
-                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                        self.width, 
-                        self.height, 
-                        start_frame_idx
-                    ),
+                    "-vf", filter_complex_foveation , 
                 ])
             .args(&["-c:v", "libx265"]) // SW Encoding
             .args(&["-preset", "ultrafast"]) // Crucial for realtime SW encoding
@@ -628,6 +690,7 @@ pub struct ChunkedHevcEncoder {
     gop_size: usize,
     intra_refresh: bool,
     chunk_index: usize, 
+    use_foveation: bool, 
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -642,6 +705,7 @@ impl ChunkedHevcEncoder {
         framerate: f32,
         gop_size: usize,
         intra_refresh: bool,
+        use_foveation: bool, 
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(1000);
@@ -662,6 +726,7 @@ impl ChunkedHevcEncoder {
             gop_size,
             intra_refresh,
             chunk_index: 0, 
+            use_foveation, 
         }
     }
 
@@ -696,7 +761,7 @@ impl ChunkedHevcEncoder {
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
         
 
-        let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al. 
+        let bufsize_kbits = 25.0 * (bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al. 
         let bufsize_str = format!("{:.0}k", bufsize_kbits);
         
 
@@ -712,6 +777,34 @@ impl ChunkedHevcEncoder {
             bitrate_mbps,
         );
         self.parser.buffer.clear();
+    
+
+        let filter_complex_foveation = if self.use_foveation {
+            &format!(
+                        "[0:v]scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p[scaled]; \
+                        [scaled]split=2[bg][fg]; \
+                        [bg]boxblur=luma_radius=10:chroma_radius=10[blurred]; \
+                        [fg]crop=w={}:h={}:x={}:y={}[sharp]; \
+                        [blurred][sharp]overlay=x={}:y={}[foveated]; \
+                        [foveated]drawbox=x={}:y={}:w={}:h={}:color=red@0.8:t=4, \
+                        drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        self.width, self.height,
+                        fovea_w, fovea_h, fovea_x, fovea_y, // crop sharp center
+                        fovea_x, fovea_y,                   // overlay position
+                        fovea_x, fovea_y, fovea_w, fovea_h, // drawbox
+                        start_frame_idx
+                    ) 
+        }
+        else{    
+            &format!(
+                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
+                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                        self.width, 
+                        self.height, 
+                        start_frame_idx
+                    )
+        }; 
+
 
         let mut command = FfmpegCommand::new();
         if self.intra_refresh {
@@ -727,31 +820,8 @@ impl ChunkedHevcEncoder {
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
-                    "-vf", &format!(
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,\
-                        addroi=x={}:y={}:w={}:h={}:qoffset=-15,\
-                        drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                        self.width, 
-                        self.height,
-                        fovea_x,
-                        fovea_y,
-                        fovea_w,
-                        fovea_h,
-                        start_frame_idx
-                    ),
-                ])
-                // Add NVENC specific Spatial AQ flags to ensure the hardware respects the ROI
-                .args(&["-spatial-aq", "1"])
-                .args(&["-aq-strength", "15"])
-                // .args(&[
-                //     "-vf", &format!(
-                //         // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                //         "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                //         self.width, 
-                //         self.height, 
-                //         start_frame_idx
-                //     ),
-                // ])
+                    "-filter_complex", filter_complex_foveation, 
+                ]) 
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-fps_mode", "passthrough"])
@@ -781,15 +851,9 @@ impl ChunkedHevcEncoder {
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "5"])
-                .input(&self.input)
+                .input(&self.input)              
                 .args(&[
-                    "-vf", &format!(
-                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                        self.width, 
-                        self.height, 
-                        start_frame_idx
-                    ),
+                    "-filter_complex", filter_complex_foveation, 
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"]) // TODO : llhq is preferrable but deprecated on some of the HPC GPUs.
@@ -2550,6 +2614,7 @@ impl<H: Serialize> StreamSender<H> {
         framerate: f32,
         gop_size: usize,
         intra_refresh: bool,
+        use_foveation: bool, 
     ) -> Result<Buffer<H>> {
         let _id_frame_files_ref = id_frame + 1;
 
@@ -2598,7 +2663,7 @@ impl<H: Serialize> StreamSender<H> {
                 //     self.ffmpeg_maxbitrate_encoder.is_some()
                 // );
 
-                let random_offset = rand::thread_rng().gen_range(10.0..OFFSET_VIDEO);
+                let random_offset = rand::thread_rng().gen_range(1.0..OFFSET_VIDEO);
                 // let random_offset = OFFSET_VIDEO;
 
                 let third_octet = get_third_octet(ip).unwrap();
@@ -2680,6 +2745,7 @@ impl<H: Serialize> StreamSender<H> {
                         framerate,
                         gop_size,
                         intra_refresh,
+                        use_foveation, 
                     )),
                     VideoCodec::AV1 => ChunkedEncoder::Av1(ChunkedAv1Encoder::new(
                         &input_path,
@@ -2692,6 +2758,7 @@ impl<H: Serialize> StreamSender<H> {
                         framerate,
                         gop_size,
                         intra_refresh,
+                        use_foveation, 
                     )),
                 };
 

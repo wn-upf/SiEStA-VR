@@ -54,7 +54,6 @@ use std::time::{Duration, Instant};
 use std::{mem, vec};
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
-
 use crate::lib::alvr_control_socket::ProtoControlSocket;
 use crate::lib::alvr_packets::{
     ClientControlPacket, ClientStatistics, EverestCommand, NadaStats, NetworkStatisticsPacket,
@@ -134,7 +133,7 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 #[allow(unused)]
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.2; // X:1 scaling for 4k visuals in lower res screens
+pub const SCALE_FACTOR_WINDOW: f64 = 0.4; // X:1 scaling for 4k visuals in lower res screens
 pub const SCALE_FACTOR_GRAPH: f32 = 0.6;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -3364,8 +3363,8 @@ pub struct XRServer {
     pub video_sample_filename: String,
     pub gop_size: usize,
     pub intra_refresh: bool,
+    pub use_foveation: bool, 
     pub abr_enabled: usize,
-
     pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>,
     pub last_tracking_rx_instant: TaiTime<0>,
 
@@ -3399,6 +3398,7 @@ impl XRServer {
         file_name_video: &str,
         gop_size: usize,
         intra_refresh: bool,
+        use_foveation: bool, 
         abr_enabled: usize,
         nest_vr_profile: &NestVrProfile,
         t_end_simu: f64,
@@ -3511,6 +3511,7 @@ impl XRServer {
             video_sample_filename: final_file.to_string(),
             gop_size,
             intra_refresh,
+            use_foveation, 
             abr_enabled,
             output_perfect_information_bitrate: Output::default(),
 
@@ -4308,6 +4309,7 @@ impl XRServer {
                         self.fps,
                         self.gop_size,
                         self.intra_refresh,
+                        self.use_foveation, 
                     )
                     .await
                     .unwrap();

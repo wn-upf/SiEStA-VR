@@ -29,7 +29,7 @@ DEBUG_LOGS=0
 
 results_path_name="Results_MLOrwalk_10seeds_${SLURM_ARRAY_JOB_ID}"
 
-simTime=10.0
+simTime=100.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
@@ -37,9 +37,11 @@ MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovB
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
 RANDOM_SEEDS=({1..3})
 ############################################################################# <- BG Traffic
-N_BGs=( 1 )                    ## Nº of BG STAs
+N_BGs=( 0 )                    ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
-rates_bps_BGtraffic=( 5000 10000 20000 50000 100000 200000 500000 ) 
+# rates_bps_BGtraffic=( 5000 10000 20000 50000 100000 200000 500000 ) 
+rates_bps_BGtraffic=( 5000 ) 
+
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
@@ -54,15 +56,16 @@ PL=0.1
 packs_per_ampdu=( 64 )
 ############################################################################# <- VR streaming Parameters
 # CODEC_CHOICES=("AV1" "HEVC")    ## can be "HEVC" or "AV1"
-CODEC_CHOICES=( "HEVC" )
+CODEC_CHOICES=( "HEVC" "AV1" )
+USE_FOVEATION=1
 # N_XR=( 1 2 3 4 5 6 7 8 9 10 ) 
-N_XR=( 0 ) 
+N_XR=( 1 ) 
 initial_bitrate_mbps=( 100.0 )  
 fps_list=( 90.0 )    
 ABR_ENABLED=( 0 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
-video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
+video_samples=("furbo")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
 intrarefresh_choice=( 1 )       ## Only if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
 GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor to them
 ############################################################################# <- RL training Parameters
@@ -94,8 +97,8 @@ if [ "${SLURM_ARRAY_TASK_ID:-0}" -eq 0 ]; then
     cp "$0" "$results_path_name/run_script_backup.sh"
 fi
 
-
-# sleep 4 ## for being able to see if there were any errors before sims start, else it would use the last best compiled code
+cargo build --release --example XR_sim 
+sleep 4 ## for being able to see if there were any errors before sims start, else it would use the last best compiled code
 
 for test in "${EMU_TEST_TYPE[@]}"; do 
     for nbg in "${N_BGs[@]}"; do
@@ -122,11 +125,12 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                                     NAME_ABR="ABR_${ABR}"
                                                                                     (( SIM_COUNT++ ))  # ← increment
 
-                                                                                    echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" >> "$temp_file"
+                                                                                    echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" >> "$temp_file"
                                                                                                                                                                 
                                                                                     if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
                                                                                         rm out_log.ans
-                                                                                        script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" "out_log.ans"
+                                                                                        script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" "out_log.ans"
+                                                                                        
                                                                                         sleep 5
                                                                                     fi
 

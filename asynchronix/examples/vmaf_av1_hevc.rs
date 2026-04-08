@@ -1004,6 +1004,7 @@ fn make_encoder_task(
     simulate_loss: bool,
     idr_freq: u32,
     intra_refresh: bool,
+    use_foveation: bool, 
     video_codec: VideoCodec, 
     pacer_rx: crossbeam::channel::Receiver<()>,) 
 
@@ -1028,6 +1029,7 @@ fn make_encoder_task(
                     framerate_fps,
                     idr_freq as usize, // GOP size
                     intra_refresh,
+                    use_foveation, 
                 ))
             },
             VideoCodec::HEVC => {
@@ -1044,6 +1046,7 @@ fn make_encoder_task(
                     framerate_fps,
                     idr_freq as usize,
                     intra_refresh,
+                    use_foveation, 
                 ))
             }
         }; 
@@ -1192,6 +1195,7 @@ pub async fn process_trace_vs_original(
     use_gui: bool, 
     parent_results_path: &str, 
     task_id: usize, 
+    use_foveation: bool, 
 ) -> Result<()> {
     let mut last_status = Instant::now();
 
@@ -1338,8 +1342,9 @@ pub async fn process_trace_vs_original(
         true, // Simulate loss based on trace
         idr_freq,
         intra_refresh_enabled,
+        use_foveation, 
         codec,
-        rx_pacer_enc
+        rx_pacer_enc, 
     );
 
     // B) Reference Reader (Direct from MP4)
@@ -1585,6 +1590,8 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
+    let use_foveation_const : bool = false; 
+
     // Regex compilation (done once)
     let re_codec = Arc::new(Regex::new(r"_Codec([^_]+)").unwrap());
     let re_fps =   Arc::new(Regex::new(r"_FPS(\d+)").unwrap());
@@ -1695,6 +1702,7 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
                 gui,
                 &parent_res,
                 task_id,  
+                use_foveation_const, 
             ).await;
 
             // Log result

@@ -37,8 +37,6 @@ pub fn path_loss(d: f64) -> f64 {
     54.12 + 10.0 * gamma * (d).log10() + 5.25 * 0.1467 * d
 }
 
-
-
 #[inline]
 pub fn airtime_ampdu(
     total_bits_transmitted_app: f64,

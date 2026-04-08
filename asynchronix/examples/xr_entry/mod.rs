@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 32;
+pub const NUM_INPUT_ARGS_SIM: usize = 33;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 
@@ -84,6 +84,7 @@ impl VRPair {
         fps: f32,
         gop_size: usize,
         intrarefresh: bool,
+        use_foveation: bool, 
         abr_enabled: usize,
         nest_vr_profile: &NestVrProfile,
         netem_values_tests: Option<(bool, bool, bool, bool)>,
@@ -143,6 +144,7 @@ impl VRPair {
             file_name_video,
             gop_size,
             intrarefresh,
+            use_foveation, 
             abr_enabled,
             nest_vr_profile,
             t_end_simu,
@@ -154,6 +156,7 @@ impl VRPair {
             edca_be_mode,
             codec_selection,
             results_path_name, 
+
         );
 
         let mut xr_client = XRClient::new(
@@ -354,6 +357,7 @@ pub struct SimParams {
     pub seed: u64,
     pub gop_size: usize,
     pub intra_refresh: usize,          // 0/1
+    pub use_foveation: usize,          // 0/1
     pub abr: usize, // 0 CBR | 1 Nest-VR | 2 Everest | 3 RL | 4 GCC | 5 NADA | 6 FovOptix
     pub nest_vr_choice: usize, // 0 Speedy | 1 Balanced | 2 Anxious
     pub test_distances_everest: usize, // 0/1
@@ -377,38 +381,38 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         "unexpected number of args"
     );
     SimParams {
-        stoptime: args[1].parse().unwrap(),
-        mean_length_bg: args[2].parse().unwrap(),
-        k_queue: args[3].parse().unwrap(),
-        distance: args[4].parse().unwrap(),
-        initial_bitrate: args[5].parse().unwrap(),
-        pl_prob: args[6].parse().unwrap(),
-        n_xr: args[7].parse().unwrap(),
-        n_bg: args[8].parse().unwrap(),
-        rate_bps_bg_in: args[9].parse().unwrap(),
-        is_ul_bg_traffic: args[10].parse().unwrap(),
-        test_type: args[11].clone(),
-        video_filename: args[12].clone(),
-        fps_arg: args[13].parse().unwrap(),
-        n_close: args[14].parse().unwrap(),
-        distance_close: args[15].parse().unwrap(),
-        seed: args[16].parse().unwrap(),
-        gop_size: args[17].parse().unwrap(),
-        intra_refresh: args[18].parse().unwrap(),
-        abr: args[19].parse().unwrap(),
-        nest_vr_choice: args[20].parse().unwrap(),
-        test_distances_everest: args[21].parse().unwrap(),
-        sim_id: args[22].parse().unwrap(),
-        observation_type: args[23].parse().unwrap(),
-        reward_mode: args[24].parse().unwrap(),
-        t_update_abr: args[25].parse().unwrap(),
-        // eval_string: args[26].parse().unwrap(),
-        mlo_channel_config: args[26].parse().unwrap(),
-        edca_be: args[27].parse().unwrap(),
-        mlo_link_sel_policy: args[28].parse().unwrap(),
-        packs_per_ampdu: args[29].parse().unwrap(),
-        codec_input_arg: args[30].parse().unwrap(),
-        name_results_path: args[31].clone(),
+        stoptime:               args[1].parse().unwrap(),
+        mean_length_bg:         args[2].parse().unwrap(),
+        k_queue:                args[3].parse().unwrap(),
+        distance:               args[4].parse().unwrap(),
+        initial_bitrate:        args[5].parse().unwrap(),
+        pl_prob:                args[6].parse().unwrap(),
+        n_xr:                   args[7].parse().unwrap(),
+        n_bg:                   args[8].parse().unwrap(),
+        rate_bps_bg_in:         args[9].parse().unwrap(),
+        is_ul_bg_traffic:       args[10].parse().unwrap(),
+        test_type:              args[11].clone(),
+        video_filename:         args[12].clone(),
+        fps_arg:                args[13].parse().unwrap(),
+        n_close:                args[14].parse().unwrap(),
+        distance_close:         args[15].parse().unwrap(),
+        seed:                   args[16].parse().unwrap(),
+        gop_size:               args[17].parse().unwrap(),
+        intra_refresh:          args[18].parse().unwrap(),
+        use_foveation:          args[19].parse().unwrap(), 
+        abr:                    args[20].parse().unwrap(),
+        nest_vr_choice:         args[21].parse().unwrap(),
+        test_distances_everest: args[22].parse().unwrap(),
+        sim_id:                 args[23].parse().unwrap(),
+        observation_type:       args[24].parse().unwrap(),
+        reward_mode:            args[25].parse().unwrap(),
+        t_update_abr:           args[26].parse().unwrap(),
+        mlo_channel_config:     args[27].parse().unwrap(),
+        edca_be:                args[28].parse().unwrap(),
+        mlo_link_sel_policy:    args[29].parse().unwrap(),
+        packs_per_ampdu:        args[30].parse().unwrap(),
+        codec_input_arg:        args[31].parse().unwrap(),
+        name_results_path:      args[32].clone(),
     }
 }
 
@@ -437,6 +441,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         seed,
         gop_size,
         intra_refresh,
+        use_foveation, 
         abr,
         nest_vr_choice,
         test_distances_everest,
@@ -693,6 +698,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             current_fps,
             gop_size,
             intra_refresh != 0,
+            use_foveation!= 0, 
             current_abr_mode,
             &nest_vr_profile,
             Some((test_bandwidth, test_jitter, test_pl, test_random)),
@@ -707,6 +713,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             codec_selection,
             &name_results_path, 
             seed, 
+
         );
 
         // Common pushes for all users
