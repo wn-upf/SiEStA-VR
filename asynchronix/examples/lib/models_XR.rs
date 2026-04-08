@@ -3232,16 +3232,27 @@ struct TrackingData {
     v_pos_y: Vec<f32>,
     v_pos_z: Vec<f32>,
     v_interarrival: Vec<f32>,
+    pub v_eye_l_x: Vec<f32>,
+    pub v_eye_l_y: Vec<f32>,
+    pub v_eye_l_z: Vec<f32>,
+    pub v_eye_l_w: Vec<f32>,
+    
+    pub v_eye_r_x: Vec<f32>,
+    pub v_eye_r_y: Vec<f32>,
+    pub v_eye_r_z: Vec<f32>,
+    pub v_eye_r_w: Vec<f32>,    
 }
 
 pub struct CsvTracking {
     csv_data: Arc<Mutex<TrackingData>>,
     writer: Arc<Mutex<BufWriter<std::fs::File>>>,
     batch_size: usize,
+    pub recent_gazes: Arc<Mutex<VecDeque<[Option<Quat>; 2]>>>,
+    pub max_window_size: usize,
 }
 
 impl CsvTracking {
-    pub fn new(folder_name: &str, num_id: u8, results_path: &str, ) -> std::io::Result<Self> {
+    pub fn new(folder_name: &str, num_id: u8, results_path: &str, fps: f32, t_abr: f32,  ) -> std::io::Result<Self> {
         let dir = format!("{}/{}", results_path, folder_name, );
         let _ = std::fs::create_dir_all(&dir);
 
@@ -3253,9 +3264,13 @@ impl CsvTracking {
             .open(&file_path)?;
         let mut buf = BufWriter::new(file);
 
+        let expected_polling_rate = fps * 3.0; // of tracking data
+        
+        let max_window_size = (expected_polling_rate * t_abr).ceil() as usize; // keep at least twice the needed samples
+
         // Write header if file is empty
         if Path::new(&file_path).metadata()?.len() == 0 {
-            buf.write_all(b"timestamp,device_id,pos_x,pos_y,pos_z,interarrival_ms\n")?;
+            buf.write_all(b"timestamp,device_id,pos_x,pos_y,pos_z,interarrival_ms,eye_l_x,eye_l_y,eye_l_z,eye_l_w,eye_r_x,eye_r_y,eye_r_z,eye_r_w\n")?;
             buf.flush()?;
         }
 
@@ -3263,6 +3278,9 @@ impl CsvTracking {
             csv_data: Arc::new(Mutex::new(TrackingData::default())),
             writer: Arc::new(Mutex::new(buf)),
             batch_size: 100,
+            recent_gazes: Arc::new(Mutex::new(VecDeque::with_capacity(max_window_size))),
+            max_window_size,
+
         })
     }
 
@@ -3272,8 +3290,26 @@ impl CsvTracking {
         device_id: u64,
         pos: [f32; 3],
         interarrival_ms: f32,
+        eye_gazes: [Option<Quat>; 2],
     ) {
         let ts_str = format_elapsed!(now);
+        let (lx, ly, lz, lw) = eye_gazes[0]
+            .map(|q| (q.x, q.y, q.z, q.w))
+            .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
+            
+        let (rx, ry, rz, rw) = eye_gazes[1]
+            .map(|q| (q.x, q.y, q.z, q.w))
+            .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
+        
+        let mut window = self.recent_gazes.lock().unwrap();
+        
+        // If the window is full, drop the oldest sample
+        if window.len() >= self.max_window_size {
+            window.pop_front();
+        }
+        // Add the newest sample to the back
+        window.push_back(eye_gazes);
+
 
         {
             let mut data = self.csv_data.lock().unwrap();
@@ -3283,6 +3319,8 @@ impl CsvTracking {
             data.v_pos_y.push(pos[1]);
             data.v_pos_z.push(pos[2]);
             data.v_interarrival.push(interarrival_ms);
+            data.v_eye_l_x.push(lx); data.v_eye_l_y.push(ly); data.v_eye_l_z.push(lz); data.v_eye_l_w.push(lw);
+            data.v_eye_r_x.push(rx); data.v_eye_r_y.push(ry); data.v_eye_r_z.push(rz); data.v_eye_r_w.push(rw);
 
             if data.v_timestamp.len() >= self.batch_size {
                 // flush while holding data, but drop it before writing
@@ -3294,19 +3332,34 @@ impl CsvTracking {
         }
     }
 
+    pub fn get_gaze_window(&self) -> Vec<[Option<Quat>; 2]> {
+        let window = self.recent_gazes.lock().unwrap();
+        // Clone the current state of the deque into a standard Vec
+        window.iter().cloned().collect()
+    }
+
     pub fn flush_batch(&self) -> std::io::Result<()> {
         let mut data = self.csv_data.lock().unwrap();
         let mut writer = self.writer.lock().unwrap();
 
         for i in 0..data.v_timestamp.len() {
+            // 14 columns: 6 original + 4 left eye + 4 right eye
             let row = format!(
-                "{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 data.v_timestamp[i],
                 data.v_device_id[i],
                 data.v_pos_x[i],
                 data.v_pos_y[i],
                 data.v_pos_z[i],
-                data.v_interarrival[i]
+                data.v_interarrival[i],
+                data.v_eye_l_x[i],
+                data.v_eye_l_y[i],
+                data.v_eye_l_z[i],
+                data.v_eye_l_w[i],
+                data.v_eye_r_x[i],
+                data.v_eye_r_y[i],
+                data.v_eye_r_z[i],
+                data.v_eye_r_w[i]
             );
             writer.write_all(row.as_bytes())?;
         }
@@ -3319,6 +3372,17 @@ impl CsvTracking {
         data.v_pos_y.clear();
         data.v_pos_z.clear();
         data.v_interarrival.clear();
+        
+        // Clear new eye buffers
+        data.v_eye_l_x.clear();
+        data.v_eye_l_y.clear();
+        data.v_eye_l_z.clear();
+        data.v_eye_l_w.clear();
+        
+        data.v_eye_r_x.clear();
+        data.v_eye_r_y.clear();
+        data.v_eye_r_z.clear();
+        data.v_eye_r_w.clear();
 
         Ok(())
     }
@@ -3330,6 +3394,8 @@ struct TrackingLog {
     position: Vec3,
     _orientation: Quat,
     _linear_velocity: Vec3,
+
+    // eye_gazes: [Option<Quat>; 2],
 }
 
 #[allow(unused)]
@@ -3516,7 +3582,7 @@ impl XRServer {
             output_perfect_information_bitrate: Output::default(),
 
             last_tracking_rx_instant: t0_sim,
-            csv_tracking: CsvTracking::new(name_folder, num, results_path_name).unwrap(),
+            csv_tracking: CsvTracking::new(name_folder, num, results_path_name, frame_rate, t_update_abr, ).unwrap(),
             sim_unique_string: sim_unique_string.to_string(),
             nada_sender,
             fov_optix_manager: fovoptix_struct,
@@ -3751,6 +3817,8 @@ impl XRServer {
 
         let serialized = &buf[SHARD_PREFIX_SIZE..];
         let track: Tracking = bincode::deserialize::<Tracking>(serialized)?;
+
+        // print_red!("Face Data: {:#?}", track.face_data); 
         // .unwrap()?;
         Ok(track)
     }
@@ -3850,6 +3918,10 @@ impl XRServer {
                                         .duration_since(self.last_tracking_rx_instant)
                                         .as_secs_f32()
                                         * 1000.0;
+
+                                    let eye_gazes: [Option<Pose>; 2] = track.face_data.eye_gazes; 
+                                    let quat_eye_gazes = eye_gazes.map(|opt_pose| opt_pose.map(|pose| pose.orientation));
+                                    
                                     self.csv_tracking.update_stats(
                                         now,
                                         log_entry.device_id,
@@ -3859,6 +3931,7 @@ impl XRServer {
                                             log_entry.position.z,
                                         ],
                                         interarrival_tracking_ms,
+                                        quat_eye_gazes, 
                                     );
                                     self.last_tracking_rx_instant = now;
 
@@ -4295,6 +4368,8 @@ impl XRServer {
                 //     _ => 100.0,
                 // };
 
+                let gaze_history: Vec<[Option<Quat>; 2]> = self.csv_tracking.get_gaze_window();
+
                 let mut buffer_emu = send_socket // generate the actual video frame data
                     .get_buffer_emu(
                         &header,
@@ -4310,6 +4385,7 @@ impl XRServer {
                         self.gop_size,
                         self.intra_refresh,
                         self.use_foveation, 
+                        gaze_history, 
                     )
                     .await
                     .unwrap();
@@ -4873,6 +4949,108 @@ impl VideoDecoder {
 
 }
 
+/// Mirrors ffmpeg cascading model for realistic saccadic eye movement.
+pub struct EyeGazeModel {
+    /// Saccade frequency Hz (Reduced to 1.5 for a calmer, more realistic resting gaze)
+    pub saccade_freq: f32,
+    /// Maximum horizontal gaze excursion in radians (~±12° = 0.20 rad)
+    pub max_yaw: f32,
+    /// Maximum vertical gaze excursion in radians (~±8° = 0.15 rad)
+    pub max_pitch: f32,
+    /// Microsaccade jitter amplitude in radians (~0.1° = 0.002 rad)
+    pub microsaccade_amplitude: f32,
+    /// Matches `start_frame_idx` in ffmpeg — phase-shifts the random sequence
+    pub seed_offset: i64,
+    /// Stream framerate (needed to compute discrete frame steps)
+    pub framerate: f32,
+}
+
+impl Default for EyeGazeModel {
+    fn default() -> Self {
+        Self {
+            saccade_freq: 1.5, // Toned down from 3.0
+            max_yaw: 0.20,     // Toned down from 0.35
+            max_pitch: 0.15,   // Toned down from 0.26
+            microsaccade_amplitude: 0.002, // Smoother microsaccades
+            seed_offset: 0,
+            framerate: 60.0,
+        }
+    }
+}
+
+impl EyeGazeModel {
+    #[inline]
+    fn hash_sin(step: i64, magic: f32) -> f32 {
+        let x = step as f32 * magic;
+        let s = x.sin() * 43758.5453;
+        s - s.floor() 
+    }
+
+    #[inline]
+    fn hash_cos(step: i64, magic: f32) -> f32 {
+        let x = step as f32 * magic;
+        let s = x.cos() * 43758.5453;
+        s - s.floor()
+    }
+
+    /// Core model — returns (yaw, pitch) in radians at `t`.
+    pub fn gaze_angles(&self, t: Duration) -> (f32, f32) {
+        let t_s = t.as_secs_f32();
+        let frame = (t_s * self.framerate + self.seed_offset as f32).round() as i64;
+        let saccade_period = (self.framerate / self.saccade_freq).round() as i64;
+        
+        // Prevent division by zero
+        let safe_period = saccade_period.max(1);
+        let step = frame / safe_period;
+        let frame_in_step = frame % safe_period;
+
+        // 1. Calculate where we are going (Current Target)
+        let target_yaw   = (Self::hash_sin(step, 12.9898) * 2.0 - 1.0) * self.max_yaw;
+        let target_pitch = (Self::hash_cos(step, 78.233)  * 2.0 - 1.0) * self.max_pitch;
+
+        // 2. Calculate where we came from (Previous Target)
+        let prev_yaw   = (Self::hash_sin(step - 1, 12.9898) * 2.0 - 1.0) * self.max_yaw;
+        let prev_pitch = (Self::hash_cos(step - 1, 78.233)  * 2.0 - 1.0) * self.max_pitch;
+
+        // 3. Interpolate (Ease-Out curve for rapid but smooth snapping)
+        let phase = frame_in_step as f32 / safe_period as f32;
+        
+        // The multiplier (20.0) controls the speed of the eye dart. 
+        // A higher number means a faster snap. 20.0 completes the movement in about 3-5 frames.
+        let ease = 1.0 - (-phase * 20.0).exp(); 
+
+        let base_yaw = prev_yaw + (target_yaw - prev_yaw) * ease;
+        let base_pitch = prev_pitch + (target_pitch - prev_pitch) * ease;
+
+        // 4. Add Microsaccade noise (Keep this continuous to avoid micro-snapping)
+        let micro_yaw   = (Self::hash_sin(frame, 127.1) * 2.0 - 1.0) * self.microsaccade_amplitude;
+        let micro_pitch = (Self::hash_cos(frame, 311.7) * 2.0 - 1.0) * self.microsaccade_amplitude;
+
+        (base_yaw + micro_yaw, base_pitch + micro_pitch)
+    }
+
+    fn eye_pose(yaw: f32, pitch: f32, vergence_sign: f32) -> Pose {
+        const VERGENCE_RAD: f32 = 0.052; 
+        Pose {
+            orientation: Quat::from_euler(
+                glam::EulerRot::YXZ,
+                yaw + vergence_sign * VERGENCE_RAD,
+                -pitch, 
+                0.0,
+            ),
+            position: Vec3::ZERO,
+        }
+    }
+
+    pub fn generate(&self, t: Duration) -> [Option<Pose>; 2] {
+        let (yaw, pitch) = self.gaze_angles(t);
+        [
+            Some(Self::eye_pose(yaw, pitch, -1.0)), 
+            Some(Self::eye_pose(yaw, pitch,  1.0)), 
+        ]
+    }
+}
+
 #[allow(unused)]
 pub struct XRClient {
     pub decoder_queue: DroppingVecDeque<(usize, Vec<u8>)>,
@@ -5002,6 +5180,7 @@ pub struct XRClient {
     consecutive_lost_counter: usize,
 
     pub client_history_metrics: ClientHistory, 
+    pub gaze_model: EyeGazeModel, 
 }
 
 #[allow(unused)]
@@ -5021,6 +5200,7 @@ impl XRClient {
         edca_be_mode: bool,
         codec_selection: VideoCodec,
         results_path: &str, // for simultaneous parallel simu runs
+        random_seed: u64, 
 
     ) -> Self {
         // let (vmaf_tx, vmaf_rx) = bounded(10);
@@ -5146,7 +5326,12 @@ impl XRClient {
             window_tx: Some(tx), // Store the tokio sender
             consecutive_lost_counter: 0,
             client_history_metrics: ClientHistory::default(), // for metrics visualization
-        }
+        
+            gaze_model: EyeGazeModel {
+                seed_offset: random_seed as i64,         
+                framerate: fps, 
+                ..Default::default()
+            },        }
     }
 
     fn spawn_display_thread(
@@ -5369,6 +5554,8 @@ impl XRClient {
                 } else {
                     Quat::IDENTITY
                 };
+
+                let eye_gazes = self.gaze_model.generate(now.duration_since(self.t_0));
                 // --- tracking packet ---
                 let track = Tracking {
                     target_timestamp: TARGET_TIMESTAMP_TRACKING,
@@ -5383,8 +5570,17 @@ impl XRClient {
                             angular_velocity: Vec3::ZERO, // could derive from orientation diff if needed (not needed)
                         },
                     )],
+                    face_data: crate::lib::alvr_stream_socket::FaceData {
+                        eye_gazes,
+                        fb_face_expression: None,
+                        htc_eye_expression: None,
+                        htc_lip_expression: None,
+                    },
+                    // face_data: crate::lib::alvr_stream_socket::FaceData { eye_gazes: (), fb_face_expression: (), htc_eye_expression: (), htc_lip_expression: () }
                     ..Default::default()
                 };
+
+
                 // print_yellow!("Generating tracking packet| dt: {}, data: {:#?}", dt.as_secs_f32(), track.device_motions);
 
                 if let Some(mut sender) = self.output_app_tracking_sender.clone() {
@@ -6875,6 +7071,8 @@ pub struct STA_extended {
     pub random_seed: StdRng,
     pub ap_coords: Coords, // used for BG DL traffic in TX
 
+    pub test_rwalk: bool, 
+
 
 
 }
@@ -6893,6 +7091,7 @@ impl STA_extended {
         is_ul_bg: usize,
         ap_coords: Coords,
         input_seed: u64, 
+        test_rwalk: bool, 
     ) -> Self {
         let arrival_rate_BG_bps = arrival_rate_BG_lambda_packets_per_s * mean_length_BG;
 
@@ -6900,6 +7099,7 @@ impl STA_extended {
         println!("[DEBUG STA{}]\tCoordinates: {:?}\n\tDestination: STA{} | L_BG: {:.3} ->  RATE_BG_packs_per_s: {:.3}| Rate = {:.3} Mbps |  is_BG_STA {}",
                             src, coordinates, dest, mean_length_BG, arrival_rate_BG_lambda_packets_per_s, arrival_rate_BG_bps / 1e6,  is_bg_sta);
         let mut random_seed = StdRng::seed_from_u64(input_seed);
+
         Self {
             output_network_port: Default::default(),
             outport_coords_xrclient: Default::default(),
@@ -6920,6 +7120,7 @@ impl STA_extended {
             random_seed,
             ap_coords,
             current_angle: 0.0, 
+            test_rwalk, 
         }
     }
 
@@ -6935,7 +7136,7 @@ impl STA_extended {
                 // Persistence factor: 0.0 is pure random, 0.9 is very "straight" lines
                 const PERSISTENCE: f64 = 0.65; 
 
-                {
+                let next_update_time = if self.test_rwalk{
                     let mut rng = rand::thread_rng();
 
                     // 1. True Correlated Angle (Smooths the movement in all 360 degrees)
@@ -6967,39 +7168,22 @@ impl STA_extended {
 
                     self.sta_coordinates.x = new_x;
                     self.sta_coordinates.y = new_y;
+                    DELTA_T
                 }
+                else{
+                    // We don't move 
+                    10.0 // update every long time, not needed in theory but just in case 
+                }; 
 
                 self.outport_coords_xrclient.send(self.sta_coordinates.clone()).await;
 
                 context.scheduler.schedule_event(
-                    std::time::Duration::from_secs_f64(DELTA_T),
+                    std::time::Duration::from_secs_f64(next_update_time),
                     Self::move_coordinates_everest,
                     (),
                 ).unwrap();
             }
         }
-
-    pub fn move_coordinates(&mut self, distance_to_move: f64) {
-        // brownian movement for STA
-        let mut rng = rand::thread_rng();
-
-        // Generate a random angle in spherical coordinates to determine the direction of movement
-        let theta = rng.gen_range(0.0..2.0 * PI); // azimuthal angle for x and y
-        let phi = rng.gen_range(0.0..PI); // polar angle for z-axis
-
-        // Decompose the distance into x, y, and z components
-        let dx = distance_to_move * theta.cos() * phi.sin();
-        let dy = distance_to_move * theta.sin() * phi.sin();
-        let dz = distance_to_move * phi.cos();
-
-        println!("[MOVE STA COORDS] Before: {:?}", self.sta_coordinates);
-
-        // Update the coordinates
-        self.sta_coordinates.x += dx;
-        self.sta_coordinates.y += dy;
-        self.sta_coordinates.z += dz;
-        println!("                  After: {:?}", self.sta_coordinates);
-    }
 
     pub async fn input_XR_app(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         // do everything else to the packet:

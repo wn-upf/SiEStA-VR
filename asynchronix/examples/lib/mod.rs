@@ -2059,7 +2059,7 @@ pub fn exponential<R: Rng + ?Sized>(mean: f64, rng: &mut R) -> f64 {
 // }
 
 // Separate struct to hold the data that will be shared
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CsvData {
     v_timestamp: Vec<String>,
     v_packet_id: Vec<usize>,
@@ -2100,6 +2100,7 @@ impl CsvData {
             v_retries: Vec::new(),
             v_last_backoff_value: Vec::new(),
             v_edca_ac: Vec::new(),
+            ..Default::default()
         }
     }
 }
@@ -2970,7 +2971,7 @@ pub fn airtime_ampdu(
     // let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;                            // ONLY FOR DEBUG
     // let _rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;              // ONLY FOR DEBUG
     // print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
-    //              ,phy_time * 1000.0, total_bits_transmitted,  channel_width, ORate, effPt, Pr, distance, PL, rts_cts_overhead_percent,);
+    //              ,phy_time * 1000.0, total_bits_transmitted_app,  channel_width, ORate, effPt, Pr, distance, PL, _rts_cts_overhead_percent,);
     (phy_time, _mcs_val as u8)
 }
 

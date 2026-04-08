@@ -3,6 +3,7 @@ use crate::lib::{
     get_prefix_path, get_third_octet, models_mm1k::NetworkPattern, Av1Parser, DebugColor,
     HevcParser, OldCsvTrace,
 };
+use glam::{Quat, EulerRot};
 use crate::print_green;
 use crate::{lib::DEBUG_PRINT_ENABLED, lib::USE_FFMPEG_DEMO, print_pretty};
 use asynchronix::model::Context;
@@ -104,11 +105,11 @@ pub enum ChunkedEncoder {
 }
 
 impl ChunkedEncoder {
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, latest_gaze: Vec<[Option<Quat>; 2]>) {
         match self {
-            ChunkedEncoder::Hevc(e) => e.start_chunking(bitrate_mbps, now).await,
-            ChunkedEncoder::Av1(e) => e.start_chunking(bitrate_mbps, now).await,
-            ChunkedEncoder::HevcSoftware(e) => e.start_chunking(bitrate_mbps, now).await,
+            ChunkedEncoder::Hevc(e) => e.start_chunking(bitrate_mbps, now, latest_gaze).await,
+            ChunkedEncoder::Av1(e) => e.start_chunking(bitrate_mbps, now, latest_gaze).await,
+            ChunkedEncoder::HevcSoftware(e) => e.start_chunking(bitrate_mbps, now, latest_gaze).await,
         }
     }
 
@@ -207,7 +208,7 @@ impl ChunkedAv1Encoder {
         while let Ok(_) = self.frame_rx.try_recv() {}
     }
     #[inline]
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, latest_gaze: Vec<[Option<Quat>; 2]>) {
         let bitrate_adjusted_fps = bitrate_mbps;
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
@@ -461,7 +462,7 @@ impl ChunkedSoftwareHevcEncoder {
         self.parser.buffer.clear();
     }
     #[inline]
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, latest_gaze: Vec<[Option<Quat>; 2]>) {
         let bitrate_adjusted_fps = bitrate_mbps;
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
@@ -745,7 +746,7 @@ impl ChunkedHevcEncoder {
     /// As data is read from ffmpeg’s stdout, it is fed to a HevcParser which extracts complete frames.
     /// Each complete frame is sent via the async channel.
     #[inline]
-    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>) {
+    pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, latest_gaze:Vec<[Option<Quat>; 2]>) {
         // let bitrate_adjusted_fps = bitrate_mbps * FRAMERATE_WINDOWS as f32 / self.framerate;
 
         let bitrate_adjusted_fps = bitrate_mbps;
@@ -763,13 +764,6 @@ impl ChunkedHevcEncoder {
 
         let bufsize_kbits = 25.0 * (bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al. 
         let bufsize_str = format!("{:.0}k", bufsize_kbits);
-        
-
-        let fovea_w = 1000;
-        let fovea_h = 1000;
-        let fovea_x = (self.width - fovea_w) / 2;
-        let fovea_y = (self.height - fovea_h) / 2;
-
         println!(
             "{} - {} CHUNKING with bitrate {} Mbps",
             crate::format_elapsed!(now),
@@ -777,34 +771,152 @@ impl ChunkedHevcEncoder {
             bitrate_mbps,
         );
         self.parser.buffer.clear();
-    
+
+        // You already calculated this earlier in the function:
+
+        let fovea_w = 1000;
+        let fovea_h = 1000;
+        
+        // Convert to f32 for math
+        let range_x = (self.width - fovea_w) as f32;
+        let range_y = (self.height - fovea_h) as f32;
+
+        let frames_in_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
+        let gaze_count = latest_gaze.len();
+
+        let mut expr_x = String::new();
+        let mut expr_y = String::new();
+        
+
+        if gaze_count == 0 || !self.use_foveation || frames_in_chunk == 0 {
+            // Fallback to absolute center if no data or foveation is off
+            expr_x = format!("{:.0}", range_x / 2.0);
+            expr_y = format!("{:.0}", range_y / 2.0);
+        } else {
+            // Start the additive string with 0
+            expr_x.push_str("0");
+            expr_y.push_str("0");
+
+            let max_yaw = std::f32::consts::FRAC_PI_4; 
+            let max_pitch = std::f32::consts::FRAC_PI_4;
+
+            for f in 0..frames_in_chunk {
+                // Time-slice mapping logic (using your existing method)
+                let start_idx = ((f as f32 / frames_in_chunk as f32) * gaze_count as f32).floor() as usize;
+                let mut end_idx = (((f + 1) as f32 / frames_in_chunk as f32) * gaze_count as f32).floor() as usize;
+                end_idx = end_idx.clamp(start_idx + 1, gaze_count);
+
+                let mut gaze_yaw = 0.0;
+                let mut gaze_pitch = 0.0;
+                let mut valid_eyes = 0;
+
+                for gazes in &latest_gaze[start_idx..end_idx] {
+                    for gaze in gazes.into_iter().flatten() {
+                        let (yaw, pitch, _roll) = gaze.to_euler(EulerRot::YXZ);
+                        gaze_yaw += yaw;
+                        gaze_pitch += pitch;
+                        valid_eyes += 1;
+                    }
+                }
+
+                if valid_eyes > 0 {
+                    gaze_yaw /= valid_eyes as f32;
+                    gaze_pitch /= valid_eyes as f32;
+                }
+
+                let norm_x = (gaze_yaw / max_yaw).clamp(-1.0, 1.0);
+                let norm_y = (-gaze_pitch / max_pitch).clamp(-1.0, 1.0);
+
+                let target_x = ((norm_x + 1.0) / 2.0 * range_x).round();
+                let target_y = ((norm_y + 1.0) / 2.0 * range_y).round();
+
+                // Build the flat additive string
+                if f == frames_in_chunk - 1 {
+                    // For the very last frame, use gte (greater than or equal).
+                    // This ensures that if ffmpeg processes an extra frame or two, 
+                    // the foveal box stays perfectly anchored to the last known position.
+                    expr_x.push_str(&format!("+gte(n,{})*{:.0}", f, target_x));
+                    expr_y.push_str(&format!("+gte(n,{})*{:.0}", f, target_y));
+                } else {
+                    // For all other frames, use eq (equal).
+                    expr_x.push_str(&format!("+eq(n,{})*{:.0}", f, target_x));
+                    expr_y.push_str(&format!("+eq(n,{})*{:.0}", f, target_y));
+                }
+            }
+        }
 
         let filter_complex_foveation = if self.use_foveation {
-            &format!(
-                        "[0:v]scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p[scaled]; \
-                        [scaled]split=2[bg][fg]; \
-                        [bg]boxblur=luma_radius=10:chroma_radius=10[blurred]; \
-                        [fg]crop=w={}:h={}:x={}:y={}[sharp]; \
-                        [blurred][sharp]overlay=x={}:y={}[foveated]; \
-                        [foveated]drawbox=x={}:y={}:w={}:h={}:color=red@0.8:t=4, \
-                        drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                        self.width, self.height,
-                        fovea_w, fovea_h, fovea_x, fovea_y, // crop sharp center
-                        fovea_x, fovea_y,                   // overlay position
-                        fovea_x, fovea_y, fovea_w, fovea_h, // drawbox
-                        start_frame_idx
-                    ) 
-        }
-        else{    
-            &format!(
-                        // x=w-tw-10 : Calculates Width minus TextWidth minus Padding -> Right Aligned
-                        "scale={}:{}:force_original_aspect_ratio=disable,format=yuv420p,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
-                        self.width, 
-                        self.height, 
-                        start_frame_idx
-                    )
-        }; 
-
+            format!(
+                "[0:v]scale={w}:{h}:force_original_aspect_ratio=disable,format=yuv420p[scaled]; \
+                [scaled]split=2[bg][fg]; \
+                [bg]boxblur=luma_radius=10:chroma_radius=10[blurred]; \
+                [fg]crop=w={fw}:h={fh}:x='{expr_x}':y='{expr_y}', \
+                    drawbox=x=0:y=0:w={fw}:h={fh}:color=red@0.8:t=4[sharp]; \
+                [blurred][sharp]overlay=x='{expr_x}':y='{expr_y}'[foveated]; \
+                [foveated]drawtext=\
+                    fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf:\
+                    text='%{{eif\\:n\\:d\\:5}}':start_number={start}:\
+                    x=10:y=10:fontsize=96:fontcolor=white:box=1:boxcolor=black:boxborderw=30",
+                w = self.width,
+                h = self.height,
+                fw = fovea_w,
+                fh = fovea_h,
+                expr_x = expr_x,
+                expr_y = expr_y,
+                start = start_frame_idx
+            )
+        } else {    
+            format!(
+                "scale={w}:{h}:force_original_aspect_ratio=disable,format=yuv420p,\
+                drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={start}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+                w = self.width, 
+                h = self.height, 
+                start = start_frame_idx
+            )
+        };
+        
+        // ######### Uncorrelated Cascaded model, works but we opted to use the data ALVR uses in Tracking packets ########
+        // let move_speed = 5; // How fast the "eye" scans
+        // let filter_complex_foveation = if self.use_foveation {
+        //     let freq = 30;
+        //     let range_x = self.width - fovea_w;
+        //     let range_y = self.height - fovea_h;
+        //     let expr_x = format!(
+        //         "trunc((sin(floor(round(t*{}+{})/{})*12.9898)+1)/2*{})",
+        //         self.framerate, start_frame_idx, freq, range_x
+        //     );
+        //     let expr_y = format!(
+        //         "trunc((cos(floor(round(t*{}+{})/{})*78.233)+1)/2*{})",
+        //         self.framerate, start_frame_idx, freq, range_y
+        //     );
+        //     &format!(
+        //         "[0:v]scale={w}:{h}:force_original_aspect_ratio=disable,format=yuv420p[scaled]; \
+        //         [scaled]split=2[bg][fg]; \
+        //         [bg]boxblur=luma_radius=10:chroma_radius=10[blurred]; \
+        //         [fg]crop=w={fw}:h={fh}:x='{expr_x}':y='{expr_y}', \
+        //             drawbox=x=0:y=0:w={fw}:h={fh}:color=red@0.8:t=4[sharp]; \
+        //         [blurred][sharp]overlay=x='{expr_x}':y='{expr_y}'[foveated]; \
+        //         [foveated]drawtext=\
+        //             fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf:\
+        //             text='%{{eif\\:n\\:d\\:5}}':start_number={start}:\
+        //             x=10:y=10:fontsize=96:fontcolor=white:box=1:boxcolor=black:boxborderw=30",
+        //         w = self.width,
+        //         h = self.height,
+        //         fw = fovea_w,
+        //         fh = fovea_h,
+        //         expr_x = expr_x,
+        //         expr_y = expr_y,
+        //         start = start_frame_idx
+        //     )
+        // } else {    
+        //     &format!(
+        //         "scale={w}:{h}:force_original_aspect_ratio=disable,format=yuv420p,\
+        //         drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf: text='%{{eif\\:n\\:d\\:5}}': start_number={start}: x=10: y=10: fontsize=96: fontcolor=white: box=1: boxcolor=black: boxborderw=30",
+        //         w = self.width, 
+        //         h = self.height, 
+        //         start = start_frame_idx
+        //     )
+        // };
 
         let mut command = FfmpegCommand::new();
         if self.intra_refresh {
@@ -820,7 +932,7 @@ impl ChunkedHevcEncoder {
                 // .args(&["-re"]) // read at real-time speed
                 .input(&self.input)
                 .args(&[
-                    "-filter_complex", filter_complex_foveation, 
+                    "-filter_complex", &filter_complex_foveation, 
                 ]) 
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
@@ -853,7 +965,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-stats_period", "5"])
                 .input(&self.input)              
                 .args(&[
-                    "-filter_complex", filter_complex_foveation, 
+                    "-filter_complex", &filter_complex_foveation, 
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"]) // TODO : llhq is preferrable but deprecated on some of the HPC GPUs.
@@ -2615,6 +2727,7 @@ impl<H: Serialize> StreamSender<H> {
         gop_size: usize,
         intra_refresh: bool,
         use_foveation: bool, 
+        latest_gazes: Vec<[Option<glam::Quat>; 2]>, 
     ) -> Result<Buffer<H>> {
         let _id_frame_files_ref = id_frame + 1;
 
@@ -2767,7 +2880,7 @@ impl<H: Serialize> StreamSender<H> {
                 {
                     let mut encoder: async_std::sync::MutexGuard<'_, ChunkedEncoder> =
                         encoder_arc.lock().await;
-                    encoder.start_chunking(current_bitrate_mbps, now).await;
+                    encoder.start_chunking(current_bitrate_mbps, now, latest_gazes.clone()).await;
                 } // Lock is dropped here
 
                 // Store the initialized encoder
@@ -2794,7 +2907,7 @@ impl<H: Serialize> StreamSender<H> {
                         encoder.clear_buffers();
 
                         // Restart chunking
-                        encoder.start_chunking(current_bitrate_mbps, now).await;
+                        encoder.start_chunking(current_bitrate_mbps, now, latest_gazes).await;
 
                         // Wait for encoder to produce frames
                         // task::sleep(Duration::from_millis(100)).await;

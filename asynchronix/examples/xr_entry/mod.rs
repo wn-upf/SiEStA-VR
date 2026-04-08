@@ -173,6 +173,7 @@ impl VRPair {
             edca_be_mode,
             codec_selection,
             results_path_name, 
+            random_seed, 
         );
 
         let mut sta_server = STA_extended::new(
@@ -188,6 +189,7 @@ impl VRPair {
             0,
             ap_coords,
             random_seed, 
+            test_distances_everest_bool
         );
         let mut sta_client = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -202,6 +204,7 @@ impl VRPair {
             0,
             ap_coords,
             random_seed, 
+            test_distances_everest_bool
 
         );
 
@@ -757,6 +760,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             is_ul_bg_traffic,
             ap_coords,
             seed, 
+            test_distances_everest_bool, 
         );
 
         let mbox_bg_sta = Mailbox::new();
@@ -1011,17 +1015,15 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         }
     }
     // Use saved addresses for movement, only in Client STAs! Will also share coords messages with connected XRClient
-    if test_distances_everest_bool {
-        for sta_client_addr in sta_client_addrs.iter() {
-            scheduler
-                .schedule_event(
-                    Duration::from_secs(SIM_START_TIME),
-                    STA_extended::move_coordinates_everest,
-                    (),
-                    sta_client_addr,
-                )
-                .unwrap();
-        }
+    for sta_client_addr in sta_client_addrs.iter() {
+        scheduler
+            .schedule_event(
+                Duration::from_secs(SIM_START_TIME),
+                STA_extended::move_coordinates_everest, // will only actually move if rwalk is set to true
+                (),
+                sta_client_addr,
+            )
+            .unwrap();
     }
 
     // Schedule background STA events
