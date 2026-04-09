@@ -832,15 +832,13 @@ impl ChunkedHevcEncoder {
 
                 // Build the flat additive string
                 if f == frames_in_chunk - 1 {
-                    // For the very last frame, use gte (greater than or equal).
-                    // This ensures that if ffmpeg processes an extra frame or two, 
-                    // the foveal box stays perfectly anchored to the last known position.
-                    expr_x.push_str(&format!("+gte(n,{})*{:.0}", f, target_x));
-                    expr_y.push_str(&format!("+gte(n,{})*{:.0}", f, target_y));
+                    // Replace 'n' with 'round(t*{framerate})'
+                    expr_x.push_str(&format!("+gte(round(t*{}),{})*{:.0}", self.framerate, f, target_x));
+                    expr_y.push_str(&format!("+gte(round(t*{}),{})*{:.0}", self.framerate, f, target_y));
                 } else {
-                    // For all other frames, use eq (equal).
-                    expr_x.push_str(&format!("+eq(n,{})*{:.0}", f, target_x));
-                    expr_y.push_str(&format!("+eq(n,{})*{:.0}", f, target_y));
+                    // Replace 'n' with 'round(t*{framerate})'
+                    expr_x.push_str(&format!("+eq(round(t*{}),{})*{:.0}", self.framerate, f, target_x));
+                    expr_y.push_str(&format!("+eq(round(t*{}),{})*{:.0}", self.framerate, f, target_y));
                 }
             }
         }

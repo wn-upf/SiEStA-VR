@@ -20,15 +20,11 @@ pub const SIFS: f64 = 16E-6;
 pub const SYMBOL_TIME_LEGACY: f64 = 4E-6; 
 pub const SYMBOL_TIME_11AX: f64 = 16E-6; // 12.8 us symbol + 3.2 us guard interval. 
 
-
-
-
 #[inline]
 pub fn calculate_distance(x: f64, y: f64, z: f64, x_: f64, y_: f64, z_: f64) -> f64 {
     let dx = x_ - x;
     let dy = y_ - y;
     let dz = z_ - z;
-
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 #[inline]
