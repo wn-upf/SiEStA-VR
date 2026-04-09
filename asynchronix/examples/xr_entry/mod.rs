@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 33;
+pub const NUM_INPUT_ARGS_SIM: usize = 34;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 
@@ -85,6 +85,7 @@ impl VRPair {
         gop_size: usize,
         intrarefresh: bool,
         use_foveation: bool, 
+        vbv_perframe: bool, 
         abr_enabled: usize,
         nest_vr_profile: &NestVrProfile,
         netem_values_tests: Option<(bool, bool, bool, bool)>,
@@ -145,6 +146,7 @@ impl VRPair {
             gop_size,
             intrarefresh,
             use_foveation, 
+            vbv_perframe, 
             abr_enabled,
             nest_vr_profile,
             t_end_simu,
@@ -361,6 +363,7 @@ pub struct SimParams {
     pub gop_size: usize,
     pub intra_refresh: usize,          // 0/1
     pub use_foveation: usize,          // 0/1
+    pub vbv_per_frame: usize,          // 0/1, per-second if set to 0. 
     pub abr: usize, // 0 CBR | 1 Nest-VR | 2 Everest | 3 RL | 4 GCC | 5 NADA | 6 FovOptix
     pub nest_vr_choice: usize, // 0 Speedy | 1 Balanced | 2 Anxious
     pub test_distances_everest: usize, // 0/1
@@ -403,19 +406,20 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         gop_size:               args[17].parse().unwrap(),
         intra_refresh:          args[18].parse().unwrap(),
         use_foveation:          args[19].parse().unwrap(), 
-        abr:                    args[20].parse().unwrap(),
-        nest_vr_choice:         args[21].parse().unwrap(),
-        test_distances_everest: args[22].parse().unwrap(),
-        sim_id:                 args[23].parse().unwrap(),
-        observation_type:       args[24].parse().unwrap(),
-        reward_mode:            args[25].parse().unwrap(),
-        t_update_abr:           args[26].parse().unwrap(),
-        mlo_channel_config:     args[27].parse().unwrap(),
-        edca_be:                args[28].parse().unwrap(),
-        mlo_link_sel_policy:    args[29].parse().unwrap(),
-        packs_per_ampdu:        args[30].parse().unwrap(),
-        codec_input_arg:        args[31].parse().unwrap(),
-        name_results_path:      args[32].clone(),
+        vbv_per_frame:          args[20].parse().unwrap(), 
+        abr:                    args[21].parse().unwrap(),
+        nest_vr_choice:         args[22].parse().unwrap(),
+        test_distances_everest: args[23].parse().unwrap(),
+        sim_id:                 args[24].parse().unwrap(),
+        observation_type:       args[25].parse().unwrap(),
+        reward_mode:            args[26].parse().unwrap(),
+        t_update_abr:           args[27].parse().unwrap(),
+        mlo_channel_config:     args[28].parse().unwrap(),
+        edca_be:                args[29].parse().unwrap(),
+        mlo_link_sel_policy:    args[30].parse().unwrap(),
+        packs_per_ampdu:        args[31].parse().unwrap(),
+        codec_input_arg:        args[32].parse().unwrap(),
+        name_results_path:      args[33].clone(),
     }
 }
 
@@ -445,6 +449,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         gop_size,
         intra_refresh,
         use_foveation, 
+        vbv_per_frame, 
         abr,
         nest_vr_choice,
         test_distances_everest,
@@ -500,9 +505,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
     let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_PL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_GoP{:.0}_IR{:.0}_ABR{:.0}_nest{:.0}_obs{:.0}_reward{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_SocketRx{}",
-        stoptime, distance, initial_bitrate, fps_arg, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed, gop_size, intra_refresh, abr, nest_vr_choice, observation_type, reward_mode, edca_be, mlo_policy.to_string(), ALVR_ORIGINAL_SOCKETRX_BEHAVIOR,
-    );
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}",
+        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, mlo_policy.to_string(),    );
 
     let output_path = format!("{}/{}", name_results_path ,name_folder);
     fs::create_dir_all(&output_path).expect("Failed to create directory");
@@ -702,6 +706,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             gop_size,
             intra_refresh != 0,
             use_foveation!= 0, 
+            vbv_per_frame != 0, 
             current_abr_mode,
             &nest_vr_profile,
             Some((test_bandwidth, test_jitter, test_pl, test_random)),

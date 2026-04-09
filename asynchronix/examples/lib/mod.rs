@@ -81,7 +81,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = true;
+pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -2863,7 +2863,9 @@ pub fn airtime_ampdu(
 
     let effPt: f64 = p_tx_cheated;
 
-    let SU_spatial_streams = 2.0;
+
+    let SU_spatial_streams = 1.0;
+
 
     let distance = calculate_distance(
         coords_src.x,

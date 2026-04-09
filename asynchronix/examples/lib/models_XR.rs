@@ -2072,6 +2072,8 @@ pub struct BitrateManager {
     obs_normalizer: ObservationNormalizer,
     reward_stat: RunningStat,
     pub reward_mode: usize,
+
+    pub nestvr_logger: Option<Arc<CsvNestVr>>,
 }
 
 impl BitrateManager {
@@ -2088,6 +2090,9 @@ impl BitrateManager {
         obs_config: ObservationConfig,
         t_update_abr: f32,
         reward_mode: usize,
+        results_path: &str, 
+        name_folder_scenario: &str, 
+        num_id_stats: u8, 
     ) -> Self {
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => 10,
@@ -2266,6 +2271,25 @@ impl BitrateManager {
         let flr_vec: TimedVecFLR = TimedVecFLR::new(1.0 as f32); // let's take FLR 1 sec sliding window. TODO: input arg
         let buflevel_vec = TimedVecBuffer::new(t_update_abr as f32);
 
+
+        let nestvr_logger = if abr_enabled == 1 {
+            // Using `sim_unique_string` as the folder name. 
+            // "results" is hardcoded as the base path, adjust if needed!
+            // We default num_id to 0, but you could derive this from ip_server if you have multiple.
+            // print_red!("UNIQUE STRING: {:?}", sim_unique_string); 
+            match CsvNestVr::new(name_folder_scenario, num_id_stats, results_path) {
+                Ok(logger) => {
+                    print_green!("Successfully initialized NeSt-VR CSV Logger!",);
+                    Some(Arc::new(logger))
+                },
+                Err(e) => {
+                    eprintln!("[WARNING] Failed to initialize Nest-VR logger: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
             last_frame_instant: TaiTime::EPOCH,
             last_update_instant: TaiTime::EPOCH,
@@ -2321,6 +2345,8 @@ impl BitrateManager {
             obs_normalizer: ObservationNormalizer::default(),
             reward_stat: RunningStat::default(),
             reward_mode,
+
+            nestvr_logger, 
         }
     }
 
@@ -2679,6 +2705,32 @@ impl BitrateManager {
 
                     bitrate_bps =
                         upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap());
+
+
+                    if let Some(logger) = &self.nestvr_logger {
+                        let ts_str = format_elapsed!(now);
+                        
+                        logger.update_stats(
+                            ts_str,
+                            ip_server.to_string(),
+                            profile_config.bitrate_step_count as u32,
+                            profile_config.bitrate_dec_steps as  u32,
+                            profile_config.bitrate_inc_steps as  u32,
+                            self.bitrate_step_size_bps_nest / 1e6,
+                            r_rtt,
+                            r_inc,
+                            profile_config.rtt_adj_prob,
+                            profile_config.bitrate_inc_prob,
+                            fps_tx_avg,
+                            fps_rx_avg,
+                            nfr_avg,
+                            rtt_avg_ms,
+                            profile_config.nfr_thresh,
+                            profile_config.rtt_thresh_ms,
+                            bitrate_bps / 1e6,
+                            estimated_capacity_bps / 1e6,
+                        );
+                    }
 
                     // let heur_stats = HeuristicStats {
                     //     bitrate_step_count: profile_config.bitrate_step_count,
@@ -3225,6 +3277,178 @@ pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 }
 
 #[derive(Default)]
+pub struct NestVrData {
+    pub v_timestamp: Vec<String>,
+    pub v_ip_server: Vec<String>,
+    pub v_bitrate_step_count: Vec<u32>,
+    pub v_bitrate_dec_steps: Vec<u32>,
+    pub v_bitrate_inc_steps: Vec<u32>,
+    pub v_bitrate_step_size_mbps: Vec<f32>,
+    pub v_r_rtt: Vec<f32>,
+    pub v_r_inc: Vec<f32>,
+    pub v_rtt_adj_prob: Vec<f32>,
+    pub v_bitrate_inc_prob: Vec<f32>,
+    pub v_fps_tx_avg: Vec<f32>,
+    pub v_fps_rx_avg: Vec<f32>,
+    pub v_nfr_avg: Vec<f32>,
+    pub v_rtt_avg_ms: Vec<f32>,
+    pub v_nfr_thresh: Vec<f32>,
+    pub v_rtt_thresh_ms: Vec<f32>,
+    pub v_requested_bitrate_mbps: Vec<f32>,
+    pub v_estimated_capacity_mbps: Vec<f32>,
+}
+
+pub struct CsvNestVr {
+    csv_data: Arc<Mutex<NestVrData>>,
+    writer: Arc<Mutex<BufWriter<std::fs::File>>>,
+    batch_size: usize,
+}
+
+impl CsvNestVr {
+    pub fn new(folder_name: &str, num_id: u8, results_path: &str) -> std::io::Result<Self> {
+        let dir = format!("{}/{}", results_path, folder_name);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let file_path = format!("{}/NESTVR_stats{}.csv", dir, num_id);
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)?;
+        let mut buf = BufWriter::new(file);
+
+        // Write header if file is empty
+        if Path::new(&file_path).metadata()?.len() == 0 {
+            buf.write_all(b"timestamp,ip_server,step_count,dec_steps,inc_steps,step_size_mbps,r_rtt,r_inc,rtt_adj_prob,bitrate_inc_prob,fps_tx_avg,fps_rx_avg,nfr_avg,rtt_avg_ms,nfr_thresh,rtt_thresh_ms,requested_bitrate_mbps,estimated_capacity_mbps\n")?;
+            buf.flush()?;
+        }
+
+        Ok(Self {
+            csv_data: Arc::new(Mutex::new(NestVrData::default())),
+            writer: Arc::new(Mutex::new(buf)),
+            batch_size: 1, // Adjust batch size as needed
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_stats(
+        &self,
+        timestamp: String,
+        ip_server: String,
+        bitrate_step_count: u32,
+        bitrate_dec_steps: u32,
+        bitrate_inc_steps: u32,
+        bitrate_step_size_mbps: f32,
+        r_rtt: f32,
+        r_inc: f32,
+        rtt_adj_prob: f32,
+        bitrate_inc_prob: f32,
+        fps_tx_avg: f32,
+        fps_rx_avg: f32,
+        nfr_avg: f32,
+        rtt_avg_ms: f32,
+        nfr_thresh: f32,
+        rtt_thresh_ms: f32,
+        requested_bitrate_mbps: f32,
+        estimated_capacity_mbps: f32,
+    ) {
+        let mut data = self.csv_data.lock().unwrap();
+        
+        data.v_timestamp.push(timestamp);
+        data.v_ip_server.push(ip_server);
+        data.v_bitrate_step_count.push(bitrate_step_count);
+        data.v_bitrate_dec_steps.push(bitrate_dec_steps);
+        data.v_bitrate_inc_steps.push(bitrate_inc_steps);
+        data.v_bitrate_step_size_mbps.push(bitrate_step_size_mbps);
+        data.v_r_rtt.push(r_rtt);
+        data.v_r_inc.push(r_inc);
+        data.v_rtt_adj_prob.push(rtt_adj_prob);
+        data.v_bitrate_inc_prob.push(bitrate_inc_prob);
+        data.v_fps_tx_avg.push(fps_tx_avg);
+        data.v_fps_rx_avg.push(fps_rx_avg);
+        data.v_nfr_avg.push(nfr_avg);
+        data.v_rtt_avg_ms.push(rtt_avg_ms);
+        data.v_nfr_thresh.push(nfr_thresh);
+        data.v_rtt_thresh_ms.push(rtt_thresh_ms);
+        data.v_requested_bitrate_mbps.push(requested_bitrate_mbps);
+        data.v_estimated_capacity_mbps.push(estimated_capacity_mbps);
+
+        if data.v_timestamp.len() >= self.batch_size {
+            drop(data); // Drop lock before flushing to prevent deadlocks
+            if let Err(e) = self.flush_batch() {
+                eprintln!("[NEST-VR CSV] Error flushing batch: {}", e);
+            }
+        }
+    }
+
+    pub fn flush_batch(&self) -> std::io::Result<()> {
+        let mut data = self.csv_data.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap();
+
+        for i in 0..data.v_timestamp.len() {
+            let row = format!(
+                "{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+                data.v_timestamp[i],
+                data.v_ip_server[i],
+                data.v_bitrate_step_count[i],
+                data.v_bitrate_dec_steps[i],
+                data.v_bitrate_inc_steps[i],
+                data.v_bitrate_step_size_mbps[i],
+                data.v_r_rtt[i],
+                data.v_r_inc[i],
+                data.v_rtt_adj_prob[i],
+                data.v_bitrate_inc_prob[i],
+                data.v_fps_tx_avg[i],
+                data.v_fps_rx_avg[i],
+                data.v_nfr_avg[i],
+                data.v_rtt_avg_ms[i],
+                data.v_nfr_thresh[i],
+                data.v_rtt_thresh_ms[i],
+                data.v_requested_bitrate_mbps[i],
+                data.v_estimated_capacity_mbps[i]
+            );
+            writer.write_all(row.as_bytes())?;
+        }
+        writer.flush()?;
+
+        // Clear all buffers
+        data.v_timestamp.clear();
+        data.v_ip_server.clear();
+        data.v_bitrate_step_count.clear();
+        data.v_bitrate_dec_steps.clear();
+        data.v_bitrate_inc_steps.clear();
+        data.v_bitrate_step_size_mbps.clear();
+        data.v_r_rtt.clear();
+        data.v_r_inc.clear();
+        data.v_rtt_adj_prob.clear();
+        data.v_bitrate_inc_prob.clear();
+        data.v_fps_tx_avg.clear();
+        data.v_fps_rx_avg.clear();
+        data.v_nfr_avg.clear();
+        data.v_rtt_avg_ms.clear();
+        data.v_nfr_thresh.clear();
+        data.v_rtt_thresh_ms.clear();
+        data.v_requested_bitrate_mbps.clear();
+        data.v_estimated_capacity_mbps.clear();
+
+        Ok(())
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#[derive(Default)]
 struct TrackingData {
     v_timestamp: Vec<String>,
     v_device_id: Vec<u64>,
@@ -3430,6 +3654,7 @@ pub struct XRServer {
     pub gop_size: usize,
     pub intra_refresh: bool,
     pub use_foveation: bool, 
+    pub vbv_perframe: bool, 
     pub abr_enabled: usize,
     pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>,
     pub last_tracking_rx_instant: TaiTime<0>,
@@ -3465,6 +3690,7 @@ impl XRServer {
         gop_size: usize,
         intra_refresh: bool,
         use_foveation: bool, 
+        vbv_perframe:  bool, 
         abr_enabled: usize,
         nest_vr_profile: &NestVrProfile,
         t_end_simu: f64,
@@ -3523,6 +3749,9 @@ impl XRServer {
             None
         };
 
+        let num_id_stats = crate::lib::get_4_octet(ip_self);
+
+
         Self {
             ip_self,
             ip_client,
@@ -3541,6 +3770,9 @@ impl XRServer {
                 obs_config,
                 t_update_abr,
                 reward_mode,
+                results_path_name, 
+                name_folder, 
+                num_id_stats
             ),
 
             video_app_sender: None,
@@ -3578,6 +3810,7 @@ impl XRServer {
             gop_size,
             intra_refresh,
             use_foveation, 
+            vbv_perframe, 
             abr_enabled,
             output_perfect_information_bitrate: Output::default(),
 
@@ -4385,6 +4618,7 @@ impl XRServer {
                         self.gop_size,
                         self.intra_refresh,
                         self.use_foveation, 
+                        self.vbv_perframe, 
                         gaze_history, 
                     )
                     .await
