@@ -82,6 +82,18 @@ pub const USE_HARDCODED_SIZES_VALIDATION: bool = false;
 // Define the path to your hardcoded CSV
 
 
+pub fn get_stream_name(stream_id: u16) -> &'static str {
+    match stream_id {
+        TRACKING => "TRACKING",
+        HAPTICS => "HAPTICS",
+        AUDIO => "AUDIO",
+        VIDEO => "VIDEO",
+        STATISTICS => "STATISTICS",
+        CONTROL_STREAM => "CONTROL_STREAM",
+        _ => "UNKNOWN_STREAM",
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {

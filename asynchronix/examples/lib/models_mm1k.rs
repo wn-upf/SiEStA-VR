@@ -534,7 +534,7 @@ pub enum NetworkPattern {
     },
 }
 
-use crate::lib::taitime_serde;
+use crate::lib::{HeaderALVRStream, taitime_serde};
 
 #[allow(unused)]
 impl NetworkPattern {
@@ -1778,6 +1778,7 @@ pub struct StatsUpdate {
     pub is_collision: bool,
     pub collision_backoff: f64,
     pub link_id: u8,
+    pub alvr_header:HeaderALVRStream,  
 }
 #[derive(Clone, Copy, Debug, Hash)]
 pub struct EdcaParam {
@@ -3157,10 +3158,9 @@ impl QueueModule {
                     now_elapsed
                 );
 
-                // crate::print_dblue!("[DBG SEND AMPDU] update! {:?}", wind_key , );
-
                 if CSV_PER_PACKET {
                     for u in drained {
+                        let alvr_header = u.alvr_header; 
                         // CSV write outside the lock
                         self.csv_metrics.update_stats(
                             u.now,
@@ -3179,6 +3179,7 @@ impl QueueModule {
                             prev_retries,
                             prev_drawn_bo,
                             ac_str.clone(),
+                            alvr_header, 
                         );
                     }
                 }
@@ -3373,6 +3374,7 @@ impl QueueModule {
                         is_collision: false,
                         collision_backoff: 0.0,
                         link_id: link_id,
+                        alvr_header: packet.header_alvr.clone(), 
                     };
 
                     stats_tx
@@ -3675,6 +3677,7 @@ impl QueueModule {
                             packet_id: 0,
                             length_packet: 0,
                             ampdu_id: self.ampdu_id,
+                            alvr_header: HeaderALVRStream::default(), 
                         };
 
                         stats_tx

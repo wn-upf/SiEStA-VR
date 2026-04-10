@@ -81,7 +81,7 @@ pub mod gcc_nada_estimator;
 // }
 
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
-pub const USE_FFMPEG_DEMO: bool = true;
+pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -2077,8 +2077,11 @@ pub struct CsvData {
     v_cw_value: Vec<usize>,
     v_retries: Vec<u8>,
     v_last_backoff_value: Vec<i32>,
-
     v_edca_ac: Vec<String>,
+
+    v_alvr_frameid: Vec<u32>,
+    v_alvr_shardid: Vec<u32>, 
+    v_alvr_streamid: Vec<String>, 
 }
 
 impl CsvData {
@@ -2100,6 +2103,9 @@ impl CsvData {
             v_retries: Vec::new(),
             v_last_backoff_value: Vec::new(),
             v_edca_ac: Vec::new(),
+            v_alvr_frameid: Vec::new(), 
+            v_alvr_shardid: Vec::new(), 
+            v_alvr_streamid: Vec::new(), 
             ..Default::default()
         }
     }
@@ -2126,7 +2132,7 @@ impl CsvType {
         let mut buf = BufWriter::new(file);
         // Write header if file is empty
         if buf.get_ref().metadata()?.len() == 0 {
-            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision,link_id,CW_value,backoff_retry_counter,last_BO_drawn,EDCA_AC")?;
+            writeln!(buf, "timestamp,packet_ID,queue_size,L_packet,T_s,T_q,id_src,id_dest,AMPDU_ID,is_collision,T_collision,link_id,CW_value,backoff_retry_counter,last_BO_drawn,EDCA_AC,ALVR_frame,ALVR_shard,ALVR_streamID")?;
             buf.flush()?;
         }
         Ok(Self {
@@ -2155,7 +2161,12 @@ impl CsvType {
         num_retries_backoff: u8,
         last_backoff: i32,
         edca_ac: String,
+        alvr_data: HeaderALVRStream, 
     ) {
+
+        let id_frame  = alvr_data.next_packet_index; 
+        let id_shard = alvr_data.shard_index; 
+        let id_stream = crate::lib::alvr_stream_socket::get_stream_name(alvr_data.stream_id).to_string(); 
         let ts_str = format_timestamp!(now);
         {
             let mut data = self.csv_data.lock().unwrap();
@@ -2175,6 +2186,9 @@ impl CsvType {
             data.v_retries.push(num_retries_backoff);
             data.v_last_backoff_value.push(last_backoff);
             data.v_edca_ac.push(edca_ac);
+            data.v_alvr_frameid.push(id_frame);
+            data.v_alvr_shardid.push(id_shard); 
+            data.v_alvr_streamid.push(id_stream); 
         }
 
         // Check if batch limit reached
@@ -2198,7 +2212,7 @@ impl CsvType {
         for i in 0..data.v_timestamp.len() {
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 data.v_timestamp[i],
                 data.v_packet_id[i],
                 data.v_queue_size[i],
@@ -2215,6 +2229,9 @@ impl CsvType {
                 data.v_retries[i],
                 data.v_last_backoff_value[i],
                 data.v_edca_ac[i],
+                data.v_alvr_frameid[i], 
+                data.v_alvr_shardid[i],
+                data.v_alvr_streamid[i],
             )?;
         }
         writer.flush()?;
@@ -2235,6 +2252,9 @@ impl CsvType {
         data.v_retries.clear();
         data.v_last_backoff_value.clear();
         data.v_edca_ac.clear();
+        data.v_alvr_frameid.clear(); 
+        data.v_alvr_shardid.clear(); 
+        data.v_alvr_streamid.clear();  
 
         Ok(())
     }
