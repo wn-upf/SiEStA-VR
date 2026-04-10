@@ -1827,6 +1827,7 @@ pub const EDCA_TABLE: [EdcaParam; 4] = [
 
 #[derive(Hash, Clone, Debug)]
 pub struct DcfStats {
+    pub mac_key: MacKey, 
     pub cw: i32,
     pub backoff_counter: i32,
     pub retry_count: u8,
@@ -1842,7 +1843,7 @@ pub const MAX_RETRIES_MAC: u8 = 10;
 use crate::lib::EdcaAc;
 
 impl DcfStats {
-    pub fn new(ac: EdcaAc) -> Self {
+    pub fn new(ac: EdcaAc, mac_key: MacKey, ) -> Self {
         let p = EDCA_TABLE[ac as usize];
 
         let edca_ac_str = match ac {
@@ -1855,6 +1856,7 @@ impl DcfStats {
         let drawn_randomly_bo = rand::thread_rng().gen_range(0..=p.cw_min);
 
         Self {
+            mac_key, 
             cw: p.cw_min,
             backoff_counter: drawn_randomly_bo,
             retry_count: 0,
@@ -2150,7 +2152,11 @@ pub struct QueueModule {
     pub link_channel_widths: HashMap<u8, usize>, // Store channel width per link
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
     pub link_queue_depths: HashMap<u8, usize>, // Required for optimization to stop iterating O(n) over queue
-    pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
+    // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
+    pub dcf_values: Vec<DcfStats>,  // flat, no mutex needed if single-threaded DES
+    pub mac_key_index: HashMap<MacKey, usize>,  // built once at init, never mutated
+    pub num_links: usize, 
+
 
     pub mlo_linkselection_strat: LinkSelectionStrategy,
     pub packs_per_ampdu: usize,
@@ -2172,10 +2178,29 @@ impl QueueModule {
         results_path: &str, 
 
     ) -> Self {
+
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
-        let mut dcf_stats_vec: HashMap<(i32, EdcaAc, u8), DcfStats> = HashMap::new();
         let mut windows_vec = HashMap::new();
+
         let (stats_tx, stats_rx) = unbounded();
+        let num_links = link_configs.len();
+
+        let total_entries = (num_stas + 1) * num_links * 4;     // index = sta_idx * (num_links * 4 ACs) + link_idx * 4 ACs + ac_idx
+        let mut dcf_values: Vec<DcfStats> = Vec::with_capacity(total_entries);
+        let mut mac_key_index: HashMap<MacKey, usize> = HashMap::with_capacity(total_entries);
+
+        let sta_idx_of = |sta_id: i32| -> usize {
+            if sta_id == -1 {
+                num_stas
+            } else {
+                vec_ids.iter().position(|&id| id == sta_id)
+                    .expect("sta_id not in vec_ids")
+            }
+        };
+
+        let dummy_key = (-2, EdcaAc::BestEffort, 0);
+        dcf_values.resize_with(total_entries, || DcfStats::new(EdcaAc::BestEffort, dummy_key));
+
 
         // Initialize per-STA stats
         for i in 0..num_stas {
@@ -2186,46 +2211,45 @@ impl QueueModule {
                 stats_vec.insert(stats.sta_id.clone() as usize, sta_stats.clone());
             }
         }
+        for (link_idx, link_config) in link_configs.iter().enumerate() {
+            let link_id = link_config.link_id;
 
-        // Create BEB queues per link and AC
-        for link_id in link_configs.iter().map(|lc| lc.link_id) {
-            // AP gets four virtual MACs per link (one per AC)
-            for ac in [
-                EdcaAc::Voice,
-                EdcaAc::Video,
-                EdcaAc::BestEffort,
-                EdcaAc::Background,
-            ] {
-                let mac_key = (-1, ac, link_id);
+            // AP: sta_id = -1
+            for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
                 let wind_key = (-1, link_id);
-
-                dcf_stats_vec.insert(mac_key, DcfStats::new(ac));
+                let mac_key: MacKey = (-1, ac, link_id);
+                
+                let idx = num_stas * (num_links * 4) + link_idx * 4 + Self::ac_idx(ac);
+                
+                // 2. NOW this works, because len() is equal to total_entries
+                dcf_values[idx] = DcfStats::new(ac, mac_key);
+                
+                mac_key_index.insert(mac_key, idx);
                 windows_vec.insert(
                     wind_key,
                     WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key),
                 );
             }
 
-            // Every uplink STA keeps one MAC per link per AC
-            for sta_id in &vec_ids {
-                for ac in [
-                    EdcaAc::Voice,
-                    EdcaAc::Video,
-                    EdcaAc::BestEffort,
-                    EdcaAc::Background,
-                ] {
-                    let mac_key = (*sta_id, ac, link_id);
-                    let wind_key = (*sta_id, link_id);
-
-                    dcf_stats_vec.insert(mac_key, DcfStats::new(ac));
-                    windows_vec.insert(
+            // STAs
+            for (s_idx, &sta_id) in vec_ids.iter().enumerate() {
+                for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
+                    let mac_key: MacKey = (sta_id, ac, link_id);
+                    let idx = s_idx * (num_links * 4) + link_idx * 4 + Self::ac_idx(ac);
+                    
+                    // This overwrites the dummy data safely
+                    dcf_values[idx] = DcfStats::new(ac, mac_key);
+                    mac_key_index.insert(mac_key, idx);
+                    
+                    let wind_key: (i32, u8) = (sta_id, link_id);
+                     windows_vec.insert(
                         wind_key,
                         WindowMetrics::new(MCS_REPORT_PERIOD_F32, wind_key),
                     );
                 }
             }
         }
-
+        
         // Initialize link mediums
         let mut link_mediums = HashMap::new();
         let mut link_outputs = HashMap::new();
@@ -2263,7 +2287,11 @@ impl QueueModule {
             STA_coords_map: HashMap::new(),
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
-            array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),
+            // array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),
+            dcf_values, 
+            mac_key_index, 
+            num_links, 
+
             sta_stats_cache: HashMap::new(),
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
@@ -2288,6 +2316,17 @@ impl QueueModule {
     #[inline]
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
+    }
+
+    #[inline]
+    fn dcf(&self, key: &MacKey) -> &DcfStats { // Helper: Obtains DCF MAC params for particular STA/EDCA_AC/LinkID
+        &self.dcf_values[self.mac_key_index[key]]
+    }
+
+    #[inline]
+    fn dcf_mut(&mut self, key: &MacKey) -> &mut DcfStats {  // Helper: Obtains DCF MAC params as mutable for particular STA/EDCA_AC/LinkID
+        let idx = self.mac_key_index[key];
+        &mut self.dcf_values[idx]
     }
 
     #[inline]
@@ -2349,6 +2388,7 @@ impl QueueModule {
     }
 
     #[inline]
+   #[inline]
     pub fn tick_backoff(&mut self, now: TaiTime<0>) -> HashMap<u8, Vec<MacKey>> {
         // Clear idle links
         for medium in self.link_mediums.values_mut() {
@@ -2369,37 +2409,30 @@ impl QueueModule {
 
         let mut ready_per_link: HashMap<u8, Vec<MacKey>> = HashMap::new();
 
-        // Lock ONCE and do all updates in a single pass
-        let mut map = self.array_dcf_values.lock().unwrap();
-        for (key, st) in map.iter_mut() {
-            let (sta_id, ac, link_id) = *key;
-
-            // debug_edca!(
-            //     "{} [TICK] Checking KEY ({}, {:?}, L-{}): state=({} slots, frozen={})",
-            //     format_elapsed!(now),
-            //     sta_id,
-            //     ac,
-            //     link_id,
-            //     st.backoff_counter,
-            //     st.backoff_frozen
-            // );
+        // st is ALREADY a mutable reference (&mut DcfStats) thanks to this loop
+        for st in &mut self.dcf_values {
+            let key = st.mac_key;
+            let (sta_id, ac, link_id) = key;
 
             // Skip if no packets for this STA/AC
             if !present_keys.contains(&(sta_id, ac)) {
                 continue;
             }
 
-            // Get medium state for this link
+            // Get medium state for this link. 
+            // Rust allows this because `link_mediums` is a different field than `dcf_values`.
             let medium = self.link_mediums.get(&link_id).unwrap();
             let idle_slot = medium.is_idle(now);
+            
             if !idle_slot {
                 debug_edca!(
                     "{} [MEDIUM] L-{} BUSY until {}",
                     format_elapsed!(now),
                     link_id,
-                    format_elapsed!(medium.busy_until) // You'll need to expose this
+                    format_elapsed!(medium.busy_until) 
                 );
             }
+
             // AIFS gating
             let aifs_until = st.medium_free_since + aifs(st.param);
             let aifs_satisfied = idle_slot && aifs_until <= now;
@@ -2416,7 +2449,7 @@ impl QueueModule {
                 );
             }
 
-            // Update backoff state directly (st is already mutable)
+            // Update backoff state directly
             if aifs_satisfied {
                 st.backoff_frozen = false;
             }
@@ -2440,19 +2473,15 @@ impl QueueModule {
                 ready_per_link
                     .entry(link_id)
                     .or_insert_with(Vec::new)
-                    .push(*key);
+                    .push(key);
             }
         }
+        
         if !ready_per_link.is_empty() {
             // Build a short summary string
             let mut summary = String::new();
             for (link_id, contenders) in &ready_per_link {
-                // You can customize the detail level here.
-                // For just counts:
                 summary.push_str(&format!("L-{}: {} | ", link_id, contenders.len()));
-
-                // For full key details (might be verbose again, but informative):
-                // summary.push_str(&format!("L-{}: {:?} | ", link_id, contenders));
             }
 
             debug_edca!(
@@ -2464,9 +2493,13 @@ impl QueueModule {
 
         ready_per_link
     }
+
+
     #[inline]
     fn txop_cap_secs(&self, key: &MacKey) -> f64 {
-        let p = self.array_dcf_values.lock().unwrap()[key].param;
+        // let p = self.array_dcf_values.lock().unwrap()[key].param;
+        let p = self.dcf(key).param;          // no lock, no unwrap
+
         if p.txop_limit_us == 0 {
             f64::INFINITY
         } else {
@@ -2478,6 +2511,15 @@ impl QueueModule {
         match ac {
             EdcaAc::Voice => 0,
             EdcaAc::Video => 1,
+            EdcaAc::BestEffort => 2,
+            EdcaAc::Background => 3,
+        }
+    }
+    #[inline]
+    fn ac_idx(ac: EdcaAc) -> usize {
+        match ac {
+            EdcaAc::Voice      => 0,
+            EdcaAc::Video      => 1,
             EdcaAc::BestEffort => 2,
             EdcaAc::Background => 3,
         }
@@ -2496,9 +2538,11 @@ impl QueueModule {
                 winner.insert(sta, key); // first (=highest-prio) wins
             } else {
                 // “virtual collision” for this lower-prio AC
-                if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
-                    st.on_failure();
-                }
+                // if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&key) {
+                        // st.on_failure();
+                // }
+                self.dcf_mut(&key).on_failure(); 
+      
             }
         }
         winner.into_values().collect()
@@ -3108,25 +3152,24 @@ impl QueueModule {
 
         let dcf_data = {
             // Lock happens here
-            let mut guard = self.array_dcf_values.lock().unwrap();
+            // let mut guard = self.array_dcf_values.lock().unwrap();
+            let st= self.dcf_mut(&mac_key); 
+            
+            // Extract the values needed for CSV/Logging later
+            let prev_retries = st.retry_count;
+            let prev_cw_val = st.cw;
+            let prev_drawn_bo = st.last_backoff_drawn_logs;
+            // Clone the string now so we don't need 'st' later
+            let ac_str = st.edca_ac_str.clone();
 
-            if let Some(st) = guard.get_mut(&mac_key) {
-                // Extract the values needed for CSV/Logging later
-                let prev_retries = st.retry_count;
-                let prev_cw_val = st.cw;
-                let prev_drawn_bo = st.last_backoff_drawn_logs;
-                // Clone the string now so we don't need 'st' later
-                let ac_str = st.edca_ac_str.clone();
+            // Update 'st' immediately while we have the lock
+            st.on_success(st.param.cw_min);
 
-                // Update 'st' immediately while we have the lock
-                st.on_success(st.param.cw_min);
+            // Return the extracted data
+            Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str))
+        }; 
 
-                // Return the extracted data
-                Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str))
-            } else {
-                None
-            }
-        };
+        
         if let Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str)) = dcf_data {
             let mut drained = smallvec::SmallVec::<[StatsUpdate; 64]>::new();
             if let Some(rx) = self.stats_rx.as_mut() {
@@ -3216,14 +3259,7 @@ impl QueueModule {
         };
 
         self.aux_ampdu_serviced.mac_key = mac_key;
-
-        let txop_us: f64 = self
-            .array_dcf_values
-            .lock()
-            .unwrap()
-            .get(&mac_key)
-            .map(|st| st.param.txop_limit_us as f64)
-            .unwrap_or(0.0);
+        let txop_us: f64 = self.dcf(&mac_key).param.txop_limit_us as f64;
 
         let mut last_service_duration = Duration::default();
         let mut packet_index = 0;
@@ -3480,6 +3516,7 @@ impl QueueModule {
         (ampdu_to_send, last_service_duration)
     }
 
+
     #[inline]
     fn deque_schedule_service<'a>(
         &'a mut self,
@@ -3602,50 +3639,47 @@ impl QueueModule {
 
                     let first_contender_key = contenders.first().unwrap();
 
-                    if let Ok(mut map) = self.array_dcf_values.lock() {
-                        // Apply backoff to all contenders on this link
+                    
+                    for key in contenders.clone() {
+                        let st = self.dcf_mut(&key); 
+                        let old_cw = st.cw;
+                        st.on_failure();
+                        debug_edca_r!(
+                            " \t\t ↳ ({}, {:?}, L-{}): CW {} → {}, backoff={}",
+                            key.0,
+                            key.1,
+                            key.2,
+                            old_cw,
+                            st.cw,
+                            st.backoff_counter
+                        );
+                        
+                    }
+                    // print_red!(
+                    //     "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
+                    //     format_elapsed!(now),
+                    //     link_id,
+                    //     contenders.len(),
+                    //     T_col * 1000.0
+                    // );
 
-                        for key in contenders.clone() {
-                            if let Some(st) = map.get_mut(&key) {
-                                let old_cw = st.cw;
-                                st.on_failure();
-                                debug_edca_r!(
-                                    " \t\t ↳ ({}, {:?}, L-{}): CW {} → {}, backoff={}",
-                                    key.0,
-                                    key.1,
-                                    key.2,
-                                    old_cw,
-                                    st.cw,
-                                    st.backoff_counter
-                                );
-                            }
-                        }
-                        // print_red!(
-                        //     "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
-                        //     format_elapsed!(now),
-                        //     link_id,
-                        //     contenders.len(),
-                        //     T_col * 1000.0
-                        // );
-
-                        // Freeze all MACs on this link
-                        for ((_, _, lid), st) in map.iter_mut() {
-                            if *lid == link_id {
-                                st.backoff_frozen = true;
-                                st.medium_free_since = now + T_col_dur;
-                            }
+                    // Freeze all MACs on this link
+                    for st in &mut self.dcf_values {
+                        if st.mac_key.2 == link_id {
+                            st.backoff_frozen = true;
+                            st.medium_free_since = now + T_col_dur;
                         }
                     }
 
                     for key in contenders.iter() {
                         let contender_key: WindowKey = (key.0, key.2); // this could be cleaner :D
-                                                                       //  self.update_window_stats(
-                                                                       //     contender_key,
-                                                                       //     None,
-                                                                       //     T_col as f64,
-                                                                       //     false,
-                                                                       //     now.duration_since(TaiTime::EPOCH).as_secs_f64()
-                                                                       // );
+                        self.update_window_stats(
+                            contender_key,
+                            None,
+                            T_col as f64,
+                            false,
+                            now.duration_since(TaiTime::EPOCH).as_secs_f64()
+                        );
                     }
 
                     if let Some(stats_tx) = &self.stats_tx {
@@ -3715,10 +3749,8 @@ impl QueueModule {
                     Some(ix) => ix,
                     None => {
                         // Reload backoff for next round
-                        if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key)
-                        {
-                            st.on_success(st.param.cw_min);
-                        }
+                        let st = self.dcf_mut(&winner_key); 
+                        st.on_success(st.param.cw_min);
                         continue;
                     }
                 };
@@ -3738,9 +3770,9 @@ impl QueueModule {
                     );
 
                     // Reset backoff for this MAC to try again
-                    if let Some(st) = self.array_dcf_values.lock().unwrap().get_mut(&winner_key) {
-                        st.on_failure(); // Increase CW and redraw backoff
-                    }
+                    let st = self.dcf_mut(&winner_key); 
+                    st.on_failure(); // Increase CW and redraw backoff
+
                     // schedule next tick to allow backoff countdown (no deadlock)
                     context
                         .scheduler
@@ -3762,14 +3794,21 @@ impl QueueModule {
                 }
 
                 // Freeze all MACs on this link during TXOP
-                if let Ok(mut map) = self.array_dcf_values.lock() {
-                    for ((_, _, lid), st) in map.iter_mut() {
-                        if *lid == link_id {
-                            st.backoff_frozen = true;
-                            st.medium_free_since = now + ampdu_airtime;
-                        }
+                for st in &mut self.dcf_values {
+                    if st.mac_key.2 == link_id {
+                        st.backoff_frozen = true;
+                        st.medium_free_since = now + ampdu_airtime;
                     }
                 }
+                
+                // if let Ok(mut map) = self.array_dcf_values.lock() {
+                //     for ((_, _, lid), st) in map.iter_mut() {
+                //         if *lid == link_id {
+                //             st.backoff_frozen = true;
+                //             st.medium_free_since = now + ampdu_airtime;
+                //         }
+                //     }
+                // }   
 
                 // Schedule TX completion
                 context
@@ -3781,41 +3820,33 @@ impl QueueModule {
             }
 
             // Schedule next slot check if needed
+            // Schedule next slot check if needed
             if !transmissions_scheduled {
                 let mut need_next_slot = false;
 
-                // Check if ANY MAC has work to do (including frozen MACs)
-                if let Ok(map) = self.array_dcf_values.lock() {
-                    for (key, st) in map.iter() {
-                        // Has packets for this flow?
-                        let (sta_id, ac, link_id) = *key;
-                        let has_packets = self.queue.iter().any(|p| {
-                            let p_sta = if p.sta_src_id > p.sta_dest_id {
-                                p.sta_src_id
-                            } else {
-                                -1
-                            };
-                            p_sta == sta_id
-                                && p.edca_ac == ac
-                                && (p.assigned_link_id.is_none()
-                                    || p.assigned_link_id == Some(link_id))
-                            // && p.assigned_link_id == Some(link_id)
-                        });
+                if !self.queue.is_empty() {
+                    // Pass 1: Scan the queue exactly ONCE to see which flows have packets. O(Q)
+                    // We store (sta_id, ac, Option<link_id>)
+                    let mut active_flows = std::collections::HashSet::new();
+                    for p in &self.queue {
+                        let is_ul = p.sta_src_id > p.sta_dest_id;
+                        let p_sta = if is_ul { p.sta_src_id } else { -1 };
+                        active_flows.insert((p_sta, p.edca_ac, p.assigned_link_id));
+                    }
 
-                        if !has_packets {
-                            continue;
-                        }
+                    // Pass 2: Linearly scan DCF values ONCE. O(M)
+                    for st in &self.dcf_values {
+                        let (sta_id, ac, link_id) = st.mac_key;
 
-                        // Frozen MAC will unfreeze in the future
-                        if st.backoff_frozen {
-                            need_next_slot = true;
-                            break;
-                        }
+                        // A flow has packets if it matches this link exactly, OR if the packet is link-agnostic (None)
+                        let has_packets = active_flows.contains(&(sta_id, ac, Some(link_id))) 
+                                       || active_flows.contains(&(sta_id, ac, None));
 
-                        // MAC has non-zero backoff
-                        if st.backoff_counter > 0 {
-                            need_next_slot = true;
-                            break;
+                        if has_packets {
+                            if st.backoff_frozen || st.backoff_counter > 0 {
+                                need_next_slot = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -3831,6 +3862,8 @@ impl QueueModule {
                         .unwrap();
                 }
             }
+        
+        
         }
     }
 }

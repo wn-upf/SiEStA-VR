@@ -80,7 +80,7 @@ pub mod gcc_nada_estimator;
 //     Lazy::new(|| Mutex::new(None))
 // }
 
-pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
+pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
 pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
