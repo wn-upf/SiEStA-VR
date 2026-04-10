@@ -18,8 +18,8 @@ pub const VIDEO_NAME: &str = "snow_short";
 const CHUNK_DURATION: f64 = 5.0;
 const NUM_SEMAPHORES: usize = 3; // NUMBER OF PARALLEL TASKS.
 
-const FRAMERATE_VALUES: [u32; 3] = [60, 90, 120];
-const CODECS_TO_RUN: [VideoCodec; 2] = [VideoCodec::HEVC, VideoCodec::AV1];
+const FRAMERATE_VALUES: [u32; 3] = [60,90,120];
+const CODECS_TO_RUN: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
 
 
 // Instead of consts, we use a small helper
@@ -225,7 +225,6 @@ fn merge_csvs_into_one(
     csv_dir: &Path, 
     use_foveation: bool, 
     use_intrarefresh: bool, 
-    gop_size: usize, 
     vbv_perframe: bool 
 ) -> Result<(), Box<dyn Error>> {
     
@@ -233,6 +232,8 @@ fn merge_csvs_into_one(
     let ir_val = if use_intrarefresh { 1 } else { 0 };
     let vbv_val = if vbv_perframe { 1 } else { 0 };
 
+    // Updated Regex: Escaped the dots and ensured capture groups for name, fps, and mbps exist.
+    // File format: {codec}_{video_name}_{fps}fps_{mbps}Mbps_vbv{v}_IR{i}_foveated{f}_framesizes.csv
     let re_str = format!(
         r"{}_(.*)_(\d+)fps_([\d\.]+)Mbps_vbv{}_IR{}_foveated{}_framesizes\.csv", 
         codec_prefix, vbv_val, ir_val, fov_val
@@ -256,30 +257,22 @@ fn merge_csvs_into_one(
     }
 
     for (group, mut files) in groups {
-        println!("[MERGING] Processing {} at {}fps for codec {}...", group.name, group.fps, codec_prefix);
-
+        if files.is_empty() { continue; }
+        
+        println!("[MERGING] {} @ {}fps (vbv:{}, IR:{}, fov:{})", group.name, group.fps, vbv_val, ir_val, fov_val);
         files.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         let (first_mbps, first_path) = &files[0];
-        let file = File::open(first_path)?;
-        let mut combined_df = CsvReader::new(file).finish()?;
-        
-        let first_col_name = format!("{}Mbps", first_mbps);
-        combined_df.rename("bytes", first_col_name.into())?;
+        let mut combined_df = CsvReader::new(File::open(first_path)?).finish()?;
+        combined_df.rename("bytes", format!("{}Mbps", first_mbps).into())?;
 
         for (mbps, path) in files.iter().skip(1) {
-            let next_file = File::open(path)?;
-            let mut next_df = CsvReader::new(next_file)
-                .finish()?
-                .select(["frame_index", "bytes"])?;
-
-            let next_col_name = format!("{}Mbps", mbps);
-            next_df.rename("bytes", next_col_name.into())?;
+            let mut next_df = CsvReader::new(File::open(path)?).finish()?.select(["frame_index", "bytes"])?;
+            next_df.rename("bytes", format!("{}Mbps", mbps).into())?;
 
             combined_df = combined_df.left_join(&next_df, ["frame_index"], ["frame_index"])?;
         }
 
-        // NEW: Fixed string formatter to cleanly use 0/1 integers instead of precision args on bools
         let output_name = format!(
             "merged_{}_{}_{}fps_vbv{}_IR{}_foveated{}.csv", 
             codec_prefix, group.name, group.fps, vbv_val, ir_val, fov_val
@@ -288,8 +281,6 @@ fn merge_csvs_into_one(
         let output_path = csv_dir.join(output_name);
         let mut out_file = File::create(&output_path)?;
         CsvWriter::new(&mut out_file).finish(&mut combined_df)?;
-
-        println!("[DONE] Saved merged CSV to {}", output_path.display());
     }
 
     Ok(())
@@ -300,10 +291,9 @@ async fn main() -> anyhow::Result<()> {
     let width = WIDTH_ENCODER;
     let height = HEIGHT_ENCODER;
     let gop_size: usize = 300;
-    let intra_refresh = false;
-    let use_foveation = true; 
-    let vbv_perframe = false; 
-    // let video_codec = VideoCodec::AV1;
+    let intra_refresh_list = [true, false];
+    let use_foveation_list = [true, false]; 
+    let vbv_perframe_list =  [true, false]; 
 
     let (video_dir, csv_dir) = get_paths();
 
@@ -321,8 +311,8 @@ async fn main() -> anyhow::Result<()> {
 
     // let br_values: Vec<f32> = (5..=100).step_by(5).map(|x| x as f32).collect();
     let br_values = vec![100.0]; 
-    // let framerate_values = [60, 90, 120];
-    // let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
+    let framerate_values = [60, 90, 120];
+    let codecs_to_run: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::HEVC];
 
     let sem = Arc::new(Semaphore::new(NUM_SEMAPHORES)); // allow 5 encoders at a time
     let mut tasks = Vec::new();
@@ -330,30 +320,36 @@ async fn main() -> anyhow::Result<()> {
     for video_codec in CODECS_TO_RUN {
         for framerate in FRAMERATE_VALUES {
             for &bitrate_mbps in &br_values {
-                let video_dir = video_dir.clone();
-                let csv_dir = csv_dir.clone();
-                let permit = sem.clone().acquire_owned().await?;
-                let task = tokio::spawn(async move {
-                    let _permit = permit; // keep until task done
-                    if let Err(e) = encode_one_video(
-                        video_dir,
-                        csv_dir,
-                        width,
-                        height,
-                        gop_size,
-                        intra_refresh,
-                        framerate,
-                        bitrate_mbps,
-                        video_codec,
-                        use_foveation, 
-                        vbv_perframe ,
-                    )
-                    .await
-                    {
-                        eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
+                for &vbv_perframe in &vbv_perframe_list{
+                    for foveation in use_foveation_list{
+                        for intra_refresh in intra_refresh_list{
+                            let video_dir = video_dir.clone();
+                            let csv_dir = csv_dir.clone();
+                            let permit = sem.clone().acquire_owned().await?;
+                            let task = tokio::spawn(async move {
+                                let _permit = permit; // keep until task done
+                                if let Err(e) = encode_one_video(
+                                    video_dir,
+                                    csv_dir,
+                                    width,
+                                    height,
+                                    gop_size,
+                                    intra_refresh,
+                                    framerate,
+                                    bitrate_mbps,
+                                    video_codec,
+                                    foveation, 
+                                    vbv_perframe ,
+                                )
+                                .await
+                                {
+                                    eprintln!("[ERR] {}fps {:.1}Mbps → {e}", framerate, bitrate_mbps);
+                                }
+                            });
+                            tasks.push(task);
+                        }
                     }
-                });
-                tasks.push(task);
+                }
             }
         }
     }
@@ -363,19 +359,23 @@ async fn main() -> anyhow::Result<()> {
 
     println!("[INFO] All encoding tasks completed. Starting CSV merge...");
 
-    // Merge the resulting CSVs
     for video_codec in CODECS_TO_RUN {
-        // Match string names identically to how you saved them in `encode_one_video`
         let codec_str = match video_codec {
             VideoCodec::AV1 => "AV1",
             VideoCodec::HEVC => "HEVC",
-            // Add other variants if needed
+            _ => "HEVC",
         };
-        // Pass the csv_dir reference so it knows where to look and save
-        if let Err(e) = merge_csvs_into_one(codec_str, &csv_dir, use_foveation, intra_refresh, gop_size, vbv_perframe ) {
-            eprintln!("[ERR] Failed to merge CSVs for {}: {}", codec_str, e);
+
+        for &vbv in &vbv_perframe_list {
+            for &fov in &use_foveation_list {
+                for &ir in &intra_refresh_list {
+                    if let Err(e) = merge_csvs_into_one(codec_str, &csv_dir, fov, ir, vbv) {
+                        // It's possible some combinations didn't produce files, so we just log and continue
+                        eprintln!("[DEBUG] No files to merge for {} with vbv:{}, IR:{}, fov:{}", codec_str, vbv, ir, fov);
+                    }
+                }
+            }
         }
     }
-    
     Ok(())
 }
