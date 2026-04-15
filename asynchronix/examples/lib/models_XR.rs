@@ -4356,6 +4356,7 @@ pub struct XRClient {
 
     pub client_history_metrics: ClientHistory, 
     pub gaze_model: EyeGazeModel, 
+    pub no_uplink_tracking: bool, 
 }
 
 #[allow(unused)]
@@ -4376,6 +4377,7 @@ impl XRClient {
         codec_selection: VideoCodec,
         results_path: &str, // for simultaneous parallel simu runs
         random_seed: u64, 
+        no_ul_tracking_bool: bool, 
 
     ) -> Self {
         // let (vmaf_tx, vmaf_rx) = bounded(10);
@@ -4506,7 +4508,9 @@ impl XRClient {
                 seed_offset: random_seed as i64,         
                 framerate: fps, 
                 ..Default::default()
-            },        }
+            },
+            no_uplink_tracking:no_ul_tracking_bool,         
+        }
     }
 
     fn spawn_display_thread(
@@ -4692,7 +4696,7 @@ impl XRClient {
                 Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection, &self.results_path));
 
 
-            if NO_UPLINK_DATA_CONST == true{
+            if self.no_uplink_tracking == true{
                 for i in 0..10 {
                     print_red!("*********** DEBUG DISABLED TRACKING DATA!!!*********** ", ); 
                 }

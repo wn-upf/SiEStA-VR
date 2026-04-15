@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 34;
+pub const NUM_INPUT_ARGS_SIM: usize = 35;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 
@@ -100,6 +100,7 @@ impl VRPair {
         codec_selection: VideoCodec,
         results_path_name: &str, 
         random_seed: u64, 
+        no_uplink_tracking_bool: bool, 
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -175,6 +176,7 @@ impl VRPair {
             codec_selection,
             results_path_name, 
             random_seed, 
+            no_uplink_tracking_bool, 
         );
 
         let mut sta_server = STA_extended::new(
@@ -377,6 +379,7 @@ pub struct SimParams {
     pub packs_per_ampdu: usize,
     pub codec_input_arg: String,
     pub name_results_path: String, 
+    pub no_uplink_tracking: usize, 
 
 }
 
@@ -419,6 +422,7 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         packs_per_ampdu:        args[31].parse().unwrap(),
         codec_input_arg:        args[32].parse().unwrap(),
         name_results_path:      args[33].clone(),
+        no_uplink_tracking:     args[34].parse().unwrap(), 
     }
 }
 
@@ -463,11 +467,13 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         packs_per_ampdu,
         codec_input_arg,
         name_results_path, 
+        no_uplink_tracking, 
     } = params;
 
     let sim_unique_string = format!("Simu_{} | {codec_input_arg}", sim_id);
     let test_distances_everest_bool = test_distances_everest != 0;
     let edca_be_bool = edca_be != 0;
+    let no_uplink_tracking_bool = no_uplink_tracking!=0; 
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -683,6 +689,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             codec_selection,
             &name_results_path, 
             seed, 
+            no_uplink_tracking_bool, 
 
         );
 
