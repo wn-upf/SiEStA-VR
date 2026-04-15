@@ -157,6 +157,9 @@ const GRAPH_HUD_HEIGHT: usize = 800;
 
 const MAX_STAT_HISTORY_GRAPH: usize = 256;
 
+pub const NO_UPLINK_DATA_CONST: bool = false; 
+
+
 // Group the histories to require only one Mutex lock per frame
 #[derive(Default)]
 pub struct ClientHistory {
@@ -1283,18 +1286,6 @@ pub enum BitrateMode {
         nest_vr_profile: ProfileConfig,
     },
 
-    ReinforcementLearner {
-        bitrate_ladder_mbps: Vec<f32>,
-        // step_interval: Duration,
-        connector: Arc<Mutex<Box<dyn RLConnector + Send>>>,
-        last_action_idx: Arc<Mutex<usize>>,
-        last_decision_instant: Arc<Mutex<TaiTime<0>>>,
-        pending_obs: Arc<Mutex<Option<RLObservationVector>>>,
-        action_space: ActionSpace,
-        nest_vr_max_mbps: f32,
-        nest_vr_min_mbps: f32,
-        nest_vr_config: ProfileConfig,
-    },
     GCCPort {
         gcc_estimator: GccBandwidthEstimator,
         framerate: f64, // to reset without needing to store framerate in parent class.
@@ -1315,432 +1306,12 @@ impl BitrateMode {
             BitrateMode::ConstantMbps(val) => format!("CBR {} Mbps", val),
             BitrateMode::EVeREst { .. } => "EVeREst-Intra".to_string(),
             BitrateMode::NestVr { .. } => "NeSt-VR".to_string(),
-            BitrateMode::ReinforcementLearner { .. } => "ReinforcementLearner".to_string(),
             BitrateMode::GCCPort { .. } => "GCC Port".to_string(),
             BitrateMode::NADACiscoPort {} => "NADA Port".to_string(),
             BitrateMode::FovOptixPort { .. } => "FovOptix Port".to_string(),
         }
     }
 }
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
-pub struct RLObservation {
-    pub t_elapsed_s: f32,
-    pub last_target_bitrate_mbps: f32,
-    pub rtt_ms_avg_s: f32,
-    pub rtt_ms_std_s: f32,
-
-    // pub frame_size_mb_avg_s: f32,
-    pub bandwidth_mbps_avg_s: f32,
-    pub bandwidth_mbps_std_s: f32,
-    pub frame_interarrival_avg_ms: f32,
-    pub frame_interarrival_std_ms: f32,
-
-    pub flr_avg_s: f32,
-    pub pl_sum_period: f32,
-    pub frame_size_avg_bytes: f32,
-
-    pub ow_delay_period_ewma: f32,
-    pub f_ow_delay_period_ewma: f32,
-    // pub buffer_level_avg_s: f32,
-    pub rebuffer_event_sum: f32,
-}
-
-impl RLObservation {
-    /// Converts the struct into a vector of f32s in a defined order.
-    /// This is the key to preserving order across the language boundary.
-    pub fn to_vec(&self) -> Vec<f32> {
-        vec![
-            self.t_elapsed_s,
-            self.last_target_bitrate_mbps,
-            self.rtt_ms_avg_s,
-            self.rtt_ms_std_s,
-            self.bandwidth_mbps_avg_s,
-            self.bandwidth_mbps_std_s,
-            self.frame_interarrival_avg_ms,
-            self.frame_interarrival_std_ms,
-            self.flr_avg_s,
-            self.pl_sum_period as f32,
-            self.frame_size_avg_bytes,
-            self.ow_delay_period_ewma,
-            self.f_ow_delay_period_ewma,
-            self.rebuffer_event_sum as f32, // Cast u8 to f32
-        ]
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RLObservationVector {
-    observations: Vec<RLObservation>,
-    max_len: u8,
-    FEAT_DIM: usize,
-}
-
-impl RLObservationVector {
-    pub fn new(max_len: u8) -> Self {
-        // debug_assert_eq!(FEAT_DIM, RLObservation::default().to_vec().len());
-        Self {
-            observations: Vec::new(),
-            max_len,
-            FEAT_DIM: 0,
-        }
-    }
-
-    pub fn push(&mut self, o: RLObservation) {
-        if self.FEAT_DIM == 0 {
-            self.FEAT_DIM = o.to_vec().len();
-        }
-
-        self.observations.push(o);
-        if self.observations.len() as u8 > self.max_len {
-            self.observations.remove(0);
-        }
-    }
-
-    // pub fn seq_len(&self) -> usize {
-    //     self.observations.len()
-    // }
-
-    /// Return a flat Vec<f32> of length (max_len * FEAT_DIM), left-padded with zeros.
-    /// Layout: [o_{t-k+1}, ..., o_t] row-major, zeros for missing prefix.
-    pub fn as_flat_padded(&self) -> Vec<f32> {
-        let cap = self.max_len as usize;
-        let mut out = vec![0.0f32; cap * self.FEAT_DIM];
-
-        // copy rows to the tail to keep left padding at the front
-        let len = self.observations.len();
-        let start_row = cap.saturating_sub(len);
-        for (i, o) in self.observations.iter().enumerate() {
-            let row = o.to_vec(); // len == FEAT_DIM
-            let dst = (start_row + i) * self.FEAT_DIM;
-            out[dst..dst + self.FEAT_DIM].copy_from_slice(&row[..self.FEAT_DIM]);
-        }
-        out
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RLTransition {
-    pub sim_id: String,
-    pub prev_obs: Vec<f32>,
-    pub action: usize, // snapped index (if continuous used)
-    pub reward: f32,
-    pub next_obs: Vec<f32>,
-    pub done: bool,
-    #[serde(default)]
-    pub cont_action_mbps: Option<f32>, // NEW: raw continuous action, if any
-}
-
-pub trait RLConnector {
-    fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction;
-    fn post_transition(&mut self, transition: &RLTransition);
-    fn reset_window(&mut self);
-}
-
-#[derive(Debug, Clone)]
-pub struct ObsWindow {
-    buf: VecDeque<Vec<f32>>,
-    cap: usize,
-    FEAT_DIM: usize, // keep in sync with RLObservation::to_vec().len()
-}
-
-impl ObsWindow {
-    pub fn new(cap: usize) -> Self {
-        Self {
-            buf: VecDeque::with_capacity(cap),
-            cap,
-            FEAT_DIM: 0,
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.buf.clear();
-    }
-
-    pub fn push_obs(&mut self, obs: &RLObservation) {
-        if self.FEAT_DIM == 0 {
-            self.FEAT_DIM = obs.to_vec().len();
-        }
-
-        if self.buf.len() == self.cap {
-            self.buf.pop_front();
-        }
-        self.buf.push_back(obs.to_vec());
-    }
-
-    /// Current logical sequence length (<= cap)
-    pub fn seq_len(&self) -> usize {
-        self.buf.len()
-    }
-
-    /// Return a flattened window of size (cap * FEAT_DIM), left-padded with zeros.
-    /// Layout: [o_{t-k+1}, ..., o_{t}] row-major.
-    pub fn as_flat_padded(&self) -> Vec<f32> {
-        let mut out = vec![0.0f32; self.cap * self.FEAT_DIM];
-        // copy the existing rows to the tail of out to keep left padding zeros
-        let start_row = self.cap - self.buf.len();
-        for (i, row) in self.buf.iter().enumerate() {
-            let dst = (start_row + i) * self.FEAT_DIM;
-            out[dst..dst + self.FEAT_DIM].copy_from_slice(&row[..self.FEAT_DIM]);
-        }
-        out
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct RLRequestRNN {
-    pub sim_id: String,
-    pub obs_flat: Vec<f32>,           // length = window_len * FEAT_DIM
-    pub seq_len: u8,                  // how many real steps (<= window_len)
-    pub feat_dim: u8,                 // = FEAT_DIM
-    pub window_len: u8,               // fixed capacity N
-    pub action_mask: Option<Vec<u8>>, // enable masking actions
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RLResponse {
-    Discrete { action_idx: usize },
-    Continuous { bitrate_mbps: f32 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ActionSpace {
-    /// Classic discrete ladder indices: 0..N-1
-    Discrete,
-
-    /// Continuous action in Mbps (with optional snapping onto the ladder)
-    Continuous { min_mbps: f32, max_mbps: f32 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RLAction {
-    Discrete(usize),     // ladder index
-    ContinuousMbps(f32), // raw Mbps
-}
-fn idx_to_mbps(ladder: &[f32], idx: usize) -> (usize, f32) {
-    let i = idx.min(ladder.len().saturating_sub(1));
-    (i, ladder[i])
-}
-
-fn nearest_idx(ladder: &[f32], mbps: f32) -> usize {
-    let mut best_i = 0usize;
-    let mut best_d = f32::INFINITY;
-    for (i, &r) in ladder.iter().enumerate() {
-        let d = (r - mbps).abs();
-        if d < best_d {
-            best_d = d;
-            best_i = i;
-        }
-    }
-    best_i
-}
-
-fn snap_to_ladder(ladder: &[f32], mbps: f32) -> (usize, f32) {
-    let i = nearest_idx(ladder, mbps);
-    (i, ladder[i])
-}
-// fn dump_bytes(label: &str, bytes: &[u8]) {
-
-//     let binding = bytes.iter().cloned().take(200).collect::<Vec<_>>();
-//     let snippet = String::from_utf8_lossy(&binding);
-
-//     // let bytes_clone = bytes.clone();
-//     // let snippet = String::from_utf8_lossy(&bytes_clone.iter().cloned().take(200).collect::<Vec<_>>());
-//     println!("[ZMQ-DUMP_rust] {} ({} bytes): {}", label, bytes.len(), snippet);
-// }
-
-pub struct ZmqConnector {
-    action_socket: zmq::Socket, // REQ socket for blocking action selection
-    step_socket: zmq::Socket,   // PUSH socket for sending (obs, reward, done) steps
-    sim_id: String,
-    window: ObsWindow,
-
-    last_good_action: Mutex<RLAction>,
-}
-
-impl ZmqConnector {
-    pub fn new(
-        action_ep: &str,
-        reward_ep: &str,
-        ctx: &zmq::Context,
-        simu_id: &str,
-        window_len: usize,
-    ) -> Self {
-        // --- Action Socket (DEALER) ---
-        // This socket sends obs and receives actions
-        let action_socket = ctx.socket(zmq::DEALER).unwrap();
-        // Set a unique identity for the ROUTER to track this client
-        action_socket.set_identity(simu_id.as_bytes()).unwrap();
-        // Set a timeout for receiving actions
-        action_socket.set_rcvtimeo(15_000).unwrap();
-        action_socket.set_linger(0).unwrap();
-        action_socket.connect(action_ep).unwrap();
-        println!(
-            "[ZmqConnector] Action DEALER connected to {} as {}",
-            action_ep, simu_id
-        );
-
-        // --- Step Socket (PUSH) ---
-        // This socket just sends transitions (reward, done, info)
-        let reward_socket = ctx.socket(zmq::PUSH).unwrap();
-        reward_socket.set_linger(0).unwrap();
-
-        reward_socket.connect(reward_ep).unwrap();
-
-        println!("[ZmqConnector] Reward PUSH connected to {}", reward_ep);
-
-        Self {
-            action_socket,
-            step_socket: reward_socket,
-            sim_id: simu_id.to_string(),
-            window: ObsWindow::new(window_len),
-            // Default action
-            last_good_action: Mutex::new(RLAction::Discrete(1)),
-        }
-    }
-}
-
-impl RLConnector for ZmqConnector {
-    /**
-     * This is the corrected request-reply flow.
-     * 1. Send the observation to the Python ROUTER.
-     * 2. Block and wait for the ROUTER to reply with an action.
-     */
-    fn select_action(&mut self, obs: &RLObservation, action_mask: Option<&Vec<u8>>) -> RLAction {
-        // 1. Build the observation payload
-
-        let feat_dim = obs.to_vec().len();
-        let mut prev_flat = self.window.as_flat_padded();
-
-        if prev_flat.is_empty() {
-            let total_flat_size = self.window.cap * feat_dim;
-            prev_flat = vec![0.0; total_flat_size];
-            // Note: self.window.seq_len() will correctly be 0 here.
-        }
-        let req = RLRequestRNN {
-            sim_id: self.sim_id.clone(),
-            obs_flat: prev_flat, // Send the *previous* window state
-            seq_len: self.window.seq_len() as u8,
-            feat_dim: feat_dim as u8,
-            window_len: self.window.cap as u8,
-            action_mask: action_mask.cloned(),
-        };
-        let request_json = serde_json::to_string(&req).expect("serialize RLRequestRNN");
-
-        // 2. Send the observation request
-        match self.action_socket.send(request_json.as_bytes(), 0) {
-            Ok(_) => {
-                // println!("[ZmqConnector] DEALER Sent obs successfully");
-            }
-            Err(e) => {
-                eprintln!(
-                    "[ZmqConnector] ❌ Failed to send obs: {}. Re-using last action.",
-                    e
-                );
-                self.window.push_obs(obs); // Still push obs to window
-                return self.last_good_action.lock().unwrap().clone();
-            }
-        }
-        // println!("[ZMQ] Rust DEALER waiting for action reply…");
-
-        // 3. Wait for the action response
-        // --- FIX: Use recv_multipart to consume all frames ---
-        match self.action_socket.recv_multipart(0) {
-            Ok(parts) => {
-                // The DEALER strips its identity, leaving [b'', payload]
-                // We must take the *last* part.
-                if let Some(response_bytes) = parts.last() {
-                    if response_bytes.is_empty() {
-                        // This catches the case where we just get [b''] or something invalid
-                        eprintln!(
-                            "[ZmqConnector] ❌ Received empty payload part. Full parts: {:?}",
-                            parts
-                                .iter()
-                                .map(|p| String::from_utf8_lossy(p))
-                                .collect::<Vec<_>>()
-                        );
-                        self.window.push_obs(obs); // Push obs
-                        return self.last_good_action.lock().unwrap().clone();
-                    }
-
-                    // println!("GOT RESPONSE (last part of {}): {:?}", parts.len(), response_bytes);
-                    let parsed: RLResponse = match serde_json::from_slice(response_bytes) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!(
-                                "[ZmqConnector] ❌ Failed to deserialize action: {}. Payload: {:?}",
-                                e,
-                                String::from_utf8_lossy(response_bytes)
-                            );
-                            self.window.push_obs(obs); // Push obs
-                            return self.last_good_action.lock().unwrap().clone();
-                        }
-                    };
-
-                    // Update the observation window *after* successfully sending the previous state
-                    self.window.push_obs(obs);
-
-                    let new_action = match parsed {
-                        RLResponse::Discrete { action_idx } => RLAction::Discrete(action_idx),
-                        RLResponse::Continuous { bitrate_mbps } => {
-                            RLAction::ContinuousMbps(bitrate_mbps)
-                        }
-                    };
-
-                    // Save this as the last known-good action
-                    *self.last_good_action.lock().unwrap() = new_action.clone();
-                    new_action
-                } else {
-                    // This should not happen, but good to guard against
-                    eprintln!("[ZmqConnector] ❌ Received empty multipart message.");
-                    self.window.push_obs(obs); // Push obs
-                    self.last_good_action.lock().unwrap().clone()
-                }
-            }
-            Err(e) if e == zmq::Error::EAGAIN => {
-                // Timeout waiting for Python
-                eprintln!("⚠️ Timeout waiting for action. Re-using last action.");
-                self.window.push_obs(obs); // Push obs
-                self.last_good_action.lock().unwrap().clone()
-            }
-            Err(e) => {
-                // A real socket error
-                eprintln!("❌ ZMQ Error on recv action: {}. Re-using last action.", e);
-                self.window.push_obs(obs); // Push obs
-                self.last_good_action.lock().unwrap().clone()
-            }
-        }
-    }
-
-    /**
-     * Send transition data (reward, done, info) on the separate PUSH socket.
-     * This is "fire and forget" - no reply.
-     */
-    fn post_transition(&mut self, transition: &RLTransition) {
-        let transition_json =
-            serde_json::to_string(transition).expect("Failed to serialize RLTransition");
-        // dump_bytes("→ PUSH SEND (transition)", transition_json.as_bytes());
-        match self.step_socket.send(transition_json.as_bytes(), 0) {
-            Ok(_) => {
-                // println!("[ZmqConnector] Sent transition successfully");
-            }
-            Err(e) => {
-                eprintln!("[ZmqConnector] ❌ Failed to send transition: {}", e);
-            }
-        }
-    }
-
-    fn reset_window(&mut self) {
-        self.window.clear();
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct RLRequest {
-    pub obs: Vec<f32>,
-}
-// #[derive(Serialize, Deserialize)]
-// pub struct RLResponse{pub action_idx: usize}
 
 #[allow(unused)]
 #[derive(Clone, PartialEq)]
@@ -1959,64 +1530,6 @@ impl RunningStat {
     }
 }
 
-// --- ADD THIS HELPER STRUCT (manages all feature stats) ---
-#[derive(Debug, Default)]
-struct ObservationNormalizer {
-    t_elapsed_s: RunningStat,
-    last_target_bitrate_mbps: RunningStat,
-    rtt_ms_avg_s: RunningStat,
-    rtt_ms_std_s: RunningStat,
-    bandwidth_mbps_avg_s: RunningStat,
-    bandwidth_mbps_std_s: RunningStat,
-    frame_interarrival_avg_ms: RunningStat,
-    frame_interarrival_std_ms: RunningStat,
-    flr_avg_s: RunningStat,
-    pl_sum_period: RunningStat,
-    frame_size_avg_bytes: RunningStat,
-    ow_delay_period_ewma: RunningStat,
-    f_ow_delay_period_ewma: RunningStat,
-    rebuffer_event_sum: RunningStat,
-}
-
-impl ObservationNormalizer {
-    const EPSILON: f32 = 1e-8;
-    const CLIP_RANGE: f32 = 5.0; // Clip to [-5.0, 5.0]
-
-    /// Updates stats with the pre-processed observation,
-    /// then returns the normalized & clipped observation.
-    fn update_and_normalize(&mut self, obs: RLObservation) -> RLObservation {
-        // This macro reduces boilerplate
-        macro_rules! update_norm_clip {
-            ($field:ident) => {{
-                // 1. Update stats
-                self.$field.update(obs.$field as f32);
-                // 2. Normalize
-                let mean = self.$field.get_mean();
-                let std = self.$field.get_std();
-                let norm: f32 = (obs.$field as f32 - mean) / (std + Self::EPSILON);
-                // 3. Clip
-                norm.clamp(-Self::CLIP_RANGE, Self::CLIP_RANGE)
-            }};
-        }
-
-        RLObservation {
-            t_elapsed_s: update_norm_clip!(t_elapsed_s),
-            last_target_bitrate_mbps: update_norm_clip!(last_target_bitrate_mbps),
-            rtt_ms_avg_s: update_norm_clip!(rtt_ms_avg_s),
-            rtt_ms_std_s: update_norm_clip!(rtt_ms_std_s),
-            bandwidth_mbps_avg_s: update_norm_clip!(bandwidth_mbps_avg_s),
-            bandwidth_mbps_std_s: update_norm_clip!(bandwidth_mbps_std_s),
-            frame_interarrival_avg_ms: update_norm_clip!(frame_interarrival_avg_ms),
-            frame_interarrival_std_ms: update_norm_clip!(frame_interarrival_std_ms),
-            flr_avg_s: update_norm_clip!(flr_avg_s),
-            pl_sum_period: update_norm_clip!(pl_sum_period),
-            frame_size_avg_bytes: update_norm_clip!(frame_size_avg_bytes),
-            ow_delay_period_ewma: update_norm_clip!(ow_delay_period_ewma),
-            f_ow_delay_period_ewma: update_norm_clip!(f_ow_delay_period_ewma),
-            rebuffer_event_sum: update_norm_clip!(rebuffer_event_sum),
-        }
-    }
-}
 
 #[allow(unused)]
 // #[derive(Clone)]
@@ -2069,7 +1582,6 @@ pub struct BitrateManager {
     bytes_size_avg: SlidingWindowAverage<f32>,
 
     obs_config: ObservationConfig,
-    obs_normalizer: ObservationNormalizer,
     reward_stat: RunningStat,
     pub reward_mode: usize,
 
@@ -2190,61 +1702,7 @@ impl BitrateManager {
                     bitrate_ladder_mbps,
                 }
             }
-            3 => {
-                // RL
-                let ladder_mbps = (5..=MAX_MBPS_LADDER as usize)
-                    .step_by(5)
-                    .map(|x| x as f32)
-                    .collect::<Vec<_>>();
-                let ctx = zmq::Context::new();
-                // print_yellow!("Ladder of Mbps values: {:?}", ladder_mbps);
 
-                let action_ep =
-                    std::env::var("ZMQ_ACTION_EP").unwrap_or("ipc:///tmp/xr_default_action".into());
-                let reward_ep =
-                    std::env::var("ZMQ_STEP_EP").unwrap_or("ipc:///tmp/xr_default_step".into());
-
-                // let action_space = ActionSpace::Continuous { min_mbps: (1.0), max_mbps: (100.0) };
-                let action_space = ActionSpace::Discrete;
-
-                println!("[RUST] CONFIGURING RL on sockets | A: {action_ep}, R: {reward_ep}");
-
-                println!("Debug ladder: {:?}", ladder_mbps);
-                BitrateMode::ReinforcementLearner {
-                    bitrate_ladder_mbps: ladder_mbps,
-                    // step_interval: Duration::from_secs_f32(t_update_abr as f32),
-                    connector: Arc::new(Mutex::new(Box::new(ZmqConnector::new(
-                        &action_ep,
-                        &reward_ep,
-                        &ctx,
-                        sim_unique_string,
-                        RL_WINDOW_OBSERVATION_SIZE,
-                    )))),
-
-                    last_action_idx: Arc::new(Mutex::new(0)),
-                    last_decision_instant: Arc::new(Mutex::new(TaiTime::EPOCH)),
-                    pending_obs: Arc::new(Mutex::new(Some(RLObservationVector::new(8)))),
-                    action_space,
-                    nest_vr_max_mbps: max_mbps,
-                    nest_vr_min_mbps: min_mbps,
-                    nest_vr_config: ProfileConfig {
-                        update_interval_nestvr_s: t_update_abr as f32,
-                        max_bitrate_mbps: max_mbps,
-                        min_bitrate_mbps: min_mbps,
-                        initial_bitrate_mbps: initial_bitrate_mbps,
-
-                        bitrate_step_count,
-                        bitrate_inc_steps: 1,
-                        bitrate_dec_steps: decrement,
-
-                        rtt_adj_prob: 1.0,
-                        bitrate_inc_prob: 0.25,
-                        nfr_thresh: 0.99,
-                        rtt_thresh_ms: 22.0,
-                        capacity_scaling_factor: 0.9,
-                    },
-                }
-            }
             4 => {
                 // GCC estimator.
 
@@ -2342,7 +1800,6 @@ impl BitrateManager {
                 max_history_size,
             ),
             obs_config,
-            obs_normalizer: ObservationNormalizer::default(),
             reward_stat: RunningStat::default(),
             reward_mode,
 
@@ -2383,18 +1840,7 @@ impl BitrateManager {
             } => {
                 self.last_target_bitrate_bps = *min_bitrate_mbps * 1e6;
             }
-            BitrateMode::ReinforcementLearner {
-                last_action_idx,
-                last_decision_instant,
-                pending_obs,
-                bitrate_ladder_mbps,
-                ..
-            } => {
-                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
-                *last_action_idx.lock().unwrap() = 0;
-                *last_decision_instant.lock().unwrap() = TaiTime::EPOCH;
-                *pending_obs.lock().unwrap() = Some(RLObservationVector::new(8));
-            }
+
             BitrateMode::GCCPort {
                 gcc_estimator,
                 framerate,
@@ -2546,8 +1992,6 @@ impl BitrateManager {
             bitrate_bps
         } else {
             // println!("{:.3} One pass ABR", taitime_to_f64!(now));
-
-            let obs = self.build_rl_observation(now); // do it here so borrow checker is happy
 
             let bitrate_bps: f32 = match &self.bitrate_mode {
                 // match all other cases.
@@ -2762,245 +2206,6 @@ impl BitrateManager {
                     bitrate_bps
                 }
 
-                BitrateMode::ReinforcementLearner {
-                    bitrate_ladder_mbps,
-                    // step_interval,
-                    connector,
-                    last_action_idx,
-                    last_decision_instant,
-                    pending_obs,
-                    action_space,
-
-                    nest_vr_max_mbps,
-                    nest_vr_min_mbps,
-                    nest_vr_config,
-                } => {
-                    let bitrate_ladder_mbps = &bitrate_ladder_mbps.clone();
-                    let connector = connector.clone();
-                    let last_action_idx = last_action_idx.clone();
-                    let pending_obs = pending_obs.clone();
-                    let action_space = action_space.clone();
-                    let profile_config = nest_vr_config.clone();
-
-                    // f32 is `Copy`, so dereferencing (`*`) creates a copy.
-                    let nest_vr_max_mbps = *nest_vr_max_mbps;
-                    let nest_vr_min_mbps = *nest_vr_min_mbps;
-                    let last_decision_instant = last_decision_instant.clone();
-
-                    // Respect step interval
-                    // if now.duration_since(*last_decision_instant.lock().unwrap()) < *step_interval {
-                    //     return self.last_target_bitrate_bps;
-                    // }
-                    let current_obs = obs.clone();
-
-                    // Take history out, or create new
-                    let mut history = pending_obs.lock().unwrap().take().unwrap_or_else(|| {
-                        RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8)
-                    });
-
-                    // Window BEFORE pushing current obs
-                    let prev_win_flat = history.as_flat_padded();
-
-                    // Ask the agent
-
-                    let everest_bps = {
-                        let current_mbps = (self.last_target_bitrate_bps as f32) / 1e6;
-                        let new_mbps = match self.everest_last_order {
-                            EverestCommand::Continue => bitrate_ladder_mbps
-                                .iter()
-                                .find(|&&x| (x - current_mbps).abs() < std::f32::EPSILON)
-                                .copied()
-                                .unwrap_or(current_mbps),
-                            EverestCommand::SpeedUp => bitrate_ladder_mbps
-                                .iter()
-                                .find(|&&x| x > current_mbps)
-                                .copied()
-                                .unwrap_or(*bitrate_ladder_mbps.last().unwrap()),
-                            EverestCommand::SlowDown => bitrate_ladder_mbps
-                                .iter()
-                                .rfind(|&&x| x < current_mbps)
-                                .copied()
-                                .unwrap_or(bitrate_ladder_mbps[0]),
-                        };
-                        let mut bps = new_mbps * 1e6;
-                        let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma)
-                            .ceil() as usize;
-                        let capacity_margin_bps =
-                            self.everest_capacity_ewma / (n_users as f32 + 1.0);
-                        bps = f32::min(capacity_margin_bps, bps);
-                        if let Some(ladder) = &self.bitrate_ladder_bps {
-                            bps = upper_bound_bitrate(bps, ladder);
-                        }
-                        bps
-                    };
-                    let everest_mbps = everest_bps / 1e6;
-
-                    // (B) Calculate Nest-VR Action (logic copied from NestVr arm)
-                    // This uses the config fields passed into this enum variant.
-                    let nest_vr_bps = {
-                        let (max_bps, min_bps) = (nest_vr_max_mbps * 1e6, nest_vr_min_mbps * 1e6);
-                        let mut rng = rand::thread_rng();
-                        let uniform_dist = Uniform::new(0.0, 1.0);
-                        let r_rtt = rng.sample(uniform_dist);
-                        let r_inc = rng.sample(uniform_dist);
-                        let frame_interval_s =
-                            f32::max(self.frame_interval_average.get_average(), 1e-9);
-                        let fps_tx_avg = if frame_interval_s != 0.0 {
-                            1.0 / frame_interval_s
-                        } else {
-                            0.0
-                        };
-                        let fps_rx_avg = if self.frame_interarrival_average.get_average() != 0.0 {
-                            1.0 / f32::max(1e-9, self.frame_interarrival_average.get_average())
-                        } else {
-                            0.0
-                        };
-                        let nfr_avg = fps_rx_avg / fps_tx_avg;
-                        let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
-                        let estimated_capacity_bps =
-                            f32::max(self.peak_throughput_average.get_average(), 1e-9);
-                        let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
-
-                        if nfr_avg < profile_config.nfr_thresh {
-                            bitrate_bps -= profile_config.bitrate_dec_steps as f32
-                                * self.bitrate_step_size_bps_nest;
-                        } else {
-                            if rtt_avg_ms > profile_config.rtt_thresh_ms {
-                                if r_rtt <= profile_config.rtt_adj_prob {
-                                    bitrate_bps -= profile_config.bitrate_dec_steps as f32
-                                        * self.bitrate_step_size_bps_nest;
-                                }
-                            } else {
-                                if r_inc <= profile_config.bitrate_inc_prob {
-                                    bitrate_bps += profile_config.bitrate_inc_steps as f32
-                                        * self.bitrate_step_size_bps_nest;
-                                }
-                            }
-                        }
-                        let capacity_upper_limit =
-                            profile_config.capacity_scaling_factor * estimated_capacity_bps;
-                        bitrate_bps = f32::min(bitrate_bps, capacity_upper_limit);
-                        bitrate_bps = minmax_bitrate(bitrate_bps, max_bps, min_bps);
-                        // Use the main bitrate ladder for final snapping
-                        bitrate_bps = upper_bound_bitrate(
-                            bitrate_bps,
-                            &self.bitrate_ladder_bps.clone().unwrap(),
-                        );
-                        bitrate_bps
-                    };
-                    let nest_vr_mbps = nest_vr_bps / 1e6;
-
-                    // (C) Find nearest indices in the RL ladder
-                    // (Assuming `nearest_idx` function is available in scope)
-                    let everest_idx = nearest_idx(bitrate_ladder_mbps, everest_mbps);
-                    let nest_vr_idx = nearest_idx(bitrate_ladder_mbps, nest_vr_mbps);
-
-                    // (D) Create the mask (allow only these two actions)
-                    let mut mask = vec![0u8; bitrate_ladder_mbps.len()];
-                    mask[everest_idx] = 1;
-                    mask[nest_vr_idx] = 1; // Overwrites if indices are same (which is fine)
-
-                    let action_mask = Some(&mask);
-
-                    // println!("[RL Mask] Everest -> {:.2} Mbps (idx {}), NestVR -> {:.2} Mbps (idx {}).\n Mask: {:?}",
-                    // everest_mbps, everest_idx, nest_vr_mbps, nest_vr_idx, mask);
-
-                    let action = connector
-                        .lock()
-                        .unwrap()
-                        .select_action(&current_obs, action_mask);
-
-                    // Reward/Done
-                    // let reward = self.rl_naive_reward_function(&current_obs);
-
-                    let reward = match self.reward_mode {
-                        0 => self.rl_naive_reward_function(&current_obs),
-                        1 => self.normalized_reward_fn(&current_obs),
-                        _ => self.rl_naive_reward_function(&current_obs),
-                    };
-
-                    let done =
-                        now.duration_since(TaiTime::EPOCH).as_secs_f64() >= self.t_end_simulation;
-                    let prev_idx_logged = *last_action_idx.lock().unwrap();
-
-                    // Push current obs, compute next window
-                    history.push(current_obs.clone());
-                    let next_win_flat = history.as_flat_padded();
-
-                    // Map action -> (final_mbps, snapped_idx)
-                    let (final_mbps, snapped_idx, cont_raw_opt) = match (action_space, action) {
-                        (ActionSpace::Discrete, RLAction::Discrete(i)) => {
-                            let (idx, mbps) = idx_to_mbps(&bitrate_ladder_mbps.clone(), i);
-                            (mbps, idx, None)
-                        }
-                        (ActionSpace::Discrete, RLAction::ContinuousMbps(v)) => {
-                            // Defensive: if Python sends continuous while env expects discrete,
-                            // snap to nearest rung.
-                            let (idx, mbps) = snap_to_ladder(&bitrate_ladder_mbps.clone(), v);
-                            (mbps, idx, Some(v))
-                        }
-                        (ActionSpace::Continuous { min_mbps, max_mbps }, RLAction::Discrete(i)) => {
-                            // Map ladder index to evenly-spaced value over [min,max]
-                            let n = bitrate_ladder_mbps.len().max(2);
-                            let alpha = (i as f32) / ((n - 1) as f32);
-                            let raw = (min_mbps + alpha * (max_mbps - min_mbps))
-                                .clamp(min_mbps, max_mbps);
-                            let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
-                            (raw, idx, Some(raw))
-                        }
-                        (
-                            ActionSpace::Continuous { min_mbps, max_mbps },
-                            RLAction::ContinuousMbps(v),
-                        ) => {
-                            let raw = v.clamp(min_mbps, max_mbps);
-
-                            let idx = nearest_idx(&bitrate_ladder_mbps.clone(), raw);
-                            (raw, idx, Some(raw))
-                        }
-                    };
-
-                    // Post transition (send snapped index for compatibility + optional raw)
-                    let transition = RLTransition {
-                        sim_id: self.sim_unique_string.clone(),
-                        prev_obs: prev_win_flat,
-                        action: prev_idx_logged,
-                        reward,
-                        next_obs: next_win_flat,
-                        done,
-                        cont_action_mbps: cont_raw_opt,
-                    };
-                    connector.lock().unwrap().post_transition(&transition);
-
-                    // Store updated history / action / instant
-                    if done {
-                        *pending_obs.lock().unwrap() =
-                            Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
-                    } else {
-                        *pending_obs.lock().unwrap() = Some(history);
-                    }
-
-                    *last_action_idx.lock().unwrap() = snapped_idx;
-                    *last_decision_instant.lock().unwrap() = now;
-
-                    // Apply bitrate
-                    self.last_target_bitrate_bps = final_mbps * 1e6;
-
-                    // match cont_raw_opt {
-                    //     Some(raw) => {print_blue!(
-                    //         "[{} RL {}] Action: raw={:.2} Mbps -> final={:.2} Mbps (idx={})",
-                    //         format_elapsed!(now), ip_server, raw, final_mbps, snapped_idx
-                    //         );
-                    //     },
-                    //     None => {print_blue!(
-                    //         "[{} RL {}] Action: idx={} -> final={:.2} Mbps",
-                    //         format_elapsed!(now), ip_server, snapped_idx, final_mbps
-                    //         );
-                    //     },
-                    // }
-
-                    self.last_target_bitrate_bps
-                }
-
                 BitrateMode::GCCPort {
                     ref gcc_estimator, ..
                 } => {
@@ -3050,142 +2255,6 @@ impl BitrateManager {
         }
     }
 
-    pub fn build_rl_observation(&mut self, now: TaiTime<0>) -> RLObservation {
-        match self.bitrate_mode {
-            BitrateMode::ReinforcementLearner { .. } => {} //do nothing
-            _ => {
-                return RLObservation::default();
-            } // return early.
-        };
-
-        // --- 1. Calculate all raw values first ---
-        let t_elapsed_s = now.duration_since(TaiTime::EPOCH).as_secs_f32();
-        let last_target_bitrate_mbps = self.last_target_bitrate_bps * 1e-6;
-        let rtt_ms_avg_s = self.rtt_average.get_average() * 1000.0;
-        let rtt_ms_std_s = self.rtt_average.get_std() * 1000.0;
-
-        let bandwidth_mbps_avg_s = self.peak_throughput_average.get_average() * 1e-6;
-        let bandwidth_mbps_std_s = self.peak_throughput_average.get_std() * 1e-6;
-        let frame_interarrival_avg_ms = self.frame_interarrival_average.get_average() * 1000.0;
-        let frame_interarrival_std_ms = self.frame_interarrival_average.get_std() * 1000.0;
-
-        let window_s = self.flr_shardloss_count.period;
-        let frames_sent_expectation = self.framerate * window_s;
-        let t_elapsed = now.duration_since(TaiTime::EPOCH).as_secs_f32();
-        let frames_lost = self.flr_shardloss_count.sum_flr(t_elapsed) as f32;
-        let pl_lost_period = self.flr_shardloss_count.sum_shard_loss(t_elapsed);
-
-        // normalize to a ratio [0.0, 1.5]
-        let flr_avg_s = (frames_lost / frames_sent_expectation.max(1.0)).min(1.5); // (not in the same period though, watch out). Saturate at 1.5 to not make ultralarge
-
-        let rebuffer_event_sum = self.last_rebuffer_avg_sum;
-        let frame_size_avg_bytes = self.bytes_size_avg.get_average();
-        let ow_delay_period_ewma = self.ewma_owd;
-        let f_ow_delay_period_ewma = self.ewma_fowd;
-
-        // Create the raw observation struct. Note casting u64 -> f32
-        let raw_obs = RLObservation {
-            t_elapsed_s,
-            last_target_bitrate_mbps,
-            rtt_ms_avg_s,
-            rtt_ms_std_s,
-            bandwidth_mbps_avg_s,
-            bandwidth_mbps_std_s,
-            frame_interarrival_avg_ms,
-            frame_interarrival_std_ms,
-            flr_avg_s,
-            pl_sum_period: pl_lost_period as f32, // Cast to f32
-            frame_size_avg_bytes,
-            ow_delay_period_ewma,
-            f_ow_delay_period_ewma,
-            rebuffer_event_sum: rebuffer_event_sum as f32, // Cast to f32
-        };
-
-        // --- 2. Match on config and return appropriate struct ---
-        match self.obs_config {
-            ObservationConfig::Raw => {
-                // Return the raw, unnormalized values
-                raw_obs
-            }
-            ObservationConfig::ManualScaledV1 => {
-                // Scaling constants based on plots from image_969aa9.jpg
-
-                // Unipolar (scale to [0.0, 1.0])
-                const MAX_T_ELAPSED: f32 = 60.0; // obs_last/t_elapsed_s
-                const MAX_TARGET_BITRATE: f32 = 100.0; // obs_last/target_bitrate_mbps
-                const MAX_RTT_AVG: f32 = 300.0; // obs_last/rtt_ms_avg_s
-                const MAX_RTT_STD: f32 = 250.0; // obs_last/rtt_ms_std_s
-                const MAX_BANDWIDTH_AVG: f32 = 1000.0; // obs_last/bandwidth_mbps_avg_s
-                const MAX_BANDWIDTH_STD: f32 = 1000.0; // obs_last/bandwidth_mbps_std_s
-                const MAX_FRAME_INTERARRIVAL_AVG: f32 = 250.0; // obs_last/frame_interarrival_avg_ms
-                const MAX_FRAME_INTERARRIVAL_STD: f32 = 250.0; // obs_last/frame_interarrival_std_ms
-                const MAX_FLR_AVG: f32 = 1.5; // From your code comment
-                const MAX_PL_SUM: f32 = 1400.0; // obs_last/pl_sum_period
-                const MAX_FRAME_SIZE_AVG: f32 = 200_000.0; // obs_last/frame_size_avg_bytes
-                                                           // const MAX_REBUFFER_SUM: f32 = 6.0; // obs_last/rebuffer_event_sum
-
-                // Bipolar (scale to [-1.0, 1.0])
-                const MAX_ABS_OW_DELAY: f32 = 0.02; // obs_last/ow_delay_period_ewma
-                const MAX_ABS_F_OW_DELAY: f32 = 0.01; // obs_last/f_ow_delay_period_ewma
-
-                // Apply scaling and clamp to the target range
-                RLObservation {
-                    // Unipolar [0.0, 1.0]
-                    t_elapsed_s: (t_elapsed_s / MAX_T_ELAPSED).clamp(0.0, 1.0),
-                    last_target_bitrate_mbps: (last_target_bitrate_mbps / MAX_TARGET_BITRATE)
-                        .clamp(0.0, 1.0),
-                    rtt_ms_avg_s: (rtt_ms_avg_s / MAX_RTT_AVG).clamp(0.0, 1.0),
-                    rtt_ms_std_s: (rtt_ms_std_s / MAX_RTT_STD).clamp(0.0, 1.0),
-                    bandwidth_mbps_avg_s: (bandwidth_mbps_avg_s / MAX_BANDWIDTH_AVG)
-                        .clamp(0.0, 1.0),
-                    bandwidth_mbps_std_s: (bandwidth_mbps_std_s / MAX_BANDWIDTH_STD)
-                        .clamp(0.0, 1.0),
-                    frame_interarrival_avg_ms: (frame_interarrival_avg_ms
-                        / MAX_FRAME_INTERARRIVAL_AVG)
-                        .clamp(0.0, 1.0),
-                    frame_interarrival_std_ms: (frame_interarrival_std_ms
-                        / MAX_FRAME_INTERARRIVAL_STD)
-                        .clamp(0.0, 1.0),
-                    flr_avg_s: (flr_avg_s / MAX_FLR_AVG).clamp(0.0, 1.0),
-                    pl_sum_period: pl_lost_period as f32 / MAX_PL_SUM, // Keep as u64, or normalize: (pl_lost_period as f32 / MAX_PL_SUM).clamp(0.0, 1.0)
-                    frame_size_avg_bytes: (frame_size_avg_bytes / MAX_FRAME_SIZE_AVG)
-                        .clamp(0.0, 1.0),
-                    // Bipolar [-1.0, 1.0]
-                    ow_delay_period_ewma: (ow_delay_period_ewma / MAX_ABS_OW_DELAY)
-                        .clamp(-1.0, 1.0),
-                    f_ow_delay_period_ewma: (f_ow_delay_period_ewma / MAX_ABS_F_OW_DELAY)
-                        .clamp(-1.0, 1.0),
-                    // Unipolar [0.0, 1.0]
-                    rebuffer_event_sum: rebuffer_event_sum as f32, // Keep as u64, or normalize: (rebuffer_event_sum as f32 / MAX_REBUFFER_SUM).clamp(0.0, 1.0)
-                }
-            }
-            ObservationConfig::RunningAvg => {
-                // 1. Pre-process: Apply log transform to skewed, non-negative features
-                let pre_processed_obs = RLObservation {
-                    // No log transform (linear, user-scaled, or can be negative)
-                    t_elapsed_s: raw_obs.t_elapsed_s,
-                    last_target_bitrate_mbps: raw_obs.last_target_bitrate_mbps,
-                    flr_avg_s: raw_obs.flr_avg_s,
-                    ow_delay_period_ewma: raw_obs.ow_delay_period_ewma,
-                    f_ow_delay_period_ewma: raw_obs.f_ow_delay_period_ewma,
-
-                    // Log transform (skewed, non-negative)
-                    rtt_ms_avg_s: (raw_obs.rtt_ms_avg_s + 1.0).ln(),
-                    rtt_ms_std_s: (raw_obs.rtt_ms_std_s + 1.0).ln(),
-                    bandwidth_mbps_avg_s: (raw_obs.bandwidth_mbps_avg_s + 1.0).ln(),
-                    bandwidth_mbps_std_s: (raw_obs.bandwidth_mbps_std_s + 1.0).ln(),
-                    frame_interarrival_avg_ms: (raw_obs.frame_interarrival_avg_ms + 1.0).ln(),
-                    frame_interarrival_std_ms: (raw_obs.frame_interarrival_std_ms + 1.0).ln(),
-                    pl_sum_period: (raw_obs.pl_sum_period + 1.0).ln(),
-                    frame_size_avg_bytes: (raw_obs.frame_size_avg_bytes + 1.0).ln(),
-                    rebuffer_event_sum: (raw_obs.rebuffer_event_sum + 1.0).ln(),
-                };
-
-                // 2. Update stats and return normalized, clipped observation
-                self.obs_normalizer.update_and_normalize(pre_processed_obs)
-            }
-        }
-    }
 
     pub fn vmaf_manual_function(&self, bitrate_mbps: f32) -> f32 {
         // values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
@@ -3193,76 +2262,6 @@ impl BitrateManager {
         100.0 - 89.40 * (-0.0615 * bitrate_mbps).exp()
     }
 
-    pub fn normalized_reward_fn(&mut self, obs: &RLObservation) -> f32 {
-        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1
-        let beta = 1.0; // flr 0 to 1
-        let omega = -1.0 / 90.0; // rebuffering events: 90 -> -1 too
-        let gamma;
-
-        if obs.rtt_ms_avg_s >= 50.0 {
-            gamma = -0.02; // rtt greater than 50 ms -> 0 to -inf based on distance
-        } else {
-            gamma = 0.0;
-        }
-
-        let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
-        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards.
-        let rtt_term = gamma * obs.rtt_ms_avg_s;
-        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;
-
-        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32;
-        reward = f32::max(reward, -1.0); // clip rewards to 0
-
-        // 2. Update the running reward stats
-        self.reward_stat.update(reward);
-
-        // 3. Normalize the reward
-        let mean = self.reward_stat.get_mean();
-        let std = self.reward_stat.get_std();
-        let normalized_reward = (reward - mean) / (std + 1e-8);
-
-        normalized_reward
-    }
-
-    pub fn rl_naive_reward_function(&self, obs: &RLObservation) -> f32 {
-        // only first term is positive, others are penalties.
-
-        let alpha = 0.01; // bitrate 0 to 100 -> 0 to 1
-        let beta = 1.0; // flr 0 to 1
-        let omega = -1.0 / 90.0; // rebuffering events: 90 -> -1 too
-        let gamma;
-
-        if obs.rtt_ms_avg_s >= 50.0 {
-            gamma = -0.02; // rtt greater than 50 ms -> 0 to -inf based on distance
-        } else {
-            gamma = 0.0;
-        }
-
-        let bitrate_term = alpha * self.vmaf_manual_function(obs.last_target_bitrate_mbps);
-        let flr_term = beta * (1.0 - obs.flr_avg_s).max(-3.0); // bound negative rewards.
-        let rtt_term = gamma * obs.rtt_ms_avg_s;
-        let rebuffer_term = omega * obs.rebuffer_event_sum as f32;
-
-        let mut reward = bitrate_term + flr_term + rtt_term + rebuffer_term as f32;
-        reward = f32::max(reward, -1.0); // clip rewards to 0
-        reward
-    }
-
-    // pub fn rl_reward_function(&self, obs: &RLObservation) -> f32 {
-    //     let alpha = 0.05; // bitrate 0 to 100 -> 0 to 1
-
-    //     println!("#######################\nrtt_ms:{} , flr: {}  ######################\n", obs.rtt_ms_avg_s, obs.flr_avg_s);
-
-    //     let reward = if obs.flr_avg_s <= 0.05 {
-    //         if obs.rtt_ms_avg_s <= 40.0 { // let's use this manual MTP threshold
-    //             self.vmaf_manual_function(obs.last_target_bitrate_mbps) * alpha
-    //         }
-    //         else{
-    //             0.0}
-    //     }
-    //     else{0.0};
-    //     reward
-    // }
 }
 
 // static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> =
@@ -3840,64 +2839,6 @@ impl XRServer {
 
         // Stop streaming
         self.is_streaming = false;
-
-        let current_obs = self.bitrate_manager.build_rl_observation(now); // only return something if RL mode activated
-
-        let reward = match self.reward_mode {
-            0 => self.bitrate_manager.rl_naive_reward_function(&current_obs),
-            1 => self.bitrate_manager.normalized_reward_fn(&current_obs),
-            _ => self.bitrate_manager.rl_naive_reward_function(&current_obs),
-        };
-
-        match &self.bitrate_manager.bitrate_mode {
-            BitrateMode::ReinforcementLearner {
-                pending_obs,
-                connector,
-                last_action_idx,
-                ..
-            } => {
-                println!("SESSION ENDDD!");
-                let mut con = connector.lock().unwrap(); // lock ONCE
-
-                // history
-                let mut history_opt = pending_obs.lock().unwrap().take();
-                let mut history = history_opt
-                    .unwrap_or_else(|| RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
-
-                // prev window BEFORE pushing current_obs
-                let prev_win_flat = history.as_flat_padded();
-
-                let reward = self.bitrate_manager.rl_naive_reward_function(&current_obs);
-                let prev_action = *last_action_idx.lock().unwrap();
-
-                // push and build next window
-                history.push(current_obs);
-                let next_win_flat = history.as_flat_padded();
-                // println!("SESSION ENDDD2!");
-
-                // FINAL transition (windowed)
-                let transition = RLTransition {
-                    sim_id: self.sim_unique_string.clone(),
-                    prev_obs: prev_win_flat,
-                    action: prev_action,
-                    reward,
-                    next_obs: next_win_flat,
-                    done: true,
-                    cont_action_mbps: Some(self.bitrate_manager.last_target_bitrate_bps / 1e6),
-                };
-                con.post_transition(&transition); // <--- use `con`, don't re-lock
-                                                  // print_red!("[RL] POSTING FINAL TRANSITION);
-
-                con.reset_window(); // <--- use `con`, don't re-lock
-
-                // Reset history window for next episode
-                *pending_obs.lock().unwrap() =
-                    Some(RLObservationVector::new(RL_WINDOW_OBSERVATION_SIZE as u8));
-                // println!("SESSION ENDDD3!");
-                drop(con); // releases the lock
-            }
-            _ => {}
-        }
 
         // Drop or reset senders/receivers
         self.video_app_sender = None;
@@ -5750,7 +4691,17 @@ impl XRClient {
             self.output_app_tracking_sender =
                 Some(stream_socket.request_stream(TRACKING, self.t_0, self.codec_selection, &self.results_path));
 
-            XRClient::generate_tracking_data(self, (), context).await;
+
+            if NO_UPLINK_DATA_CONST == true{
+                for i in 0..10 {
+                    print_red!("*********** DEBUG DISABLED TRACKING DATA!!!*********** ", ); 
+                }
+            }
+            else{
+                XRClient::generate_tracking_data(self, (), context).await;
+
+            }
+
         }
     }
 
@@ -6009,11 +4960,15 @@ impl XRClient {
         packetz.data_inner = buffer[0..packet_size].to_vec();
         packetz.header_alvr.stream_id = CONTROL_STREAM;
         packetz.header_alvr.next_packet_index = 2;
-
-        if matches!(packet, ClientControlPacket::NetworkStatistics(..)) {       // All UL traffic is given the AC_VO for max priority in channel access
+        if !self.edca_be_mode {
+             if matches!(packet, ClientControlPacket::NetworkStatistics(..)) {       // All UL traffic is given the AC_VO for max priority in channel access
             packetz.edca_ac = EdcaAc::Voice;                                
-        } else if matches!(packet, ClientControlPacket::DeadlineShardLossStat(..)) {
-            packetz.edca_ac = EdcaAc::Voice;
+            } else if matches!(packet, ClientControlPacket::DeadlineShardLossStat(..)) {
+                packetz.edca_ac = EdcaAc::Voice;
+            }
+        }
+        else{
+            packetz.edca_ac = EdcaAc::BestEffort; 
         }
 
         context

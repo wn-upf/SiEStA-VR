@@ -112,7 +112,6 @@ impl VRPair {
             0 => "CBR",
             1 => "Nest-VR",
             2 => "EveRest",
-            3 => "RL agent",
             4 => "GCC Port",
             5 => "NADA Port",
             6 => "FovOptix Port",
@@ -150,7 +149,7 @@ impl VRPair {
             abr_enabled,
             nest_vr_profile,
             t_end_simu,
-            simu_unique_str, // for identifying each simulation on the RLConnector
+            simu_unique_str, // for identifying each simulation on the Connector
             obs_config,
             reward_mode,
             t_update_abr,
@@ -364,14 +363,14 @@ pub struct SimParams {
     pub intra_refresh: usize,          // 0/1
     pub use_foveation: usize,          // 0/1
     pub vbv_per_frame: usize,          // 0/1, per-second if set to 0. 
-    pub abr: usize, // 0 CBR | 1 Nest-VR | 2 Everest | 3 RL | 4 GCC | 5 NADA | 6 FovOptix
+    pub abr: usize, // 0 CBR | 1 Nest-VR | 2 Everest | 3 ?? | 4 GCC | 5 NADA | 6 FovOptix
     pub nest_vr_choice: usize, // 0 Speedy | 1 Balanced | 2 Anxious
     pub test_distances_everest: usize, // 0/1
     pub sim_id: usize,
     pub observation_type: usize,
     pub reward_mode: usize, // 0-> naive , 1-> normalized, 2-> ??? todo shaping.
     pub t_update_abr: f32,
-    // pub eval_string: String, // to store name of eval run, used for benchmarking RL in parallel.
+    // pub eval_string: String, // to store name of eval run, used for benchmarking in parallel.
     pub mlo_channel_config: String,
     pub edca_be: usize,
     pub mlo_link_sel_policy: usize,
@@ -647,44 +646,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
         let current_abr_mode = abr;
         let mut bitrate_choice = initial_bitrate;
-        
-
-        // let current_fps = if i == 0 {
-        //     fps_arg
-        // } else {
-        //     if test_distances_everest_bool {
-        //         let choices = [60.0, 90.0, 120.0];
-        //         *choices.choose(&mut rng).unwrap_or(&fps_arg)
-        //     } else {
-        //         fps_arg
-        //     }
-        // };
-
-        // if matches!(abr, 3) || test_distances_everest_bool == true {
-        //     // Shared between RL training and ABR everest-like test.
-        //     // ABR==3 -> ReinforcementLearner mode, First VR pair is RL, rest is random ABR option
-            
-        //     let pair_index: usize = i;
-        //     if pair_index == 0 {
-        //         current_abr_mode = abr;
-
-        //         // do nothing, it's correct
-        //     } else {
-        //         // abr_choice = rng.gen_range(0..=2);
-        //         let choices = [0, 1, 2, 4, 5]; // CBR, Nest, Everest, GCC, NADA
-        //         let mut rng = thread_rng();
-        //         current_abr_mode = *choices.choose(&mut rng).unwrap();
-
-        //         if current_abr_mode == 0 {
-        //             // CBR (RANDOM)
-        //             let values: Vec<u32> = (5..=25).step_by(5).collect(); // bounding to max CBR 25 Mbps in RL scenario
-        //             bitrate_choice = *values.choose(&mut rng).unwrap() as f64;
-        //         }
-        //     }
-        // } else {
-        //     current_abr_mode = abr; //makes all sessions have same ABR choice
-        // }
-
+    
 
         let mut current_t_update_abr = t_update_abr; 
         if current_abr_mode == 2 {
