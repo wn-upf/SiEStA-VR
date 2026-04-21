@@ -3567,9 +3567,9 @@ fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
 }
 
 #[allow(unused)]
-pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
-    // Calculate the payload size based on bitrate
-    let no_bytes_based_bitrate = (1416.97 * current_bitrate_mbps + -810.06) as usize;
+pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32, fps: f32, ) -> Vec<u8> {
+    // Calculate the payload size based on bitrate, very simplified linear relationship of bitrate/frame_size based on ALVR test for 90 FPS, assume for other FPS the relationship mantains. 
+    let no_bytes_based_bitrate = ((1416.97 * current_bitrate_mbps + -810.06) * 90.0/fps) as usize ;
 
     // Initialize a vector to hold the Fibonacci sequence
     let mut buffer_inner = Vec::with_capacity(no_bytes_based_bitrate);
@@ -3596,9 +3596,7 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32) -> Vec<u8> {
     buffer_inner
 }
 
-
 /////// ALT code to use table based on real ALVR frame size distribution at 100 Mbps /////////
-
 #[derive(Clone)]
 struct HardcodedFrameTable {
     framesizes: Vec<u32>,

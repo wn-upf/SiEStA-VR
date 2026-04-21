@@ -157,8 +157,6 @@ const GRAPH_HUD_HEIGHT: usize = 800;
 
 const MAX_STAT_HISTORY_GRAPH: usize = 256;
 
-pub const NO_UPLINK_DATA_CONST: bool = false; 
-
 
 // Group the histories to require only one Mutex lock per frame
 #[derive(Default)]

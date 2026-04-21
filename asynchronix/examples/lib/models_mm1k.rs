@@ -65,8 +65,8 @@ pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 pub const REFILL_INTERVAL_TBF: Duration = Duration::from_micros(500);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
 
-pub const DEBUG_EDCA: bool = false;
-pub const DEBUG_MLO: bool = false;
+pub const DEBUG_EDCA: bool = true;
+pub const DEBUG_MLO: bool = true;
 
 pub const STR_PLUS_MODE_MLO: bool = true; // Set to true for STR+ mode, running backoffs and assigning traffic to link in last moment.
 
@@ -958,8 +958,6 @@ impl EmulatedLink {
             for pkt in ready {
                 self.output.send(pkt).await;
             }
-
-            // *** OPTIMIZATION ***
             // Efficiently schedule the next flush based on the *new* front packet.
             if let Some(next_pkt) = self.queue_mechanism.queue.front() {
                 if let Some(next_deadline) = next_pkt.emulated_added_delay_deadline {
@@ -1168,7 +1166,7 @@ impl QueueMechanism {
         }
         self.log_active_bw_patterns(now, &packet);
         if packet.length_packet_bits == 0 {
-            packet.length_packet_bits = packet.data_inner.len(); // fallback for early traffic
+            packet.length_packet_bits = packet.data_inner.len() * 8; // fallback for early traffic, len is in bytes (converted to bits)
         }
         // Get the potential delay for the packet
         let reason = match self
@@ -1675,7 +1673,7 @@ impl NetworkPatternEmulator {
                     // valid_until,
                     ..
                 } => {
-                        let pkt_bits = (packet.length_packet_bits * 8) as f64;
+                        let pkt_bits = packet.length_packet_bits as f64;
                         let (can_send, delay) = pattern.bandwidth_account(current_time, Some(pkt_bits));
                         if can_send {
                             packet.has_consumed_emu_tokens = true;
@@ -2822,7 +2820,6 @@ impl QueueModule {
         };
 
         let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
-
         // All immutable borrows happen here and end immediately
         let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
         let coords_queue = self.coords_queue; // Assuming Coords is Copy
