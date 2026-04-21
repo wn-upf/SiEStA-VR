@@ -2596,7 +2596,7 @@ pub fn compute_mm1k_metrics(
 #[allow(unused)]
 #[derive(Default, Debug, Clone)]
 pub struct HeaderALVRStream {
-    pub packet_length: u32,
+    pub packet_length_bytes: u32,
     pub stream_id: u16,
     pub next_packet_index: u32,
     pub shards_count: u32,
