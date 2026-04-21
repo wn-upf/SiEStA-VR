@@ -2494,7 +2494,6 @@ impl QueueModule {
             if !present_keys.contains(&(sta_id, ac)) {
                 continue;
             }
-
             // Get medium state for this link. 
             // Rust allows this because `link_mediums` is a different field than `dcf_values`.
             let medium = self.link_mediums.get(&link_id).unwrap();
@@ -2502,13 +2501,14 @@ impl QueueModule {
             
             if !idle_slot {
                 debug_edca!(
-                    "{} [MEDIUM] L-{} BUSY until {}",
+                    "{} [LINK {}] BUSY until {}, owned by {:?} | Previous owner: {:?}",
                     format_elapsed!(now),
                     link_id,
-                    format_elapsed!(medium.busy_until) 
+                    format_elapsed!(medium.busy_until),
+                    medium._current_owner(),
+                    medium._last_owner(), 
                 );
             }
-
             // AIFS gating
             let aifs_until = st.medium_free_since + aifs(st.param);
             let aifs_satisfied = idle_slot && aifs_until <= now;
@@ -2543,7 +2543,6 @@ impl QueueModule {
                 );
                 st.backoff_counter -= 1;
             }
-
             // Check if ready
             if st.backoff_counter == 0 && !st.backoff_frozen {
                 ready_per_link
@@ -2566,7 +2565,6 @@ impl QueueModule {
                 summary
             );
         }
-
         ready_per_link
     }
 
@@ -3710,7 +3708,6 @@ impl QueueModule {
                     // Handle collision on this link
                     let T_col = collision_delay();
                     let T_col_dur = Duration::from_secs_f32(T_col);
-
                     // print_yellow!("{:.5} [Channel {} collision!] T_col:{:.5}| contenders: {:?} ", taitime_to_f64!(now), link_id, T_col, contenders );
                     if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                         medium.occupy_collision(now + T_col_dur);

@@ -2848,13 +2848,11 @@ pub fn path_loss(d: f64) -> f64 {
 }
 #[inline]
 pub fn collision_delay() -> f32 {
-    let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
-
+    // let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0;
+    let OBasicRate: f64 = 1.0 / 2.0 * 4.0 * 48.0; // evaluates to 96.0 bits/symbol, 4 bit symbol (16-QAM) * 1/2 CR * 48 subcarriers
     // let _L: f64 = total_bits_transmitted / n_mpdus as f64;
-
     let SF = 16.0;
     let TB = 18.0;
-
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * 4E-6; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * 4E-6;
 
