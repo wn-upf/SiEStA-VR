@@ -3030,8 +3030,6 @@ impl<H: Serialize> StreamSender<H> {
                     .parent()
                     .ok_or_else(|| anyhow::anyhow!("CSV path has no parent: {}", csv_path_emu))?;
 
-
-                println!("DEBUG: Attempting to create directory at: {:?}", parent_dir);
                 
                 // std::fs::create_dir_all(parent_dir)
                 //     .map_err(|e| anyhow::anyhow!("Failed to create results directory: {}", e))?;

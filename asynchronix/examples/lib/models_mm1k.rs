@@ -34,7 +34,7 @@ use crate::lib::{
     airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential,
     perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
     WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
-    P_TX, UPLINK_QUEUE_SIZE,
+    P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO,
 };
 
 use rand::SeedableRng;
@@ -65,8 +65,6 @@ pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 pub const REFILL_INTERVAL_TBF: Duration = Duration::from_micros(500);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
 
-pub const DEBUG_EDCA: bool = true;
-pub const DEBUG_MLO: bool = true;
 
 pub const STR_PLUS_MODE_MLO: bool = true; // Set to true for STR+ mode, running backoffs and assigning traffic to link in last moment.
 
@@ -3369,6 +3367,8 @@ impl QueueModule {
             sta_dest_id,
             first_packet.edca_ac
         );
+        let mut virtual_queue_depth = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
+
 
         // ========== Aggregate packets for this flow on this link ==========
         while packet_index < self.queue.len() {
@@ -3446,7 +3446,9 @@ impl QueueModule {
                 let mut cloned_packet = current_packet.clone();
                 cloned_packet.original_index = packet_index;
 
-                cloned_packet.queue_length_when_out = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
+                cloned_packet.queue_length_when_out = virtual_queue_depth;
+                virtual_queue_depth = virtual_queue_depth.saturating_sub(1); // Simulate the effect of this packet leaving the queue for the AMPDU
+
                 cloned_packet.queue_out_instant = now;
                 cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
                 cloned_packet.mac_key_cached = Some(mac_key); 
