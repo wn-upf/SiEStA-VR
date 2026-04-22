@@ -60,12 +60,13 @@ packs_per_ampdu=( 64 )
 CODEC_CHOICES=( "HEVC")
 USE_FOVEATION=0
 VBV_PERFRAME=1
+DETERMINISTIC_FIBONACCI_VIDEO=(0 1)
 intrarefresh_choice=( 1 )       ## Only if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
 GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor to them
 
 N_XR=( 3 4 5 6 7 8 ) 
 # N_XR=( 1 ) 
-initial_bitrate_mbps=( 20.0 30.0 40.0 50.0 60.0 70.0 80.0 90.0 100.0 )  
+initial_bitrate_mbps=( 70.0 80.0 90.0 100.0 )  
 fps_list=( 90.0 )    
 ABR_ENABLED=( 0 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
@@ -124,34 +125,36 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                             for ampdu_packs in "${packs_per_ampdu[@]}"; do 
                                                                                 for codec in "${CODEC_CHOICES[@]}"; do 
                                                                                     for tracking_bool in "${NO_UL_TRACKING_MODE[@]}"; do
+                                                                                        for deterministic_video_sizes in "${DETERMINISTIC_FIBONACCI_VIDEO[@]}"; do 
 
-                                                                                        NAME_ABR="ABR_${ABR}"
-                                                                                        (( SIM_COUNT++ ))  # ← increment
+                                                                                            NAME_ABR="ABR_${ABR}"
+                                                                                            (( SIM_COUNT++ ))  # ← increment
 
-                                                                                        echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" >> "$temp_file"
-                                                                                                                                                                    
-                                                                                        if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
-                                                                                            rm out_log.ans
-                                                                                            script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name" "out_log.ans"
-                                                                                            
-                                                                                            sleep 5
-                                                                                        fi
+                                                                                            echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes" >> "$temp_file"
+                                                                                                                                                                        
+                                                                                            if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
+                                                                                                rm out_log.ans
+                                                                                                script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes" "out_log.ans"
+                                                                                                
+                                                                                                sleep 5
+                                                                                            fi
 
-                                                                                        # # --- Profiling Block using samply ---
-                                                                                        # if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
-                                                                                        #     echo "--- Starting Profiling Run for XR_sim with samply ---"
+                                                                                            # # --- Profiling Block using samply ---
+                                                                                            # if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
+                                                                                            #     echo "--- Starting Profiling Run for XR_sim with samply ---"
 
-                                                                                        #     # Define the output file
-                                                                                        #     PROFILE_HTML_FILE="XR_sim_profile.html"
+                                                                                            #     # Define the output file
+                                                                                            #     PROFILE_HTML_FILE="XR_sim_profile.html"
 
-                                                                                        #     # Run samply against your binary and arguments. 
-                                                                                        #     # The -o flag tells samply where to save the profile.
-                                                                                        #     samply record -o $PROFILE_HTML_FILE -- \
-                                                                                        #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
+                                                                                            #     # Run samply against your binary and arguments. 
+                                                                                            #     # The -o flag tells samply where to save the profile.
+                                                                                            #     samply record -o $PROFILE_HTML_FILE -- \
+                                                                                            #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
 
-                                                                                        #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
-                                                                                        #     exit 0 # Exit the job after generating the profile
-                                                                                        # fi 
+                                                                                            #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
+                                                                                            #     exit 0 # Exit the job after generating the profile
+                                                                                            # fi 
+                                                                                        done
                                                                                     done
                                                                                 done
                                                                             done
