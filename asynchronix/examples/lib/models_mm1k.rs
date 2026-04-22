@@ -2234,7 +2234,7 @@ pub struct QueueModule {
     pub link_channel_widths: HashMap<u8, usize>, // Store channel width per link
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
     pub link_queue_depths: HashMap<u8, usize>, // Holds packets assigned to each link with MLO: Required for optimization to stop iterating O(n) over queue
-    pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
+    // pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
     pub dcf_values: Vec<DcfStats>,  // flat, no mutex needed if single-threaded DES
     pub mac_key_index: HashMap<MacKey, usize>,  // built once at init, never mutated
@@ -2383,7 +2383,7 @@ impl QueueModule {
             link_mediums,
             link_channel_widths,
             link_queue_depths,
-            mac_queue_depths: HashMap::new(), 
+            // mac_queue_depths: HashMap::new(), 
             sta_capabilities: HashMap::new(),
             mlo_linkselection_strat,
             packs_per_ampdu,
@@ -3023,9 +3023,9 @@ impl QueueModule {
                             .entry(link_id)
                             .and_modify(|c| *c += 1); // add to lookup hashmap, per link
                         
-                        *self.mac_queue_depths
-                            .entry(mac_key_helper.unwrap())
-                            .or_insert(0) += 1;
+                        // *self.mac_queue_depths
+                        //     .entry(mac_key_helper.unwrap())
+                        //     .or_insert(0) += 1;
 
                         // Trigger scheduling if medium is idle
                         // [STR+] Trigger scheduling if ANY link is idle (start race on all links), else just check the link_id of the current packet.
@@ -3104,9 +3104,9 @@ impl QueueModule {
                         .entry(link_id)
                         .and_modify(|c| *c += 1);
 
-                    *self.mac_queue_depths
-                        .entry(packet.mac_key_cached.unwrap())
-                        .or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
+                    // *self.mac_queue_depths
+                    //     .entry(packet.mac_key_cached.unwrap())
+                    //     .or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
 
                     log_mlo!(
                         now,
@@ -3367,8 +3367,14 @@ impl QueueModule {
             sta_dest_id,
             first_packet.edca_ac
         );
-        let mut virtual_queue_depth = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
-
+        // let mut virtual_queue_depth = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
+        let mut flow_backlog = self.queue.iter() // This is O(N), but we only do it once per AMPDU (not per packet).
+            .filter(|p| {
+                let is_ul_p = p.sta_src_id > p.sta_dest_id;
+                let key_p = if is_ul_p { (p.sta_src_id, p.edca_ac, link_id) } else { (-1, p.edca_ac, link_id) };
+                key_p == mac_key
+            })
+            .count();
 
         // ========== Aggregate packets for this flow on this link ==========
         while packet_index < self.queue.len() {
@@ -3446,8 +3452,13 @@ impl QueueModule {
                 let mut cloned_packet = current_packet.clone();
                 cloned_packet.original_index = packet_index;
 
-                cloned_packet.queue_length_when_out = virtual_queue_depth;
-                virtual_queue_depth = virtual_queue_depth.saturating_sub(1); // Simulate the effect of this packet leaving the queue for the AMPDU
+
+                cloned_packet.queue_length_when_out = flow_backlog;
+                if flow_backlog > 0 {
+                    flow_backlog -= 1; // Decrement only when a packet is actually aggregated
+                }
+                // cloned_packet.queue_length_when_out = virtual_queue_depth;
+                // virtual_queue_depth = virtual_queue_depth.saturating_sub(1); // Simulate the effect of this packet leaving the queue for the AMPDU
 
                 cloned_packet.queue_out_instant = now;
                 cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
@@ -3567,9 +3578,9 @@ impl QueueModule {
 
                 let mac_key: MacKey =  packet.mac_key_cached.unwrap(); 
 
-                if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
-                    *count = count.saturating_sub(1);
-                }
+                // if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
+                //     *count = count.saturating_sub(1);
+                // }
                 return false; // Remove from queue
             }           
             
@@ -3704,9 +3715,9 @@ impl QueueModule {
                             }
                         }
                         let mac_key = packet.mac_key_cached.unwrap(); 
-                        if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
-                            *count = count.saturating_sub(1);
-                        }
+                        // if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
+                        //     *count = count.saturating_sub(1);
+                        // }
 
                         return false; // Drop from queue
                     }
@@ -3797,9 +3808,9 @@ impl QueueModule {
                                     && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))
                             });
 
-                            let ac_queue_length_when_out = *self.mac_queue_depths
-                                .get(&key)
-                                .unwrap_or(&0);
+                            // let ac_queue_length_when_out = *self.mac_queue_depths
+                            //     .get(&key)
+                            //     .unwrap_or(&0);
 
                             let stats_update = if let Some(p) = colliding_packet {
                                 // We found the actual packet that collided!
@@ -3817,7 +3828,7 @@ impl QueueModule {
                                     T_s: 0.0, // Transmission didn't succeed
                                     blocked_packet_counter: self.blocked_packet_counter,
                                     arrived_packet_counter: self.arrived_packet_counter,
-                                    queue_length_when_out: ac_queue_length_when_out, 
+                                    queue_length_when_out: 0, 
                                     ampdu_id: self.ampdu_id,
                                 }
                             } else {
