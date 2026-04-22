@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 35;
+pub const NUM_INPUT_ARGS_SIM: usize = 36;
 pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
 
 
@@ -101,6 +101,7 @@ impl VRPair {
         results_path_name: &str, 
         random_seed: u64, 
         no_uplink_tracking_bool: bool, 
+        deterministic_frame_sizes_bool: bool, 
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -147,6 +148,8 @@ impl VRPair {
             intrarefresh,
             use_foveation, 
             vbv_perframe, 
+            deterministic_frame_sizes_bool, 
+
             abr_enabled,
             nest_vr_profile,
             t_end_simu,
@@ -158,7 +161,6 @@ impl VRPair {
             edca_be_mode,
             codec_selection,
             results_path_name, 
-
         );
 
         let mut xr_client = XRClient::new(
@@ -380,7 +382,7 @@ pub struct SimParams {
     pub codec_input_arg: String,
     pub name_results_path: String, 
     pub no_uplink_tracking: usize, 
-
+    pub deterministic_frame_sizes: usize, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -423,6 +425,7 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         codec_input_arg:        args[32].parse().unwrap(),
         name_results_path:      args[33].clone(),
         no_uplink_tracking:     args[34].parse().unwrap(), 
+        deterministic_frame_sizes: args[35].parse().unwrap(), 
     }
 }
 
@@ -468,12 +471,14 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         codec_input_arg,
         name_results_path, 
         no_uplink_tracking, 
+        deterministic_frame_sizes, 
     } = params;
 
     let sim_unique_string = format!("Simu_{} | {codec_input_arg}", sim_id);
     let test_distances_everest_bool = test_distances_everest != 0;
     let edca_be_bool = edca_be != 0;
     let no_uplink_tracking_bool = no_uplink_tracking!=0; 
+    let deterministic_frame_sizes_bool = deterministic_frame_sizes != 0; 
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -510,8 +515,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
    let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_tracking{:.0}",
-        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, mlo_policy.to_string(), no_uplink_tracking as usize);
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_noTrack{:.0}_fibonacciVid{:.0}",
+        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, mlo_policy.to_string(), no_uplink_tracking as usize, deterministic_frame_sizes, );
         
     let output_path = format!("{}/{}", name_results_path ,name_folder);
     fs::create_dir_all(&output_path).expect("Failed to create directory");
@@ -690,6 +695,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             &name_results_path, 
             seed, 
             no_uplink_tracking_bool, 
+            deterministic_frame_sizes_bool, 
 
         );
 

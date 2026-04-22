@@ -33,8 +33,8 @@ fn main() {
             <pl_prob> <n_xr> <n_bg> <rate_bps_BG> <IS_UL> <test_type> <video_filename> <FPS> \
             <N_close_users> <distance_close_users> <seed> <GoP_size> <Intra-refresh> <Use_Foveation> \
             <VBV_per_frame> <ABR_mode> <nest-vr_profile> <Coords_everest_test> <sim_id> \
-            <observation_type> <reward_mode> <T_update_abr> <MLO_config> <Edca_be> \
-            <mlo_link_selection> <packs_per_ampdu> <codec_input> <results_path>",
+            <observation_type> <reward_mode> <T_update_abr> <MLO_config> <Edca_besteffort> \
+            <mlo_link_selection> <packs_per_ampdu> <codec_input> <results_path> <Deterministic_VF_sizes> ",
             args[0]
         );
 

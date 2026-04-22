@@ -246,21 +246,34 @@ macro_rules! print_brown {
 use std::env;
 
 pub fn get_prefix_path(directory: &str) -> String {
-    let home = env::var("HOME").unwrap_or_default();
-
-    if home.contains("fmaura") {
-        // HPC user
-        format!("{}/simulator_asynchronix/asynchronix/{}", home, directory)
-    } else if home.contains("boris") {
-        // Local Ubuntu user
-        format!("{}/Desktop/Rust_MG1/asynchronix/{}", home, directory)
-    } else {
-        format!(
-            "/gpfs/home/fmaura/simulator_asynchronix/asynchronix/{}",
-            directory
-        ) // still in HPC, absolute path
+    // This gets the directory where you ran the command (e.g., SiEStA-VR/)
+    match std::env::current_dir() {
+        Ok(path) => {
+            // Join the relative directory provided to the current path
+            path.join(directory).to_string_lossy().to_string()
+        }
+        Err(_) => {
+            // Fallback to just the directory string if CWD fails
+            directory.to_string()
+        }
     }
 }
+// pub fn get_prefix_path(directory: &str) -> String {
+//     let home = env::var("HOME").unwrap_or_default();
+
+//     if home.contains("fmaura") {
+//         // HPC user
+//         format!("{}/simulator_asynchronix/asynchronix/{}", home, directory)
+//     } else if home.contains("boris") {
+//         // Local Ubuntu user
+//         format!("{}/Desktop/Rust_MG1/asynchronix/{}", home, directory)
+//     } else {
+//         format!(
+//             "/gpfs/home/fmaura/simulator_asynchronix/asynchronix/{}",
+//             directory
+//         ) // still in HPC, absolute path
+//     }
+// }
 
 // use crate::lib::alvr_stream_socket::ConResult;
 #[allow(unused)]
@@ -2780,7 +2793,7 @@ impl AmpduPacket {
                 packet.T_s.as_secs_f64() * 1000.0,
                 packet.header_alvr.stream_id,
                 packet.header_alvr.shard_index,
-                packet.header_alvr.shards_count - 1,
+                packet.header_alvr.shards_count.saturating_sub(1),
                 packet.header_alvr.next_packet_index,
             );
         }

@@ -2030,11 +2030,19 @@ impl Medium {
 
     #[inline]
     pub fn _current_owner(&self) -> Option<MacKey> {
-        self.tx_owner
+        if let Some(owner) = self.tx_owner {
+            Some(owner)
+        } else {
+            None
+        }
     }
     #[inline]
     pub fn _last_owner(&self) -> Option<MacKey> {
-        self.last_txop_owner
+        if let Some(owner) = self.last_txop_owner {
+            Some(owner)
+        } else {
+            None
+        }    
     }
     #[inline]
     pub fn _last_end(&self) -> TaiTime<0> {

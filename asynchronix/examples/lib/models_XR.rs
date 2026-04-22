@@ -2652,6 +2652,7 @@ pub struct XRServer {
     pub intra_refresh: bool,
     pub use_foveation: bool, 
     pub vbv_perframe: bool, 
+    pub deterministic_frame_sizes_bool: bool, 
     pub abr_enabled: usize,
     pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>,
     pub last_tracking_rx_instant: TaiTime<0>,
@@ -2688,6 +2689,8 @@ impl XRServer {
         intra_refresh: bool,
         use_foveation: bool, 
         vbv_perframe:  bool, 
+        deterministic_frame_sizes_bool: bool, 
+
         abr_enabled: usize,
         nest_vr_profile: &NestVrProfile,
         t_end_simu: f64,
@@ -2808,6 +2811,7 @@ impl XRServer {
             intra_refresh,
             use_foveation, 
             vbv_perframe, 
+            deterministic_frame_sizes_bool, 
             abr_enabled,
             output_perfect_information_bitrate: Output::default(),
 
@@ -3560,6 +3564,7 @@ impl XRServer {
                         self.intra_refresh,
                         self.use_foveation, 
                         self.vbv_perframe, 
+                        self.deterministic_frame_sizes_bool, 
                         gaze_history, 
                     )
                     .await

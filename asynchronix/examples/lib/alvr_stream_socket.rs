@@ -2857,6 +2857,7 @@ impl<H: Serialize> StreamSender<H> {
         intra_refresh: bool,
         use_foveation: bool, 
         vbv_perframe: bool, 
+        deterministic_frame_sizes_bool: bool, 
         latest_gazes: Vec<[Option<glam::Quat>; 2]>, 
     ) -> Result<Buffer<H>> {
         let _id_frame_files_ref = id_frame + 1;
@@ -3015,9 +3016,8 @@ impl<H: Serialize> StreamSender<H> {
                     }
                 };
             };
-        } else {
-            // non-FFMPEG mode, fast!
-
+        } 
+        else {             // non-FFMPEG mode, fast!
             if self.csv_trace.path.as_os_str().is_empty() {
                 let third_octet = get_third_octet(ip).unwrap();
 
@@ -3029,9 +3029,29 @@ impl<H: Serialize> StreamSender<H> {
                 let parent_dir = std::path::Path::new(&csv_path_emu)
                     .parent()
                     .ok_or_else(|| anyhow::anyhow!("CSV path has no parent: {}", csv_path_emu))?;
-                std::fs::create_dir_all(parent_dir)
-                    .map_err(|e| anyhow::anyhow!("Failed to create results directory: {}", e))?;
 
+
+                println!("DEBUG: Attempting to create directory at: {:?}", parent_dir);
+                
+                // std::fs::create_dir_all(parent_dir)
+                //     .map_err(|e| anyhow::anyhow!("Failed to create results directory: {}", e))?;
+
+                if let Err(e) = std::fs::create_dir_all(parent_dir) {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        crate::print_red!("PERMISSION DENIED for {:?}. Falling back to local ./results", parent_dir);
+                        
+                        // Construct a fallback path in the current working directory
+                        let fallback_path = format!("./results_fallback/{}/{}", name_folder, third_octet);
+                        std::fs::create_dir_all(&fallback_path)
+                            .map_err(|e2| anyhow::anyhow!("Total failure: Could not create original OR fallback directory. Err: {}", e2))?;
+                        
+                        // Update the csv_path to use the fallback
+                        let new_csv_path = format!("{}/trace_emu_effects{}.csv", fallback_path, third_octet);
+                        self.csv_trace.path = new_csv_path.into();
+                    } else {
+                        return Err(anyhow::anyhow!("Failed to create results directory: {}", e));
+                    }
+                }
                 // Try to atomically create the file and write headers only if we created it.
                 match std::fs::OpenOptions::new()
                     .write(true)
@@ -3071,7 +3091,11 @@ impl<H: Serialize> StreamSender<H> {
 
             let fps = framerate.round() as u32;
 
-            let bytes_this_frame = if USE_HARDCODED_SIZES_VALIDATION {
+            if deterministic_frame_sizes_bool{
+                buffer = generate_fibonacci_video_payload(current_bitrate_mbps, framerate);
+            }
+            else{
+                let bytes_this_frame = if USE_HARDCODED_SIZES_VALIDATION {
                 
                 let csv_path = format!("csv_framesizes/ALVR_session_framesizes_{}fps_100Mbps.csv", fps);
                 let hardcoded_table = Arc::new(
@@ -3105,7 +3129,7 @@ impl<H: Serialize> StreamSender<H> {
 
             buffer.clear(); // Sets length to 0, but keeps capacity (no deallocation)
             buffer.resize(bytes_this_frame, 7); // Fills with 7s (for good luck). Very fast if capacity is sufficient.
-
+            }
         }
 
         // Rest of your function remains the same
