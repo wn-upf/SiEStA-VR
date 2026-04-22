@@ -1836,7 +1836,7 @@ impl NetworkPatternEmulator {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StatsUpdate {
     pub T_s: f64,
     pub T_q: f64,
@@ -2227,7 +2227,8 @@ pub struct QueueModule {
     pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
     pub link_channel_widths: HashMap<u8, usize>, // Store channel width per link
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
-    pub link_queue_depths: HashMap<u8, usize>, // Required for optimization to stop iterating O(n) over queue
+    pub link_queue_depths: HashMap<u8, usize>, // Holds packets assigned to each link with MLO: Required for optimization to stop iterating O(n) over queue
+    pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
     pub dcf_values: Vec<DcfStats>,  // flat, no mutex needed if single-threaded DES
     pub mac_key_index: HashMap<MacKey, usize>,  // built once at init, never mutated
@@ -2376,6 +2377,7 @@ impl QueueModule {
             link_mediums,
             link_channel_widths,
             link_queue_depths,
+            mac_queue_depths: HashMap::new(), 
             sta_capabilities: HashMap::new(),
             mlo_linkselection_strat,
             packs_per_ampdu,
@@ -3005,6 +3007,7 @@ impl QueueModule {
                     } else {
                         (-1, pkt.edca_ac, link_id)
                     });
+                    let mac_key_helper = pkt.mac_key_cached.clone(); 
 
                     if self.queue.len() < self.queue_maxsize_dl {
                         self.cache_input_packet(pkt.clone(), link_id).await;
@@ -3013,9 +3016,12 @@ impl QueueModule {
                         self.link_queue_depths
                             .entry(link_id)
                             .and_modify(|c| *c += 1); // add to lookup hashmap, per link
+                        
+                        *self.mac_queue_depths
+                            .entry(mac_key_helper.unwrap())
+                            .or_insert(0) += 1;
 
                         // Trigger scheduling if medium is idle
-
                         // [STR+] Trigger scheduling if ANY link is idle (start race on all links), else just check the link_id of the current packet.
                         // Instead of checking only the assigned 'link_id', we check if any link is free to start the backoff process.
                         let any_link_idle = if STR_PLUS_MODE_MLO {
@@ -3074,7 +3080,7 @@ impl QueueModule {
 
         // Select link for uplink packet
         let selected_link = self.select_link_for_packet(&packet, now);
-
+        
         if is_ul {
             match selected_link {
                 Some(link_id) => {
@@ -3091,6 +3097,10 @@ impl QueueModule {
                     self.link_queue_depths
                         .entry(link_id)
                         .and_modify(|c| *c += 1);
+
+                    *self.mac_queue_depths
+                        .entry(packet.mac_key_cached.unwrap())
+                        .or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
 
                     log_mlo!(
                         now,
@@ -3427,10 +3437,11 @@ impl QueueModule {
                 // Clone the packet and add to AMPDU
                 let mut cloned_packet = current_packet.clone();
                 cloned_packet.original_index = packet_index;
-                cloned_packet.queue_length_when_out = self.queue.len();
+
+                cloned_packet.queue_length_when_out = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
                 cloned_packet.queue_out_instant = now;
                 cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
-
+                cloned_packet.mac_key_cached = Some(mac_key); 
                 
                 // Add the cloned packet to the AMPDU
                 self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
@@ -3533,7 +3544,6 @@ impl QueueModule {
             if success_indices_set.contains(&current_idx) {
                 // This packet was successful, so remove it (return false)
 
-                // --- Update Tally/Cache Logic ---
                 let key = (packet.sta_src_id, packet.sta_dest_id);
                 *packets_removed_by_key.entry(key).or_insert(0) += 1;
 
@@ -3544,8 +3554,15 @@ impl QueueModule {
                         *count = count.saturating_sub(1);
                     }
                 }
+
+                let mac_key: MacKey =  packet.mac_key_cached.unwrap(); 
+
+                if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
+                    *count = count.saturating_sub(1);
+                }
                 return false; // Remove from queue
-            }
+            }           
+            
             true // Keep in queue
         });
 
@@ -3676,6 +3693,10 @@ impl QueueModule {
                                 *count = count.saturating_sub(1);
                             }
                         }
+                        let mac_key = packet.mac_key_cached.unwrap(); 
+                        if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
+                            *count = count.saturating_sub(1);
+                        }
 
                         return false; // Drop from queue
                     }
@@ -3731,14 +3752,7 @@ impl QueueModule {
                         );
                         
                     }
-                    // print_red!(
-                    //     "{} [COLLISION] LINK-{}: {} contenders collided, T_col={:.3}ms",
-                    //     format_elapsed!(now),
-                    //     link_id,
-                    //     contenders.len(),
-                    //     T_col * 1000.0
-                    // );
-
+  
                     // Freeze all MACs on this link
                     for st in &mut self.dcf_values {
                         if st.mac_key.2 == link_id {
@@ -3760,39 +3774,58 @@ impl QueueModule {
 
                     if let Some(stats_tx) = &self.stats_tx {
                         // Deconstruct key. Assuming key is (sta_id, ac, link_id) based on your debug print
-                        let (src_id, _ac, _lid) = *first_contender_key;
+                        for key in &contenders {
+                            let (sta_id, ac, winner_link_id) = *key;
 
-                        // We don't know the exact destination from the DCF key alone,
-                        // but strictly speaking, we only need 'src_id' for your Python DL/UL split.
-                        // We'll set dest_id to 0 (or -1) as a placeholder.
-                        let dummy_dest_id = if src_id == -1 { 1 } else { -1 };
+                            // Try to find the packet at the head of the queue for this specific collider
+                            // to extract real SRC/DEST and packet metrics.
+                            let colliding_packet = self.queue.iter().find(|p| {
+                                let is_ul = p.sta_src_id > p.sta_dest_id;
+                                let p_sta = if is_ul { p.sta_src_id } else { -1 };
+                                p_sta == sta_id 
+                                    && p.edca_ac == ac 
+                                    && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))
+                            });
 
-                        let stats_update = StatsUpdate {
-                            // -- Timing & collision info --
-                            now,
-                            is_collision: true,
-                            collision_backoff: T_col as f64,
+                            let ac_queue_length_when_out = *self.mac_queue_depths
+                                .get(&key)
+                                .unwrap_or(&0);
 
-                            // -- IDs --
-                            sta_src_id: src_id, // Python uses this to determine DL vs UL
-                            sta_dest_id: dummy_dest_id,
-                            link_id: link_id,
+                            let stats_update = if let Some(p) = colliding_packet {
+                                // We found the actual packet that collided!
+                                StatsUpdate {
+                                    now,
+                                    is_collision: true,
+                                    collision_backoff: T_col as f64,
+                                    sta_src_id: p.sta_src_id,
+                                    sta_dest_id: p.sta_dest_id,
+                                    link_id: link_id,
+                                    packet_id: p.packet_id as i32,
+                                    length_packet: p.length_packet_bits,
+                                    T_q: now.duration_since(p.queue_in_instant).as_secs_f64(),
+                                    alvr_header: p.header_alvr.clone(),
+                                    T_s: 0.0, // Transmission didn't succeed
+                                    blocked_packet_counter: self.blocked_packet_counter,
+                                    arrived_packet_counter: self.arrived_packet_counter,
+                                    queue_length_when_out: ac_queue_length_when_out, 
+                                    ampdu_id: self.ampdu_id,
+                                }
+                            } else {
+                                // Fallback: If no packet found (shouldn't happen if DCF is active), 
+                                // use the key info with dummy dest.
+                                StatsUpdate {
+                                    now,
+                                    is_collision: true,
+                                    collision_backoff: T_col as f64,
+                                    sta_src_id: sta_id,
+                                    sta_dest_id: if sta_id == -1 { 1 } else { -1 },
+                                    link_id: link_id,
+                                    ..StatsUpdate::default() // Assuming you have Default or fill manually
+                                }
+                            };
 
-                            // -- Dummy / Empty values for non-packet fields --
-                            T_s: 0.0,
-                            T_q: 0.0,
-                            blocked_packet_counter: self.blocked_packet_counter,
-                            arrived_packet_counter: self.arrived_packet_counter,
-                            queue_length_when_out: 0,
-                            packet_id: 0,
-                            length_packet: 0,
-                            ampdu_id: self.ampdu_id,
-                            alvr_header: HeaderALVRStream::default(), 
-                        };
-
-                        stats_tx
-                            .send(stats_update)
-                            .expect("Failed to send stats update");
+                            stats_tx.send(stats_update).expect("Failed to send collision stats");
+                        }
                     }
 
                     // CRITICAL FIX: Schedule wake-up after collision resolves
