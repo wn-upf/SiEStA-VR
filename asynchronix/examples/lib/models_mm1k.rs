@@ -23,7 +23,7 @@ use rand::rngs::StdRng;
 use rand_distr::{Distribution, Exp, Normal};
 use std::time::{Duration, Instant};
 // use crate::lib::TESTS_RANDOM_PATTERNS;
-use crate::{debug_print, format_elapsed, taitime_to_f64};
+use crate::{debug_print, format_elapsed, taitime_to_f64, lib::t_secs, };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -1846,6 +1846,7 @@ pub struct StatsUpdate {
     pub packet_id: i32,
     pub now: tai_time::TaiTime<0>,
     pub length_packet: usize,
+    pub edca_ac: EdcaAc,
 
     pub ampdu_id: u32,
 
@@ -1856,8 +1857,8 @@ pub struct StatsUpdate {
 }
 #[derive(Clone, Copy, Debug, Hash)]
 pub struct EdcaParam {
-    pub cw_min: i32,
-    pub cw_max: i32,
+    pub cw_min: u32,
+    pub cw_max: u32,
     pub aifsn: u8,          // slots added to DIFS
     pub txop_limit_us: u16, // 0 = no TXOP
 }
@@ -1902,14 +1903,14 @@ pub const EDCA_TABLE: [EdcaParam; 4] = [
 #[derive(Hash, Clone, Debug)]
 pub struct DcfStats {
     pub mac_key: MacKey, 
-    pub cw: i32,
-    pub backoff_counter: i32,
+    pub cw: u32,
+    pub backoff_counter: u32,
     pub retry_count: u8,
     pub param: EdcaParam,              // <-- NEW (static per AC)
     pub medium_free_since: TaiTime<0>, // NEW –
     pub backoff_frozen: bool,          // NEW
     pub edca_ac_str: String,
-    pub last_backoff_drawn_logs: i32, // Only for logging to CSV the 'drawn' BO value.
+    pub last_backoff_drawn_logs: u32, // Only for logging to CSV the 'drawn' BO value.
                                       // pub slot_timer_event,
 }
 
@@ -1951,7 +1952,7 @@ impl DcfStats {
     }
 
     /// Call after a **successful** transmission.
-    pub fn on_success(&mut self, cw_min: i32) {
+    pub fn on_success(&mut self, cw_min: u32) {
         self.cw = cw_min;
         self.retry_count = 0;
         self.reload_backoff();
@@ -2183,6 +2184,46 @@ impl WindowMetrics {
     }
 }
 
+
+#[derive(Clone, Debug)]
+pub enum VizEvent { // Visualization events for the medium state, emitted for logging/plotting purposes
+    /// Medium grabbed for a successful TXOP on this link.
+    TxopStart {
+        t: f64,
+        end: f64,
+        link_id: u8,
+        owner: MacKey,         // (sta, ac, link)
+        dest_id: i32, 
+        ampdu_packets: u16,
+        mcs: u8,
+        stream_id: u16, // Added
+        frame_ids: Vec<u32>,  // Added
+    },
+    /// Collision interval on this link.
+    Collision {
+        t: f64,
+        end: f64,
+        link_id: u8,
+        contenders: smallvec::SmallVec<[MacKey; 4]>,
+    },
+    /// Backoff/AIFS snapshot — emit ONLY on change, not every slot.
+    BackoffSnap {
+        t: f64,
+        mac_key: MacKey,
+        counter: u32,
+        cw: u32,
+        frozen: bool,
+        medium_free_since: f64,  // for the AIFS bar
+    },
+    /// Queue depth for one virtual queue.
+    QueueDepth {
+        t: f64,
+        mac_key: MacKey,
+        depth: usize,
+        sta_src: i32, //new field for per-device queue
+    },
+}
+
 // #[allow(unused)]
 #[derive(Clone)]
 pub struct QueueModule {
@@ -2234,7 +2275,7 @@ pub struct QueueModule {
     pub link_channel_widths: HashMap<u8, usize>, // Store channel width per link
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
     pub link_queue_depths: HashMap<u8, usize>, // Holds packets assigned to each link with MLO: Required for optimization to stop iterating O(n) over queue
-    // pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
+    pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
     pub dcf_values: Vec<DcfStats>,  // flat, no mutex needed if single-threaded DES
     pub mac_key_index: HashMap<MacKey, usize>,  // built once at init, never mutated
@@ -2245,6 +2286,8 @@ pub struct QueueModule {
     pub packs_per_ampdu: usize,
     pub window_metrics_mcs_util: Arc<Mutex<HashMap<WindowKey, WindowMetrics>>>, //  K: STA_ID, V: Metrics on temporal window, Arc<Mutex<>> for accessibility
     pub output_metrics: Output<WindowMetricReport>, // Just to report MCS and utilization in real time, for each STA.
+    pub viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
+
 }
 #[allow(unused)]
 impl QueueModule {
@@ -2259,6 +2302,7 @@ impl QueueModule {
         mlo_linkselection_strat: LinkSelectionStrategy,
         packs_per_ampdu: usize,
         results_path: &str, 
+        viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
 
     ) -> Self {
 
@@ -2271,6 +2315,13 @@ impl QueueModule {
         let total_entries = (num_stas + 1) * num_links * 4;     // index = sta_idx * (num_links * 4 ACs) + link_idx * 4 ACs + ac_idx
         let mut dcf_values: Vec<DcfStats> = Vec::with_capacity(total_entries);
         let mut mac_key_index: HashMap<MacKey, usize> = HashMap::with_capacity(total_entries);
+
+
+        let mut mac_queue_depths: HashMap<MacKey, usize> =
+            HashMap::with_capacity(total_entries);
+        for k in mac_key_index.keys() {
+            mac_queue_depths.insert(*k, 0);
+        }
 
         let sta_idx_of = |sta_id: i32| -> usize {
             if sta_id == -1 {
@@ -2383,6 +2434,7 @@ impl QueueModule {
             link_mediums,
             link_channel_widths,
             link_queue_depths,
+            mac_queue_depths,
             // mac_queue_depths: HashMap::new(), 
             sta_capabilities: HashMap::new(),
             mlo_linkselection_strat,
@@ -2390,6 +2442,7 @@ impl QueueModule {
 
             window_metrics_mcs_util: Arc::new(Mutex::new(windows_vec)),
             output_metrics: Output::default(),
+            viz_tx, 
         }
     }
 
@@ -2412,6 +2465,14 @@ impl QueueModule {
         let idx = self.mac_key_index[key];
         &mut self.dcf_values[idx]
     }
+
+    #[inline]
+    fn emit_visualization_event(&self, ev: VizEvent) {
+        if let Some(tx) = &self.viz_tx {
+            let _ = tx.try_send(ev);  // never block the sim
+        }
+}
+
 
     #[inline]
     pub fn update_window_stats(
@@ -2471,7 +2532,6 @@ impl QueueModule {
         metrics.update_metrics_mcs_util(mcs, duration, success);
     }
 
-    #[inline]
    #[inline]
     pub fn tick_backoff(&mut self, now: TaiTime<0>) -> HashMap<u8, Vec<MacKey>> {
         // Clear idle links
@@ -2502,6 +2562,8 @@ impl QueueModule {
             if !present_keys.contains(&(sta_id, ac)) {
                 continue;
             }
+            let prev = (st.backoff_counter, st.backoff_frozen, st.cw); // Snapshot before mutation, to compare later
+
             // Get medium state for this link. 
             // Rust allows this because `link_mediums` is a different field than `dcf_values`.
             let medium = self.link_mediums.get(&link_id).unwrap();
@@ -2558,6 +2620,23 @@ impl QueueModule {
                     .or_insert_with(Vec::new)
                     .push(key);
             }
+            let curr = (st.backoff_counter, st.backoff_frozen, st.cw);
+            if curr != prev {
+                // Borrow-checker note: we can't call `&self` methods here because `st` holds &mut.
+                // Push directly through the sender.
+                    if let Some(tx) = &self.viz_tx {
+                        let _ = tx.try_send(VizEvent::BackoffSnap {
+                            t: t_secs(now),
+                            mac_key: key,
+                            counter: st.backoff_counter,
+                            cw: st.cw,
+                            frozen: st.backoff_frozen,
+                            medium_free_since: t_secs(st.medium_free_since),
+                        });
+                    }
+                }
+
+
         }
         
         if !ready_per_link.is_empty() {
@@ -2707,7 +2786,7 @@ impl QueueModule {
                 sta_id,
                 self.mlo_linkselection_strat,
             );
-            } 
+        } 
             // pkt.print(DebugColor::Blue);
         }
         selected
@@ -2992,33 +3071,18 @@ impl QueueModule {
             // Extra guard to prevent wrong routing.
             match selected_link {
                 Some(link_id) => {
-                    if !STR_PLUS_MODE_MLO { // with STR+ there is no 'assignment', we aggregate the max to the link that wins every backoff. 
-                        log_mlo!(
-                            now,
-                            "📥 DL Packet {} (STA {} → {}) assigned to LINK-{}: Q_size={}",
-                            pkt.packet_id,
-                            pkt.sta_src_id,
-                            pkt.sta_dest_id,
-                            link_id,
-                            self.queue.len(),
-                        );
-                    }
 
                     // Cache the selected link in packet metadata
                     pkt.assign_link(link_id);
 
-                    // Create MacKey with link_id
-                    pkt.mac_key_cached = Some(if is_ul {
-                        (pkt.sta_src_id, pkt.edca_ac, link_id)
-                    } else {
-                        (-1, pkt.edca_ac, link_id)
-                    });
-                    let mac_key_helper = pkt.mac_key_cached.clone(); 
+                    let mac_key_dl: MacKey = (-1, pkt.edca_ac, link_id);
+                    pkt.mac_key_cached = Some(mac_key_dl);
 
-                    if self.queue.len() < self.queue_maxsize_dl {
+                    let cur_depth = self.mac_queue_depths.get(&mac_key_dl).copied().unwrap_or(0);
+                    if cur_depth < self.queue_maxsize_dl {
                         self.cache_input_packet(pkt.clone(), link_id).await;
-                        self.queue.push(pkt);
 
+                        *self.mac_queue_depths.entry(mac_key_dl).or_insert(0) += 1;
                         self.link_queue_depths
                             .entry(link_id)
                             .and_modify(|c| *c += 1); // add to lookup hashmap, per link
@@ -3035,8 +3099,29 @@ impl QueueModule {
                         } else {
                             *self.link_is_transmitting.get(&link_id).unwrap() == false
                         };
+                        let new_depth = cur_depth + 1;
+                        log_mlo!(
+                                now,
+                                "📥 DL Packet {} (STA {} → {}) assigned to LINK-{}: Q_size={}",
+                                pkt.packet_id,
+                                pkt.sta_src_id,
+                                pkt.sta_dest_id,
+                                link_id,
+                                new_depth
+                            );
+                        
+                        self.emit_visualization_event(VizEvent::QueueDepth {
+                            t: t_secs(now),
+                            mac_key: mac_key_dl,
+                            depth: new_depth,
+                            sta_src: pkt.sta_src_id,
+                        });
+                        
+                        
+                        self.queue.push(pkt);
 
-                        if self.queue.len() == 1 && any_link_idle {
+
+                        if new_depth == 1 && any_link_idle {
                             // We schedule it one slot time in the future.
                             // This prevents an immediate call and starts the 9µs slot timer loop correctly.
                             ctx.scheduler
@@ -3047,6 +3132,8 @@ impl QueueModule {
                                 )
                                 .unwrap();
                         }
+  
+
 
                         // if !self.packet_being_served {
                         //     if let Some(medium) = self.link_mediums.get(&link_id) {
@@ -3090,51 +3177,75 @@ impl QueueModule {
         if is_ul {
             match selected_link {
                 Some(link_id) => {
+
                     packet.assign_link(link_id);
                     packet.mac_key_cached = Some(if is_ul {
                         (packet.sta_src_id, packet.edca_ac, link_id)
                     } else {
                         (-1, packet.edca_ac, link_id)
                     });
+                    let mac_key_ul = packet.mac_key_cached.unwrap();
 
-                    packet.queue_in_instant = now; // UL packets always go in queue, later they're dropped if they exceed max of STA/EDCA_AC virtual queue.
-                    self.cache_input_packet(packet.clone(), link_id).await;
-                    self.queue.push(packet.clone());
-                    self.link_queue_depths
-                        .entry(link_id)
-                        .and_modify(|c| *c += 1);
+                    let current_depth = self.mac_queue_depths.get(&mac_key_ul).copied().unwrap_or(0);
+                    if current_depth <self.ul_capacity_queue_device {
 
-                    // *self.mac_queue_depths
-                    //     .entry(packet.mac_key_cached.unwrap())
-                    //     .or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
+                        packet.queue_in_instant = now; // UL packets always go in queue, later they're dropped if they exceed max of STA/EDCA_AC virtual queue.
+                        self.cache_input_packet(packet.clone(), link_id).await;
+                        self.queue.push(packet.clone());
+                        self.link_queue_depths
+                            .entry(link_id)
+                            .and_modify(|c| *c += 1);
 
-                    log_mlo!(
-                        now,
-                        "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
-                        packet.packet_id,
-                        packet.sta_src_id,
-                        packet.sta_dest_id,
-                        link_id,
-                        self.queue.len()
-                    );
+                        *self.mac_queue_depths.entry(mac_key_ul).or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
+                        // *self.mac_queue_depths
+                        //     .entry(packet.mac_key_cached.unwrap())
+                        //     .or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
+                        let new_depth = current_depth + 1;
+                        log_mlo!(
+                            now,
+                            "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
+                            packet.packet_id,
+                            packet.sta_src_id,
+                            packet.sta_dest_id,
+                            link_id,
+                            new_depth
+                        );
 
-                    let any_link_idle = if STR_PLUS_MODE_MLO {
-                        self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy
-                    } else {
-                        *self.link_is_transmitting.get(&link_id).unwrap() == false
-                    };
+                        self.emit_visualization_event(VizEvent::QueueDepth {
+                            t: t_secs(now),
+                            mac_key: mac_key_ul,
+                            depth: new_depth,
+                            sta_src: packet.sta_src_id,
+                        });
 
-                    if self.queue.len() == 1 && any_link_idle {
-                        context
-                            .scheduler
-                            .schedule_event(
-                                Duration::from_micros(SLOT_TIME_US), // SLOT = 9e-6
-                                Self::deque_schedule_service,
-                                (),
-                            )
-                            .unwrap();
+                        let any_link_idle = if STR_PLUS_MODE_MLO {
+                            self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy
+                        } else {
+                            *self.link_is_transmitting.get(&link_id).unwrap() == false
+                        };
+
+                        if new_depth == 1 && any_link_idle {
+                            context
+                                .scheduler
+                                .schedule_event(
+                                    Duration::from_micros(SLOT_TIME_US), // SLOT = 9e-6
+                                    Self::deque_schedule_service,
+                                    (),
+                                )
+                                .unwrap();
+                        }
                     }
-                }
+                        else {
+                            log_mlo!(
+                                now,
+                                "❌ UL Queue for STA{} (MAC_KEY={:?}) exceeded capacity ({} pkts), dropping packet {}",
+                                packet.sta_src_id,
+                                mac_key_ul,
+                                current_depth,
+                                packet.packet_id
+                            );
+                        }
+                    }
                 None => {
                     self.blocked_packet_counter += 1;
                     log_mlo!(
@@ -3298,6 +3409,7 @@ impl QueueModule {
                     for u in drained {
                         let alvr_header = u.alvr_header; 
                         // CSV write outside the lock
+                        let row_ac = u.edca_ac.to_string();   // per-row, not per-AMPDU
                         self.csv_metrics.update_stats(
                             u.now,
                             u.packet_id as usize,
@@ -3314,7 +3426,7 @@ impl QueueModule {
                             prev_cw_val as usize,
                             prev_retries,
                             prev_drawn_bo,
-                            ac_str.clone(),
+                            row_ac,
                             alvr_header, 
                         );
                     }
@@ -3341,8 +3453,13 @@ impl QueueModule {
         self.aux_ampdu_serviced.coordinates = first_packet.sta_src_coords.clone();
         self.aux_ampdu_serviced.link_id = link_id; // Tag AMPDU with link
 
+        if first_packet.sta_src_id <= 0 || first_packet.sta_dest_id <= 0 {
+            panic!(
+                "Invalid STA IDs in first packet: src_id={}, dest_id={}",
+                first_packet.sta_src_id, first_packet.sta_dest_id
+            );
+        }
         let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id;
-
         // println!("IS_UL = {} ( {} > {})", is_ul, first_packet.sta_src_id, first_packet.sta_dest_id);
 
         let mac_key: MacKey = if is_ul {
@@ -3368,14 +3485,14 @@ impl QueueModule {
             first_packet.edca_ac
         );
         // let mut virtual_queue_depth = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
-        let mut flow_backlog = self.queue.iter() // This is O(N), but we only do it once per AMPDU (not per packet).
-            .filter(|p| {
-                let is_ul_p = p.sta_src_id > p.sta_dest_id;
-                let key_p = if is_ul_p { (p.sta_src_id, p.edca_ac, link_id) } else { (-1, p.edca_ac, link_id) };
-                key_p == mac_key
-            })
-            .count();
-
+        // let mut flow_backlog = self.queue.iter() // This is O(N), but we only do it once per AMPDU (not per packet).
+        //     .filter(|p| {
+        //         let is_ul_p = p.sta_src_id > p.sta_dest_id;
+        //         let key_p = if is_ul_p { (p.sta_src_id, p.edca_ac, link_id) } else { (-1, p.edca_ac, link_id) };
+        //         key_p == mac_key
+        //     })
+        //     .count();
+        let mut flow_backlog = self.mac_queue_depths.get(&mac_key).copied().unwrap_or(0);
         // ========== Aggregate packets for this flow on this link ==========
         while packet_index < self.queue.len() {
             if let Some(current_packet) = self.queue.get(packet_index) {
@@ -3384,6 +3501,7 @@ impl QueueModule {
                 // 2. Are unassigned OR assigned to the SAME link
                 if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
                     || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
+                    || current_packet.edca_ac != self.aux_ampdu_serviced.mac_key.1
                     || (current_packet.assigned_link_id.is_some()
                         && current_packet.assigned_link_id != Some(link_id))
                 {
@@ -3520,6 +3638,7 @@ impl QueueModule {
                         collision_backoff: 0.0,
                         link_id: link_id,
                         alvr_header: packet.header_alvr.clone(), 
+                        edca_ac: packet.edca_ac,
                     };
 
                     stats_tx
@@ -3558,6 +3677,9 @@ impl QueueModule {
         // 2. Use retain to remove all successful packets in a single O(N) pass.
         // We must also count removals and update link depths *during* this pass.
         let mut i = 0;
+
+        let viz_tx_clone = self.viz_tx.clone();
+
         self.queue.retain(|packet| {
             let current_idx = i;
             i += 1; // Increment index for the next packet
@@ -3577,6 +3699,21 @@ impl QueueModule {
                 }
 
                 let mac_key: MacKey =  packet.mac_key_cached.unwrap(); 
+                if let Some(mac_key) = packet.mac_key_cached {
+                    if let Some(c) = self.mac_queue_depths.get_mut(&mac_key) {
+                        *c = c.saturating_sub(1);
+                        let new_depth = *c;
+                        // can't call self.emit_* here — self is borrowed by retain's closure
+                        if let Some(tx) = &viz_tx_clone {
+                            let _ = tx.try_send(VizEvent::QueueDepth {
+                                t: t_secs(now),
+                                mac_key,
+                                depth: new_depth,
+                                sta_src: packet.sta_src_id,
+                            });
+                        }
+                    }
+                }
 
                 // if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
                 //     *count = count.saturating_sub(1);
@@ -3753,6 +3890,14 @@ impl QueueModule {
                     // print_yellow!("{:.5} [Channel {} collision!] T_col:{:.5}| contenders: {:?} ", taitime_to_f64!(now), link_id, T_col, contenders );
                     if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                         medium.occupy_collision(now + T_col_dur);
+
+                        self.emit_visualization_event(VizEvent::Collision {
+                            t: t_secs(now),
+                            end: t_secs(now + T_col_dur),
+                            link_id,
+                            contenders: contenders.iter().copied().collect(),
+                        });
+
                     }
 
                     let first_contender_key = contenders.first().unwrap();
@@ -3791,6 +3936,19 @@ impl QueueModule {
                             false,
                             now.duration_since(TaiTime::EPOCH).as_secs_f64()
                         );
+
+                        let st = self.dcf(key);
+                            if let Some(tx) = &self.viz_tx {
+                                let _ = tx.try_send(VizEvent::BackoffSnap {
+                                    t: t_secs(now),
+                                    mac_key: *key,
+                                    counter: st.backoff_counter,
+                                    cw: st.cw,
+                                    frozen: st.backoff_frozen,
+                                    medium_free_since: t_secs(st.medium_free_since),
+                                });
+                            }
+
                     }
 
                     if let Some(stats_tx) = &self.stats_tx {
@@ -3830,6 +3988,7 @@ impl QueueModule {
                                     arrived_packet_counter: self.arrived_packet_counter,
                                     queue_length_when_out: 0, 
                                     ampdu_id: self.ampdu_id,
+                                    edca_ac: p.edca_ac,
                                 }
                             } else {
                                 // Fallback: If no packet found (shouldn't happen if DCF is active), 
@@ -3921,6 +4080,24 @@ impl QueueModule {
                 // Occupy medium on this link
                 if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                     medium.start_txop(now + ampdu_airtime, winner_key);
+                    let unique_ids: Vec<u32> = ampdu_to_send.mpdu_packets
+                        .iter()
+                        .map(|p| p.header_alvr.next_packet_index)
+                        .collect::<HashSet<_>>() // Filters duplicates automatically
+                        .into_iter()
+                        .collect();
+                    self.emit_visualization_event(VizEvent::TxopStart {
+                        t: t_secs(now),
+                        end: t_secs(now + ampdu_airtime),
+                        link_id,
+                        owner: winner_key,
+                        dest_id: first_packet.sta_dest_id,
+                        ampdu_packets: ampdu_to_send.mpdu_packets.len() as u16,
+                        mcs: ampdu_to_send.mcs_assigned,
+                        frame_ids: unique_ids, 
+                        stream_id: first_packet.header_alvr.stream_id,
+                    });
+
                 }
 
                 // Freeze all MACs on this link during TXOP

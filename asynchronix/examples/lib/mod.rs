@@ -184,6 +184,11 @@ macro_rules! taitime_to_f64 {
         secs + (nanos / 1_000_000_000.0)
     }};
 }
+#[inline]
+fn t_secs(now: TaiTime<0>) -> f64 {
+    now.duration_since(TaiTime::EPOCH).as_secs_f64()
+}
+
 
 #[macro_export]
 macro_rules! print_red {
@@ -2092,7 +2097,7 @@ pub struct CsvData {
     v_link_id: Vec<usize>,
     v_cw_value: Vec<usize>,
     v_retries: Vec<u8>,
-    v_last_backoff_value: Vec<i32>,
+    v_last_backoff_value: Vec<u32>,
     v_edca_ac: Vec<String>,
 
     v_alvr_frameid: Vec<u32>,
@@ -2175,7 +2180,7 @@ impl CsvType {
         link_id: usize,
         cw_val: usize,
         num_retries_backoff: u8,
-        last_backoff: i32,
+        last_backoff: u32,
         edca_ac: String,
         alvr_data: HeaderALVRStream, 
     ) {
@@ -2679,6 +2684,18 @@ impl Default for EdcaAc {
     }
 }
 
+use std::fmt::Display;
+impl Display for EdcaAc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ac_str = match self {
+            EdcaAc::Voice => "AC_VO",
+            EdcaAc::Video => "AC_VI",
+            EdcaAc::BestEffort => "AC_BE",
+            EdcaAc::Background => "AC_BK",
+        };
+        write!(f, "{}", ac_str)
+    }
+}
 #[allow(unused)]
 impl MpduPacket {
     pub fn new() -> Self {
@@ -2742,8 +2759,8 @@ impl MpduPacket {
     }
 }
 
-type MacKey = (i32, EdcaAc, u8); // e.g. (AP/STA_ID, EDCA_AC, link_id)); last u8 for MLO link ID
-type WindowKey = (i32, u8); // (STA_ID, link_id)
+pub type MacKey = (i32, EdcaAc, u8); // e.g. (AP/STA_ID, EDCA_AC, link_id)); last u8 for MLO link ID
+pub type WindowKey = (i32, u8); // (STA_ID, link_id)
 
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {

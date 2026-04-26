@@ -20,22 +20,22 @@ export PATH=$HOME/.local/bin:$PATH
 #############################################################################
 
 NUMBER_OF_JOBS=10
-SERIAL_EXECUTION=1
+SERIAL_EXECUTION=0
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
 
 
-results_path_name="Results_CBR_${SLURM_ARRAY_JOB_ID}"
+results_path_name="Results_CBRDebug2_${SLURM_ARRAY_JOB_ID}"
 
-simTime=45.0
+simTime=25.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
 MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
-RANDOM_SEEDS=({1..5})
+RANDOM_SEEDS=(1)
 ############################################################################# <- BG Traffic
 N_BGs=( 0 )                    ## Nº of BG STAs
 mean_length_BG=12000.0         ## BG traffic length (bits) 
@@ -45,8 +45,8 @@ rates_bps_BGtraffic=( 5000 )
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
 EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
-NO_UL_TRACKING_MODE=(0 1)
-MLO_CONFIGS=( "MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
+NO_UL_TRACKING_MODE=(0)
+MLO_CONFIGS=("MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 # MLO_CONFIGS=( "SLO80"  )                         ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 
 RANDOMWALK_TEST=0            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
@@ -60,11 +60,11 @@ packs_per_ampdu=( 64 )
 CODEC_CHOICES=( "HEVC")
 USE_FOVEATION=0
 VBV_PERFRAME=1
-DETERMINISTIC_FIBONACCI_VIDEO=(0 1)
+DETERMINISTIC_FIBONACCI_VIDEO=(0)
 intrarefresh_choice=( 1 )       ## Only if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
 GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor to them
 
-N_XR=( 3 4 5 6 7 8 ) 
+N_XR=( 1 2 3 4 ) 
 # N_XR=( 1 ) 
 initial_bitrate_mbps=( 70.0 80.0 90.0 100.0 )  
 fps_list=( 90.0 )    
