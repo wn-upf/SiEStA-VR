@@ -91,7 +91,7 @@ use std::sync::OnceLock;
 // use crate::lib::INITIAL_BITRATE_MBPS_SIM;
 use super::alvr_packets::DeadlineShardlossStatPacket;
 use super::alvr_stream_socket::{SocketWriter, StreamSocket, MAX_PACKET_SIZE_RECV};
-use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS};
+use super::alvr_stream_socket::{CONTROL_STREAM, MAX_DEADLINE_IN_STATS, FRAMELOSS_PACKET};
 use super::get_third_octet;
 use crate::lib::gcc_nada_estimator::*;
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
@@ -3131,7 +3131,7 @@ impl XRServer {
                     }
                 }
 
-                CONTROL_STREAM => {
+                CONTROL_STREAM | FRAMELOSS_PACKET => {
                     if let Some(mut sock) = self.control_socket_sender.as_mut() {
                         // Deserialize into ClientControlPacket directly, not a reference
 
@@ -3226,6 +3226,7 @@ impl XRServer {
                                     shards_count,
                                     shard_index,
                                     tx_instant: tx_r_instant,
+                                    frame_losses: None, 
                                 };
                                 packet.data_inner = buffer[..packet_length_bytes as usize].to_vec();
 
@@ -4900,6 +4901,7 @@ impl XRClient {
                                     shards_count,
                                     shard_index,
                                     tx_instant: tx_r_instant,
+                                    frame_losses: None, 
                                 };
                                 packet.data_inner = buffer[..packet_length_bytes as usize].to_vec();
                                 packet.length_packet_bits = packet_length_bytes as usize * 8  + 100 * 8; // convert length (bytes) to bits + ALVR App header (100 bytes);
@@ -4967,8 +4969,29 @@ impl XRClient {
         )?;
         let mut packetz = MpduPacket::new();
         packetz.data_inner = buffer[0..packet_size].to_vec();
-        packetz.header_alvr.stream_id = CONTROL_STREAM;
-        packetz.header_alvr.next_packet_index = 2;
+
+        match packet {
+            ClientControlPacket::NetworkStatistics(netpack) => {
+                // You now have direct access to netpack fields
+                packetz.header_alvr.next_packet_index = netpack.frame_index as u32;
+                packetz.header_alvr.stream_id = CONTROL_STREAM;
+
+            }
+            ClientControlPacket::DeadlineShardLossStat(paak) => {
+                // Accessing the Vec inside DeadlineShardlossStatPacket
+                // Since next_packet_index expects a u32, you might need to choose 
+                // which index from the vector to use (e.g., the first one)
+                if let Some(&first_idx) = paak.frame_indexes.first() {
+                    packetz.header_alvr.next_packet_index = first_idx;
+                    packetz.header_alvr.stream_id = FRAMELOSS_PACKET;
+                    packetz.header_alvr.frame_losses = Some(paak.frame_indexes.clone()); // Store the entire vector of frame indexes in the packet header for later use 
+                }
+            }
+                _ => {
+                    // For other packet types, you can set next_packet_index to a default value or handle accordingly
+                    packetz.header_alvr.next_packet_index = 0; // Default or placeholder value
+            }
+        }
         if !self.edca_be_mode {
              if matches!(packet, ClientControlPacket::NetworkStatistics(..)) {       // All UL traffic is given the AC_VO for max priority in channel access
             packetz.edca_ac = EdcaAc::Voice;                                

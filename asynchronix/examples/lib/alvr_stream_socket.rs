@@ -58,7 +58,7 @@ pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring this fro
 pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
                                         // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(300);
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(30);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 15.0;
 
@@ -72,7 +72,8 @@ pub const AUDIO: u16 = 2;
 pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
 pub const CONTROL_STREAM: u16 = 5;
-
+// CUSTOM / ADDED
+pub const FRAMELOSS_PACKET: u16 = 8;
 pub const FOVOPTIX_BW_PROBE: u16 = 9;
 
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
@@ -89,7 +90,9 @@ pub fn get_stream_name(stream_id: u16) -> &'static str {
         AUDIO => "AUDIO",
         VIDEO => "VIDEO",
         STATISTICS => "STATISTICS",
-        CONTROL_STREAM => "CONTROL STREAM",
+        CONTROL_STREAM => "STATISTICS",
+        FRAMELOSS_PACKET => "FRAME LOSS",
+
         _ => "UNKNOWN_STREAM",
     }
 }

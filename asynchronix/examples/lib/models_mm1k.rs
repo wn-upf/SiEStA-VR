@@ -2198,6 +2198,8 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
         mcs: u8,
         stream_id: u16, // Added
         frame_ids: Vec<u32>,  // Added
+        frame_losses: Option<Vec<u32>>, 
+        
     },
     /// Collision interval on this link.
     Collision {
@@ -2221,6 +2223,7 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
         mac_key: MacKey,
         depth: usize,
         sta_src: i32, //new field for per-device queue
+        sta_dest: i32, //new field for per-device queue
     },
 }
 
@@ -3115,6 +3118,7 @@ impl QueueModule {
                                 mac_key: mac_key_dl,
                                 depth: new_depth,
                                 sta_src: pkt.sta_src_id,
+                                sta_dest: pkt.sta_dest_id,
                             });
                         }
                         
@@ -3217,6 +3221,7 @@ impl QueueModule {
                                 mac_key: mac_key_ul,
                                 depth: new_depth,
                                 sta_src: packet.sta_src_id,
+                                sta_dest: packet.sta_dest_id,
                             });
                         }
 
@@ -3712,6 +3717,7 @@ impl QueueModule {
                                 mac_key,
                                 depth: new_depth,
                                 sta_src: packet.sta_src_id,
+                                sta_dest: packet.sta_dest_id,
                             });
                         }
                     }
@@ -4101,6 +4107,7 @@ impl QueueModule {
                             mcs: ampdu_to_send.mcs_assigned,
                             frame_ids: unique_ids, 
                             stream_id: first_packet.header_alvr.stream_id,
+                            frame_losses: first_packet.header_alvr.frame_losses, 
                         });
                     }
                 }

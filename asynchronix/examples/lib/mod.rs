@@ -60,7 +60,6 @@ pub const PREFIX_ID_DOWNLINK: i32 = 100;
 pub const PREFIX_ID_UPLINK: i32 = 200;
 #[allow(unused)]
 pub const PREFIX_ID_BG: i32 = 300;
-
 // Define a constant to control debugging
 
 pub mod alvr_packets;
@@ -86,7 +85,7 @@ pub const DEBUG_MLO: bool =  false;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 pub const USE_FFMPEG_DEMO: bool = false;
 
-pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
+pub const VISUALIZER_QUEUES_ENABLED: bool = true; // Set to true to enable visualizer events for queue states
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -2625,6 +2624,7 @@ pub struct HeaderALVRStream {
     pub shards_count: u32,
     pub shard_index: u32,
     pub tx_instant: f32,
+    pub frame_losses: Option<Vec<u32>>,
 }
 
 // Implementing Display for HeaderALVRStream
