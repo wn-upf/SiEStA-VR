@@ -23,7 +23,7 @@ use anyhow::Result;
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 // use rand::rngs::StdRng;
-use crate::lib::models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer};
+use crate::lib::{models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer, }, EdcaAc, render_text, VISUALIZER_QUEUES_ENABLED, MacKey};
 use rand::seq::SliceRandom;
 use rand::thread_rng; //  SeedableRng};
 use rand::Rng;
@@ -1031,38 +1031,30 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         events.push(ev);
     }
 
-    
-    println!(
-        "[VIZ] Collected {} events in in {:.4} s spanning from [{:.6}, {:.6}] s of simulated time ",
-        events.len(),
-        elapsed.as_secs_f32(), 
-        events.first().map(event_t).unwrap_or(0.0),
-        events.last().map(event_end).unwrap_or(0.0),
-    );
+    if VISUALIZER_QUEUES_ENABLED == true {
+        println!(
+            "[VIZ] Collected {} events in spanning from [{:.6}, {:.6}] s of simulated time ",
+            events.len(),
+            events.first().map(event_t).unwrap_or(0.0),
+            events.last().map(event_end).unwrap_or(0.0),
+        );
 
-    // Optional: pickle for later replay (uncomment if VizEvent + MacKey + EdcaAc derive Serialize/Deserialize)
-    // let viz_path = format!("{}/viz_events.bin", output_path);
-    // if let Ok(file) = std::fs::File::create(&viz_path) {
-    //     let _ = bincode::serialize_into(std::io::BufWriter::new(file), &events);
-    //     println!("[VIZ] Wrote {} events to {}", events.len(), viz_path);
-    // }
 
-    // ===== Open the viewer (blocks until the user closes the window) =====
-    if !events.is_empty() {
-        let idx = VizIndex::build(events);
-        run_viewer(idx);
-    } else {
-        println!("[VIZ] No events to visualize (was viz_tx wired up?).");
+        // ===== Open the viewer (blocks until the user closes the window) =====
+        if !events.is_empty() {
+            let idx = VizIndex::build(events);
+            run_viewer(idx);
+        } else {
+            println!("[VIZ] No events to visualize (was viz_tx wired up?).");
+        }
     }
-
 
     Ok(())
 }
 
 
 use std::collections::{HashMap, HashSet};
-use crate::lib::render_text;
-use crate::lib::MacKey; 
+
 pub struct VizIndex {
     pub all: Vec<VizEvent>,                                  // owned, sorted by t
     pub txops_by_link: HashMap<u8, Vec<usize>>,              // indices into `all`
@@ -1126,7 +1118,6 @@ fn latest_at<'a>(indices: &'a [usize], all: &'a [VizEvent], t_cursor: f64)
 }
 
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
-use crate::lib::EdcaAc;
 
 pub struct ViewState {
     pub center_t: f64,
@@ -1556,7 +1547,7 @@ fn render_qdepth_panel(
     fill_rect(buf, stride, panel_x, panel_y, panel_w, panel_h, 0x10101a);
     fill_rect(buf, stride, 0, panel_y, panel_x, panel_h, 0x14141c);
 
-    render_text(buf, "QUEUES BY DESTINATION:", 8, panel_y + 6, stride, 0xcccccc, 2);
+    render_text(buf, "QUEUES", 8, panel_y + 6, stride, 0xcccccc, 2);
 
     let t_lo = view.center_t - view.span_t * 0.5;
     let t_hi = view.center_t + view.span_t * 0.5;
@@ -1712,7 +1703,7 @@ fn render_qdepth_panel(
             }
         }
     }
-    render_text(buf, &format!("max={}", max_depth), panel_x + 6, panel_y + 6, stride, 0x888899, 1);
+    render_text(buf, &format!("max={}", max_depth), panel_x + 6, panel_y + 6, stride, 0x888899, 2);
 }
 
 

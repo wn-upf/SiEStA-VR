@@ -86,6 +86,8 @@ pub const DEBUG_MLO: bool =  false;
 pub const DEBUG_PRINT_ENABLED: bool = false; // Change to false to disable
 pub const USE_FFMPEG_DEMO: bool = false;
 
+pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
+
 #[macro_export]
 macro_rules! debug_bgprint {
     ($color:expr, $fmt:expr, $($arg:tt)*) => {

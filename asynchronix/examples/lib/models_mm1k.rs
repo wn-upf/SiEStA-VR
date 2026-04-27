@@ -34,7 +34,7 @@ use crate::lib::{
     airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential,
     perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
     WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
-    P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO,
+    P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO, VISUALIZER_QUEUES_ENABLED, 
 };
 
 use rand::SeedableRng;
@@ -3109,13 +3109,14 @@ impl QueueModule {
                                 link_id,
                                 new_depth
                             );
-                        
-                        self.emit_visualization_event(VizEvent::QueueDepth {
-                            t: t_secs(now),
-                            mac_key: mac_key_dl,
-                            depth: new_depth,
-                            sta_src: pkt.sta_src_id,
-                        });
+                        if VISUALIZER_QUEUES_ENABLED {
+                            self.emit_visualization_event(VizEvent::QueueDepth {
+                                t: t_secs(now),
+                                mac_key: mac_key_dl,
+                                depth: new_depth,
+                                sta_src: pkt.sta_src_id,
+                            });
+                        }
                         
                         
                         self.queue.push(pkt);
@@ -3210,13 +3211,14 @@ impl QueueModule {
                             link_id,
                             new_depth
                         );
-
-                        self.emit_visualization_event(VizEvent::QueueDepth {
-                            t: t_secs(now),
-                            mac_key: mac_key_ul,
-                            depth: new_depth,
-                            sta_src: packet.sta_src_id,
-                        });
+                        if VISUALIZER_QUEUES_ENABLED {
+                            self.emit_visualization_event(VizEvent::QueueDepth {
+                                t: t_secs(now),
+                                mac_key: mac_key_ul,
+                                depth: new_depth,
+                                sta_src: packet.sta_src_id,
+                            });
+                        }
 
                         let any_link_idle = if STR_PLUS_MODE_MLO {
                             self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy
@@ -3890,14 +3892,15 @@ impl QueueModule {
                     // print_yellow!("{:.5} [Channel {} collision!] T_col:{:.5}| contenders: {:?} ", taitime_to_f64!(now), link_id, T_col, contenders );
                     if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                         medium.occupy_collision(now + T_col_dur);
-
-                        self.emit_visualization_event(VizEvent::Collision {
-                            t: t_secs(now),
-                            end: t_secs(now + T_col_dur),
-                            link_id,
-                            contenders: contenders.iter().copied().collect(),
-                        });
-
+                        
+                        if VISUALIZER_QUEUES_ENABLED {
+                            self.emit_visualization_event(VizEvent::Collision {
+                                t: t_secs(now),
+                                end: t_secs(now + T_col_dur),
+                                link_id,
+                                contenders: contenders.iter().copied().collect(),
+                            });
+                        }
                     }
 
                     let first_contender_key = contenders.first().unwrap();
@@ -4086,18 +4089,20 @@ impl QueueModule {
                         .collect::<HashSet<_>>() // Filters duplicates automatically
                         .into_iter()
                         .collect();
-                    self.emit_visualization_event(VizEvent::TxopStart {
-                        t: t_secs(now),
-                        end: t_secs(now + ampdu_airtime),
-                        link_id,
-                        owner: winner_key,
-                        dest_id: first_packet.sta_dest_id,
-                        ampdu_packets: ampdu_to_send.mpdu_packets.len() as u16,
-                        mcs: ampdu_to_send.mcs_assigned,
-                        frame_ids: unique_ids, 
-                        stream_id: first_packet.header_alvr.stream_id,
-                    });
 
+                    if VISUALIZER_QUEUES_ENABLED {
+                        self.emit_visualization_event(VizEvent::TxopStart {
+                            t: t_secs(now),
+                            end: t_secs(now + ampdu_airtime),
+                            link_id,
+                            owner: winner_key,
+                            dest_id: first_packet.sta_dest_id,
+                            ampdu_packets: ampdu_to_send.mpdu_packets.len() as u16,
+                            mcs: ampdu_to_send.mcs_assigned,
+                            frame_ids: unique_ids, 
+                            stream_id: first_packet.header_alvr.stream_id,
+                        });
+                    }
                 }
 
                 // Freeze all MACs on this link during TXOP
