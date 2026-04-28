@@ -1083,53 +1083,6 @@ fn is_key_highlighted(key: &MacKey, highlight: &Option<ActiveHighlights>) -> boo
         Some(h) => h.keys.contains(key),
     }
 }
-/// Is this (sta_id, ac) pair represented by *any* key in the highlight set?
-/// Used for the queue panel, which has no per-link dimension in its agg key.
-#[inline]
-fn is_sta_ac_highlighted(
-    sta_id: i32,
-    ac: EdcaAc,
-    highlight: &Option<HashSet<MacKey>>,
-) -> bool {
-    highlight
-        .as_ref()
-        .map_or(true, |hs| hs.iter().any(|k| k.0 == sta_id && k.1 == ac))
-}
- 
-/// Collect the owner/contenders of whatever TXOP or Collision contains `t`
-/// on `link_id`. Returns `None` if `t` is in open air.
-fn find_keys_at_time_on_link(
-    t: f64,
-    idx: &VizIndex,
-    link_id: u8,
-) -> Option<HashSet<MacKey>> {
-    // --- TXOPs ---
-    if let Some(indices) = idx.txops_by_link.get(&link_id) {
-        for &ii in indices {
-            if let VizEvent::TxopStart { t: ts, end, owner, .. } = &idx.all[ii] {
-                if t >= *ts && t <= *end {
-                    let mut set = HashSet::new();
-                    set.insert(*owner);
-                    return Some(set);
-                }
-            }
-        }
-    }
-    // --- Collisions ---
-    if let Some(indices) = idx.collisions_by_link.get(&link_id) {
-        for &ii in indices {
-            if let VizEvent::Collision { t: ts, end, contenders, .. } = &idx.all[ii] {
-                if t >= *ts && t <= *end {
-                    let mut set = HashSet::new();
-                    for k in contenders { set.insert(*k); }
-                    return Some(set);
-                }
-            }
-        }
-    }
-    None
-}
- 
 
 fn collect_highlights_at(t: f64, link_id: u8, idx: &VizIndex, h: &mut ActiveHighlights) {
     // Check TXOPs
@@ -1425,7 +1378,122 @@ fn render_link_lane(
         0xeeeeee, 
         2
     );
-    // render_text(buf, &format!("LINK {}", link_id), 8, lane_y + lane_h / 2 - 8, stride, 0xeeeeee, 2);
+
+    render_text(buf, &link_label, 8, lane_y + lane_h / 2 - 8, stride, 0xeeeeee, 2);
+
+}
+
+
+
+/// Draw a hatched brown/amber AIFS box.
+fn draw_aifs_box(buf: &mut [u32], stride: usize,
+                 x: usize, y: usize, w: usize, h: usize) {
+    const DARK:  u32 = 0x4A2200;
+    const LIGHT: u32 = 0x8B5010;
+    for yy in y..(y + h) {
+        for xx in x..(x + w) {
+            let bi = yy * stride + xx;
+            if bi >= buf.len() { continue; }
+            // diagonal stripe every 3 px
+            buf[bi] = if ((xx + yy) / 3) % 2 == 0 { LIGHT } else { DARK };
+        }
+    }
+}
+
+fn render_aifs_backoff_overlay(
+    buf: &mut [u32], stride: usize,
+    lane_y: usize, lane_h: usize,
+    panel_x: usize, panel_w: usize,
+    view: &ViewState, idx: &VizIndex, link_id: u8,
+) {
+    let t_lo = view.center_t - view.span_t * 0.5;
+    let t_hi = view.center_t + view.span_t * 0.5;
+
+    // ── 1. Only draw for keys that own a visible TXOP on this link ──────────
+    let mut active_keys: HashSet<MacKey> = HashSet::new();
+    if let Some(txop_indices) = idx.txops_by_link.get(&link_id) {
+        let s = txop_indices.partition_point(|&i| event_end(&idx.all[i]) < t_lo);
+        for &ii in &txop_indices[s..] {
+            match &idx.all[ii] {
+                VizEvent::TxopStart { t, owner, .. } => {
+                    if *t > t_hi { break; }
+                    active_keys.insert(*owner);
+                }
+                _ => {}
+            }
+        }
+    }
+    if active_keys.is_empty() { return; }
+
+    let y0 = lane_y + 2;
+    let y1 = lane_y + lane_h - 2;
+
+    // ── 2. Per-key: AIFS hatched box + backoff tick lines ───────────────────
+    for key in &active_keys {
+        let indices = match idx.backoff_by_key.get(key) {
+            Some(v) => v,
+            None    => continue,
+        };
+        let aifs_dur = aifs_secs_for_ac(key.1);
+        let mut seen_aifs: HashSet<u64> = HashSet::new();
+
+        // Look one event back so an AIFS that started just before t_lo is visible
+        let s     = indices.partition_point(|&i| event_t(&idx.all[i]) < t_lo);
+        let start = s.saturating_sub(1);
+
+        for &ii in &indices[start..] {
+            let (t, counter, frozen, medium_free_since) = match &idx.all[ii] {
+                VizEvent::BackoffSnap { t, counter, frozen, medium_free_since, .. } =>
+                    (*t, *counter, *frozen, *medium_free_since),
+                _ => continue,
+            };
+            if t > t_hi { break; }
+
+            if frozen {
+                // ── AIFS: hatched amber/brown vertical rect ──────────────────
+                let aifs_end = medium_free_since + aifs_dur;
+                if aifs_end < t_lo { continue; }
+
+                // Deduplicate: same medium_free_since = same window
+                if seen_aifs.insert(medium_free_since.to_bits()) {
+                    let x0 = x_of(medium_free_since, view, panel_x, panel_w)
+                        .max(panel_x as i32);
+                    let x1 = x_of(aifs_end, view, panel_x, panel_w)
+                        .min((panel_x + panel_w) as i32);
+                    if x1 > x0 {
+                        for xx in (x0 as usize)..(x1 as usize) {
+                            for yy in y0..y1 {
+                                let bi = yy * stride + xx;
+                                if bi < buf.len() {
+                                    buf[bi] = if ((xx + yy) / 3) % 2 == 0 {
+                                        0x9B5A10   // lighter amber stripe
+                                    } else {
+                                        0x3E1A00   // dark brown stripe
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+
+            } else if counter > 0 {
+                // ── Backoff tick: vertical white line, 9 µs wide ────────────
+                // counter == 0 means the STA is about to grab the medium;
+                // skip it — the TXOP bar drawn afterwards covers that moment anyway.
+                if t < t_lo { continue; }
+                let x0 = x_of(t, view, panel_x, panel_w).max(panel_x as i32);
+                let x1 = x_of(t + 9e-6, view, panel_x, panel_w)
+                    .min((panel_x + panel_w) as i32)
+                    .max(x0 + 1);   // guarantee ≥ 1 px
+                for xx in (x0 as usize)..(x1 as usize).min(panel_x + panel_w) {
+                    for yy in y0..y1 {
+                        let bi = yy * stride + xx;
+                        if bi < buf.len() { buf[bi] = 0xffff_ff; }
+                    }
+                }
+            }
+        }
+    }
 }
 
 
