@@ -3729,11 +3729,7 @@ impl QueueModule {
                     }
                 }
 
-                let mac_key: MacKey =  packet.mac_key_cached.unwrap(); 
-
-                if let Some(c) = self.active_mac_key_counts.get_mut(&(packet.sta_src_id, packet.edca_ac)) {
-                    *c = c.saturating_sub(1);
-                }   
+                // let mac_key: MacKey =  packet.mac_key_cached.unwrap(); 
 
                 if let Some(mac_key) = packet.mac_key_cached {
                     // flat Vec access — no hashing
@@ -4171,18 +4167,18 @@ impl QueueModule {
             if !transmissions_scheduled {
                 let mut need_next_slot = false;
 
-                                // AFTER — single O(M) pass, no queue scan:
-                if !self.queue.is_empty() {
-                    'outer: for st in &self.dcf_values {
-                        let (sta_id, ac, _) = st.mac_key;
-                        if self.active_mac_key_counts.get(&(sta_id, ac)).copied().unwrap_or(0) > 0
-                            && (st.backoff_frozen || st.backoff_counter > 0)
-                        {
-                            need_next_slot = true;
-                            break 'outer;
-                        }
+                            // AFTER — single O(M) pass, no queue scan:
+            if !self.queue.is_empty() {
+                'outer: for st in &self.dcf_values {
+                    let (sta_id, ac, _) = st.mac_key;
+                    if self.active_mac_key_counts.get(&(sta_id, ac)).copied().unwrap_or(0) > 0
+                        && (st.backoff_frozen || st.backoff_counter > 0)
+                    {
+                        need_next_slot = true;
+                        break 'outer;
                     }
                 }
+            }
 
                 if need_next_slot {
                     context
