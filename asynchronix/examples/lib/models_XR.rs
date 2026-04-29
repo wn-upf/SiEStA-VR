@@ -5769,7 +5769,12 @@ impl XRClient {
                     // Non-blocking send
                     if let Err(e) = tx.send(cmd) {
                         // This usually means the window was closed by the user
-                        print_red!("Display thread channel closed (Window closed?): {}", e);
+                        if USE_FFMPEG_DEMO {
+                            print_red!("Display thread channel closed (Window closed?): {}", e);
+                        }
+                        else{
+                            // it is expected, no window is created in the faster mode 
+                        }
                         self.window_tx = None; // Stop trying to send
                     }
                 }

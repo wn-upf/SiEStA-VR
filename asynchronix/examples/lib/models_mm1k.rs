@@ -861,10 +861,10 @@ impl EmulatedLink {
         now: TaiTime<0>,
         emulated_tests: Option<(bool, bool, bool, bool)>,
         id_sta: IpAddr,
-        bandwidth_bps: u64,
+        bandwidth_bps: Option<u64>,
     ) -> Self {
         let mut link = Self::new(max_queue_size, now, emulated_tests, id_sta);
-        link.bandwidth_bps = Some(bandwidth_bps);
+        link.bandwidth_bps = bandwidth_bps;
         link
     }
 
@@ -875,7 +875,7 @@ impl EmulatedLink {
         emulated_tests: Option<(bool, bool, bool, bool)>,
         id_sta: IpAddr,
     ) -> Self {
-        Self::new_with_bandwidth(max_queue_size, now, emulated_tests, id_sta, 1_000_000_000)
+        Self::new_with_bandwidth(max_queue_size, now, emulated_tests, id_sta, Some(1_000_000_000))
     }
 
     /// Enable or disable bandwidth emulation
@@ -2069,38 +2069,49 @@ fn default_mloconfig(config: &str) -> Vec<LinkConfig> {
         bandwidth_mhz: 80,
     }]
 }
+
 pub fn create_mlo_config(config: &str) -> Vec<LinkConfig> {
-    // Compile regex (in production, use lazy_static or OnceLock for performance)
-    let re = Regex::new(r"^(SLO|MLO)(\d+)(?:-(\d+))?$").unwrap();
+    // 1. Identify the prefix and the "values" part
+    // Matches MLO or SLO followed by a sequence of digits and hyphens
+    let re = Regex::new(r"^(SLO|MLO)([\d\-]+)$").unwrap();
 
-    let links = if let Some(caps) = re.captures(config) {
-        let mode = &caps[1];
-        let bw1 = caps[2].parse::<u16>().unwrap_or(80);
-
-        match mode {
-            "SLO" => vec![LinkConfig {
-                link_id: 0,
-                _frequency_ghz: 5.0,
-                bandwidth_mhz: bw1,
-            }],
-            "MLO" => {
-                // If the second bandwidth is missing (e.g., "MLO80"), default to bw1
-                let bw2 = caps.get(3)
-                    .map_or(bw1, |m| m.as_str().parse().unwrap_or(80));
-                
-                vec![
-                    LinkConfig { link_id: 0, _frequency_ghz: 5.0, bandwidth_mhz: bw1 },
-                    LinkConfig { link_id: 1, _frequency_ghz: 6.0, bandwidth_mhz: bw2 },
-                ]
-            }
-            _ => default_mloconfig(config),
-        }
-    } else {
-        default_mloconfig(config)
+    let caps = match re.captures(config) {
+        Some(c) => c,
+        None => return vec![], // Or handle error appropriately
     };
 
-    println!("Creating MLO Config!\n{:#?}", links);
-    links
+    let mode = &caps[1];
+    let values_str = &caps[2];
+
+    // 2. Split the values by '-' and parse them into integers
+    let bandwidths: Vec<u16> = values_str
+        .split('-')
+        .filter_map(|s| s.parse::<u16>().ok())
+        .collect();
+
+    match mode {
+        "SLO" => {
+            let bw = bandwidths.first().cloned().unwrap_or(80);
+            vec![LinkConfig {
+                link_id: 0,
+                _frequency_ghz: 5.0,
+                bandwidth_mhz: bw,
+            }]
+        }
+        "MLO" => {
+            bandwidths
+                .into_iter()
+                .enumerate()
+                .map(|(i, bw)| LinkConfig {
+                    link_id: i as u8,
+                    // Example logic for frequency mapping
+                    _frequency_ghz: if i == 0 { 5.0 } else { 6.0 },
+                    bandwidth_mhz: bw,
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -6,7 +6,7 @@ use std::f64;
 use csv::Writer;
 use std::fs::OpenOptions;
 use tai_time::TaiTime;
-
+use num_traits::AsPrimitive;
 use crate::lib::alvr_packets::DeviceMotion;
 use crate::lib::alvr_packets::Pose;
 use crate::lib::models_XR::PerfectInfoBitrateMessage;
@@ -574,21 +574,26 @@ macro_rules! render_hud_grid {
     };
 }
 // Renders ASCII text into the minifb window with coordinates.
-pub fn render_text(
-    buffer: &mut [u32],
-    text: &str,
-    x: usize,
-    y: usize,
-    stride: usize,
-    color: u32,
-    scale: usize,
-) {
+pub fn render_text<T>(
+        buffer: &mut [u32],
+        text: &str,
+        x: usize,
+        y: usize,
+        stride: usize,
+        color: u32,
+        scale_input: T,
+    ) where T: AsPrimitive<f32> {
+
     const FONT_WIDTH: usize = 5;
     const FONT_HEIGHT: usize = 7;
     const CHAR_SPACING: usize = 1;
 
-    let scaled_font_width = FONT_WIDTH * scale;
-    let scaled_char_spacing = CHAR_SPACING * scale;
+    let scale: f32 = scale_input.as_();    
+    // Calculate dimensions
+    let scaled_font_width = (FONT_WIDTH as f32 * scale).round() as usize;
+    let scaled_font_height = (FONT_HEIGHT as f32 * scale).round() as usize;
+
+    let scaled_char_spacing = CHAR_SPACING as f32 * scale;
 
     // Extended font with lowercase letters
     let font = [
@@ -705,7 +710,7 @@ pub fn render_text(
         [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F], // z
     ];
 
-    let mut char_x = x;
+    let mut char_cursor_x = x as f32;
 
     for c in text.chars() {
         let index = match c {
@@ -739,36 +744,34 @@ pub fn render_text(
             ']' => 61,
             '^' => 62,
             '_' => 63,
-            'a'..='z' => (c as usize) - ('a' as usize) + 64, // Now maps to lowercase glyphs
+            'a'..='z' => (c as usize) - ('a' as usize) + 64,
             _ => 0,
         };
 
-        // Draw the character with scaling
-        for row in 0..FONT_HEIGHT {
-            for scaled_row in 0..scale {
-                let buffer_y = y + (row * scale) + scaled_row;
+        for py in 0..scaled_font_height {
+            for px in 0..scaled_font_width {
+                
+                // Nearest-neighbor: Map output pixel back to font bit
+                let src_row = ((py as f32) / scale).floor() as usize;
+                let src_col = ((px as f32) / scale).floor() as usize;
 
-                for col in 0..FONT_WIDTH {
-                    if (font[index][row] & (1 << (FONT_WIDTH - 1 - col))) != 0 {
-                        for scaled_col in 0..scale {
-                            let buffer_x = char_x + (col * scale) + scaled_col;
+                if src_row < FONT_HEIGHT && src_col < FONT_WIDTH {
+                    if (font[index][src_row] & (1 << (FONT_WIDTH - 1 - src_col))) != 0 {
+                        let buffer_x = (char_cursor_x + px as f32) as usize;
+                        let buffer_y = y + py;
 
-                            if buffer_y < buffer.len() / stride && buffer_x < stride {
-                                let buffer_index = buffer_y * stride + buffer_x;
-                                if buffer_index < buffer.len() {
-                                    buffer[buffer_index] = color;
-                                }
-                            }
+                        if buffer_x < stride && buffer_y < (buffer.len() / stride) {
+                            let buffer_index = buffer_y * stride + buffer_x;
+                            buffer[buffer_index] = color;
                         }
                     }
                 }
             }
         }
 
-        char_x += scaled_font_width + scaled_char_spacing;
+        char_cursor_x += (FONT_WIDTH as f32 * scale) + scaled_char_spacing;
     }
 }
-
 
 
 #[derive(PartialEq)]

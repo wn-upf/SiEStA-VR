@@ -35,7 +35,8 @@ use std::{fs, u64};
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
 pub const NUM_INPUT_ARGS_SIM: usize = 36;
-pub const BANDWIDTH_EMU_LINK: u64 = 100E7 as u64; // 1 Gbps link
+pub const BANDWIDTH_EMU_LINK: Option<u64> = Some(100E7 as u64); // 1 Gbps link
+// pub const BANDWIDTH_EMU_LINK: Option<u64> = None; 
 
 
 fn random_room_coords<R: Rng>(rng: &mut R) -> Coords {
@@ -1194,7 +1195,7 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
         mouse_drag:    None,
     };
  
-    let panel_x = 220;
+    let panel_x = 270;
     let panel_w = W - panel_x - 20;
  
     while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -1203,7 +1204,7 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
             .get_mouse_pos(MouseMode::Discard)
             .unwrap_or((0.0, 0.0));
  
-        handle_input(&window, &mut view, &idx, panel_w, panel_x);
+        handle_input(&window, &mut view, &idx, panel_w, panel_x, link_configs.len() as u8);
         clamp_view(&mut view, &idx);
  
         // ── compute highlight: hover wins over cursor ──────────────────────
@@ -1255,6 +1256,9 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
     }
 }
 
+fn is_uplink(dest_id: i32) -> bool {
+    dest_id > PREFIX_ID_DOWNLINK && dest_id < PREFIX_ID_UPLINK   // AP is always STA-id 0; adjust if your topology differs
+}
 
 // ----------------------------------------------------------------
 // render_link_lane  – dims or highlights each TXOP / collision bar
@@ -1299,12 +1303,24 @@ fn render_link_lane(
  
             let lit     = is_key_highlighted(&owner, highlight);
             // 1. Determine the base color: Bright Red if it's a frame loss, otherwise AC color
+            
             let base_c = if stream_id == FRAMELOSS_PACKET {
-                0xff0000 // Bright Red
+                0xff0000 // Bright red — frame loss, always distinct
             } else {
-                ac_color(owner.1)
+                match owner.1 {
+                    // When every frame is BestEffort, split uplink/downlink so lanes
+                    // are readable at a glance.  Other ACs keep their own palette.
+                    EdcaAc::BestEffort => {
+                        if is_uplink(dest_id) {
+                            0xffb74d   //  warm amber  → uplink   (STA → AP)
+                        } else {
+                               //cool blue → downlink (AP → STA)
+                            0x4fc3f7
+                        }
+                    }
+                    _ => ac_color(owner.1),
+                }
             };
-
             // 2. Apply dimming if the stream isn't currently highlighted
             let color = if lit { base_c } else { dim_color(base_c, 5) };
 
@@ -1385,118 +1401,116 @@ fn render_link_lane(
 
 
 
-/// Draw a hatched brown/amber AIFS box.
-fn draw_aifs_box(buf: &mut [u32], stride: usize,
-                 x: usize, y: usize, w: usize, h: usize) {
-    const DARK:  u32 = 0x4A2200;
-    const LIGHT: u32 = 0x8B5010;
-    for yy in y..(y + h) {
-        for xx in x..(x + w) {
-            let bi = yy * stride + xx;
-            if bi >= buf.len() { continue; }
-            // diagonal stripe every 3 px
-            buf[bi] = if ((xx + yy) / 3) % 2 == 0 { LIGHT } else { DARK };
-        }
-    }
-}
+// /// Draw a hatched brown/amber AIFS box.
+// fn draw_aifs_box(buf: &mut [u32], stride: usize,
+//                  x: usize, y: usize, w: usize, h: usize) {
+//     const DARK:  u32 = 0x4A2200;
+//     const LIGHT: u32 = 0x8B5010;
+//     for yy in y..(y + h) {
+//         for xx in x..(x + w) {
+//             let bi = yy * stride + xx;
+//             if bi >= buf.len() { continue; }
+//             // diagonal stripe every 3 px
+//             buf[bi] = if ((xx + yy) / 3) % 2 == 0 { LIGHT } else { DARK };
+//         }
+//     }
+// }
 
-fn render_aifs_backoff_overlay(
-    buf: &mut [u32], stride: usize,
-    lane_y: usize, lane_h: usize,
-    panel_x: usize, panel_w: usize,
-    view: &ViewState, idx: &VizIndex, link_id: u8,
-) {
-    let t_lo = view.center_t - view.span_t * 0.5;
-    let t_hi = view.center_t + view.span_t * 0.5;
+// fn render_aifs_backoff_overlay(
+//     buf: &mut [u32], stride: usize,
+//     lane_y: usize, lane_h: usize,
+//     panel_x: usize, panel_w: usize,
+//     view: &ViewState, idx: &VizIndex, link_id: u8,
+// ) {
+//     let t_lo = view.center_t - view.span_t * 0.5;
+//     let t_hi = view.center_t + view.span_t * 0.5;
 
-    // ── 1. Only draw for keys that own a visible TXOP on this link ──────────
-    let mut active_keys: HashSet<MacKey> = HashSet::new();
-    if let Some(txop_indices) = idx.txops_by_link.get(&link_id) {
-        let s = txop_indices.partition_point(|&i| event_end(&idx.all[i]) < t_lo);
-        for &ii in &txop_indices[s..] {
-            match &idx.all[ii] {
-                VizEvent::TxopStart { t, owner, .. } => {
-                    if *t > t_hi { break; }
-                    active_keys.insert(*owner);
-                }
-                _ => {}
-            }
-        }
-    }
-    if active_keys.is_empty() { return; }
+//     // ── 1. Only draw for keys that own a visible TXOP on this link ──────────
+//     let mut active_keys: HashSet<MacKey> = HashSet::new();
+//     if let Some(txop_indices) = idx.txops_by_link.get(&link_id) {
+//         let s = txop_indices.partition_point(|&i| event_end(&idx.all[i]) < t_lo);
+//         for &ii in &txop_indices[s..] {
+//             match &idx.all[ii] {
+//                 VizEvent::TxopStart { t, owner, .. } => {
+//                     if *t > t_hi { break; }
+//                     active_keys.insert(*owner);
+//                 }
+//                 _ => {}
+//             }
+//         }
+//     }
+//     if active_keys.is_empty() { return; }
 
-    let y0 = lane_y + 2;
-    let y1 = lane_y + lane_h - 2;
+//     let y0 = lane_y + 2;
+//     let y1 = lane_y + lane_h - 2;
 
-    // ── 2. Per-key: AIFS hatched box + backoff tick lines ───────────────────
-    for key in &active_keys {
-        let indices = match idx.backoff_by_key.get(key) {
-            Some(v) => v,
-            None    => continue,
-        };
-        let aifs_dur = aifs_secs_for_ac(key.1);
-        let mut seen_aifs: HashSet<u64> = HashSet::new();
+//     // ── 2. Per-key: AIFS hatched box + backoff tick lines ───────────────────
+//     for key in &active_keys {
+//         let indices = match idx.backoff_by_key.get(key) {
+//             Some(v) => v,
+//             None    => continue,
+//         };
+//         let aifs_dur = aifs_secs_for_ac(key.1);
+//         let mut seen_aifs: HashSet<u64> = HashSet::new();
 
-        // Look one event back so an AIFS that started just before t_lo is visible
-        let s     = indices.partition_point(|&i| event_t(&idx.all[i]) < t_lo);
-        let start = s.saturating_sub(1);
+//         // Look one event back so an AIFS that started just before t_lo is visible
+//         let s     = indices.partition_point(|&i| event_t(&idx.all[i]) < t_lo);
+//         let start = s.saturating_sub(1);
 
-        for &ii in &indices[start..] {
-            let (t, counter, frozen, medium_free_since) = match &idx.all[ii] {
-                VizEvent::BackoffSnap { t, counter, frozen, medium_free_since, .. } =>
-                    (*t, *counter, *frozen, *medium_free_since),
-                _ => continue,
-            };
-            if t > t_hi { break; }
+//         for &ii in &indices[start..] {
+//             let (t, counter, frozen, medium_free_since) = match &idx.all[ii] {
+//                 VizEvent::BackoffSnap { t, counter, frozen, medium_free_since, .. } =>
+//                     (*t, *counter, *frozen, *medium_free_since),
+//                 _ => continue,
+//             };
+//             if t > t_hi { break; }
 
-            if frozen {
-                // ── AIFS: hatched amber/brown vertical rect ──────────────────
-                let aifs_end = medium_free_since + aifs_dur;
-                if aifs_end < t_lo { continue; }
+//             if frozen {
+//                 // ── AIFS: hatched amber/brown vertical rect ──────────────────
+//                 let aifs_end = medium_free_since + aifs_dur;
+//                 if aifs_end < t_lo { continue; }
 
-                // Deduplicate: same medium_free_since = same window
-                if seen_aifs.insert(medium_free_since.to_bits()) {
-                    let x0 = x_of(medium_free_since, view, panel_x, panel_w)
-                        .max(panel_x as i32);
-                    let x1 = x_of(aifs_end, view, panel_x, panel_w)
-                        .min((panel_x + panel_w) as i32);
-                    if x1 > x0 {
-                        for xx in (x0 as usize)..(x1 as usize) {
-                            for yy in y0..y1 {
-                                let bi = yy * stride + xx;
-                                if bi < buf.len() {
-                                    buf[bi] = if ((xx + yy) / 3) % 2 == 0 {
-                                        0x9B5A10   // lighter amber stripe
-                                    } else {
-                                        0x3E1A00   // dark brown stripe
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
+//                 // Deduplicate: same medium_free_since = same window
+//                 if seen_aifs.insert(medium_free_since.to_bits()) {
+//                     let x0 = x_of(medium_free_since, view, panel_x, panel_w)
+//                         .max(panel_x as i32);
+//                     let x1 = x_of(aifs_end, view, panel_x, panel_w)
+//                         .min((panel_x + panel_w) as i32);
+//                     if x1 > x0 {
+//                         for xx in (x0 as usize)..(x1 as usize) {
+//                             for yy in y0..y1 {
+//                                 let bi = yy * stride + xx;
+//                                 if bi < buf.len() {
+//                                     buf[bi] = if ((xx + yy) / 3) % 2 == 0 {
+//                                         0x9B5A10   // lighter amber stripe
+//                                     } else {
+//                                         0x3E1A00   // dark brown stripe
+//                                     };
+//                                 }
+//                             }
+//                         }
+//                     }
+//                 }
 
-            } else if counter > 0 {
-                // ── Backoff tick: vertical white line, 9 µs wide ────────────
-                // counter == 0 means the STA is about to grab the medium;
-                // skip it — the TXOP bar drawn afterwards covers that moment anyway.
-                if t < t_lo { continue; }
-                let x0 = x_of(t, view, panel_x, panel_w).max(panel_x as i32);
-                let x1 = x_of(t + 9e-6, view, panel_x, panel_w)
-                    .min((panel_x + panel_w) as i32)
-                    .max(x0 + 1);   // guarantee ≥ 1 px
-                for xx in (x0 as usize)..(x1 as usize).min(panel_x + panel_w) {
-                    for yy in y0..y1 {
-                        let bi = yy * stride + xx;
-                        if bi < buf.len() { buf[bi] = 0xffff_ff; }
-                    }
-                }
-            }
-        }
-    }
-}
-
-
+//             } else if counter > 0 {
+//                 // ── Backoff tick: vertical white line, 9 µs wide ────────────
+//                 // counter == 0 means the STA is about to grab the medium;
+//                 // skip it — the TXOP bar drawn afterwards covers that moment anyway.
+//                 if t < t_lo { continue; }
+//                 let x0 = x_of(t, view, panel_x, panel_w).max(panel_x as i32);
+//                 let x1 = x_of(t + 9e-6, view, panel_x, panel_w)
+//                     .min((panel_x + panel_w) as i32)
+//                     .max(x0 + 1);   // guarantee ≥ 1 px
+//                 for xx in (x0 as usize)..(x1 as usize).min(panel_x + panel_w) {
+//                     for yy in y0..y1 {
+//                         let bi = yy * stride + xx;
+//                         if bi < buf.len() { buf[bi] = 0xffff_ff; }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
 fn render_mackey_rows(
     buf: &mut [u32], stride: usize,
     top: usize, bottom: usize,
@@ -1504,81 +1518,120 @@ fn render_mackey_rows(
     view: &ViewState, idx: &VizIndex,
     highlight: &Option<ActiveHighlights>,
 ) {
-    let row_h       = 36;
-    let rows_visible = (bottom - top) / row_h;
-    let cursor      = view.cursor_t;
- 
-    fill_rect(buf, stride, 0, top, panel_x, bottom - top, 0x14141c);
- 
-    let start_row = view.row_scroll as usize;
-    for (vrow, key) in idx.mac_keys_sorted.iter()
-        .skip(start_row)
-        .take(rows_visible)
-        .enumerate()
-    {
-        if let Some(filter) = view.selected_link {
-            if key.2 != filter { continue; }
+    let cursor = view.cursor_t;
+
+    let visible_keys: Vec<_> = idx.mac_keys_sorted.iter()
+        .filter(|k| view.selected_link.map_or(true, |f| k.2 == f))
+        .collect();
+
+    // ── Column count (use fixed row_h=36 for the estimate) ───────────────
+    let base_row_h        = 36usize;
+    let rows_per_col_base = ((bottom - top) / base_row_h).max(1);
+    let num_cols = ((visible_keys.len() as f64 / rows_per_col_base as f64)
+        .ceil() as usize)
+        .max(1);
+
+    // ── Per-column-count layout table ────────────────────────────────────
+    // (row_h, top_line_h, label_scale, bar_scale, aifs_w, cw_label_w)
+    //   top_line_h : pixels given to the label line
+    //   remaining  : goes to AIFS pill + bar + CW text
+    let (row_h, top_h, label_scale, aifs_w, cw_label_w) = match num_cols {
+        1 => (36usize, 14usize, 2usize, 10usize, 90usize),
+        2 => (32,      12,      1,       7,       80),
+        3 => (26,      10,      1,       5,       68),
+        _ => (22,       9,      1,       4,       58),
+    };
+
+    let rows_per_col = ((bottom - top) / row_h).max(1);
+    let col_w        = panel_w / num_cols;
+
+    // bar gets everything between AIFS pill and CW label
+    let bar_x_offset = aifs_w + 6;                          // from col_x
+    let bar_w = col_w
+        .saturating_sub(bar_x_offset + cw_label_w + 8)
+        .max(20);
+
+    fill_rect(buf, stride, 0,       top, panel_x, bottom - top, 0x14141c);
+    fill_rect(buf, stride, panel_x, top, panel_w, bottom - top, 0x0d0d12);
+
+    for col in 1..num_cols {
+        let div_x = panel_x + col * col_w;
+        for y in top..bottom {
+            let i = y * stride + div_x;
+            if i < buf.len() { buf[i] = 0x222233; }
         }
-        let y      = top + vrow * row_h;
+    }
+
+    let start_row = view.row_scroll as usize;
+    for (vrow, key) in visible_keys.iter().skip(start_row).enumerate() {
+        let col        = vrow / rows_per_col;
+        let row_in_col = vrow % rows_per_col;
+        if col >= num_cols { break; }
+
+        let col_x = panel_x + col * col_w;
+        let y     = top + row_in_col * row_h;
+
+        let row_bg = if row_in_col % 2 == 0 { 0x10101a } else { 0x0d0d12 };
+        fill_rect(buf, stride, col_x, y, col_w, row_h, row_bg);
+
         let dimmed = !is_key_highlighted(key, highlight);
- 
-        // ── row label ─────────────────────────────────────────────────────
-        let lbl = format!("sta{:>4} {:?} L{}",
-            if key.0 == -1 { -1 } else { key.0 }, key.1, key.2);
-        render_text(buf, &lbl, 8, y + 8, stride, maybe_dim(0xffffff, dimmed), 2);
- 
-        // ── state at cursor ───────────────────────────────────────────────
-        let bo = idx.backoff_by_key.get(key)
+
+        // ── TOP LINE: STA label (full column width, no bar here) ─────────
+        let lbl = format!("s{:>3} {:?} L{}", key.0, key.1, key.2);
+        render_text(buf, &lbl, col_x + 4, y + 2, stride,
+                    maybe_dim(0xffffff, dimmed), label_scale);
+
+        // ── BOTTOM LINE: AIFS pill + backoff bar + CW text ───────────────
+        let bot_y   = y + top_h;                  // y-start of the bar line
+        let bot_h   = row_h.saturating_sub(top_h); // remaining height
+        let pill_h  = bot_h.saturating_sub(2).max(4);
+        let pill_y  = bot_y + (bot_h - pill_h) / 2;
+        let bar_h   = pill_h;
+        let bar_y   = pill_y;
+
+        let bo = idx.backoff_by_key.get(*key)
             .and_then(|v| latest_at(v, &idx.all, cursor));
-        let qd = idx.qdepth_by_key.get(key)
-            .and_then(|v| latest_at(v, &idx.all, cursor));
- 
+
         if let Some(VizEvent::BackoffSnap { counter, cw, frozen, medium_free_since, .. }) = bo {
-            // AIFS indicator
             let aifs_s      = aifs_secs_for_ac(key.1);
             let aifs_active = cursor < medium_free_since + aifs_s;
             let aifs_color  = maybe_dim(
-                if aifs_active { 0xffaa00 } else { 0x333333 },
-                dimmed,
-            );
-            fill_rect(buf, stride, panel_x, y + 4, 14, row_h - 8, aifs_color);
- 
-            // Backoff bar
-            let bar_x  = panel_x + 24;
-            let bar_w  = 200;
+                if aifs_active { 0xffaa00 } else { 0x333333 }, dimmed);
+
+            fill_rect(buf, stride, col_x + 4, pill_y, aifs_w, pill_h, aifs_color);
+
+            let bar_x  = col_x + bar_x_offset + 4;
             let cells  = (*cw as usize).min(64);
-            let cell_w = (bar_w / cells.max(1)).max(2);
+            let cell_w = (bar_w / cells.max(1)).max(1);
+
             for c in 0..cells {
                 let x = bar_x + c * cell_w;
+                if x + cell_w > col_x + col_w { break; }
                 let color = maybe_dim(
                     if c < (*counter as usize) {
                         if *frozen { 0x664488 } else { 0x44aaff }
                     } else { 0x222230 },
                     dimmed,
                 );
-                fill_rect(buf, stride, x, y + 6, cell_w - 1, row_h - 12, color);
+                fill_rect(buf, stride, x, bar_y,
+                          cell_w.saturating_sub(1).max(1), bar_h, color);
             }
-            render_text(
-                buf,
-                &format!("CW={} BO={}{}", cw, counter, if *frozen { " ❄" } else { "" }),
-                bar_x + bar_w + 12, y + 4, stride,
-                maybe_dim(0xcccccc, dimmed), 2,
-            );
-        }
- 
-        if let Some(VizEvent::QueueDepth { depth, .. }) = qd {
-            let qx       = panel_x + panel_w - 200;
-            let qw_max   = 180;
-            let normalized = (*depth as f64 / 64.0).min(1.0);
-            let qw       = (normalized * qw_max as f64) as usize;
-            fill_rect(buf, stride, qx, y + 6, qw_max, row_h - 12, maybe_dim(0x222230, dimmed));
-            fill_rect(buf, stride, qx, y + 6, qw,     row_h - 12, maybe_dim(0xee8844, dimmed));
-            render_text(buf, &format!("Q={}", depth),
-                qx + qw_max + 8, y + 4, stride, maybe_dim(0xcccccc, dimmed), 1);
+
+            let cw_x = bar_x + bar_w + 4;
+            if cw_x + cw_label_w <= col_x + col_w {
+                let cw_str = if num_cols == 1 {
+                    format!("CW={} BO={}{}", cw, counter, if *frozen { " *" } else { "" })
+                } else {
+                    format!("C{} B{}{}", cw, counter, if *frozen { "*" } else { "" })
+                };
+                render_text(buf, &cw_str, cw_x, pill_y, stride,
+                            maybe_dim(0xcccccc, dimmed), 1);
+            }
         }
     }
 }
- 
+
+
 fn blend_pixel(buf: &mut [u32], idx: usize, color: u32, alpha: f32) {
     if idx >= buf.len() { return; }
     let bg = buf[idx];
@@ -1720,9 +1773,9 @@ fn render_qdepth_panel(
         // ── Legend Row (Increased Thickness) ─────────────
         if is_active && legend_y + 12 < panel_y + panel_h {
             let lbl = if sta_src_id == -1 {
-                format!("STA{:<3} {:?} (All)", sta_src_id, ac)
+                format!("STA{:<3} {} (All)", sta_src_id, ac.to_string())
             } else {
-                format!("STA{:<3} {:?}", sta_src_id, ac)
+                format!("STA{:<3} {}", sta_src_id, ac.to_string())
             };
             render_text(buf, &lbl, 35, legend_y, stride, maybe_dim(0xdddddd, dimmed), 2);
             for px in 0..22usize {
@@ -1856,7 +1909,7 @@ fn latest_at<'a>(indices: &'a [usize], all: &'a [VizEvent], t_cursor: f64)
     if pos == 0 { None } else { Some(&all[indices[pos - 1]]) }
 }
  
-fn handle_input(window: &Window, view: &mut ViewState, idx: &VizIndex, panel_w: usize, panel_x: usize) {
+fn handle_input(window: &Window, view: &mut ViewState, idx: &VizIndex, panel_w: usize, panel_x: usize, num_links: u8) {
     if window.is_key_down(Key::Left)  || window.is_key_down(Key::A) { view.center_t -= view.span_t * 0.02; }
     if window.is_key_down(Key::Right) || window.is_key_down(Key::D) { view.center_t += view.span_t * 0.02; }
     if window.is_key_pressed(Key::Equal,      minifb::KeyRepeat::Yes)
@@ -1866,9 +1919,11 @@ fn handle_input(window: &Window, view: &mut ViewState, idx: &VizIndex, panel_w: 
     if window.is_key_pressed(Key::Home,  minifb::KeyRepeat::No) { view.center_t = idx.t_min + view.span_t * 0.5; }
     if window.is_key_pressed(Key::End,   minifb::KeyRepeat::No) { view.center_t = idx.t_max - view.span_t * 0.5; }
     if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) { view.paused = !view.paused; }
-    if window.is_key_pressed(Key::Tab,   minifb::KeyRepeat::No) {
+    if window.is_key_pressed(Key::Tab, minifb::KeyRepeat::No) {
         view.selected_link = match view.selected_link {
-            None => Some(0), Some(0) => Some(1), Some(1) => None, _ => None,
+            None => Some(0),
+            Some(l) if l + 1 < num_links => Some(l + 1),
+            _ => None,
         };
     }
     let (mx, _my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
@@ -1958,7 +2013,7 @@ fn render_hud(buf: &mut [u32], stride: usize, view: &ViewState, idx: &VizIndex) 
     render_text(buf, &filter, stride.saturating_sub(260), 16, stride, 0xaaccff, 1);
     render_text(
         buf,
-        "L-Click drag pan   R-Click set cursor   Scroll zoom   Tab filter-link   Space pause",
+        "L-Click: drag pan   R-Click: set cursor   Scroll: zoom in/out   Tab filter-link   ",
         12, 36, stride, 0x888899, 1,
     );
     let mut leg_x = stride.saturating_sub(450);
