@@ -2244,7 +2244,8 @@ pub struct QueueModule {
     // pub output_port_sta1: Output<AmpduPacket>,
     pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
     // pub queue: VecDeque<MpduPacket>,
-    pub queue: Vec<MpduPacket>,
+    // pub queue: Vec<MpduPacket>,
+    pub per_flow_queues: Vec<VecDeque<MpduPacket>>,
 
     pub queue_maxsize_dl: usize,
     pub service_timer: Duration,
@@ -2290,7 +2291,7 @@ pub struct QueueModule {
     pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
     pub link_queue_depths: HashMap<u8, usize>, // Holds packets assigned to each link with MLO: Required for optimization to stop iterating O(n) over queue
     // pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
-    pub mac_queue_depths: Vec<usize>, // flat, no mutex needed if single-threaded DES, indexed by mac_key_index
+    // pub mac_queue_depths: Vec<usize>, // flat, no mutex needed if single-threaded DES, indexed by mac_key_index
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
     pub dcf_values: Vec<DcfStats>,  // flat, no mutex needed if single-threaded DES
     pub mac_key_index: HashMap<MacKey, usize>,  // built once at init, never mutated
@@ -2303,6 +2304,8 @@ pub struct QueueModule {
     pub output_metrics: Output<WindowMetricReport>, // Just to report MCS and utilization in real time, for each STA.
     pub viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
     pub active_mac_key_counts: HashMap<(i32, EdcaAc), usize>,
+
+    pub slot_tick_pending: bool,
 
 
 }
@@ -2334,7 +2337,7 @@ impl QueueModule {
         let mut mac_key_index: HashMap<MacKey, usize> = HashMap::with_capacity(total_entries);
 
 
-        let mut mac_queue_depths = vec![0usize; total_entries];
+        // let mut mac_queue_depths = vec![0usize; total_entries];
 
         let sta_idx_of = |sta_id: i32| -> usize {
             if sta_id == -1 {
@@ -2406,6 +2409,7 @@ impl QueueModule {
         let mut being_served = HashMap::new();
 
         for link_config in &link_configs {
+            link_queue_depths.insert(link_config.link_id, 0usize); // ← add this
             link_mediums.insert(link_config.link_id, Medium::default());
             link_channel_widths.insert(link_config.link_id, link_config.bandwidth_mhz as usize);
             link_outputs.insert(link_config.link_id, Output::default());
@@ -2414,7 +2418,8 @@ impl QueueModule {
 
         Self {
             // queue: VecDeque::with_capacity(queue_size),
-            queue: Vec::with_capacity(queue_size),
+            // queue: Vec::with_capacity(queue_size),
+            per_flow_queues: vec![VecDeque::new(); total_entries],
             // queue_maxsize_k:        queue_size,
             queue_maxsize_dl: DOWNLINK_QUEUE_SIZE,
             ul_capacity_queue_device: UPLINK_QUEUE_SIZE,
@@ -2447,7 +2452,7 @@ impl QueueModule {
             link_mediums,
             link_channel_widths,
             link_queue_depths,
-            mac_queue_depths,
+            // mac_queue_depths,
             // mac_queue_depths: HashMap::new(), 
             sta_capabilities: HashMap::new(),
             mlo_linkselection_strat,
@@ -2457,6 +2462,7 @@ impl QueueModule {
             output_metrics: Output::default(),
             viz_tx, 
             active_mac_key_counts: HashMap::new(), 
+            slot_tick_pending: false,
         }
     }
 
@@ -2468,6 +2474,7 @@ impl QueueModule {
     pub fn get_stas_stats_handle(&self) -> Arc<Mutex<HashMap<usize, perStaLockStats>>> {
         self.array_stas_stats.clone()
     }
+    
 
     #[inline]
     fn dcf(&self, key: &MacKey) -> &DcfStats { // Helper: Obtains DCF MAC params for particular STA/EDCA_AC/LinkID
@@ -2488,13 +2495,8 @@ impl QueueModule {
     }
 
     fn queue_depth(&self, key: &MacKey) -> usize {
-        self.mac_queue_depths[self.mac_key_index[key]]
+        self.per_flow_queues[self.mac_key_index[key]].len()
     }
-    fn queue_depth_mut(&mut self, key: &MacKey) -> &mut usize {
-        let idx = self.mac_key_index[key];
-        &mut self.mac_queue_depths[idx]
-    }
-
 
     #[inline]
     pub fn update_window_stats(
@@ -3110,11 +3112,10 @@ impl QueueModule {
                         self.cache_input_packet(pkt.clone(), link_id).await;
 
                         // *self.mac_queue_depths.entry(mac_key_dl).or_insert(0) += 1;
-                        *self.queue_depth_mut(&mac_key_dl) += 1;
-                        self.link_queue_depths
+                        // *self.queue_depth_mut(&mac_key_dl) += 1;
+                        *self.link_queue_depths
                             .entry(link_id)
-                            .and_modify(|c| *c += 1); // add to lookup hashmap, per link
-                        
+                            .or_insert(0) += 1;                        
                         // Trigger scheduling if medium is idle
                         // [STR+] Trigger scheduling if ANY link is idle (start race on all links), else just check the link_id of the current packet.
                         // Instead of checking only the assigned 'link_id', we check if any link is free to start the backoff process.
@@ -3149,32 +3150,14 @@ impl QueueModule {
                                 sta_dest: pkt.sta_dest_id,
                             });
                         }
-                        
-                        
-                        self.queue.push(pkt);
 
+                        let idx = self.mac_key_index[&mac_key_dl];
+                        self.per_flow_queues[idx].push_back(pkt);
 
                         if new_depth == 1 && any_link_idle {
-                            // We schedule it one slot time in the future.
-                            // This prevents an immediate call and starts the 9µs slot timer loop correctly.
-                            ctx.scheduler
-                                .schedule_event(
-                                    Duration::from_micros(SLOT_TIME_US), // SLOT = 9e-6
-                                    Self::deque_schedule_service,
-                                    (),
-                                )
-                                .unwrap();
+                            self.schedule_tick(ctx);
                         }
   
-
-
-                        // if !self.packet_being_served {
-                        //     if let Some(medium) = self.link_mediums.get(&link_id) {
-                        //         if medium.is_idle(now) {
-                        //             self.deque_schedule_service((), ctx).await;
-                        //         }
-                        //     }
-                        // }
                     } else {
                         self.blocked_packet_counter += 1;
                         log_mlo!(now, "❌ QUEUE FULL - dropped packet {}", pkt.packet_id);
@@ -3199,7 +3182,8 @@ impl QueueModule {
     #[inline]
     pub async fn input_UL(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
         self.arrived_packet_counter += 1;
-        self.queue_length_counter += self.queue.len();
+
+        self.queue_length_counter += self.per_flow_queues.iter().map(|dq| dq.len()).sum::<usize>();
 
         let now = context.scheduler.time();
         let is_ul = packet.sta_src_id > packet.sta_dest_id;
@@ -3225,15 +3209,10 @@ impl QueueModule {
 
                         packet.queue_in_instant = now; // UL packets always go in queue, later they're dropped if they exceed max of STA/EDCA_AC virtual queue.
                         self.cache_input_packet(packet.clone(), link_id).await;
-                        self.queue.push(packet.clone());
-                        self.link_queue_depths
-                            .entry(link_id)
-                            .and_modify(|c| *c += 1);
+                        
+                        let idx = self.mac_key_index[&mac_key_ul];
+                        let new_depth: usize = current_depth + 1;
 
-                        // *self.mac_queue_depths.entry(mac_key_ul).or_insert(0) += 1;  // inserts 0 first if missing, then increments to 1
-                        *self.queue_depth_mut(&mac_key_ul) += 1;
-            
-                        let new_depth = current_depth + 1;
                         log_mlo!(
                             now,
                             "📥 UL Packet {} from STA{} → STA{} on LINK-{}, Q_size = {}",
@@ -3243,12 +3222,6 @@ impl QueueModule {
                             link_id,
                             new_depth
                         );
-
-                        *self.active_mac_key_counts
-                            .entry((packet.sta_src_id, packet.edca_ac))
-                            .or_insert(0) += 1;
-
-
                         if VISUALIZER_QUEUES_ENABLED {
                             self.emit_visualization_event(VizEvent::QueueDepth {
                                 t: t_secs(now),
@@ -3258,7 +3231,16 @@ impl QueueModule {
                                 sta_dest: packet.sta_dest_id,
                             });
                         }
-
+                  
+                        *self.active_mac_key_counts
+                            .entry((packet.sta_src_id, packet.edca_ac))
+                            .or_insert(0) += 1;
+                        
+                        self.per_flow_queues[idx].push_back(packet);
+                        *self.link_queue_depths
+                            .entry(link_id)
+                            .or_insert(0) += 1;
+            
                         let any_link_idle = if STR_PLUS_MODE_MLO {
                             self.link_is_transmitting.values().any(|&tx| !tx) // get any link that is not busy
                         } else {
@@ -3266,14 +3248,7 @@ impl QueueModule {
                         };
 
                         if new_depth == 1 && any_link_idle {
-                            context
-                                .scheduler
-                                .schedule_event(
-                                    Duration::from_micros(SLOT_TIME_US), // SLOT = 9e-6
-                                    Self::deque_schedule_service,
-                                    (),
-                                )
-                                .unwrap();
+                            self.schedule_tick(context);
                         }
                     }
                         else {
@@ -3366,11 +3341,10 @@ impl QueueModule {
         // crate::print_brown!("{} | [TXOP END] last_owner={:?}", format_elapsed!(elapsed), self.shared_medium.last_owner());
         debug_debug!(
             DebugColor::Red,
-            "{} [DBG TXOP]    --AMPDU sent to STA {} with {} packets inside, Q_size = {}, L = {}, AMPDU_size: {}",
+            "{} [DBG TXOP]    --AMPDU sent to STA {} with {} packets inside, L = {}, AMPDU_size: {}",
             format_elapsed!(elapsed),
             AMPDU_sent.sta_dest_id,
             AMPDU_sent.mpdu_packets.len(),
-            self.queue.len(),
             AMPDU_sent.total_length,
             AMPDU_sent.size
         );
@@ -3390,10 +3364,14 @@ impl QueueModule {
             output.send(AMPDU_sent).await;
         }
 
-        if self.queue.len() > 0 {
-            self.deque_schedule_service((), context).await;
-            // context.scheduler.schedule_event(Duration::from_nanos(10), Self::deque_schedule_service, ()).unwrap();
+        // if self.per_flow_queues.iter().any(|dq| !dq.is_empty()) {
+        //     self.deque_schedule_service((), context).await;
+        // }
+        if self.per_flow_queues.iter().any(|dq| !dq.is_empty()) {
+            self.schedule_tick(context);
         }
+
+
 
         let dcf_data = {
             // Lock happens here
@@ -3483,7 +3461,7 @@ impl QueueModule {
         link_id: u8,
         now: TaiTime<0>,
     ) -> (AmpduPacket, Duration) {
-        let mut success_indices: Vec<usize> = Vec::new();
+
         let (sta_src_id, sta_dest_id) = (first_packet.sta_src_id, first_packet.sta_dest_id);
 
         let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
@@ -3513,7 +3491,7 @@ impl QueueModule {
         let txop_us: f64 = self.dcf(&mac_key).param.txop_limit_us as f64;
 
         let mut last_service_duration = Duration::default();
-        let mut packet_index = 0;
+        // let mut packet_index = 0;
         let mut resultz = 0.0;
 
         log_mlo!(
@@ -3525,39 +3503,45 @@ impl QueueModule {
             sta_dest_id,
             first_packet.edca_ac
         );
-        // let mut virtual_queue_depth = *self.mac_queue_depths.get(&mac_key).unwrap_or(&0);
-        // let mut flow_backlog = self.queue.iter() // This is O(N), but we only do it once per AMPDU (not per packet).
-        //     .filter(|p| {
-        //         let is_ul_p = p.sta_src_id > p.sta_dest_id;
-        //         let key_p = if is_ul_p { (p.sta_src_id, p.edca_ac, link_id) } else { (-1, p.edca_ac, link_id) };
-        //         key_p == mac_key
-        //     })
-        //     .count();
-        // let mut flow_backlog = self.mac_queue_depths.get(&mac_key).copied().unwrap_or(0);
+        
         let mut flow_backlog = self.queue_depth(&mac_key);
-        // ========== Aggregate packets for this flow on this link ==========
-        while packet_index < self.queue.len() {
-            if let Some(current_packet) = self.queue.get(packet_index) {
-                //  Only aggregate packets that:
-                // 1. Match the same flow (src/dest)
-                // 2. Are unassigned OR assigned to the SAME link
-                if current_packet.sta_dest_id != self.aux_ampdu_serviced.sta_dest_id
-                    || current_packet.sta_src_id != self.aux_ampdu_serviced.sta_src_id
-                    || current_packet.edca_ac != self.aux_ampdu_serviced.mac_key.1
-                    || (current_packet.assigned_link_id.is_some()
-                        && current_packet.assigned_link_id != Some(link_id))
-                {
-                    packet_index += 1;
-                    continue;
+
+        let mut deque_sources: Vec<(usize, usize)> = Vec::new();
+
+        let mut taken_snapshot: Vec<(usize, MpduPacket)> = Vec::new();
+
+        let primary_idx = self.mac_key_index[&mac_key];
+        let sta_id_for_deque: i32 = if is_ul { sta_src_id } else { -1 };
+        let mut source_deque_idxs: Vec<usize> = vec![primary_idx];
+
+        if STR_PLUS_MODE_MLO {
+            let mut other_links: Vec<u8> = self.link_mediums.keys().copied()
+                .filter(|&lid| lid != link_id)
+                .collect();
+            other_links.sort_unstable();
+            for alt_link_id in other_links {
+                let alt_mac_key: MacKey = (sta_id_for_deque, first_packet.edca_ac, alt_link_id);
+                if let Some(&alt_idx) = self.mac_key_index.get(&alt_mac_key) {
+                    if !self.per_flow_queues[alt_idx].is_empty() {
+                        source_deque_idxs.push(alt_idx);
+                    }
                 }
+            }
+        }
+        
+        // ========== Aggregate packets for this flow on this link ==========
+        'agg: for &deq_idx in &source_deque_idxs {
+            let mut taken = 0usize;
+
+            for pos in 0..self.per_flow_queues[deq_idx].len() {
+                let current_packet = match self.per_flow_queues[deq_idx].get(pos) {
+                    Some(p) => p,
+                    None => break,
+                };
 
                 let new_total_length =
                     self.aux_ampdu_serviced.total_length + current_packet.length_packet_bits;
                 let new_size = self.aux_ampdu_serviced.size + 1;
-
-                // Calculate airtime for the new AMPDU size
-                // NOTE: we assume links are simmetrical, src and dest are mixed up for DL/UL,
-                //       but we compute distance correctly and rest of parameters follow.
 
                 if is_ul {
                     let ampdu_airtime_mcs = airtime_ampdu(
@@ -3574,12 +3558,8 @@ impl QueueModule {
                     let dest_coords = self
                         .STA_coords_map
                         .get(&(current_packet.sta_dest_id as usize))
-                        .unwrap_or_else(|| {
-                            panic!("no coordinates for STA {}", current_packet.sta_dest_id)
-                        })
+                        .unwrap_or_else(|| panic!("no coordinates for STA {}", current_packet.sta_dest_id))
                         .clone();
-
-                    // println!("Computing DL AMPDU airtime: src: {:?}, dest: {:?}", self.coords_queue, dest_coords);
                     let ampdu_airtime_mcs = airtime_ampdu(
                         new_total_length as f64,
                         new_size,
@@ -3591,8 +3571,8 @@ impl QueueModule {
                     resultz = ampdu_airtime_mcs.0;
                     self.aux_ampdu_serviced.mcs_assigned = ampdu_airtime_mcs.1;
                 }
-                let cap_s_edca = self.txop_cap_secs(&mac_key);
 
+                let cap_s_edca = self.txop_cap_secs(&mac_key);
                 if resultz >= DEFAULT_TMAX_AGG
                     || new_size > self.packs_per_ampdu as i32
                     || resultz >= cap_s_edca
@@ -3605,34 +3585,34 @@ impl QueueModule {
                         resultz * 1000.0,
                         f64::min(DEFAULT_TMAX_AGG * 1000.0, cap_s_edca * 1000.0)
                     );
-                    break;
+                     if taken > 0 {
+                        deque_sources.push((deq_idx, taken)); // ← record partial deque FIRST
+                    }
+                    break 'agg;
                 }
 
-                // Clone the packet and add to AMPDU
                 let mut cloned_packet = current_packet.clone();
-                cloned_packet.original_index = packet_index;
-
-
                 cloned_packet.queue_length_when_out = flow_backlog;
-                if flow_backlog > 0 {
-                    flow_backlog -= 1; // Decrement only when a packet is actually aggregated
-                }
-                // cloned_packet.queue_length_when_out = virtual_queue_depth;
-                // virtual_queue_depth = virtual_queue_depth.saturating_sub(1); // Simulate the effect of this packet leaving the queue for the AMPDU
-
+                if flow_backlog > 0 { flow_backlog -= 1; }
                 cloned_packet.queue_out_instant = now;
                 cloned_packet.T_q = now.duration_since(cloned_packet.queue_in_instant);
-                cloned_packet.mac_key_cached = Some(mac_key); 
-                
-                // Add the cloned packet to the AMPDU
+                cloned_packet.mac_key_cached = Some(mac_key);
+
+                // Record in snapshot BEFORE pushing into mpdu_packets
+                taken_snapshot.push((deq_idx, cloned_packet.clone()));
+
                 self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
                 self.aux_ampdu_serviced.total_length = new_total_length;
                 self.aux_ampdu_serviced.size = new_size;
                 last_service_duration = Duration::from_secs_f64(resultz);
+                taken += 1;
             }
-            packet_index += 1;
-        }
 
+            if taken > 0 {
+                deque_sources.push((deq_idx, taken));
+            }
+        }
+      
         log_mlo!(
             now,
             "  Aggregated {} packets, total_length={}, MCS={},  airtime={:.3}ms",
@@ -3703,99 +3683,138 @@ impl QueueModule {
         self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
 
         // ========== Remove successfully transmitted packets from queue ==========
-        for packet in &self.aux_ampdu_serviced.mpdu_packets {
-            success_indices.push(packet.original_index);
+        // ── Pop aggregated packets from their deques ─────────────────────────────────
+        for (deq_idx, count) in &deque_sources {
+            for _ in 0..*count {
+                self.per_flow_queues[*deq_idx].pop_front();
+            }
         }
 
-        // Track removals per flow for cache update
+        // if VISUALIZER_QUEUES_ENABLED {
+        //     for (deq_idx, _) in &deque_sources {
+        //         let mac_key_v = self.dcf_values[*deq_idx].mac_key;
+        //         let new_depth  = self.per_flow_queues[*deq_idx].len();
+        //         let is_ul_dq   = mac_key_v.0 != -1;
+        //         if let Some(tx) = &self.viz_tx {
+        //             let _ = tx.try_send(VizEvent::QueueDepth {
+        //                 t:        t_secs(now),
+        //                 mac_key:  mac_key_v,
+        //                 depth:    new_depth,
+        //                 sta_src:  if is_ul_dq { mac_key_v.0 } else { -1 },
+        //                 sta_dest: if is_ul_dq { -1 } else { sta_dest_id },
+        //             });
+        //         }
+        //     }
+        // }
+
+        // ── Push failed (PL) packets back to the front for retransmission ────────────
+        // Build set of packet_ids that survived PL
+        let successful_ids: std::collections::HashSet<usize> = self
+            .aux_ampdu_serviced.mpdu_packets
+            .iter()
+            .map(|p| p.packet_id)
+            .collect();
+
+        // Group failed packets by deque, preserving FIFO order
+        let mut failed_by_deque: HashMap<usize, Vec<MpduPacket>> = HashMap::new();
+        for (deq_idx, pkt) in taken_snapshot {
+            if !successful_ids.contains(&pkt.packet_id) {
+                failed_by_deque.entry(deq_idx).or_default().push(pkt);
+            }
+        }
+        // Reverse before push_front so the original head ends up at front again
+        for (deq_idx, mut failed_pkts) in failed_by_deque {
+            failed_pkts.reverse();
+            for pkt in failed_pkts {
+                self.per_flow_queues[deq_idx].push_front(pkt);
+            }
+        }
+
+        if VISUALIZER_QUEUES_ENABLED {
+            // Count successful packets per deque using assigned_link_id
+            let mut success_per_deq: HashMap<usize, usize> = HashMap::new();
+            for packet in &self.aux_ampdu_serviced.mpdu_packets {
+                let lid = packet.assigned_link_id.unwrap_or(mac_key.2);
+                let is_ul_pkt = packet.sta_src_id > packet.sta_dest_id;
+                let k: MacKey = (if is_ul_pkt { packet.sta_src_id } else { -1 }, packet.edca_ac, lid);
+                if let Some(&d_idx) = self.mac_key_index.get(&k) {
+                    *success_per_deq.entry(d_idx).or_insert(0) += 1;
+                }
+            }
+
+            // Start each deque at its pre-removal depth: final_depth + success_count
+            let mut running_depth: HashMap<usize, usize> = deque_sources
+                .iter()
+                .map(|(deq_idx, taken)| {
+                    let succ    = success_per_deq.get(deq_idx).copied().unwrap_or(0);
+                    let final_d = self.per_flow_queues[*deq_idx].len();
+                    // final_d already has failed packets re-inserted. Remove them,
+                    // then add back all taken packets to get the true pre-removal depth.
+                    let failed  = taken - succ;
+                    (*deq_idx, final_d - failed + *taken)
+                })
+                .collect();
+
+            // Walk FORWARD, decrement for each removal — matches old retain loop behaviour
+            for packet in &self.aux_ampdu_serviced.mpdu_packets {
+                let lid = packet.assigned_link_id.unwrap_or(mac_key.2);
+                let is_ul_pkt = packet.sta_src_id > packet.sta_dest_id;
+                let correct_key: MacKey = (if is_ul_pkt { packet.sta_src_id } else { -1 }, packet.edca_ac, lid);
+                if let Some(&d_idx) = self.mac_key_index.get(&correct_key) {
+                    if let Some(depth) = running_depth.get_mut(&d_idx) {
+                        *depth -= 1;  // ← decrement, not increment
+                        if let Some(tx) = &self.viz_tx {
+                            let _ = tx.try_send(VizEvent::QueueDepth {
+                                t:        t_secs(now),
+                                mac_key:  correct_key,
+                                depth:    *depth,
+                                sta_src:  packet.sta_src_id,
+                                sta_dest: packet.sta_dest_id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Update link_queue_depths and active_mac_key_counts for successful packets ─
         let mut packets_removed_by_key: HashMap<(i32, i32), usize> = HashMap::new();
+        for packet in &self.aux_ampdu_serviced.mpdu_packets {
+            *packets_removed_by_key
+                .entry((packet.sta_src_id, packet.sta_dest_id))
+                .or_insert(0) += 1;
 
-        // Remove in descending order to avoid index shifts
-        success_indices.sort_unstable_by(|a, b| b.cmp(a));
-
-        let success_indices_set: std::collections::HashSet<usize> =
-            success_indices.into_iter().collect();
-
-        // 2. Use retain to remove all successful packets in a single O(N) pass.
-        // We must also count removals and update link depths *during* this pass.
-        let mut i = 0;
-
-        let viz_tx_clone = self.viz_tx.clone();
-
-        self.queue.retain(|packet| {
-            let current_idx = i;
-            i += 1; // Increment index for the next packet
-
-            if success_indices_set.contains(&current_idx) {
-                // This packet was successful, so remove it (return false)
-
-                let key = (packet.sta_src_id, packet.sta_dest_id);
-                *packets_removed_by_key.entry(key).or_insert(0) += 1;
-
-                // --- Decrement Per-Link Queue Depth ---
-                if let Some(link_id) = packet.assigned_link_id {
-                    // Check if link_id is in the map before modifying
-                    if let Some(count) = self.link_queue_depths.get_mut(&link_id) {
-                        *count = count.saturating_sub(1);
-                    }
+            if let Some(assigned_lid) = packet.assigned_link_id {
+                if let Some(count) = self.link_queue_depths.get_mut(&assigned_lid) {
+                    *count = count.saturating_sub(1);
                 }
+            }
 
-                // let mac_key: MacKey =  packet.mac_key_cached.unwrap(); 
+            let is_ul_pkt = packet.sta_src_id > packet.sta_dest_id;
+            let ac_key = if is_ul_pkt { (packet.sta_src_id, packet.edca_ac) }
+                        else         { (-1i32, packet.edca_ac) };
+            if let Some(c) = self.active_mac_key_counts.get_mut(&ac_key) {
+                *c = c.saturating_sub(1);
+            }
 
-                if let Some(mac_key) = packet.mac_key_cached {
-                    // flat Vec access — no hashing
-                    let idx = self.mac_key_index[&mac_key];
-                    let new_depth = {
-                        let c = &mut self.mac_queue_depths[idx];
-                        *c = c.saturating_sub(1);
-                        *c
-                    };
-                    if let Some(tx) = &viz_tx_clone {
-                        let _ = tx.try_send(VizEvent::QueueDepth {
-                            t: t_secs(now),
-                            mac_key,
-                            depth: new_depth,
-                            sta_src: packet.sta_src_id,
-                            sta_dest: packet.sta_dest_id,
-                        });
-                    }
+        }
 
-                    // Fix #5: correct key for both UL and DL
-                    let is_ul = packet.sta_src_id > packet.sta_dest_id;
-                    let ac_key = if is_ul { (packet.sta_src_id, packet.edca_ac) }
-                                else     { (-1i32, packet.edca_ac) };
-                    if let Some(c) = self.active_mac_key_counts.get_mut(&ac_key) {
-                        *c = c.saturating_sub(1);
-                    }
-                }
-
-                // if let Some(count) = self.mac_queue_depths.get_mut(&mac_key) {
-                //     *count = count.saturating_sub(1);
-                // }
-                return false; // Remove from queue
-            }           
-            
-            true // Keep in queue
-        });
-
-        // ========== Update cache for affected flows ==========
+        // ── Update sta_stats_cache ────────────────────────────────────────────────────
         for (key, count_removed) in packets_removed_by_key {
             if let Some(entry) = self.sta_stats_cache.get_mut(&key) {
                 entry.packet_count = entry.packet_count.saturating_sub(count_removed);
                 entry.expected_queue_delivery_ms =
                     entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
-
                 if count_removed != 0 {
                     log_mlo!(
                         now,
                         "  Updated cache for flow ({}, {}): {} packets remaining",
-                        key.0,
-                        key.1,
-                        entry.packet_count
+                        key.0, key.1, entry.packet_count
                     );
                 }
             }
         }
+        
 
         if DEBUG_PRINT_ENABLED {
             print_yellow!(
@@ -3821,7 +3840,20 @@ impl QueueModule {
 
         (ampdu_to_send, last_service_duration)
     }
-
+    
+    #[inline]
+    fn schedule_tick(&mut self, context: &Context<Self>) {
+        if !self.slot_tick_pending {
+            self.slot_tick_pending = true;
+            context.scheduler
+                .schedule_event(
+                    Duration::from_micros(SLOT_TIME_US),
+                    Self::deque_schedule_service,
+                    (),
+                )
+                .unwrap();
+        }
+    }
 
     #[inline]
     fn deque_schedule_service<'a>(
@@ -3830,6 +3862,7 @@ impl QueueModule {
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
+            self.slot_tick_pending = false;
             let now = context.scheduler.time();
 
             // UL capacity check (same as before)
@@ -3847,64 +3880,40 @@ impl QueueModule {
                 .collect();
 
 
-            let mut global_indices_to_drop = std::collections::HashSet::new();
-
             if !overflowing_flows.is_empty() {
-                // 2. Find all indices for *these specific* overflowing flows
-                // We build a map: (src, dest) -> [idx1, idx8, idx22]
-                let mut flow_indices_map: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-                for (i, packet) in self.queue.iter().enumerate() {
-                    let key = (packet.sta_src_id, packet.sta_dest_id);
-                    if overflowing_flows.contains_key(&key) {
-                        flow_indices_map.entry(key).or_default().push(i);
-                    }
-                }
+                for ((src, dest), excess_count) in overflowing_flows {
+                    let is_ul_flow = src > dest;
+                    let sta_for_key: i32 = if is_ul_flow { src } else { -1 };
 
-                // 3. For each overflowing flow, get the newest (last) indices to drop
-                for (key, excess_count) in overflowing_flows {
-                    if let Some(indices) = flow_indices_map.get_mut(&key) {
-                        // `indices` is already sorted (from iter().enumerate()). We want the last `excess_count`.
-                        let start_index = indices.len().saturating_sub(excess_count);
-                        for i in start_index..indices.len() {
-                            global_indices_to_drop.insert(indices[i]);
-                        }
-                    }
-                }
-                // 4. Run retain ONCE to remove all marked packets
-                let mut i = 0;
-               self.queue.retain(|packet| {
-                    let current_idx = i;
-                    i += 1;
-
-                    if global_indices_to_drop.contains(&current_idx) {
-                        self.blocked_packet_counter += 1;
-
-                        if let Some(link_id) = packet.assigned_link_id {
-                            if let Some(count) = self.link_queue_depths.get_mut(&link_id) {
-                                *count = count.saturating_sub(1);
+                    // Try every AC × link combination for this flow direction.
+                    for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
+                        let mut remaining_drops = excess_count;
+                        let link_ids: Vec<u8> = self.link_mediums.keys().copied().collect();
+                        for lid in link_ids {
+                            if remaining_drops == 0 { break; }
+                            let overflow_key: MacKey = (sta_for_key, ac, lid);
+                            if let Some(&idx) = self.mac_key_index.get(&overflow_key) {
+                                let drop_count = remaining_drops.min(self.per_flow_queues[idx].len());
+                                for _ in 0..drop_count {
+                                    if let Some(dropped) = self.per_flow_queues[idx].pop_back() {
+                                        self.blocked_packet_counter += 1;
+                                        if let Some(count) = self.link_queue_depths.get_mut(&lid) {
+                                            *count = count.saturating_sub(1);
+                                        }
+                                        let ac_key = if is_ul_flow { (src, ac) } else { (-1i32, ac) };
+                                        if let Some(c) = self.active_mac_key_counts.get_mut(&ac_key) {
+                                            *c = c.saturating_sub(1);
+                                        }
+                                        let _ = dropped; // metrics: add StatsUpdate send here if desired
+                                    }
+                                }
+                                remaining_drops -= drop_count;
                             }
                         }
-
-                        // Fix #6a: decrement flat mac_queue_depths
-                        if let Some(mac_key) = packet.mac_key_cached {
-                            let idx = self.mac_key_index[&mac_key];
-                            self.mac_queue_depths[idx] = self.mac_queue_depths[idx].saturating_sub(1);
-                        }
-
-                        // Fix #6b: decrement active_mac_key_counts with correct key
-                        let is_ul = packet.sta_src_id > packet.sta_dest_id;
-                        let ac_key = if is_ul { (packet.sta_src_id, packet.edca_ac) }
-                                    else     { (-1i32, packet.edca_ac) };
-                        if let Some(c) = self.active_mac_key_counts.get_mut(&ac_key) {
-                            *c = c.saturating_sub(1);
-                        }
-
-                        return false;
                     }
-                    true
-                });
+                }
             }
-
+          
             // Get ready contenders per link
             let ready_per_link: HashMap<u8, Vec<MacKey>> = self.tick_backoff(now);
 
@@ -4002,13 +4011,12 @@ impl QueueModule {
 
                             // Try to find the packet at the head of the queue for this specific collider
                             // to extract real SRC/DEST and packet metrics.
-                            let colliding_packet = self.queue.iter().find(|p| {
-                                let is_ul = p.sta_src_id > p.sta_dest_id;
-                                let p_sta = if is_ul { p.sta_src_id } else { -1 };
-                                p_sta == sta_id 
-                                    && p.edca_ac == ac 
-                                    && (p.assigned_link_id.is_none() || p.assigned_link_id == Some(winner_link_id))
-                            });
+                           
+                            // NEW — O(1)
+                            let collision_mac_key: MacKey = (sta_id, ac, winner_link_id);
+                            let colliding_packet = self.mac_key_index
+                                .get(&collision_mac_key)
+                                .and_then(|&idx| self.per_flow_queues[idx].front());
 
                             // let ac_queue_length_when_out = *self.mac_queue_depths
                             //     .get(&key)
@@ -4052,13 +4060,14 @@ impl QueueModule {
                         }
                     }
 
-                    // CRITICAL FIX: Schedule wake-up after collision resolves
+                    // Schedule wake-up after collision resolves
                     context
                         .scheduler
                         .schedule_event(T_col_dur, Self::deque_schedule_service, ())
                         .unwrap();
 
                     // Mark that we scheduled something
+                    self.slot_tick_pending = true; // ← ADD — collision owns the next wake-up
                     transmissions_scheduled = true;
 
                     continue;
@@ -4068,27 +4077,45 @@ impl QueueModule {
                 let winner_key = contenders[0];
                 let (sta_id, ac, winner_link_id) = winner_key;
 
-                // Find first packet that matches this STA/AC
-                let first_ix = match self.queue.iter().position(|p| {
-                    let is_ul = p.sta_src_id > p.sta_dest_id;
-                    let p_sta = if is_ul { p.sta_src_id } else { -1 };
-                    p_sta == sta_id
-                        && p.edca_ac == ac
-                        && (p.assigned_link_id.is_none()
-                            || p.assigned_link_id == Some(winner_link_id)) // p_sta == sta_id
-                                                                           //     && p.edca_ac == ac
-                                                                           //     && p.assigned_link_id == Some(winner_link_id)
-                }) {
-                    Some(ix) => ix,
-                    None => {
-                        // Reload backoff for next round
-                        let st = self.dcf_mut(&winner_key); 
-                        st.on_success(st.param.cw_min);
-                        continue;
+                // NEW — O(1) primary; O(num_links) STR+ fallback
+                let winner_flow_idx = self.mac_key_index[&winner_key];
+                let first_packet: MpduPacket = {
+                    // Try primary deque first.
+                    let primary_front = self.per_flow_queues[winner_flow_idx].front().cloned();
+
+                    let found = if primary_front.is_some() {
+                        primary_front
+                    } else if STR_PLUS_MODE_MLO {
+                        // Primary deque empty: check other links' deques for same (STA, AC).
+                        let sta_for_deque: i32 = if sta_id == -1 { -1 } else { sta_id };
+                        let mut other_links: Vec<u8> = self.link_mediums.keys().copied()
+                            .filter(|&lid| lid != winner_link_id)
+                            .collect();
+                        other_links.sort_unstable();
+                        let mut alt_found = None;
+                        for alt_lid in other_links {
+                            let alt_key: MacKey = (sta_for_deque, ac, alt_lid);
+                            if let Some(&alt_idx) = self.mac_key_index.get(&alt_key) {
+                                if let Some(p) = self.per_flow_queues[alt_idx].front() {
+                                    alt_found = Some(p.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        alt_found
+                    } else {
+                        None
+                    };
+
+                    match found {
+                        Some(p) => p,
+                        None => {
+                            let st = self.dcf_mut(&winner_key);
+                            st.on_success(st.param.cw_min);
+                            continue;
+                        }
                     }
                 };
-
-                let first_packet = self.queue.get(first_ix).cloned().unwrap();
 
                 // Build AMPDU for this link
                 let (mut ampdu_to_send, ampdu_airtime) =
@@ -4101,21 +4128,13 @@ impl QueueModule {
                         "⚠️  LINK-{}: Empty AMPDU or zero airtime, skipping transmission",
                         link_id
                     );
-
+                    self.link_is_transmitting.insert(link_id, false); 
                     // Reset backoff for this MAC to try again
                     let st = self.dcf_mut(&winner_key); 
                     st.on_failure(); // Increase CW and redraw backoff
 
                     // schedule next tick to allow backoff countdown (no deadlock)
-                    context
-                        .scheduler
-                        .schedule_event(
-                            Duration::from_micros(SLOT_TIME_US),
-                            Self::deque_schedule_service,
-                            (),
-                        )
-                        .unwrap();
-
+                    self.schedule_tick(context); 
                     transmissions_scheduled = true; // Prevent duplicate scheduling
 
                     continue;
@@ -4174,14 +4193,20 @@ impl QueueModule {
             }
 
             // Schedule next slot check if needed
-            // Schedule next slot check if needed
-            if !transmissions_scheduled {
-                let mut need_next_slot = false;
+            
+            let mut need_next_slot = false;
 
-                            // AFTER — single O(M) pass, no queue scan:
-            if !self.queue.is_empty() {
+            if self.per_flow_queues.iter().any(|dq| !dq.is_empty()) {
                 'outer: for st in &self.dcf_values {
-                    let (sta_id, ac, _) = st.mac_key;
+                    let (sta_id, ac, link_id) = st.mac_key;
+
+                    // Skip links that are currently mid-TXOP — their send_ampdu
+                    // callback will reschedule when they finish. We only care about
+                    // links that are idle and still have work pending.
+                    if *self.link_is_transmitting.get(&link_id).unwrap_or(&false) {
+                        continue;
+                    }
+
                     if self.active_mac_key_counts.get(&(sta_id, ac)).copied().unwrap_or(0) > 0
                         && (st.backoff_frozen || st.backoff_counter > 0)
                     {
@@ -4191,16 +4216,8 @@ impl QueueModule {
                 }
             }
 
-                if need_next_slot {
-                    context
-                        .scheduler
-                        .schedule_event(
-                            Duration::from_micros(SLOT_TIME_US),
-                            Self::deque_schedule_service,
-                            (),
-                        )
-                        .unwrap();
-                }
+            if need_next_slot {
+                self.schedule_tick(context);
             }
         
         

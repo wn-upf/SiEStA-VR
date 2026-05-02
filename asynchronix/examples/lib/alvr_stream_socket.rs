@@ -2084,9 +2084,9 @@ impl StreamSocket {
                 })
                 .or_else(|| {
                     // Second fallback: If still no buffer, create a new emergency buffer
-                    println!(
-                        "Warning: Creating new emergency buffer - consider increasing buffer pool"
-                    );
+                    // println!(
+                    //     "Warning: Creating new emergency buffer - consider increasing buffer pool"
+                    // );
                     // println!(
                     //     "{:.9}[INSIDE2!]Buffer stats - Pool: {}, In-progress: {}",
                     //     context.scheduler.time().duration_since(TaiTime::EPOCH).as_secs_f32(),

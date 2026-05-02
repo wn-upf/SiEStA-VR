@@ -2647,7 +2647,7 @@ impl fmt::Display for HeaderALVRStream {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone,)]
 pub struct MpduPacket {
     pub packet_id: usize,
     pub length_packet_bits: usize,
