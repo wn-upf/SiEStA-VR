@@ -4969,6 +4969,7 @@ impl XRClient {
         )?;
         let mut packetz = MpduPacket::new();
         packetz.data_inner = buffer[0..packet_size].to_vec();
+        packetz.length_packet_bits = packet_size * 8; // convert to bits
 
         match packet {
             ClientControlPacket::NetworkStatistics(netpack) => {

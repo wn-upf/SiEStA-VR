@@ -2306,8 +2306,6 @@ pub struct QueueModule {
     pub active_mac_key_counts: HashMap<(i32, EdcaAc), usize>,
 
     pub slot_tick_pending: bool,
-
-
 }
 #[allow(unused)]
 impl QueueModule {
@@ -3331,6 +3329,7 @@ impl QueueModule {
 
     #[inline]
     pub async fn send_ampdu(&mut self, AMPDU_sent: AmpduPacket, context: &Context<Self>) {
+        let now = context.scheduler.time();
         let elapsed = context.scheduler.time();
         // self.shared_medium.release_txop(elapsed);
         let link_id = AMPDU_sent.link_id;
@@ -3353,12 +3352,51 @@ impl QueueModule {
 
         self.link_is_transmitting.insert(link_id, false);
 
+        if VISUALIZER_QUEUES_ENABLED {
+            let mac_key = AMPDU_sent.mac_key;
+            
+            // Reconstruct the per-deque depths at actual TXOP completion
+            let mut depth_by_key: HashMap<MacKey, usize> = HashMap::new();
+            for packet in &AMPDU_sent.mpdu_packets {
+                let lid = packet.assigned_link_id.unwrap_or(mac_key.2);
+                let is_ul = packet.sta_src_id > packet.sta_dest_id;
+                let correct_key: MacKey = (
+                    if is_ul { packet.sta_src_id } else { -1 },
+                    packet.edca_ac,
+                    lid,
+                );
+                // Record so we emit one final depth snapshot per deque
+                depth_by_key.entry(correct_key).or_insert_with(|| {
+                    self.mac_key_index.get(&correct_key)
+                        .map(|&idx| self.per_flow_queues[idx].len())
+                        .unwrap_or(0)
+                });
+            }
+
+            for (correct_key, depth) in depth_by_key {
+                self.emit_visualization_event(VizEvent::QueueDepth {
+                    t: t_secs(now),  // ← TXOP end, not build time
+                    mac_key: correct_key,
+                    depth,
+                    sta_src: if correct_key.0 == -1 { AMPDU_sent.sta_src_id } 
+                            else { correct_key.0 },
+                    sta_dest: AMPDU_sent.sta_dest_id,
+                });
+            }
+        }
+
+
+
         let mac_key = AMPDU_sent.mac_key;
         let wind_key: WindowKey = (mac_key.0, mac_key.2);
         // crate::print_dblue!("[DBG SEND AMPDU] KEY: {:?}", wind_key );
 
         let now_elapsed = elapsed.duration_since(TaiTime::EPOCH).as_secs_f64();
         let mcs_assigned = AMPDU_sent.mcs_assigned;
+        
+
+
+
         // Send to appropriate output port
         if let Some(output) = self.link_outputs.get_mut(&link_id) {
             output.send(AMPDU_sent).await;
@@ -3371,7 +3409,7 @@ impl QueueModule {
             self.schedule_tick(context);
         }
 
-
+        
 
         let dcf_data = {
             // Lock happens here
@@ -3690,22 +3728,24 @@ impl QueueModule {
             }
         }
 
-        // if VISUALIZER_QUEUES_ENABLED {
-        //     for (deq_idx, _) in &deque_sources {
-        //         let mac_key_v = self.dcf_values[*deq_idx].mac_key;
-        //         let new_depth  = self.per_flow_queues[*deq_idx].len();
-        //         let is_ul_dq   = mac_key_v.0 != -1;
-        //         if let Some(tx) = &self.viz_tx {
-        //             let _ = tx.try_send(VizEvent::QueueDepth {
-        //                 t:        t_secs(now),
-        //                 mac_key:  mac_key_v,
-        //                 depth:    new_depth,
-        //                 sta_src:  if is_ul_dq { mac_key_v.0 } else { -1 },
-        //                 sta_dest: if is_ul_dq { -1 } else { sta_dest_id },
-        //             });
-        //         }
-        //     }
-        // }
+        if VISUALIZER_QUEUES_ENABLED {
+            for (deq_idx, _count) in &deque_sources {
+                // Reverse-lookup: find the MacKey for this deq_idx
+                if let Some((&correct_key, _)) = self.mac_key_index.iter()
+                    .find(|(_, &idx)| idx == *deq_idx)
+                {
+                    let remaining_depth = self.per_flow_queues[*deq_idx].len();
+                    let is_ul = correct_key.0 != -1;
+                    self.emit_visualization_event(VizEvent::QueueDepth {
+                        t: t_secs(now),          // ← build time, not TXOP end
+                        mac_key: correct_key,
+                        depth: remaining_depth,  // ← 0 for fully drained deques
+                        sta_src: if is_ul { correct_key.0 } else { first_packet.sta_src_id },
+                        sta_dest: first_packet.sta_dest_id,
+                    });
+                }
+            }
+        }
 
         // ── Push failed (PL) packets back to the front for retransmission ────────────
         // Build set of packet_ids that survived PL
@@ -3727,53 +3767,6 @@ impl QueueModule {
             failed_pkts.reverse();
             for pkt in failed_pkts {
                 self.per_flow_queues[deq_idx].push_front(pkt);
-            }
-        }
-
-        if VISUALIZER_QUEUES_ENABLED {
-            // Count successful packets per deque using assigned_link_id
-            let mut success_per_deq: HashMap<usize, usize> = HashMap::new();
-            for packet in &self.aux_ampdu_serviced.mpdu_packets {
-                let lid = packet.assigned_link_id.unwrap_or(mac_key.2);
-                let is_ul_pkt = packet.sta_src_id > packet.sta_dest_id;
-                let k: MacKey = (if is_ul_pkt { packet.sta_src_id } else { -1 }, packet.edca_ac, lid);
-                if let Some(&d_idx) = self.mac_key_index.get(&k) {
-                    *success_per_deq.entry(d_idx).or_insert(0) += 1;
-                }
-            }
-
-            // Start each deque at its pre-removal depth: final_depth + success_count
-            let mut running_depth: HashMap<usize, usize> = deque_sources
-                .iter()
-                .map(|(deq_idx, taken)| {
-                    let succ    = success_per_deq.get(deq_idx).copied().unwrap_or(0);
-                    let final_d = self.per_flow_queues[*deq_idx].len();
-                    // final_d already has failed packets re-inserted. Remove them,
-                    // then add back all taken packets to get the true pre-removal depth.
-                    let failed  = taken - succ;
-                    (*deq_idx, final_d - failed + *taken)
-                })
-                .collect();
-
-            // Walk FORWARD, decrement for each removal — matches old retain loop behaviour
-            for packet in &self.aux_ampdu_serviced.mpdu_packets {
-                let lid = packet.assigned_link_id.unwrap_or(mac_key.2);
-                let is_ul_pkt = packet.sta_src_id > packet.sta_dest_id;
-                let correct_key: MacKey = (if is_ul_pkt { packet.sta_src_id } else { -1 }, packet.edca_ac, lid);
-                if let Some(&d_idx) = self.mac_key_index.get(&correct_key) {
-                    if let Some(depth) = running_depth.get_mut(&d_idx) {
-                        *depth -= 1;  // ← decrement, not increment
-                        if let Some(tx) = &self.viz_tx {
-                            let _ = tx.try_send(VizEvent::QueueDepth {
-                                t:        t_secs(now),
-                                mac_key:  correct_key,
-                                depth:    *depth,
-                                sta_src:  packet.sta_src_id,
-                                sta_dest: packet.sta_dest_id,
-                            });
-                        }
-                    }
-                }
             }
         }
 
