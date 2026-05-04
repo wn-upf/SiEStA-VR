@@ -2206,9 +2206,17 @@ impl StreamSocket {
 
                     frame_span = max_time.duration_since(min_time).as_secs_f32();
 
-                    frame_interarrival = max_time
-                        .duration_since(self.prev_frame_rx_instant)
+                    // frame_interarrival = max_time
+                    //     .duration_since(self.prev_frame_rx_instant)
+                    //     .as_secs_f32();
+
+                    frame_interarrival = min_time
+                        .checked_duration_since(self.prev_frame_rx_instant)
+                        .unwrap_or(Duration::ZERO)
                         .as_secs_f32();
+
+                    // Also update prev with min_time for consistency
+                    self.prev_frame_rx_instant = min_time;
 
                     if self.prev_frame_rx_instant == TaiTime::EPOCH {
                         frame_interarrival = Duration::ZERO.as_secs_f32(); // prevent very high values at begginning of simulation.

@@ -1566,13 +1566,15 @@ fn render_qdepth_panel(
     let t_hi = view.center_t + view.span_t * 0.5;
 
     // ── 1. Aggregate data ────────────────────────────────────────────────
-    let mut per_link_map: HashMap<(i32, EdcaAc, i32, i32, u8), Vec<usize>> = HashMap::new();
+    // Key is (sta_id, ac) — the actual deque owner, NOT (sta_src, sta_dest)
+    let mut per_link_map: HashMap<(i32, EdcaAc, u8), Vec<usize>> = HashMap::new();
     for (key, indices) in &idx.qdepth_by_key {
-        let link_id = key.2;
+        // key.0=sta_id (-1 for AP/DL), key.1=ac, key.2=link_id
+        // These map 1:1 to actual per_flow_queues deques
         for &ii in indices {
-            if let VizEvent::QueueDepth { sta_src, sta_dest, .. } = &idx.all[ii] {
+            if let VizEvent::QueueDepth { .. } = &idx.all[ii] {
                 per_link_map
-                    .entry((key.0, key.1, *sta_src, *sta_dest, link_id))
+                    .entry((key.0, key.1, key.2))
                     .or_default()
                     .push(ii);
             }
@@ -1582,20 +1584,18 @@ fn render_qdepth_panel(
         v.sort_by(|&a, &b| event_t(&idx.all[a]).partial_cmp(&event_t(&idx.all[b])).unwrap());
     }
 
-    // B: for each flow, merge all links into a single summed (time, total_depth) series
-    let mut agg_map: HashMap<(i32, EdcaAc, i32, i32), Vec<(f64, usize)>> = HashMap::new();
+    let mut agg_map: HashMap<(i32, EdcaAc), Vec<(f64, usize)>> = HashMap::new();
 
-    let flow_keys: std::collections::HashSet<(i32, EdcaAc, i32, i32)> = per_link_map
+    let flow_keys: std::collections::HashSet<(i32, EdcaAc)> = per_link_map
         .keys()
-        .map(|&(sid, ac, src, dst, _lid)| (sid, ac, src, dst))
+        .map(|&(sta_id, ac, _lid)| (sta_id, ac))
         .collect();
 
-    for flow_key @ (sta_id, ac, src, dst) in flow_keys {
-        // Flatten all (time, link_id, depth) events for this flow
+    for (sta_id, ac) in flow_keys {
         let mut all_events: Vec<(f64, u8, usize)> = per_link_map
             .iter()
-            .filter(|(&(s, a, sr, d, _), _)| s == sta_id && a == ac && sr == src && d == dst)
-            .flat_map(|(&(_, _, _, _, lid), indices)| {
+            .filter(|(&(s, a, _), _)| s == sta_id && a == ac)
+            .flat_map(|(&(_, _, lid), indices)| {
                 indices.iter().filter_map(move |&ii| {
                     if let VizEvent::QueueDepth { t, depth, .. } = &idx.all[ii] {
                         Some((*t, lid, *depth))
@@ -1608,7 +1608,6 @@ fn render_qdepth_panel(
 
         all_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-        // Walk events in time order, maintaining latest depth per link, emit running sum
         let mut link_depths: HashMap<u8, usize> = HashMap::new();
         let series: Vec<(f64, usize)> = all_events
             .into_iter()
@@ -1619,7 +1618,7 @@ fn render_qdepth_panel(
             })
             .collect();
 
-        agg_map.insert(flow_key, series);
+        agg_map.insert((sta_id, ac), series);
     }
 
     // ── 2. Max depth (zoom-safe) ─────────────────────────────────────────
@@ -1667,24 +1666,19 @@ fn render_qdepth_panel(
     // ── 5. Draw Series ───────────────────────────────────────────────────
 
     let mut keys_to_draw: Vec<_> = agg_map.keys().collect();
-    keys_to_draw.sort_by_key(|k| (ac_prio(k.1), k.0, k.2, k.3));
+    keys_to_draw.sort_by_key(|k| (ac_prio(k.1), k.0));
     keys_to_draw.reverse();
 
     let mut legend_y = panel_y + 24;
 
-    for &&(sta_id, ac, sta_src_id, sta_dst_id) in &keys_to_draw {
-        let series = &agg_map[&(sta_id, ac, sta_src_id, sta_dst_id)]; // ← renamed from `indices`
+    for &&(sta_id, ac) in &keys_to_draw {
+        let series = &agg_map[&(sta_id, ac)];
 
         // Highlight/Dim Decision
         let dimmed = if let Some(h) = highlight {
             let mut is_lit = false;
-            let target_sta_id = if sta_id == -1 { sta_src_id % 100 } else { -1 };
-            for &(h_mac, h_dest) in &h.txops {
-                if h_mac.0 == sta_id && h_mac.1 == ac {
-                    if sta_id == -1 {
-                        if target_sta_id == h_dest || sta_dst_id == h_dest { is_lit = true; break; }
-                    } else { is_lit = true; break; }
-                }
+            for &(h_mac, _h_dest) in &h.txops {
+                if h_mac.0 == sta_id && h_mac.1 == ac { is_lit = true; break; }
             }
             if !is_lit && h.txops.is_empty() {
                 if h.keys.iter().any(|k| k.0 == sta_id && k.1 == ac) { is_lit = true; }
@@ -1692,25 +1686,31 @@ fn render_qdepth_panel(
             !is_lit
         } else { false };
 
-        // Colors
-        let is_target_range = (100..=150).contains(&sta_src_id);
-        let pattern_type = if is_target_range { 0 } else { 2 };
-        let base_outline = if sta_src_id == -1 { ac_color(ac) }
-            else if is_target_range { [0xFF4444, 0xFF8822, 0xFFCC33, 0xFF55AA][(sta_src_id.abs() as usize) % 4] }
-            else { [0x44AAFF, 0x44FF88, 0x8844FF, 0x44FFEE][(sta_src_id.abs() as usize) % 4] };
+        // Colors — sta_id == -1 means AP-owned deque (all DL for this AC)
+        //          positive sta_id means UL deque owned by that STA
+        let is_dl = sta_id == -1;
+        let pattern_type = if is_dl { 0 } else { 2 };
+        let base_outline = if is_dl {
+            ac_color(ac)
+        } else {
+            [0xFF4444, 0xFF8822, 0xFFCC33, 0xFF55AA, 0x44AAFF, 0x44FF88, 0x8844FF, 0x44FFEE]
+                [(sta_id.unsigned_abs() as usize) % 8]
+        };
 
         let outline_color = maybe_dim(base_outline, dimmed);
         let fill_color = dim_color(outline_color, if dimmed { 2 } else { 6 });
         let fill_alpha = if dimmed { 0.1 } else { 0.3 };
 
-        // ↓ fixed: use (f64, usize) tuple API instead of old event index API
         let s = series.partition_point(|(t, _)| *t < t_lo);
         let is_active = (s > 0) || (s < series.len() && series[s].0 <= t_hi);
 
         // Legend
         if is_active && legend_y + 12 < panel_y + panel_h {
-            let lbl = if sta_src_id == -1 { format!("STA{:<3} {} (All)", sta_src_id, ac.to_string()) }
-                      else { format!("STA{:<3} {}", sta_src_id, ac.to_string()) };
+            let lbl = if is_dl {
+                format!("AP   {}", ac.to_string())
+            } else {
+                format!("STA{:<3} {}", sta_id, ac.to_string())
+            };
             render_text(buf, &lbl, 35, legend_y, stride, maybe_dim(0xdddddd, dimmed), 2);
             for px in 0..22usize {
                 if should_draw_pixel(px as i32, pattern_type) {
@@ -1726,11 +1726,11 @@ fn render_qdepth_panel(
         // Draw Line Series
         let mut prev: Option<(i32, i32)> = None;
         if s > 0 {
-            let (_, depth) = series[s - 1]; // ← now correctly reads from loop's own `series`
+            let (_, depth) = series[s - 1];
             prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(depth, max_depth)));
         }
 
-        for &(t, depth) in &series[s..] { // ← iterates (f64, usize) directly, no idx.all lookup
+        for &(t, depth) in &series[s..] {
             if t > t_hi { break; }
             let x = x_of(t, view, panel_x, panel_w);
             let y = calc_y(depth, max_depth);
@@ -1770,7 +1770,7 @@ fn render_qdepth_panel(
             }
         }
     }
-
+    
     render_text(buf, &format!("max={}", max_depth), panel_x + 6, panel_y + 6, stride, 0x888899, 2);
 }
 
