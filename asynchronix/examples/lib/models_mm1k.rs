@@ -2207,9 +2207,9 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
         dest_id: i32, 
         ampdu_packets: u16,
         mcs: u8,
-        stream_id: u16, // Added
-        frame_ids: Vec<u32>,  // Added
-        frame_losses: Option<Vec<u32>>, 
+        alvr_stream_ids: Vec<u16>, // Hold ALVR StreamIDs contained in AMPDU
+        alvr_frame_ids: Vec<u32>,  // Added
+        alvr_frame_losses: Option<Vec<u32>>, 
         
     },
     /// Collision interval on this link.
@@ -3517,6 +3517,7 @@ impl QueueModule {
             );
         }
         let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id;
+        let target_dest_id = first_packet.sta_dest_id;
         // println!("IS_UL = {} ( {} > {})", is_ul, first_packet.sta_src_id, first_packet.sta_dest_id);
 
         let mac_key: MacKey = if is_ul {
@@ -3576,6 +3577,9 @@ impl QueueModule {
                     Some(p) => p,
                     None => break,
                 };
+                if !is_ul && current_packet.sta_dest_id != target_dest_id {
+                    continue;
+                }
 
                 let new_total_length =
                     self.aux_ampdu_serviced.total_length + current_packet.length_packet_bits;
@@ -3722,11 +3726,31 @@ impl QueueModule {
 
         // ========== Remove successfully transmitted packets from queue ==========
         // ── Pop aggregated packets from their deques ─────────────────────────────────
-        for (deq_idx, count) in &deque_sources {
-            for _ in 0..*count {
-                self.per_flow_queues[*deq_idx].pop_front();
+        if is_ul {
+            // UL queues are per-flow: every packet in the deque belongs to the same
+            // (src, dest) pair, so the taken packets are always contiguous at the front.
+            for (deq_idx, count) in &deque_sources {
+                    for _ in 0..*count {
+                        self.per_flow_queues[*deq_idx].pop_front();
+                    }
+                }
+            } else {
+                // DL queue (-1, ac, link_id) is shared across all destination STAs.
+                // Packets for other destinations may be interleaved between the ones we
+                // just aggregated, so we remove exactly the packets that entered taken_snapshot.
+                let taken_ids: HashSet<usize> = taken_snapshot
+                    .iter()
+                    .map(|(_, p)| p.packet_id)
+                    .collect();
+                let involved_deques: HashSet<usize> = taken_snapshot
+                    .iter()
+                    .map(|(idx, _)| *idx)
+                    .collect();
+                for deq_idx in involved_deques {
+                    self.per_flow_queues[deq_idx]
+                        .retain(|p| !taken_ids.contains(&p.packet_id));
+                }
             }
-        }
 
         if VISUALIZER_QUEUES_ENABLED {
             for (deq_idx, _count) in &deque_sources {
@@ -4143,6 +4167,13 @@ impl QueueModule {
                         .into_iter()
                         .collect();
 
+                    let unique_stream_ids: Vec<u16> = ampdu_to_send.mpdu_packets
+                        .iter()
+                        .map(|p| p.header_alvr.stream_id)
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect();
+
                     if VISUALIZER_QUEUES_ENABLED {
                         self.emit_visualization_event(VizEvent::TxopStart {
                             t: t_secs(now),
@@ -4152,9 +4183,9 @@ impl QueueModule {
                             dest_id: first_packet.sta_dest_id,
                             ampdu_packets: ampdu_to_send.mpdu_packets.len() as u16,
                             mcs: ampdu_to_send.mcs_assigned,
-                            frame_ids: unique_ids, 
-                            stream_id: first_packet.header_alvr.stream_id,
-                            frame_losses: first_packet.header_alvr.frame_losses, 
+                            alvr_frame_ids: unique_ids, 
+                            alvr_stream_ids: unique_stream_ids,
+                            alvr_frame_losses: first_packet.header_alvr.frame_losses, 
                         });
                     }
                 }

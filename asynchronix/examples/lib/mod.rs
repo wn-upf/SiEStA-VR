@@ -79,13 +79,12 @@ pub mod gcc_nada_estimator;
 //     Lazy::new(|| Mutex::new(None))
 // }
 
-pub const DEBUG_EDCA: bool = true;
-pub const DEBUG_MLO: bool =  true;
+pub const DEBUG_EDCA: bool =            false;
+pub const DEBUG_MLO: bool =             false;
+pub const DEBUG_PRINT_ENABLED: bool =   false; // Change to false to disable
 
-pub const DEBUG_PRINT_ENABLED: bool = true; // Change to false to disable
+pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
 pub const USE_FFMPEG_DEMO: bool = false;
-
-pub const VISUALIZER_QUEUES_ENABLED: bool = true; // Set to true to enable visualizer events for queue states
 
 #[macro_export]
 macro_rules! debug_bgprint {
@@ -2810,7 +2809,7 @@ impl AmpduPacket {
         //     self.link_id, self.mpdu_packets.len(), self.total_length);
         for packet in &self.mpdu_packets {
             println!(
-                "\x1b[33m\t - Packet ID:{:>4}, L ={:>6} bits ({:>5} Bytes inner) | T_q: {:.3} ms , T_s: {:.3} ms | StreamID: {} | shard {:>3}/{:>3} , F:{:>5}\x1b[0m",
+                "\x1b[33m\t - Packet ID:{:>4}, L ={:>6} bits ({:>5} Bytes inner) | T_q: {:.3} ms , T_s: {:.3} ms | StreamID: {} | shard {:>3}/{:>3} , F:{:>5} | src: {} dest: {} \x1b[0m",
                 packet.packet_id,
                 packet.length_packet_bits,
                 packet.data_inner.len(), // data_inner length counts bytes
@@ -2820,6 +2819,8 @@ impl AmpduPacket {
                 packet.header_alvr.shard_index,
                 packet.header_alvr.shards_count.saturating_sub(1),
                 packet.header_alvr.next_packet_index,
+                packet.sta_src_id,
+                packet.sta_dest_id
             );
         }
     }

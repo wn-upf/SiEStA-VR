@@ -1280,7 +1280,7 @@ fn render_link_lane(
         let start = indices.partition_point(|&i| event_end(&idx.all[i]) < t_lo);
         for &ii in &indices[start..] {
             let ev = &idx.all[ii];
-            let (t, end, owner, dest_id, ampdu_packets, mcs, stream_id, frame_id, frame_losses) = match ev {
+            let (t, end, owner, dest_id, ampdu_packets, mcs, alvr_stream_ids, frame_id, frame_losses) = match ev {
                 VizEvent::TxopStart {
                     t, 
                     end, 
@@ -1288,12 +1288,12 @@ fn render_link_lane(
                     dest_id, 
                     ampdu_packets,
                     mcs, 
-                    stream_id, 
-                    frame_ids, 
-                    frame_losses, 
+                    alvr_stream_ids, 
+                    alvr_frame_ids, 
+                    alvr_frame_losses, 
                     .. 
-                } => (*t, *end, *owner, *dest_id, *ampdu_packets, *mcs, *stream_id, frame_ids, frame_losses),
-                _ => continue,
+                    } => (*t, *end, *owner, *dest_id, *ampdu_packets, *mcs, alvr_stream_ids.clone(), alvr_frame_ids.clone(), alvr_frame_losses.clone()),
+                    _ => continue,
             };
             if t > t_hi { break; }
  
@@ -1304,7 +1304,7 @@ fn render_link_lane(
             let lit     = is_key_highlighted(&owner, highlight);
             // 1. Determine the base color: Bright Red if it's a frame loss, otherwise AC color
             
-            let base_c = if stream_id == FRAMELOSS_PACKET {
+            let base_c = if alvr_stream_ids.contains(&FRAMELOSS_PACKET) {
                 0xff0000 // Bright red — frame loss, always distinct
             } else {
                 match owner.1 {
@@ -1342,16 +1342,22 @@ fn render_link_lane(
                 let label1 = format!("{:?} STA{}->{} MCS{}", owner.1, owner.0, dest_id, mcs);
                 render_text(buf, &label1, x0 as usize + 4, lane_y + 6, stride, 0x000000, 1);
                 if width > 100 {
-                    let label2 = if stream_id != FRAMELOSS_PACKET {
+
+                    let stream_names = alvr_stream_ids
+                        .iter()
+                        .map(|&id| crate::lib::alvr_stream_socket::get_stream_name(id))
+                        .collect::<Vec<_>>()
+                        .join("+"); // You can use ", " or "|" depending on your UI preference
+                    let label2 = if !alvr_stream_ids.contains(&FRAMELOSS_PACKET) {
                         format!(
                             "{}|frames: {:?} ({} MPDUs)",
-                            crate::lib::alvr_stream_socket::get_stream_name(stream_id),
+                            stream_names, 
                             frame_id, ampdu_packets
                         )
                     } else {
                         format!(
                             "{}|frames: {:?} ({} MPDUs)",
-                            crate::lib::alvr_stream_socket::get_stream_name(stream_id),
+                            stream_names,
                             frame_losses.clone().unwrap(), ampdu_packets
                         )
                     };

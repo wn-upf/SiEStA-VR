@@ -90,7 +90,7 @@ pub fn get_stream_name(stream_id: u16) -> &'static str {
         AUDIO => "AUDIO",
         VIDEO => "VIDEO",
         STATISTICS => "STATISTICS",
-        CONTROL_STREAM => "STATISTICS",
+        CONTROL_STREAM => "CONTROL",
         FRAMELOSS_PACKET => "FRAME LOSS",
 
         _ => "UNKNOWN_STREAM",

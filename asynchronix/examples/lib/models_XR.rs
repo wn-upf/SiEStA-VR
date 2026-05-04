@@ -2949,7 +2949,7 @@ impl XRServer {
 
                         // println!("SEND INSTANT: {}, now: {}, rtt: {}", format_elapsed!(send_instant), format_elapsed!(now), rtt.as_secs_f32());
                     } else {
-                        println!("frame {} RTT ZEROO!!!!!", network_stats.frame_index);
+                        println!("[{}] frame {} RTT ZEROO!!!!!", self.ip_self, network_stats.frame_index);
                         rtt = Duration::ZERO;
                     }
                 }
