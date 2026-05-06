@@ -76,11 +76,16 @@ pub const CONTROL_STREAM: u16 = 5;
 pub const FRAMELOSS_PACKET: u16 = 8;
 pub const FOVOPTIX_BW_PROBE: u16 = 9;
 
+pub const BG_TRAFFIC_STREAM_ID: u16 = 7; // For synthetic background traffic packets, if needed in the future
+
 pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 
 
 pub const USE_HARDCODED_SIZES_VALIDATION: bool = false;
 // Define the path to your hardcoded CSV
+
+
+
 
 
 pub fn get_stream_name(stream_id: u16) -> &'static str {
@@ -92,6 +97,7 @@ pub fn get_stream_name(stream_id: u16) -> &'static str {
         STATISTICS => "STATISTICS",
         CONTROL_STREAM => "CONTROL",
         FRAMELOSS_PACKET => "FRAME LOSS",
+        BG_TRAFFIC_STREAM_ID => "BG TRAFFIC",
 
         _ => "UNKNOWN_STREAM",
     }

@@ -1174,7 +1174,12 @@ pub struct ViewState {
     pub row_scroll:  i32,
     pub mouse_drag:  Option<(f32, f64)>,
 }
- 
+ fn brighten_color(color: u32) -> u32 {
+    let r = (((color >> 16) & 0xFF) * 5 / 4).min(255);
+    let g = (((color >>  8) & 0xFF) * 5 / 4).min(255);
+    let b = (( color        & 0xFF) * 5 / 4).min(255);
+    (r << 16) | (g << 8) | b
+}
 // ----------------------------------------------------------------
 // run_viewer  – now queries mouse pos and builds highlight each frame
 // ----------------------------------------------------------------
@@ -1208,9 +1213,9 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
         clamp_view(&mut view, &idx);
  
         // ── compute highlight: hover wins over cursor ──────────────────────
+        // ── compute highlight: legend hover > lane hover > cursor ──────────────
         let highlight_keys =
-            find_highlight_from_mouse(mx, my, &view, &idx, panel_x, panel_w)
-                .or_else(|| find_highlight_from_cursor(&view, &idx));
+            hit_test_qdepth_legend(mx, my, H - 180, 160, panel_x, &view, &idx);
  
         // ── render ────────────────────────────────────────────────────────
         buf.fill(0x0d0d12);
@@ -1227,7 +1232,7 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
             render_link_lane(
                 &mut buf, W, lane_y, lane_h,
                 panel_x, panel_w, &view, &idx, link_id,bw_link, 
-                &None, // no per-link highlight, 
+                &highlight_keys,   // ← was &None, // no per-link highlight, 
             );
             lane_y += lane_h + 5;
         }
@@ -1322,8 +1327,12 @@ fn render_link_lane(
                 }
             };
             // 2. Apply dimming if the stream isn't currently highlighted
-            let color = if lit { base_c } else { dim_color(base_c, 5) };
-
+            // let color = if lit { base_c } else { dim_color(base_c, 5) };
+            let color = match (lit, highlight.is_some()) {
+                (true,  true)  => brighten_color(base_c),  // actively highlighted → extra bright
+                (true,  false) => base_c,                  // nothing hovered → normal
+                (false, _)     => dim_color(base_c, 5),    // not in highlight set → dimmed
+            };
             // 3. Render the rectangle (already uses 'color')
             fill_rect(buf, stride, x0 as usize, lane_y + 2,
                     (x1 - x0) as usize, lane_h - 4, color);
@@ -1555,7 +1564,103 @@ fn draw_vline_alpha(buf: &mut [u32], stride: usize, x: i32, y0: i32, y1: i32, co
         }
     }
 }
+fn build_qdepth_series(
+    view: &ViewState,
+    idx: &VizIndex,
+) -> Vec<((i32, EdcaAc), Vec<(f64, usize)>)> {
+    let mut per_link_map: HashMap<(i32, EdcaAc, u8), Vec<usize>> = HashMap::new();
+    for (key, indices) in &idx.qdepth_by_key {
+        for &ii in indices {
+            if let VizEvent::QueueDepth { .. } = &idx.all[ii] {
+                per_link_map.entry((key.0, key.1, key.2)).or_default().push(ii);
+            }
+        }
+    }
+    for v in per_link_map.values_mut() {
+        v.sort_by(|&a, &b| event_t(&idx.all[a]).partial_cmp(&event_t(&idx.all[b])).unwrap());
+    }
 
+    let flow_keys: HashSet<(i32, EdcaAc)> = per_link_map
+        .keys()
+        .map(|&(s, a, _)| (s, a))
+        .collect();
+
+    let mut agg_map: HashMap<(i32, EdcaAc), Vec<(f64, usize)>> = HashMap::new();
+    for (sta_id, ac) in &flow_keys {
+        let mut all_events: Vec<(f64, u8, usize)> = per_link_map
+            .iter()
+            .filter(|(&(s, a, _), _)| s == *sta_id && a == *ac)
+            .flat_map(|(&(_, _, lid), indices)| {
+                indices.iter().filter_map(move |&ii| {
+                    if let VizEvent::QueueDepth { t, depth, .. } = &idx.all[ii] {
+                        Some((*t, lid, *depth))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        all_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let mut link_depths: HashMap<u8, usize> = HashMap::new();
+        let series = all_events
+            .into_iter()
+            .map(|(t, lid, depth)| {
+                link_depths.insert(lid, depth);
+                (t, link_depths.values().sum::<usize>())
+            })
+            .collect();
+        agg_map.insert((*sta_id, *ac), series);
+    }
+
+    let mut keys: Vec<_> = agg_map.keys().copied().collect();
+    keys.sort_by_key(|k| (ac_prio(k.1), k.0));
+    keys.reverse();
+    keys.into_iter().map(|k| (k, agg_map.remove(&k).unwrap())).collect()
+}
+
+fn hit_test_qdepth_legend(
+    mx: f32, my: f32,
+    panel_y: usize, panel_h: usize, panel_x: usize,
+    view: &ViewState, idx: &VizIndex,
+) -> Option<ActiveHighlights> {
+    // Legend lives in the left sidebar only
+    if (mx as usize) >= panel_x { return None; }
+    let my_u = my as usize;
+
+    let t_lo = view.center_t - view.span_t * 0.5;
+    let t_hi = view.center_t + view.span_t * 0.5;
+
+    let series_list = build_qdepth_series(view, idx);
+    let mut legend_y = panel_y + 24;
+    const LEGEND_ITEM_H: usize = 20;
+
+    for ((sta_id, ac), series) in &series_list {
+        let s = series.partition_point(|(t, _)| *t < t_lo);
+        let is_active = s > 0 || s < series.len() && series[s].0 <= t_hi;
+        if !is_active { continue; }
+
+        if my_u >= legend_y && my_u < legend_y + LEGEND_ITEM_H {
+            // Build an ActiveHighlights that lights up every MacKey for this flow
+            let mut h = ActiveHighlights {
+                keys: HashSet::new(),
+                txops: HashSet::new(),
+            };
+            for key in &idx.mac_keys_sorted {
+                if key.0 == *sta_id && key.1 == *ac {
+                    h.keys.insert(*key);
+                }
+            }
+            // Also mark matching txops so render_link_lane can see them
+            for key in &h.keys {
+                h.txops.insert((*key, -1)); // dest wildcard — checked by sta_id+ac below
+            }
+            return Some(h);
+        }
+        legend_y += LEGEND_ITEM_H;
+    }
+    None
+}
 // ----------------------------------------------------------------
 fn render_qdepth_panel(
     buf: &mut [u32], stride: usize,
@@ -1572,11 +1677,8 @@ fn render_qdepth_panel(
     let t_hi = view.center_t + view.span_t * 0.5;
 
     // ── 1. Aggregate data ────────────────────────────────────────────────
-    // Key is (sta_id, ac) — the actual deque owner, NOT (sta_src, sta_dest)
     let mut per_link_map: HashMap<(i32, EdcaAc, u8), Vec<usize>> = HashMap::new();
     for (key, indices) in &idx.qdepth_by_key {
-        // key.0=sta_id (-1 for AP/DL), key.1=ac, key.2=link_id
-        // These map 1:1 to actual per_flow_queues deques
         for &ii in indices {
             if let VizEvent::QueueDepth { .. } = &idx.all[ii] {
                 per_link_map
@@ -1631,7 +1733,6 @@ fn render_qdepth_panel(
     let mut max_depth = 1usize;
     for series in agg_map.values() {
         let s = series.partition_point(|(t, _)| *t < t_lo);
-        // last point before window (holds the step value at t_lo)
         if s > 0 {
             if series[s - 1].1 > max_depth { max_depth = series[s - 1].1; }
         }
@@ -1641,21 +1742,20 @@ fn render_qdepth_panel(
         }
     }
 
-    // ── 3. Define coordinate helpers (Moved UP for scope) ────────────────
+    // ── 3. Coordinate helpers ─────────────────────────────────────────────
     let base_y = panel_y as i32 + panel_h as i32 - 2;
     let calc_y = |depth: usize, max: usize| -> i32 {
         let raw = base_y - (((depth as f64 / max as f64) * (panel_h as f64 - 12.0)) as i32);
         raw.clamp(panel_y as i32, base_y)
     };
 
-    // ── 4. Grid Lines (Horizontal Units) ─────────────────────────────────
+    // ── 4. Grid Lines ─────────────────────────────────────────────────────
     let grid_step = match max_depth {
         0..=10   => 2,
         11..=30  => 5,
         31..=100 => 20,
         _        => 50,
     };
-
     let mut current_unit = grid_step;
     while current_unit <= max_depth {
         let grid_y = calc_y(current_unit, max_depth);
@@ -1669,8 +1769,7 @@ fn render_qdepth_panel(
         current_unit += grid_step;
     }
 
-    // ── 5. Draw Series ───────────────────────────────────────────────────
-
+    // ── 5. Draw Series ────────────────────────────────────────────────────
     let mut keys_to_draw: Vec<_> = agg_map.keys().collect();
     keys_to_draw.sort_by_key(|k| (ac_prio(k.1), k.0));
     keys_to_draw.reverse();
@@ -1680,7 +1779,7 @@ fn render_qdepth_panel(
     for &&(sta_id, ac) in &keys_to_draw {
         let series = &agg_map[&(sta_id, ac)];
 
-        // Highlight/Dim Decision
+        // ── Highlight / dim decision ──────────────────────────────────────
         let dimmed = if let Some(h) = highlight {
             let mut is_lit = false;
             for &(h_mac, _h_dest) in &h.txops {
@@ -1692,8 +1791,6 @@ fn render_qdepth_panel(
             !is_lit
         } else { false };
 
-        // Colors — sta_id == -1 means AP-owned deque (all DL for this AC)
-        //          positive sta_id means UL deque owned by that STA
         let is_dl = sta_id == -1;
         let pattern_type = if is_dl { 0 } else { 2 };
         let base_outline = if is_dl {
@@ -1704,13 +1801,13 @@ fn render_qdepth_panel(
         };
 
         let outline_color = maybe_dim(base_outline, dimmed);
-        let fill_color = dim_color(outline_color, if dimmed { 2 } else { 6 });
-        let fill_alpha = if dimmed { 0.1 } else { 0.3 };
+        let fill_color    = dim_color(outline_color, if dimmed { 2 } else { 6 });
+        let fill_alpha    = if dimmed { 0.1 } else { 0.3 };
 
         let s = series.partition_point(|(t, _)| *t < t_lo);
         let is_active = (s > 0) || (s < series.len() && series[s].0 <= t_hi);
 
-        // Legend
+        // ── Legend ────────────────────────────────────────────────────────
         if is_active && legend_y + 12 < panel_y + panel_h {
             let lbl = if is_dl {
                 format!("AP   {}", ac.to_string())
@@ -1729,11 +1826,11 @@ fn render_qdepth_panel(
             legend_y += 20;
         }
 
-        // Draw Line Series
-        let mut prev: Option<(i32, i32)> = None;
+        // ── Draw step series — prev carries (x, y, depth) ────────────────
+        let mut prev: Option<(i32, i32, usize)> = None;
         if s > 0 {
             let (_, depth) = series[s - 1];
-            prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(depth, max_depth)));
+            prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(depth, max_depth), depth));
         }
 
         for &(t, depth) in &series[s..] {
@@ -1741,9 +1838,35 @@ fn render_qdepth_panel(
             let x = x_of(t, view, panel_x, panel_w);
             let y = calc_y(depth, max_depth);
 
-            if let Some((px, py)) = prev {
-                for fill_x in px..x {
-                    if fill_x >= panel_x as i32 && fill_x < (panel_x + panel_w) as i32 {
+            if let Some((px, py, prev_depth)) = prev {
+                // Only paint the horizontal segment when the queue was non-zero
+                if prev_depth > 0 {
+                    for fill_x in px..x {
+                        if fill_x >= panel_x as i32 && fill_x < (panel_x + panel_w) as i32 {
+                            if should_draw_pixel(fill_x, pattern_type) {
+                                for ty in 0..3 {
+                                    let oi = (py as usize + ty) * stride + (fill_x as usize);
+                                    if oi < buf.len() { buf[oi] = outline_color; }
+                                }
+                            }
+                            draw_vline_alpha(buf, stride, fill_x, py + 3, base_y, fill_color, fill_alpha);
+                        }
+                    }
+                }
+                // Draw the vertical step transition only when at least one side is non-zero
+                if (prev_depth > 0 || depth > 0) && x >= panel_x as i32 && x < (panel_x + panel_w) as i32 {
+                    draw_vline(buf, stride, x, py, y, outline_color);
+                }
+            }
+            prev = Some((x, y, depth));
+        }
+
+        // ── Extend to right edge of panel ─────────────────────────────────
+        if let Some((px, py, prev_depth)) = prev {
+            if prev_depth > 0 {
+                let end_x = (panel_x + panel_w) as i32;
+                for fill_x in px..end_x {
+                    if fill_x >= panel_x as i32 && fill_x < end_x {
                         if should_draw_pixel(fill_x, pattern_type) {
                             for ty in 0..3 {
                                 let oi = (py as usize + ty) * stride + (fill_x as usize);
@@ -1753,34 +1876,16 @@ fn render_qdepth_panel(
                         draw_vline_alpha(buf, stride, fill_x, py + 3, base_y, fill_color, fill_alpha);
                     }
                 }
-                if x >= panel_x as i32 && x < (panel_x + panel_w) as i32 {
-                    draw_vline(buf, stride, x, py, y, outline_color);
-                }
             }
-            prev = Some((x, y));
         }
 
-        // Connect to end of screen
-        if let Some((px, py)) = prev {
-            let end_x = (panel_x + panel_w) as i32;
-            for fill_x in px..end_x {
-                if fill_x >= panel_x as i32 && fill_x < end_x {
-                    if should_draw_pixel(fill_x, pattern_type) {
-                        for ty in 0..3 {
-                            let oi = (py as usize + ty) * stride + (fill_x as usize);
-                            if oi < buf.len() { buf[oi] = outline_color; }
-                        }
-                    }
-                    draw_vline_alpha(buf, stride, fill_x, py + 3, base_y, fill_color, fill_alpha);
-                }
-            }
-        }
+
     }
-    
+
     render_text(buf, &format!("max={}", max_depth), panel_x + 6, panel_y + 6, stride, 0x888899, 2);
 }
 
- 
+
 pub struct VizIndex {
     pub all: Vec<VizEvent>,
     pub txops_by_link: HashMap<u8, Vec<usize>>,

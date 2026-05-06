@@ -83,7 +83,7 @@ pub const DEBUG_EDCA: bool =            false;
 pub const DEBUG_MLO: bool =             false;
 pub const DEBUG_PRINT_ENABLED: bool =   false; // Change to false to disable
 
-pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
+pub const VISUALIZER_QUEUES_ENABLED: bool = true; // Set to true to enable visualizer events for queue states
 pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
@@ -2618,7 +2618,7 @@ pub fn compute_mm1k_metrics(
 }
 
 #[allow(unused)]
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct HeaderALVRStream {
     pub packet_length_bytes: u32,
     pub stream_id: u16,
@@ -2627,6 +2627,22 @@ pub struct HeaderALVRStream {
     pub shard_index: u32,
     pub tx_instant: f32,
     pub frame_losses: Option<Vec<u32>>,
+}
+
+impl Default for HeaderALVRStream {
+    fn default() -> Self {
+        Self {
+            stream_id: crate::lib::alvr_stream_socket::BG_TRAFFIC_STREAM_ID,
+            
+            // The rest of the fields can still use their type's standard defaults
+            packet_length_bytes: Default::default(),
+            next_packet_index: Default::default(),
+            shards_count: Default::default(),
+            shard_index: Default::default(),
+            tx_instant: Default::default(),
+            frame_losses: Default::default(),
+        }
+    }
 }
 
 // Implementing Display for HeaderALVRStream
