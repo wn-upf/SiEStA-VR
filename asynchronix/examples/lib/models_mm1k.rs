@@ -2321,7 +2321,6 @@ impl QueueModule {
         packs_per_ampdu: usize,
         results_path: &str, 
         viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
-
     ) -> Self {
 
         let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();

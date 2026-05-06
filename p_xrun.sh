@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --export=ALL
-#SBATCH -J MLOrwalk         # job name
+#SBATCH -J SLOABR              # job name
 #SBATCH --partition=high         # partition
 #SBATCH --nodes=1                # Nodes PER TASK (Always 1 for arrays)
-#SBATCH --array=0-1          # <--- INPUT: Run n nodes total (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
-#SBATCH --mem=64G                # memory
-#SBATCH --time=96:00:00          # max walltime
+#SBATCH --array=0-2              # Use N parallel nodes (indices 0,1,2,3). Change to 0-9 for 10 nodes, etc.
+#SBATCH --mem=32G                # memory
+#SBATCH --time=48:00:00          # max walltime
 #SBATCH --cpus-per-task=30       # CPUs per node
 #SBATCH -o logs_hpc/%x_%A_%a.out # %A=Job ID, %a=Array Index (Log separation)
 #SBATCH -e logs_hpc/%x_%A_%a.err
@@ -19,22 +19,22 @@ export PATH=$HOME/.local/bin:$PATH
 
 #############################################################################
 
-NUMBER_OF_JOBS=10
-SERIAL_EXECUTION=0
+NUMBER_OF_JOBS=30
+SERIAL_EXECUTION=1
 DEBUG_PROFILE_FLAMEGRAPH=0
 DEBUG_LOGS=0
 
 #############################################################################
+# results_path_name="Results_ABRSLOMLOrwalk_${SLURM_ARRAY_JOB_ID}"
+results_path_name="Results_quicktest_${SLURM_ARRAY_JOB_ID}"
 
-
-results_path_name="Results_CBRDebug2_${SLURM_ARRAY_JOB_ID}"
-
-simTime=25.0
+simTime=35.0
 EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
 k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
 # RANDOM_SEEDS=(1)
 MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
+# RANDOM_SEEDS=({1..10})  
 RANDOM_SEEDS=(1)
 ############################################################################# <- BG Traffic
 N_BGs=( 0 )                    ## Nº of BG STAs
@@ -44,12 +44,13 @@ rates_bps_BGtraffic=( 5000 )
 
 IS_UL_BG=( 0 )                 ## 0 -> DL, 1-> UL, 2 -> DL + UL 
 ############################################################################# <- 802.11 Parameters
-EDCA_BE_MODE=(0) ## Set to 1 if we want all traffic in EDCA_BE category. 
-NO_UL_TRACKING_MODE=(0)
-MLO_CONFIGS=("MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
-# MLO_CONFIGS=( "SLO80"  )                         ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
+EDCA_BE_MODE=(0)                ## Set to 1 if we want all traffic in EDCA_BE category. 
+DELAY_MAC_ENABLED_MODE=(0 1)    ## Set to 1 if we want 1 Gbps bandwidth emulation link between MAC and APP layers, to have realistic delays that affect A-MPDU aggregation and channel efficiency.
+NO_UL_TRACKING_MODE=(0)         ## Set to 1 if we want to disable UL tracking generation in the VR Model, to reduce UL churn. Less realistic but useful for debugging 802.11 behavior.
+# MLO_CONFIGS=("SLO80" "MLO80-80") ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
+MLO_CONFIGS=( "SLO80" "MLO80-80" )                         ## Regex-based: e.g. SLO80 -> SLO with 80 Mhz, MLO80-80 -> MLO with two 80_80 MHz channels, MLO80-320 for 80_320 MHz channels, etc. 
 
-RANDOMWALK_TEST=0            ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
+RANDOMWALK_TEST=0           ## If == 1: Randomizes all VR STA distances, makes them move in 1 m radius, 5 m/s speed random walk. 
 distance_list=( 5.0 )         ## Distance to AP of users                                     (ignored when RANDOMWALK_TEST==1)
 num_close_users=( 0 )        ## number of users with alternate AP distance (to the one configured before)
 distance_close_users=( 1.5 ) ## to have heterogeneous distances            (if num_close_users > 0)
@@ -64,11 +65,11 @@ DETERMINISTIC_FIBONACCI_VIDEO=(0)
 intrarefresh_choice=( 1 )       ## Only if USE_FFMPEG_DEMO enabled: intra-refresh enabled if true
 GoP_sizes=(30)                  ## Only if USE_FFMPEG_DEMO enabled:  Make sure GoP size is always less than (T_abr·FPS), and a common divisor to them
 
-N_XR=( 1 2 3 4 ) 
+N_XR=( 1 2 3 4 5 6 7 8 9 10 ) 
 # N_XR=( 1 ) 
-initial_bitrate_mbps=( 70.0 80.0 90.0 100.0 )  
+initial_bitrate_mbps=( 10.0 20.0 30.0 40.0 50.0 60.0 70.0 80.0 90.0 100.0 )  
 fps_list=( 90.0 )    
-ABR_ENABLED=( 0 )             ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
+ABR_ENABLED=( 0 )              ## 0 -> CBR, 1 -> NeSt-VR, 2-> Everest, 3-> ReinforcementLearner, 4-> GCC, 5-> NADA, 6-> FoVOptix 
 T_ABR=1.0                       ## Time between updates of ABR, also affects RL mode. 
 nest_profiles=( 1 )             ## specific setting for Nest-vr
 video_samples=("snow_short")    ## snow (HEVC only for now), swordsmith (AV1/HEVC)
@@ -100,7 +101,7 @@ if [ "${SLURM_ARRAY_TASK_ID:-0}" -eq 0 ]; then
     cp "$0" "$results_path_name/run_script_backup.sh"
 fi
 
-cargo build --release --example XR_sim 
+# cargo build --release --example XR_sim 
 sleep 4 ## for being able to see if there were any errors before sims start, else it would use the last best compiled code
 
 for test in "${EMU_TEST_TYPE[@]}"; do 
@@ -126,34 +127,36 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                                 for codec in "${CODEC_CHOICES[@]}"; do 
                                                                                     for tracking_bool in "${NO_UL_TRACKING_MODE[@]}"; do
                                                                                         for deterministic_video_sizes in "${DETERMINISTIC_FIBONACCI_VIDEO[@]}"; do 
-
-                                                                                            NAME_ABR="ABR_${ABR}"
-                                                                                            (( SIM_COUNT++ ))  # ← increment
-
-                                                                                            echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes" >> "$temp_file"
-                                                                                                                                                                        
-                                                                                            if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
-                                                                                                rm out_log.ans
-                                                                                                script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes" "out_log.ans"
+                                                                                            for delay_app_mac_enabled in "${DELAY_MAC_ENABLED_MODE[@]}"; do
                                                                                                 
-                                                                                                sleep 5
-                                                                                            fi
+                                                                                                NAME_ABR="ABR_${ABR}"
+                                                                                                (( SIM_COUNT++ ))  # ← increment
 
-                                                                                            # # --- Profiling Block using samply ---
-                                                                                            # if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
-                                                                                            #     echo "--- Starting Profiling Run for XR_sim with samply ---"
+                                                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes $delay_app_mac_enabled" >> "$temp_file"
+                                                                                                                                                                            
+                                                                                                if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
+                                                                                                    rm out_log.ans
+                                                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes $delay_app_mac_enabled" "out_log.ans"
+                                                                                                    
+                                                                                                    sleep 5
+                                                                                                fi
 
-                                                                                            #     # Define the output file
-                                                                                            #     PROFILE_HTML_FILE="XR_sim_profile.html"
+                                                                                                # # --- Profiling Block using samply ---
+                                                                                                # if [ "$DEBUG_PROFILE_FLAMEGRAPH" = 1 ]; then
+                                                                                                #     echo "--- Starting Profiling Run for XR_sim with samply ---"
 
-                                                                                            #     # Run samply against your binary and arguments. 
-                                                                                            #     # The -o flag tells samply where to save the profile.
-                                                                                            #     samply record -o $PROFILE_HTML_FILE -- \
-                                                                                            #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
+                                                                                                #     # Define the output file
+                                                                                                #     PROFILE_HTML_FILE="XR_sim_profile.html"
 
-                                                                                            #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
-                                                                                            #     exit 0 # Exit the job after generating the profile
-                                                                                            # fi 
+                                                                                                #     # Run samply against your binary and arguments. 
+                                                                                                #     # The -o flag tells samply where to save the profile.
+                                                                                                #     samply record -o $PROFILE_HTML_FILE -- \
+                                                                                                #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
+
+                                                                                                #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
+                                                                                                #     exit 0 # Exit the job after generating the profile
+                                                                                                # fi 
+                                                                                            done
                                                                                         done
                                                                                     done
                                                                                 done

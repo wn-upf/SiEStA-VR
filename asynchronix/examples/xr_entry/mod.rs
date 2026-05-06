@@ -34,7 +34,7 @@ use std::{fs, u64};
 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 36;
+pub const NUM_INPUT_ARGS_SIM: usize = 37;
 pub const BANDWIDTH_EMU_LINK: Option<u64> = Some(100E7 as u64); // 1 Gbps link
 // pub const BANDWIDTH_EMU_LINK: Option<u64> = None; 
 
@@ -103,6 +103,7 @@ impl VRPair {
         random_seed: u64, 
         no_uplink_tracking_bool: bool, 
         deterministic_frame_sizes_bool: bool, 
+        delay_app_mac_enabled_bool: bool, 
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -214,12 +215,19 @@ impl VRPair {
 
         );
 
+        let bandwidth_emu_link = if delay_app_mac_enabled_bool {
+            BANDWIDTH_EMU_LINK // Convert Mbps to bps
+        } else {
+            None
+        };
+
+
         let mut emu_link = EmulatedLink::new_with_bandwidth(
             MAX_EMULATED_QUEUE_PACKETS,
             t0,
             netem_values_tests,
             server_ip,
-            BANDWIDTH_EMU_LINK,
+            bandwidth_emu_link,
         );
 
         let mbox_xr_server = Mailbox::new();
@@ -384,6 +392,7 @@ pub struct SimParams {
     pub name_results_path: String, 
     pub no_uplink_tracking: usize, 
     pub deterministic_frame_sizes: usize, 
+    pub delay_app_mac_enabled: usize, 
 }
 
 pub fn parse_cli_to_params(args: &[String]) -> SimParams {
@@ -427,6 +436,8 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
         name_results_path:      args[33].clone(),
         no_uplink_tracking:     args[34].parse().unwrap(), 
         deterministic_frame_sizes: args[35].parse().unwrap(), 
+        delay_app_mac_enabled: args[36].parse().unwrap(), 
+
     }
 }
 
@@ -473,6 +484,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         name_results_path, 
         no_uplink_tracking, 
         deterministic_frame_sizes, 
+        delay_app_mac_enabled, 
     } = params;
 
     let start_sim_benchmark = std::time::Instant::now();
@@ -481,6 +493,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let edca_be_bool = edca_be != 0;
     let no_uplink_tracking_bool = no_uplink_tracking!=0; 
     let deterministic_frame_sizes_bool = deterministic_frame_sizes != 0; 
+    let delay_app_mac_enabled_bool = delay_app_mac_enabled != 0;
+
+
 
     // Set test constants based on test_type parameter
     let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
@@ -517,8 +532,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
    let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_noTrack{:.0}_fibonacciVid{:.0}",
-        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, mlo_policy.to_string(), no_uplink_tracking as usize, deterministic_frame_sizes, );
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_noTrack{:.0}_fibonacciVid{:.0}_delayAppMac{:.0}",
+        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, mlo_policy.to_string(), no_uplink_tracking as usize, deterministic_frame_sizes, delay_app_mac_enabled, 
+    );
         
     let output_path = format!("{}/{}", name_results_path ,name_folder);
     fs::create_dir_all(&output_path).expect("Failed to create directory");
@@ -621,12 +637,20 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     );
 
     let localhost_v4 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+
+    let bandwidth_emu_link = if delay_app_mac_enabled_bool {
+            BANDWIDTH_EMU_LINK // Convert Mbps to bps
+        } else {
+            None
+    };
+
     let scratch_link = EmulatedLink::new_with_bandwidth(
         MAX_EMULATED_QUEUE_PACKETS,
         t0,
         Some((test_bandwidth, test_jitter, test_pl, test_random)),
         localhost_v4,
-        BANDWIDTH_EMU_LINK,
+        bandwidth_emu_link,
     );
 
     let codec_selection = match codec_input_arg.as_str() {
@@ -702,6 +726,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             seed, 
             no_uplink_tracking_bool, 
             deterministic_frame_sizes_bool, 
+            delay_app_mac_enabled_bool, 
 
         );
 
