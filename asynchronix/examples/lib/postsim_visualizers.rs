@@ -401,7 +401,7 @@ fn render_abr_sidebar(
             "{:.0}M  RTT{:.0}ms  FLR{:.2}  TP{:.0}M",
             bitrate_mbps, rtt_ms, flr, tp_mbps,
         );
-        render_text(buf, &line, 8, ly, stride, color, TEXT_SIZE_ABR);
+        render_text(buf, &line, 8, ly, stride, color, 1.4);
         ly += 22;
     }
 }
@@ -1769,6 +1769,610 @@ fn draw_vline(buf: &mut [u32], stride: usize, x: i32, y0: i32, y1: i32, color: u
             if i < buf.len() {
                 buf[i] = blend_screen(buf[i], color);
             }
+        }
+    }
+}
+
+
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// #############################################################################
+/////////////////////////////////////// UNIFIED VIEWER /////////////////////////////////////////
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+// ##########################################################################################################################################################
+
+//
+// Combines the ABR metrics viewer and the Channel/Queue viewer into a single
+// resizable minifb window.  A draggable vertical splitter divides the two panels;
+// the cursor is shared (right-click moves it in both); zoom/pan are independent.
+//
+// Drop-in usage:
+//
+//   run_unified_viewer(viz_idx, abr_idx, &link_configs);
+//
+// Everything else (render_abr_strip, render_link_lane, …) stays unchanged.
+
+// Pull in the two existing viewer modules' internals.
+// Adjust paths to match your actual module layout.
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+
+const WIN_W:     usize = 2200;   // default window width  (user can resize)
+const WIN_H:     usize = 950;    // default window height
+const HUD_H:     usize = 50;     // shared top HUD strip
+const TIME_AXIS: usize = 22;     // shared bottom time-axis strip
+const SPLITTER_W: usize = 6;     // draggable divider width
+
+// ── Input focus: which panel receives keyboard zoom/pan ───────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum Focus { Channel, Abr }
+
+// ── Splitter drag state ───────────────────────────────────────────────────────
+
+struct SplitterDrag {
+    start_mx:     f32,
+    start_split:  f32,   // split_frac at drag start
+}
+
+// ── Unified viewer state ──────────────────────────────────────────────────────
+
+struct UnifiedState {
+    // Fraction of (total width) given to the left (Channel) panel.
+    // Range: 0.2 .. 0.8
+    split_frac:    f32,
+    splitter_drag: Option<SplitterDrag>,
+
+    focus:         Focus,
+
+    // ── Channel viewer ────────────────────────────────────────────────────────
+    ch_view:       ViewState,
+
+    // ── ABR viewer ────────────────────────────────────────────────────────────
+    abr_view:      AbrViewState,
+
+    // Sync mode: when true, right-click moves both cursors together.
+    sync_cursor:   bool,
+}
+
+impl UnifiedState {
+    fn new(viz_idx: &VizIndex, abr_idx: &AbrVizIndex) -> Self {
+        let ch_full  = viz_idx.t_max  - viz_idx.t_min;
+        let abr_full = abr_idx.t_max - abr_idx.t_min;
+
+        Self {
+            split_frac:    0.50,
+            splitter_drag: None,
+            focus:         Focus::Channel,
+
+            ch_view: ViewState {
+                center_t:      (viz_idx.t_min  + viz_idx.t_max)  * 0.5,
+                span_t:        (ch_full  * 0.05).max(0.001),
+                cursor_t:      viz_idx.t_min,
+                paused:        false,
+                selected_link: None,
+                row_scroll:    0,
+                mouse_drag:    None,
+            },
+
+            abr_view: AbrViewState {
+                center_t:   (abr_idx.t_min + abr_idx.t_max) * 0.5,
+                span_t:     abr_full,
+                cursor_t:   abr_idx.t_min,
+                mouse_drag: None,
+            },
+
+            sync_cursor: true,
+        }
+    }
+}
+
+// ── Shared HUD ────────────────────────────────────────────────────────────────
+
+fn render_unified_hud(
+    buf:    &mut [u32],
+    stride: usize,
+    state:  &UnifiedState,
+    ch_idx: &VizIndex,
+    abr_idx: &AbrVizIndex,
+) {
+    use crate::lib::render_text;
+
+    fill_rect(buf, stride, 0, 0, stride, HUD_H, 0x1a1a24);
+
+    let ch  = &state.ch_view;
+    let abr = &state.abr_view;
+
+    let label = format!(
+        "CH: t={:.4}s  span={:.3}ms    |    ABR: t={:.4}s  span={:.3}ms    |    \
+         [S] sync-cursor:{}  [F] focus:{}  [ESC] quit",
+        ch.center_t,
+        ch.span_t * 1000.0,
+        abr.center_t,
+        abr.span_t * 1000.0,
+        if state.sync_cursor { "ON " } else { "OFF" },
+        if state.focus == Focus::Channel { "CH" } else { "ABR" },
+    );
+    render_text(buf, &label, 12, 14, stride, 0xeeeeee, 1.5);
+
+    let hint = "L-Drag pan  R-Click cursor  Scroll zoom  Tab link-filter  \
+                Click panel to focus  drag divider to resize";
+    render_text(buf, hint, 12, 34, stride, 0x667788, 1.3);
+}
+
+// ── Shared time-axis at the bottom ───────────────────────────────────────────
+//
+// The channel viewer's time range drives the left ruler;
+// the ABR viewer's drives the right ruler.
+
+fn render_unified_time_axis(
+    buf:     &mut [u32],
+    stride:  usize,
+    w:       usize,
+    h:       usize,
+    state:   &UnifiedState,
+    ch_px:   usize,   // left-panel content x-start
+    ch_pw:   usize,   // left-panel content width
+    abr_px:  usize,   // right-panel content x-start
+    abr_pw:  usize,   // right-panel content width
+) {
+    use crate::lib::render_text;
+
+    let y = h - TIME_AXIS;
+    fill_rect(buf, stride, 0, y, w, TIME_AXIS, 0x0d0d12);
+
+    // ── Left ruler (channel view) ─────────────────────────────────────────────
+    let ch = &state.ch_view;
+    let t0 = ch.center_t - ch.span_t * 0.5;
+    let t1 = ch.center_t + ch.span_t * 0.5;
+    let raw = ch.span_t / 8.0;
+    let mag = 10f64.powf(raw.log10().floor());
+    let step = (raw / mag).ceil() * mag;
+    if step > 0.0 {
+        let mut t = (t0 / step).ceil() * step;
+        while t <= t1 {
+            let x = x_of(t, ch, ch_px, ch_pw);
+            draw_vline(buf, stride, x, y as i32, (y + 5) as i32, 0x555566);
+            render_text(buf, &format!("{:.2}s", t), x as usize + 2, y + 4, stride, 0x778899, 1.3);
+            t += step;
+        }
+    }
+
+    // ── Right ruler (ABR view) ────────────────────────────────────────────────
+    let abr = &state.abr_view;
+    let t0a = abr.center_t - abr.span_t * 0.5;
+    let t1a = abr.center_t + abr.span_t * 0.5;
+    let raw_a = abr.span_t / 8.0;
+    let mag_a = 10f64.powf(raw_a.log10().floor());
+    let step_a = (raw_a / mag_a).ceil() * mag_a;
+    if step_a > 0.0 {
+        let mut t = (t0a / step_a).ceil() * step_a;
+        while t <= t1a {
+            let x = abr_x_of(t, abr, abr_px, abr_pw);
+            if x >= abr_px as i32 && x < (abr_px + abr_pw) as i32 {
+                abr_draw_vline(buf, stride, x, y as i32, (y + 5) as i32, 0x554455);
+                render_text(buf, &format!("{:.2}s", t), x as usize + 2, y + 4, stride, 0x997788, 1.3);
+            }
+            t += step_a;
+        }
+    }
+}
+
+// ── Splitter rendering ────────────────────────────────────────────────────────
+
+fn render_splitter(buf: &mut [u32], stride: usize, h: usize, x: usize) {
+    let color_base  = 0x334455_u32;
+    let color_light = 0x6688aa_u32;
+    for yy in HUD_H..(h - TIME_AXIS) {
+        for xx in x..(x + SPLITTER_W) {
+            let i = yy * stride + xx;
+            if i < buf.len() {
+                // Draw a bright centre line in the splitter for grip affordance
+                buf[i] = if xx == x + SPLITTER_W / 2 { color_light } else { color_base };
+            }
+        }
+    }
+}
+
+// ── Input routing ─────────────────────────────────────────────────────────────
+
+fn handle_unified_input(
+    window:      &Window,
+    state:       &mut UnifiedState,
+    ch_idx:      &VizIndex,
+    abr_idx:     &AbrVizIndex,
+    w:           usize,
+    h:           usize,
+    // Pre-computed panel geometry so the router can decide quickly
+    ch_panel_x:  usize,
+    ch_panel_w:  usize,
+    abr_panel_x: usize,
+    abr_panel_w: usize,
+    splitter_x:  usize,
+    num_links:   u8,
+) {
+    let (mx, my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
+    let mx_u     = mx as usize;
+
+    // ── Global keys ──────────────────────────────────────────────────────────
+
+    if window.is_key_pressed(Key::S, minifb::KeyRepeat::No) {
+        state.sync_cursor = !state.sync_cursor;
+    }
+
+    // Click inside a panel transfers keyboard focus to it (and lets scroll work)
+    if window.get_mouse_down(MouseButton::Left) {
+        if mx_u < splitter_x                         { state.focus = Focus::Channel; }
+        else if mx_u >= splitter_x + SPLITTER_W      { state.focus = Focus::Abr;     }
+    }
+
+    // ── Splitter drag ─────────────────────────────────────────────────────────
+
+    let in_splitter = mx_u >= splitter_x && mx_u < splitter_x + SPLITTER_W;
+
+    if window.get_mouse_down(MouseButton::Left) && (in_splitter || state.splitter_drag.is_some()) {
+        if let Some(ref drag) = state.splitter_drag {
+            let dx = (mx - drag.start_mx) as f32;
+            state.split_frac = (drag.start_split + dx / w as f32).clamp(0.20, 0.80);
+        } else if in_splitter {
+            state.splitter_drag = Some(SplitterDrag {
+                start_mx:    mx,
+                start_split: state.split_frac,
+            });
+        }
+        // Consume — don't route anything else while dragging the splitter
+        if state.splitter_drag.is_some() { return; }
+    } else {
+        state.splitter_drag = None;
+    }
+
+    // ── Route scroll / right-click to the panel under the mouse ──────────────
+
+    let mouse_in_ch  = mx_u >= ch_panel_x  && mx_u < ch_panel_x  + ch_panel_w;
+    let mouse_in_abr = mx_u >= abr_panel_x && mx_u < abr_panel_x + abr_panel_w;
+
+    // Shared right-click cursor
+    if window.get_mouse_down(MouseButton::Right) {
+        if mouse_in_ch {
+            let n = (mx as f64 - ch_panel_x as f64) / ch_panel_w as f64;
+            let t = state.ch_view.center_t - state.ch_view.span_t * 0.5
+                  + state.ch_view.span_t * n;
+            let t = t.clamp(ch_idx.t_min, ch_idx.t_max);
+            state.ch_view.cursor_t = t;
+            if state.sync_cursor { state.abr_view.cursor_t = t; }
+        } else if mouse_in_abr {
+            let n = (mx as f64 - abr_panel_x as f64) / abr_panel_w as f64;
+            let t = state.abr_view.center_t - state.abr_view.span_t * 0.5
+                  + state.abr_view.span_t * n;
+            let t = t.clamp(abr_idx.t_min, abr_idx.t_max);
+            state.abr_view.cursor_t = t;
+            if state.sync_cursor { state.ch_view.cursor_t = t; }
+        }
+    }
+
+    // Scroll zoom — route by mouse position
+    if let Some((_, scroll_y)) = window.get_scroll_wheel() {
+        if scroll_y.abs() > 0.0 {
+            let factor = if scroll_y > 0.0 { 0.85 } else { 1.18 };
+            if mouse_in_ch {
+                let n = ((mx as f64) - ch_panel_x as f64) / ch_panel_w as f64;
+                let n = n.clamp(0.0, 1.0);
+                let anchor = state.ch_view.center_t - state.ch_view.span_t * 0.5
+                           + state.ch_view.span_t * n;
+                state.ch_view.span_t   *= factor;
+                state.ch_view.center_t  = anchor - state.ch_view.span_t * (n - 0.5);
+            } else if mouse_in_abr {
+                let n = ((mx as f64) - abr_panel_x as f64) / abr_panel_w as f64;
+                let n = n.clamp(0.0, 1.0);
+                let anchor = state.abr_view.center_t - state.abr_view.span_t * 0.5
+                           + state.abr_view.span_t * n;
+                state.abr_view.span_t   *= factor;
+                state.abr_view.center_t  = anchor - state.abr_view.span_t * (n - 0.5);
+            }
+        }
+    }
+
+    // ── Left-drag pan — routed by focus ──────────────────────────────────────
+
+    if window.get_mouse_down(MouseButton::Left) {
+        match state.focus {
+            Focus::Channel => {
+                if let Some((mx0, ct0)) = state.ch_view.mouse_drag {
+                    let dx = (mx - mx0) as f64;
+                    state.ch_view.center_t = ct0 - dx * (state.ch_view.span_t / ch_panel_w as f64);
+                } else if mouse_in_ch {
+                    state.ch_view.mouse_drag = Some((mx, state.ch_view.center_t));
+                }
+            }
+            Focus::Abr => {
+                if let Some((mx0, ct0)) = state.abr_view.mouse_drag {
+                    let dx = (mx - mx0) as f64;
+                    state.abr_view.center_t = ct0 - dx * (state.abr_view.span_t / abr_panel_w as f64);
+                } else if mouse_in_abr {
+                    state.abr_view.mouse_drag = Some((mx, state.abr_view.center_t));
+                }
+            }
+        }
+    } else {
+        state.ch_view.mouse_drag  = None;
+        state.abr_view.mouse_drag = None;
+    }
+
+    // ── Keyboard — routed to the focused panel ────────────────────────────────
+
+    match state.focus {
+        Focus::Channel => {
+            // Reuse handle_input but pass a view wrapper so drag/scroll don't double-apply.
+            // Simpler: just replicate the key checks for the channel view.
+            let v = &mut state.ch_view;
+            if window.is_key_down(Key::Left)  || window.is_key_down(Key::A) { v.center_t -= v.span_t * 0.02; }
+            if window.is_key_down(Key::Right) || window.is_key_down(Key::D) { v.center_t += v.span_t * 0.02; }
+            if window.is_key_pressed(Key::Equal,      minifb::KeyRepeat::Yes)
+            || window.is_key_pressed(Key::NumPadPlus, minifb::KeyRepeat::Yes) { v.span_t *= 0.8; }
+            if window.is_key_pressed(Key::Minus,       minifb::KeyRepeat::Yes)
+            || window.is_key_pressed(Key::NumPadMinus, minifb::KeyRepeat::Yes) { v.span_t *= 1.25; }
+            if window.is_key_pressed(Key::Home, minifb::KeyRepeat::No) { v.center_t = ch_idx.t_min + v.span_t * 0.5; }
+            if window.is_key_pressed(Key::End,  minifb::KeyRepeat::No) { v.center_t = ch_idx.t_max - v.span_t * 0.5; }
+            if window.is_key_pressed(Key::Space,minifb::KeyRepeat::No) { v.paused = !v.paused; }
+            if window.is_key_pressed(Key::Tab,  minifb::KeyRepeat::No) {
+                v.selected_link = match v.selected_link {
+                    None    => Some(0),
+                    Some(l) if l + 1 < num_links => Some(l + 1),
+                    _       => None,
+                };
+            }
+            if window.is_key_down(Key::PageDown) { v.row_scroll += 4; }
+            if window.is_key_down(Key::PageUp)   { v.row_scroll  = (v.row_scroll - 4).max(0); }
+        }
+        Focus::Abr => {
+            let v = &mut state.abr_view;
+            if window.is_key_down(Key::Left)  || window.is_key_down(Key::A) { v.center_t -= v.span_t * 0.05; }
+            if window.is_key_down(Key::Right) || window.is_key_down(Key::D) { v.center_t += v.span_t * 0.05; }
+            if window.is_key_pressed(Key::Equal,      minifb::KeyRepeat::Yes)
+            || window.is_key_pressed(Key::NumPadPlus, minifb::KeyRepeat::Yes) { v.span_t *= 0.8; }
+            if window.is_key_pressed(Key::Minus,       minifb::KeyRepeat::Yes)
+            || window.is_key_pressed(Key::NumPadMinus, minifb::KeyRepeat::Yes) { v.span_t *= 1.25; }
+            if window.is_key_pressed(Key::Home, minifb::KeyRepeat::No) { v.center_t = abr_idx.t_min + v.span_t * 0.5; }
+            if window.is_key_pressed(Key::End,  minifb::KeyRepeat::No) { v.center_t = abr_idx.t_max - v.span_t * 0.5; }
+        }
+    }
+
+    // ── Clamp both views ─────────────────────────────────────────────────────
+
+    clamp_view(&mut state.ch_view, ch_idx);
+    clamp_abr_view(&mut state.abr_view, abr_idx);
+}
+
+/// Mirror of channel viewer's clamp_view for the ABR state.
+/// Mirror of channel viewer's clamp_view for the ABR state.
+fn clamp_abr_view(v: &mut AbrViewState, idx: &AbrVizIndex) {
+    let full = (idx.t_max - idx.t_min).max(1e-6);
+    
+    // 1. Clamp the zoom level so it cannot exceed the total duration of the data
+    v.span_t = v.span_t.clamp(1e-3, full);
+    
+    // 2. Clamp the panning so the left and right edges never go past t_min and t_max.
+    // When zoomed fully out (span_t == full), the min and max of this clamp 
+    // evaluate to the exact center, perfectly locking the view in place.
+    v.center_t = v.center_t.clamp(
+        idx.t_min + v.span_t * 0.5,
+        idx.t_max - v.span_t * 0.5,
+    );
+}
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+pub fn run_unified_viewer(
+    viz_idx:      VizIndex,
+    abr_idx:      AbrVizIndex,
+    link_configs: Vec<LinkConfig>,     // ← now owned, move into thread freely
+    )
+ {
+    let mut window = Window::new(
+        "WLAN Sim + ABR Viewer",
+        WIN_W, WIN_H,
+        WindowOptions {
+            resize:     true,
+            scale_mode: minifb::ScaleMode::Stretch,
+            ..WindowOptions::default()
+        },
+    ).expect("Failed to open unified viewer");
+
+    let mut buf   = vec![0u32; WIN_W * WIN_H];
+    let mut state = UnifiedState::new(&viz_idx, &abr_idx);
+
+    // Pre-build ABR strip descriptors (doesn't change frame-to-frame)
+    let abr_strips  = make_strips(&abr_idx);
+    let n_abr       = abr_strips.len();
+    let num_links   = link_configs.len() as u8;
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+
+        // ── Live dimensions ───────────────────────────────────────────────────
+        let (w, h) = window.get_size();
+        if buf.len() != w * h { buf.resize(w * h, 0); }
+
+        // ── Derive panel geometry from split_frac ─────────────────────────────
+        //
+        // Total horizontal space after HUD/time-axis is handled vertically.
+        // Left (channel) panel content area:
+        //   x: CH_SIDEBAR_W .. split_px
+        // Right (ABR) panel content area:
+        //   x: split_px + SPLITTER_W + ABR_SIDEBAR_W .. w
+        //
+        // We keep the sidebars at the far edges; the splitter is between them.
+
+        let split_px       = ((w as f32 * state.split_frac) as usize).clamp(200, w.saturating_sub(400));
+        let splitter_x     = split_px;                                    // left edge of splitter bar
+
+        // Channel viewer occupies [0 .. split_px]
+        const CH_SIDEBAR_W: usize = 240;
+        let ch_panel_x = CH_SIDEBAR_W;
+        let ch_panel_w = split_px.saturating_sub(CH_SIDEBAR_W + 4);
+
+        // ABR viewer occupies [split_px + SPLITTER_W .. w]
+        const ABR_SIDEBAR_W: usize = 280;
+        let abr_left   = split_px + SPLITTER_W;
+        let abr_panel_x = abr_left + ABR_SIDEBAR_W;
+        let abr_panel_w = w.saturating_sub(abr_left + ABR_SIDEBAR_W + 4);
+
+        let content_top    = HUD_H;
+        let content_bottom = h.saturating_sub(TIME_AXIS);
+        let content_h      = content_bottom - content_top;
+
+        // ABR strips vertical layout
+        const PANEL_PAD: usize = 10;
+        let abr_usable_h = content_h.saturating_sub(PANEL_PAD);
+        let abr_strip_h  = (abr_usable_h / n_abr).max(1);
+
+        // ── Input ─────────────────────────────────────────────────────────────
+        handle_unified_input(
+            &window, &mut state,
+            &viz_idx, &abr_idx,
+            w, h,
+            ch_panel_x, ch_panel_w,
+            abr_panel_x, abr_panel_w,
+            splitter_x,
+            num_links,
+        );
+
+        // ── Render ────────────────────────────────────────────────────────────
+        buf.fill(0x0d0d12);
+
+        // 1. Channel panel (left half)
+        {
+            // Channel HUD (left portion only) — the shared HUD overwrites the
+            // full top strip afterwards, so we render channel row-state here.
+            let ch_highlight = {
+                let (mx, my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
+                hit_test_qdepth_legend(mx, my, content_bottom - 180, 160, ch_panel_x, &state.ch_view, &viz_idx)
+            };
+
+            let mut lane_y = content_top + 10;
+            let lane_h     = 50usize;
+            for (link_id_usize, link_cfg) in link_configs.iter().enumerate() {
+                render_link_lane(
+                    &mut buf, w, lane_y, lane_h,
+                    ch_panel_x, ch_panel_w,
+                    &state.ch_view, &viz_idx,
+                    link_id_usize as u8, link_cfg.bandwidth_mhz,
+                    &ch_highlight,
+                );
+                lane_y += lane_h + 5;
+            }
+
+            let rows_top    = lane_y + 10;
+            let rows_bottom = content_bottom - 200;
+            render_mackey_rows(
+                &mut buf, w, rows_top, rows_bottom,
+                ch_panel_x, ch_panel_w,
+                &state.ch_view, &viz_idx,
+                &None,
+            );
+            render_qdepth_panel(
+                &mut buf, w,
+                content_bottom - 180, 160,
+                ch_panel_x, ch_panel_w,
+                &state.ch_view, &viz_idx,
+                &ch_highlight,
+            );
+
+            // Channel cursor line
+            let cx = x_of(state.ch_view.cursor_t, &state.ch_view, ch_panel_x, ch_panel_w);
+            if cx >= ch_panel_x as i32 && cx < (ch_panel_x + ch_panel_w) as i32 {
+                draw_vline(&mut buf, w, cx, content_top as i32, content_bottom as i32, 0xffff66);
+            }
+        }
+
+        // 2. ABR panel (right half)
+        {
+            // ABR sidebar (relative to abr_left)
+            render_abr_sidebar_clipped(
+                &mut buf, w, h, abr_left, &abr_idx, &state.abr_view,
+            );
+
+            // ABR metric strips
+            for (si, strip) in abr_strips.iter().enumerate() {
+                let strip_y = content_top + PANEL_PAD + si * abr_strip_h;
+                render_abr_strip(
+                    &mut buf, w,
+                    strip, strip_y, abr_strip_h,
+                    abr_panel_x, abr_panel_w,
+                    &state.abr_view, &abr_idx,
+                );
+            }
+
+            // ABR cursor line
+            let cx = abr_x_of(state.abr_view.cursor_t, &state.abr_view, abr_panel_x, abr_panel_w);
+            if cx >= abr_panel_x as i32 && cx < (abr_panel_x + abr_panel_w) as i32 {
+                abr_draw_vline(&mut buf, w, cx, content_top as i32, content_bottom as i32, 0xffff66);
+            }
+        }
+
+        // 3. Splitter bar
+        render_splitter(&mut buf, w, h, splitter_x);
+
+        // 4. Shared HUD (draws over both halves)
+        render_unified_hud(&mut buf, w, &state, &viz_idx, &abr_idx);
+
+        // 5. Shared time axis
+        render_unified_time_axis(
+            &mut buf, w, w, h,
+            &state,
+            ch_panel_x,  ch_panel_w,
+            abr_panel_x, abr_panel_w,
+        );
+
+        // 6. Focus indicator — thin coloured border on the active panel
+        let focus_color = 0x334488_u32;
+        let (fx, fw) = if state.focus == Focus::Channel {
+            (0usize, split_px)
+        } else {
+            (split_px + SPLITTER_W, w.saturating_sub(split_px + SPLITTER_W))
+        };
+        for x in fx..(fx + fw).min(w) {
+            let top_i = HUD_H * w + x;
+            let bot_i = (content_bottom - 1) * w + x;
+            if top_i < buf.len() { buf[top_i] = focus_color; }
+            if bot_i < buf.len() { buf[bot_i] = focus_color; }
+        }
+
+        window.update_with_buffer(&buf, w, h).unwrap();
+    }
+}
+
+// ── Helper: render ABR sidebar offset to the right half ──────────────────────
+//
+// The original render_abr_sidebar draws at x=0; we need it offset to `x_off`.
+// Rather than refactoring the original, we render into a small temp buffer and
+// blit it across.  This keeps both viewers' internals unchanged.
+
+fn render_abr_sidebar_clipped(
+    buf:     &mut [u32],
+    stride:  usize,
+    h:       usize,
+    x_off:   usize,
+    idx:     &AbrVizIndex,
+    view:    &AbrViewState,
+) {
+    let sidebar_w = SIDEBAR_W.min(stride.saturating_sub(x_off));
+
+    // Temp buffer — same height, sidebar width only
+    let mut tmp = vec![0u32; sidebar_w * h];
+    render_abr_sidebar(&mut tmp, sidebar_w, h, idx, view);
+
+    // Blit into the main buffer at x_off
+    for row in 0..h {
+        let dst_row = row * stride + x_off;
+        let src_row = row * sidebar_w;
+        let copy_w  = sidebar_w.min(stride.saturating_sub(x_off));
+        if dst_row + copy_w <= buf.len() {
+            buf[dst_row..dst_row + copy_w].copy_from_slice(&tmp[src_row..src_row + copy_w]);
         }
     }
 }
