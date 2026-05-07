@@ -3,7 +3,8 @@ use crate::lib::alvr_stream_socket::{ALVR_ORIGINAL_SOCKETRX_BEHAVIOR, VideoCodec
 use crate::lib::models_mm1k::{
     EmulatedLink, LinkConfig, MAX_EMULATED_QUEUE_PACKETS, NetworkPattern, QueueModule, VizEvent 
 };
-
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use crate::lib::models_mm1k::{LinkSelectionStrategy, StaCapabilities};
 use crate::lib::{
     exponential,
@@ -17,6 +18,7 @@ use crate::lib::{
     DebugColor,
     PREFIX_ID_DOWNLINK,
     PREFIX_ID_UPLINK,
+    postsim_visualizers::*, 
 };
 use anyhow::Result;
 #[allow(unused)]
@@ -32,6 +34,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use std::{fs, u64};
 
+use crate::lib::postsim_visualizers::{event_t, event_end}; 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
 pub const NUM_INPUT_ARGS_SIM: usize = 37;
@@ -104,6 +107,8 @@ impl VRPair {
         no_uplink_tracking_bool: bool, 
         deterministic_frame_sizes_bool: bool, 
         delay_app_mac_enabled_bool: bool, 
+        abr_event_tx: Option<crossbeam::channel::Sender<crate::lib::models_XR::AbrEvent>>, 
+
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
 
@@ -163,6 +168,8 @@ impl VRPair {
             edca_be_mode,
             codec_selection,
             results_path_name, 
+            abr_event_tx,   
+
         );
 
         let mut xr_client = XRClient::new(
@@ -576,6 +583,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let available_links: Vec<_> = link_configs.iter().map(|lc| lc.link_id).collect();
 
     let (viz_tx, viz_rx) = crossbeam::channel::unbounded::<VizEvent>();
+    let (abr_tx, abr_rx) = crossbeam::channel::unbounded::<crate::lib::models_XR::AbrEvent>();
 
 
     // Create and configure queue
@@ -695,6 +703,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             }
         
         println!("[VR session {}] Final: {}, ABR_duration: {:.3}" , i, current_abr_mode, current_t_update_abr);
+        
 
         let vr = VRPair::new(
             i,
@@ -727,6 +736,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             no_uplink_tracking_bool, 
             deterministic_frame_sizes_bool, 
             delay_app_mac_enabled_bool, 
+            Some(abr_tx.clone()), 
 
         );
 
@@ -1045,7 +1055,46 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             .unwrap();
     }
     // Run simulation
-    simu.step_by(Duration::from_secs_f64(stoptime));
+    // simu.step_by(Duration::from_secs_f64(stoptime));
+
+        // Run simulation
+    let ctrl_c_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ctrl_c_ctrlc = ctrl_c_count.clone();
+
+    ctrlc::set_handler(move || {
+        let count = ctrl_c_ctrlc.fetch_add(1, Ordering::SeqCst) + 1;
+        match count {
+            1 => println!("\n[SIM] Ctrl+C received — stopping simulation early, visualizers will still run... (press Ctrl+C twice more to force quit)"),
+            2 => println!("\n[SIM] Press Ctrl+C one more time to force quit."),
+            _ => {
+                println!("\n[SIM] Force quitting.");
+                std::process::exit(1);
+            }
+        }
+    })
+    .expect("Failed to set Ctrl+C handler");
+
+    let sim_step  = Duration::from_millis(50);
+    let sim_total = Duration::from_secs_f64(stoptime);
+    let mut sim_elapsed = Duration::ZERO;
+
+    while sim_elapsed < sim_total && ctrl_c_count.load(Ordering::SeqCst) == 0 {
+        let remaining  = sim_total - sim_elapsed;
+        let next_chunk = sim_step.min(remaining);
+        simu.step_by(next_chunk);
+        sim_elapsed += next_chunk;
+    }
+
+    let was_interrupted = ctrl_c_count.load(Ordering::SeqCst) > 0;
+    if was_interrupted {
+        println!(
+            "[SIM] Interrupted at {:.2?} / {}s simulated. Proceeding to visualizers...",
+            sim_elapsed, stoptime
+        );
+    }
+
+
+
 
     if let Ok(stats) = queue_stats.lock() {
         stats.print_nicely();
@@ -1055,1109 +1104,49 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         "Simulation {} completed in {:.2?} (simulated time: {}s)",
         sim_unique_string, _elapsed, stoptime
     );
-    // ===== Drain viz events =====
-    let mut events: Vec<VizEvent> = Vec::with_capacity(1024);
+
+    drop(abr_tx); 
+    drop(viz_tx); 
+
+
+    let mut abr_events: Vec<crate::lib::models_XR::AbrEvent> = Vec::new();
+    while let Ok(ev) = abr_rx.try_recv() {
+        abr_events.push(ev);
+    }
+    println!("[ABR-VIZ] Collected {} ABR events.", abr_events.len());
+
+    let mut viz_events: Vec<VizEvent> = Vec::with_capacity(1024);
     while let Ok(ev) = viz_rx.try_recv() {
-        events.push(ev);
+        viz_events.push(ev);
     }
-
-    if VISUALIZER_QUEUES_ENABLED == true {
+    if VISUALIZER_QUEUES_ENABLED {
         println!(
-            "[VIZ] Collected {} events, spanning from [{:.6}, {:.6}] s of simulated time ",
-            events.len(),
-            events.first().map(event_t).unwrap_or(0.0),
-            events.last().map(event_end).unwrap_or(0.0),
+            "[CHANNEL-VIZ] Collected {} events, spanning from [{:.6}, {:.6}] s of simulated time",
+            viz_events.len(),
+            viz_events.first().map(event_t).unwrap_or(0.0),
+            viz_events.last().map(event_end).unwrap_or(0.0),
         );
-
-
-        // ===== Open the viewer (blocks until the user closes the window) =====
-        if !events.is_empty() {
-            let idx = VizIndex::build(events);
-            run_viewer(idx, &link_configs_clone);
-        } else {
-            println!("[VIZ] No events to visualize (was viz_tx wired up?).");
-        }
     }
+
+    let abr_handle = if !abr_events.is_empty() {
+        let abr_idx = AbrVizIndex::build(abr_events);
+        Some(std::thread::spawn(move || run_abr_viewer(abr_idx)))
+    } else {
+        println!("[ABR-VIZ] No ABR events to visualize.");
+        None
+    };
+
+    let viz_handle = if VISUALIZER_QUEUES_ENABLED && !viz_events.is_empty() {
+        let viz_idx = VizIndex::build(viz_events);
+        let link_configs_clone = link_configs_clone.clone();
+        Some(std::thread::spawn(move || run_viewer(viz_idx, &link_configs_clone)))
+    } else {
+        println!("[VIZ] No queue events to visualize (was viz_tx wired up?).");
+        None
+    };
+
+    if let Some(h) = abr_handle { h.join().unwrap(); }
+    if let Some(h) = viz_handle { h.join().unwrap(); }
 
     Ok(())
-}
-
-
-use std::collections::{HashMap, HashSet};
-use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
- 
-/// Dim a colour by `factor` (integer division per channel, no bleed).
-fn dim_color(color: u32, factor: u32) -> u32 {
-    let r = ((color >> 16) & 0xFF) / factor;
-    let g = ((color >> 8)  & 0xFF) / factor;
-    let b = ( color        & 0xFF) / factor;
-    (r << 16) | (g << 8) | b
-}
- 
-/// Return `color` dimmed ×5 when `dimmed` is true, unchanged otherwise.
-#[inline]
-fn maybe_dim(color: u32, dimmed: bool) -> u32 {
-    if dimmed { dim_color(color, 5) } else { color }
-}
- 
-/// Is this MacKey fully represented in the highlight set?
-/// `None` highlight = everything is full-bright.
-#[inline]
-fn is_key_highlighted(key: &MacKey, highlight: &Option<ActiveHighlights>) -> bool {
-    match highlight {
-        None => true, // Default to bright if nothing is hovered
-        Some(h) => h.keys.contains(key),
-    }
-}
-
-fn collect_highlights_at(t: f64, link_id: u8, idx: &VizIndex, h: &mut ActiveHighlights) {
-    // Check TXOPs
-    if let Some(indices) = idx.txops_by_link.get(&link_id) {
-        for &ii in indices {
-            let ev = &idx.all[ii];
-            if let VizEvent::TxopStart { t: start, end, owner, dest_id, .. } = ev {
-                if t >= *start && t <= *end {
-                    h.keys.insert(*owner);
-                    h.txops.insert((*owner, *dest_id));
-                }
-            }
-        }
-    }
-    // Check Collisions
-    if let Some(indices) = idx.collisions_by_link.get(&link_id) {
-        for &ii in indices {
-            let ev = &idx.all[ii];
-            if let VizEvent::Collision { t: start, end, contenders, .. } = ev {
-                if t >= *start && t <= *end {
-                    for &c in contenders {
-                        h.keys.insert(c);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn find_highlight_from_cursor(view: &ViewState, idx: &VizIndex) -> Option<ActiveHighlights> {
-    let mut h = ActiveHighlights {
-        keys: HashSet::new(),
-        txops: HashSet::new(),
-    };
-
-    for &link_id in &[0u8, 1u8] {
-        collect_highlights_at(view.cursor_t, link_id, idx, &mut h);
-    }
-
-    if h.keys.is_empty() {
-        None
-    } else {
-        Some(h)
-    }
-}
-fn find_highlight_from_mouse(
-    mx: f32, my: f32,
-    view: &ViewState, idx: &VizIndex,
-    panel_x: usize, panel_w: usize,
-) -> Option<ActiveHighlights> {
-    if (mx as usize) < panel_x { return None; }
-
-    let t0 = view.center_t - view.span_t * 0.5;
-    let n = ((mx as f64) - panel_x as f64) / panel_w as f64;
-    let t_mouse = t0 + n * view.span_t;
-
-    const LANE_H: usize = 50;
-    let mut lane_y = 60usize;
-    
-    for &link_id in &[0u8, 1u8] {
-        let my_u = my as usize;
-        if my_u >= lane_y && my_u < lane_y + LANE_H {
-            let mut h = ActiveHighlights {
-                keys: HashSet::new(),
-                txops: HashSet::new(),
-            };
-            
-            collect_highlights_at(t_mouse, link_id, idx, &mut h);
-            
-            if !h.keys.is_empty() {
-                return Some(h);
-            }
-        }
-        lane_y += LANE_H + 5;
-    }
-    None
-}
- 
-// ----------------------------------------------------------------
-// ViewState  (unchanged struct, shown for context)
-// ----------------------------------------------------------------
-pub struct ViewState {
-    pub center_t:    f64,
-    pub span_t:      f64,
-    pub cursor_t:    f64,
-    pub paused:      bool,
-    pub selected_link: Option<u8>,
-    pub row_scroll:  i32,
-    pub mouse_drag:  Option<(f32, f64)>,
-}
- fn brighten_color(color: u32) -> u32 {
-    let r = (((color >> 16) & 0xFF) * 5 / 4).min(255);
-    let g = (((color >>  8) & 0xFF) * 5 / 4).min(255);
-    let b = (( color        & 0xFF) * 5 / 4).min(255);
-    (r << 16) | (g << 8) | b
-}
-// ----------------------------------------------------------------
-// run_viewer  – now queries mouse pos and builds highlight each frame
-// ----------------------------------------------------------------
-pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
-    const W: usize = 1500;
-    const H: usize = 900;
-    let mut window =
-        Window::new("WLAN Sim Playback", W, H, WindowOptions::default()).unwrap();
- 
-    let mut buf = vec![0u32; W * H];
-    let mut view = ViewState {
-        center_t:      (idx.t_min + idx.t_max) * 0.5,
-        span_t:        ((idx.t_max - idx.t_min) * 0.05).max(0.001),
-        cursor_t:      idx.t_min,
-        paused:        false,
-        selected_link: None,
-        row_scroll:    0,
-        mouse_drag:    None,
-    };
- 
-    let panel_x = 270;
-    let panel_w = W - panel_x - 20;
- 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        // ── read mouse position BEFORE handle_input (which also reads it for drag)
-        let (mx, my) = window
-            .get_mouse_pos(MouseMode::Discard)
-            .unwrap_or((0.0, 0.0));
- 
-        handle_input(&window, &mut view, &idx, panel_w, panel_x, link_configs.len() as u8);
-        clamp_view(&mut view, &idx);
- 
-        // ── compute highlight: hover wins over cursor ──────────────────────
-        // ── compute highlight: legend hover > lane hover > cursor ──────────────
-        let highlight_keys =
-            hit_test_qdepth_legend(mx, my, H - 180, 160, panel_x, &view, &idx);
- 
-        // ── render ────────────────────────────────────────────────────────
-        buf.fill(0x0d0d12);
-        render_hud(&mut buf, W, &view, &idx);
- 
-        let mut lane_y = 60usize;
-        let lane_h     = 50usize;
-        
-
-        // for &link_id in &[0u8, 1u8] {
-        for (link_id_usize, link_config) in link_configs.iter().enumerate() {
-            let link_id = link_id_usize as u8;
-            let bw_link = link_config.bandwidth_mhz; 
-            render_link_lane(
-                &mut buf, W, lane_y, lane_h,
-                panel_x, panel_w, &view, &idx, link_id,bw_link, 
-                &highlight_keys,   // ← was &None, // no per-link highlight, 
-            );
-            lane_y += lane_h + 5;
-        }
- 
-        let rows_top    = lane_y + 10;
-        let rows_bottom = H - 200;
-        render_mackey_rows(
-            &mut buf, W, rows_top, rows_bottom,
-            panel_x, panel_w, &view, &idx,
-            // &highlight_keys,
-            &None, // no per-row highlight, since we already have per-link highlight in the link lanes
-        );
-        render_qdepth_panel(
-            &mut buf, W, H - 180, 160,
-            panel_x, panel_w, &view, &idx,
-            &highlight_keys,
-        );
- 
-        // cursor line (drawn last so it's always on top)
-        let cursor_x = x_of(view.cursor_t, &view, panel_x, panel_w);
-        if cursor_x >= panel_x as i32 && cursor_x <= (panel_x + panel_w) as i32 {
-            draw_vline(&mut buf, W, cursor_x, 50, (H - 20) as i32, 0xffff66);
-        }
- 
-        window.update_with_buffer(&buf, W, H).unwrap();
-    }
-}
-
-fn is_uplink(dest_id: i32) -> bool {
-    dest_id > PREFIX_ID_DOWNLINK && dest_id < PREFIX_ID_UPLINK   // AP is always STA-id 0; adjust if your topology differs
-}
-
-// ----------------------------------------------------------------
-// render_link_lane  – dims or highlights each TXOP / collision bar
-// ----------------------------------------------------------------
-fn render_link_lane(
-    buf: &mut [u32], stride: usize,
-    lane_y: usize, lane_h: usize,
-    panel_x: usize, panel_w: usize,
-    view: &ViewState, idx: &VizIndex, link_id: u8,
-    bandwidth_mhz: u16, 
-    highlight: &Option<ActiveHighlights>,
-) {
-    fill_rect(buf, stride, panel_x, lane_y, panel_w, lane_h, 0x14141c);
- 
-    let t_lo = view.center_t - view.span_t * 0.5;
-    let t_hi = view.center_t + view.span_t * 0.5;
- 
-    if let Some(indices) = idx.txops_by_link.get(&link_id) {
-        let start = indices.partition_point(|&i| event_end(&idx.all[i]) < t_lo);
-        for &ii in &indices[start..] {
-            let ev = &idx.all[ii];
-            let (t, end, owner, dest_id, ampdu_packets, mcs, alvr_stream_ids, frame_id, frame_losses) = match ev {
-                VizEvent::TxopStart {
-                    t, 
-                    end, 
-                    owner, 
-                    dest_id, 
-                    ampdu_packets,
-                    mcs, 
-                    alvr_stream_ids, 
-                    alvr_frame_ids, 
-                    alvr_frame_losses, 
-                    .. 
-                    } => (*t, *end, *owner, *dest_id, *ampdu_packets, *mcs, alvr_stream_ids.clone(), alvr_frame_ids.clone(), alvr_frame_losses.clone()),
-                    _ => continue,
-            };
-            if t > t_hi { break; }
- 
-            let x0 = x_of(t,   view, panel_x, panel_w).max(panel_x as i32);
-            let x1 = x_of(end, view, panel_x, panel_w).min((panel_x + panel_w) as i32);
-            if x1 <= x0 { continue; }
- 
-            let lit     = is_key_highlighted(&owner, highlight);
-            // 1. Determine the base color: Bright Red if it's a frame loss, otherwise AC color
-            
-            let base_c = if alvr_stream_ids.contains(&FRAMELOSS_PACKET) {
-                0xff0000 // Bright red — frame loss, always distinct
-            } else {
-                match owner.1 {
-                    // When every frame is BestEffort, split uplink/downlink so lanes
-                    // are readable at a glance.  Other ACs keep their own palette.
-                    EdcaAc::BestEffort => {
-                        if is_uplink(dest_id) {
-                            0xffb74d   //  warm amber  → uplink   (STA → AP)
-                        } else {
-                               //cool blue → downlink (AP → STA)
-                            0x4fc3f7
-                        }
-                    }
-                    _ => ac_color(owner.1),
-                }
-            };
-            // 2. Apply dimming if the stream isn't currently highlighted
-            // let color = if lit { base_c } else { dim_color(base_c, 5) };
-            let color = match (lit, highlight.is_some()) {
-                (true,  true)  => brighten_color(base_c),  // actively highlighted → extra bright
-                (true,  false) => base_c,                  // nothing hovered → normal
-                (false, _)     => dim_color(base_c, 5),    // not in highlight set → dimmed
-            };
-            // 3. Render the rectangle (already uses 'color')
-            fill_rect(buf, stride, x0 as usize, lane_y + 2,
-                    (x1 - x0) as usize, lane_h - 4, color);
- 
-            if lit && highlight.is_some() {
-                draw_hline(buf, stride, x0, x1, (lane_y + 2) as i32,          0xffffff);
-                draw_hline(buf, stride, x0, x1, (lane_y + lane_h - 3) as i32, 0xffffff);
-                draw_vline(buf, stride, x0, (lane_y + 2) as i32,
-                           (lane_y + lane_h - 3) as i32, 0xffffff);
-                draw_vline(buf, stride, x1 - 1, (lane_y + 2) as i32,
-                           (lane_y + lane_h - 3) as i32, 0xffffff);
-            }
- 
-            let width = x1 - x0;
-            if width > 80 && lit {
-                let label1 = format!("{:?} STA{}->{} MCS{}", owner.1, owner.0, dest_id, mcs);
-                render_text(buf, &label1, x0 as usize + 4, lane_y + 6, stride, 0x000000, 1);
-                if width > 100 {
-
-                    let stream_names = alvr_stream_ids
-                        .iter()
-                        .map(|&id| crate::lib::alvr_stream_socket::get_stream_name(id))
-                        .collect::<Vec<_>>()
-                        .join("+"); // You can use ", " or "|" depending on your UI preference
-                    let label2 = if !alvr_stream_ids.contains(&FRAMELOSS_PACKET) {
-                        format!(
-                            "{}|frames: {:?} ({} MPDUs)",
-                            stream_names, 
-                            frame_id, ampdu_packets
-                        )
-                    } else {
-                        format!(
-                            "{}|frames: {:?} ({} MPDUs)",
-                            stream_names,
-                            frame_losses.clone().unwrap(), ampdu_packets
-                        )
-                    };
-                    render_text(buf, &label2, x0 as usize + 4, lane_y + 18, stride, 0x000000, 1);
-                }
-            }
-        }
-    }
-    
-    // Collisions (Adjusted for same height)
-     // Collisions overlay
-    if let Some(indices) = idx.collisions_by_link.get(&link_id) {
-        let start = indices.partition_point(|&i| event_end(&idx.all[i]) < t_lo);
-        for &ii in &indices[start..] {
-            let ev = &idx.all[ii];
-            let (t, end) = match ev {
-                VizEvent::Collision { t, end, .. } => (*t, *end),
-                _ => continue,
-            };
-            if t > t_hi { break; }
-            let x0 = x_of(t,   view, panel_x, panel_w).max(panel_x as i32);
-            let x1 = x_of(end, view, panel_x, panel_w).min((panel_x + panel_w) as i32);
-            if x1 <= x0 { continue; }
-            for yy in (lane_y + 6)..(lane_y + lane_h - 6) {
-                let c = if (yy & 2) == 0 { 0xff3344 } else { 0x661010 };
-                let row = yy * stride;
-                for xx in (x0 as usize)..(x1 as usize).min(stride) {
-                    buf[row + xx] = c;
-                }
-            }
-        }
-    }
-    let link_label = format!("LINK {} ({}MHz)", link_id, bandwidth_mhz);
-    render_text(
-        buf, 
-        &link_label, 
-        8, 
-        lane_y + lane_h / 2 - 8, 
-        stride, 
-        0xeeeeee, 
-        2
-    );
-
-    render_text(buf, &link_label, 8, lane_y + lane_h / 2 - 8, stride, 0xeeeeee, 2);
-
-}
-
-fn render_mackey_rows(
-    buf: &mut [u32], stride: usize,
-    top: usize, bottom: usize,
-    panel_x: usize, panel_w: usize,
-    view: &ViewState, idx: &VizIndex,
-    highlight: &Option<ActiveHighlights>,
-) {
-    let cursor = view.cursor_t;
-
-    let visible_keys: Vec<_> = idx.mac_keys_sorted.iter()
-        .filter(|k| view.selected_link.map_or(true, |f| k.2 == f))
-        .collect();
-
-    // ── Column count ─────────────────────────────────────────────────────
-    let base_row_h        = 36usize;
-    let rows_per_col_base = ((bottom - top) / base_row_h).max(1);
-    let num_cols = ((visible_keys.len() as f64 / rows_per_col_base as f64)
-        .ceil() as usize)
-        .max(1);
-
-    // ── Per-column-count layout table ────────────────────────────────────
-    // Increased top_h values by ~40% to add vertical breathing room
-    let (row_h, top_h, label_scale, aifs_w, cw_label_w) = match num_cols {
-        1 => (42usize, 20usize, 2usize, 10usize, 90usize), // top_h: 14 -> 20 (+42%)
-        2 => (36,      17,      1,       7,       80),       // top_h: 12 -> 17 (+41%)
-        3 => (30,      14,      1,       5,       68),       // top_h: 10 -> 14 (+40%)
-        _ => (26,      13,      1,       4,       58),       // top_h: 9  -> 13 (+44%)
-    };
-
-    let rows_per_col = ((bottom - top) / row_h).max(1);
-    
-    // Narrow panel to half-width if only one column
-    let col_w = if num_cols == 1 { panel_w / 2 } else { panel_w / num_cols };
-
-    // Horizontal spacing between AIFS pill and bars
-    let bar_x_offset = aifs_w + 20; 
-    let bar_w = col_w
-        .saturating_sub(bar_x_offset + cw_label_w + 12)
-        .max(20);
-
-    // Background clearing
-    fill_rect(buf, stride, 0,       top, panel_x, bottom - top, 0x14141c);
-    fill_rect(buf, stride, panel_x, top, panel_w, bottom - top, 0x0d0d12);
-
-    for col in 1..num_cols {
-        let div_x = panel_x + col * col_w;
-        for y in top..bottom {
-            let i = y * stride + div_x;
-            if i < buf.len() { buf[i] = 0x222233; }
-        }
-    }
-
-    let start_row = view.row_scroll as usize;
-    for (vrow, key) in visible_keys.iter().skip(start_row).enumerate() {
-        let col        = vrow / rows_per_col;
-        let row_in_col = vrow % rows_per_col;
-        if col >= num_cols { break; }
-
-        let col_x = panel_x + col * col_w;
-        let y     = top + row_in_col * row_h;
-
-        let row_bg = if row_in_col % 2 == 0 { 0x10101a } else { 0x0d0d12 };
-        fill_rect(buf, stride, col_x, y, col_w, row_h, row_bg);
-
-        let dimmed = !is_key_highlighted(key, highlight);
-
-        // ── TOP LINE (STA Label) ──
-        let lbl = format!("s{:>3} {:?} L{}", key.0, key.1, key.2);
-        render_text(buf, &lbl, col_x + 4, y + 2, stride,
-                    maybe_dim(0xffffff, dimmed), label_scale);
-
-        // ── BOTTOM LINE (Pill + Bar) ──
-        // The vertical gap is created because bot_y starts further down (at y + top_h)
-        let bot_y   = y + top_h;
-        let bot_h   = row_h.saturating_sub(top_h);
-        let pill_h  = bot_h.saturating_sub(4).max(4); // Slightly more padding inside the row
-        let pill_y  = bot_y + (bot_h - pill_h) / 2;
-        let bar_h   = pill_h;
-        let bar_y   = pill_y;
-
-        let bo = idx.backoff_by_key.get(*key)
-            .and_then(|v| latest_at(v, &idx.all, cursor));
-
-        if let Some(VizEvent::BackoffSnap { counter, cw, frozen, medium_free_since, .. }) = bo {
-            let aifs_s      = aifs_secs_for_ac(key.1);
-            let aifs_active = cursor < medium_free_since + aifs_s;
-            let aifs_color  = maybe_dim(if aifs_active { 0xffaa00 } else { 0x333333 }, dimmed);
-
-            fill_rect(buf, stride, col_x + 4, pill_y, aifs_w, pill_h, aifs_color);
-
-            let bar_x  = col_x + bar_x_offset;
-            let cells  = (*cw as usize).min(64);
-            let cell_w = (bar_w / cells.max(1)).max(1);
-
-            for c in 0..cells {
-                let x = bar_x + c * cell_w;
-                if x + cell_w > col_x + col_w { break; }
-                let color = maybe_dim(
-                    if c < (*counter as usize) {
-                        if *frozen { 0x664488 } else { 0x44aaff }
-                    } else { 0x222230 },
-                    dimmed,
-                );
-                fill_rect(buf, stride, x, bar_y,
-                          cell_w.saturating_sub(1).max(1), bar_h, color);
-            }
-
-            let cw_x = bar_x + bar_w + 6;
-            if cw_x + cw_label_w <= col_x + col_w {
-                let cw_str = if num_cols == 1 {
-                    format!("CW={} BO={}{}", cw, counter, if *frozen { " *" } else { "" })
-                } else {
-                    format!("C{} B{}{}", cw, counter, if *frozen { "*" } else { "" })
-                };
-                render_text(buf, &cw_str, cw_x, pill_y, stride,
-                            maybe_dim(0xcccccc, dimmed), 1.5);
-            }
-        }
-    }
-}
-
-
-fn blend_pixel(buf: &mut [u32], idx: usize, color: u32, alpha: f32) {
-    if idx >= buf.len() { return; }
-    let bg = buf[idx];
-    
-    // Extract RGB components
-    let rb = bg & 0xFF00FF;
-    let g  = bg & 0x00FF00;
-    let rf = color & 0xFF00FF;
-    let gf = color & 0x00FF00;
-
-    // Linear interpolation: bg + alpha * (fg - bg)
-    let a = (alpha * 256.0) as u32;
-    let out_rb = (rb + ((rf.wrapping_sub(rb)).wrapping_mul(a) >> 8)) & 0xFF00FF;
-    let out_g  = (g + ((gf.wrapping_sub(g)).wrapping_mul(a) >> 8)) & 0x00FF00;
-
-    buf[idx] = out_rb | out_g;
-}
-
-// A version of draw_vline that supports alpha
-fn draw_vline_alpha(buf: &mut [u32], stride: usize, x: i32, y0: i32, y1: i32, color: u32, alpha: f32) {
-    if x < 0 || x >= stride as i32 { return; }
-    let (start, end) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
-    for y in start..=end {
-        if y >= 0 {
-            blend_pixel(buf, (y as usize) * stride + (x as usize), color, alpha);
-        }
-    }
-}
-fn build_qdepth_series(
-    view: &ViewState,
-    idx: &VizIndex,
-) -> Vec<((i32, EdcaAc), Vec<(f64, usize)>)> {
-    let mut per_link_map: HashMap<(i32, EdcaAc, u8), Vec<usize>> = HashMap::new();
-    for (key, indices) in &idx.qdepth_by_key {
-        for &ii in indices {
-            if let VizEvent::QueueDepth { .. } = &idx.all[ii] {
-                per_link_map.entry((key.0, key.1, key.2)).or_default().push(ii);
-            }
-        }
-    }
-    for v in per_link_map.values_mut() {
-        v.sort_by(|&a, &b| event_t(&idx.all[a]).partial_cmp(&event_t(&idx.all[b])).unwrap());
-    }
-
-    let flow_keys: HashSet<(i32, EdcaAc)> = per_link_map
-        .keys()
-        .map(|&(s, a, _)| (s, a))
-        .collect();
-
-    let mut agg_map: HashMap<(i32, EdcaAc), Vec<(f64, usize)>> = HashMap::new();
-    for (sta_id, ac) in &flow_keys {
-        let mut all_events: Vec<(f64, u8, usize)> = per_link_map
-            .iter()
-            .filter(|(&(s, a, _), _)| s == *sta_id && a == *ac)
-            .flat_map(|(&(_, _, lid), indices)| {
-                indices.iter().filter_map(move |&ii| {
-                    if let VizEvent::QueueDepth { t, depth, .. } = &idx.all[ii] {
-                        Some((*t, lid, *depth))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-        all_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        let mut link_depths: HashMap<u8, usize> = HashMap::new();
-        let series = all_events
-            .into_iter()
-            .map(|(t, lid, depth)| {
-                link_depths.insert(lid, depth);
-                (t, link_depths.values().sum::<usize>())
-            })
-            .collect();
-        agg_map.insert((*sta_id, *ac), series);
-    }
-
-    let mut keys: Vec<_> = agg_map.keys().copied().collect();
-    keys.sort_by_key(|k| (ac_prio(k.1), k.0));
-    keys.reverse();
-    keys.into_iter().map(|k| (k, agg_map.remove(&k).unwrap())).collect()
-}
-
-fn hit_test_qdepth_legend(
-    mx: f32, my: f32,
-    panel_y: usize, panel_h: usize, panel_x: usize,
-    view: &ViewState, idx: &VizIndex,
-) -> Option<ActiveHighlights> {
-    // Legend lives in the left sidebar only
-    if (mx as usize) >= panel_x { return None; }
-    let my_u = my as usize;
-
-    let t_lo = view.center_t - view.span_t * 0.5;
-    let t_hi = view.center_t + view.span_t * 0.5;
-
-    let series_list = build_qdepth_series(view, idx);
-    let mut legend_y = panel_y + 24;
-    const LEGEND_ITEM_H: usize = 20;
-
-    for ((sta_id, ac), series) in &series_list {
-        let s = series.partition_point(|(t, _)| *t < t_lo);
-        let is_active = s > 0 || s < series.len() && series[s].0 <= t_hi;
-        if !is_active { continue; }
-
-        if my_u >= legend_y && my_u < legend_y + LEGEND_ITEM_H {
-            // Build an ActiveHighlights that lights up every MacKey for this flow
-            let mut h = ActiveHighlights {
-                keys: HashSet::new(),
-                txops: HashSet::new(),
-            };
-            for key in &idx.mac_keys_sorted {
-                if key.0 == *sta_id && key.1 == *ac {
-                    h.keys.insert(*key);
-                }
-            }
-            // Also mark matching txops so render_link_lane can see them
-            for key in &h.keys {
-                h.txops.insert((*key, -1)); // dest wildcard — checked by sta_id+ac below
-            }
-            return Some(h);
-        }
-        legend_y += LEGEND_ITEM_H;
-    }
-    None
-}
-// ----------------------------------------------------------------
-fn render_qdepth_panel(
-    buf: &mut [u32], stride: usize,
-    panel_y: usize, panel_h: usize,
-    panel_x: usize, panel_w: usize,
-    view: &ViewState, idx: &VizIndex,
-    highlight: &Option<ActiveHighlights>,
-) {
-    fill_rect(buf, stride, panel_x, panel_y, panel_w, panel_h, 0x10101a);
-    fill_rect(buf, stride, 0, panel_y, panel_x, panel_h, 0x14141c);
-    render_text(buf, "QUEUES", 8, panel_y + 6, stride, 0xcccccc, 2);
-
-    let t_lo = view.center_t - view.span_t * 0.5;
-    let t_hi = view.center_t + view.span_t * 0.5;
-
-    // ── 1. Aggregate data ────────────────────────────────────────────────
-    let mut per_link_map: HashMap<(i32, EdcaAc, u8), Vec<usize>> = HashMap::new();
-    for (key, indices) in &idx.qdepth_by_key {
-        for &ii in indices {
-            if let VizEvent::QueueDepth { .. } = &idx.all[ii] {
-                per_link_map
-                    .entry((key.0, key.1, key.2))
-                    .or_default()
-                    .push(ii);
-            }
-        }
-    }
-    for v in per_link_map.values_mut() {
-        v.sort_by(|&a, &b| event_t(&idx.all[a]).partial_cmp(&event_t(&idx.all[b])).unwrap());
-    }
-
-    let mut agg_map: HashMap<(i32, EdcaAc), Vec<(f64, usize)>> = HashMap::new();
-
-    let flow_keys: std::collections::HashSet<(i32, EdcaAc)> = per_link_map
-        .keys()
-        .map(|&(sta_id, ac, _lid)| (sta_id, ac))
-        .collect();
-
-    for (sta_id, ac) in flow_keys {
-        let mut all_events: Vec<(f64, u8, usize)> = per_link_map
-            .iter()
-            .filter(|(&(s, a, _), _)| s == sta_id && a == ac)
-            .flat_map(|(&(_, _, lid), indices)| {
-                indices.iter().filter_map(move |&ii| {
-                    if let VizEvent::QueueDepth { t, depth, .. } = &idx.all[ii] {
-                        Some((*t, lid, *depth))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-
-        all_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        let mut link_depths: HashMap<u8, usize> = HashMap::new();
-        let series: Vec<(f64, usize)> = all_events
-            .into_iter()
-            .map(|(t, lid, depth)| {
-                link_depths.insert(lid, depth);
-                let total: usize = link_depths.values().sum();
-                (t, total)
-            })
-            .collect();
-
-        agg_map.insert((sta_id, ac), series);
-    }
-
-    // ── 2. Max depth (zoom-safe) ─────────────────────────────────────────
-    let mut max_depth = 1usize;
-    for series in agg_map.values() {
-        let s = series.partition_point(|(t, _)| *t < t_lo);
-        if s > 0 {
-            if series[s - 1].1 > max_depth { max_depth = series[s - 1].1; }
-        }
-        for &(t, depth) in &series[s..] {
-            if t > t_hi { break; }
-            if depth > max_depth { max_depth = depth; }
-        }
-    }
-
-    // ── 3. Coordinate helpers ─────────────────────────────────────────────
-    let base_y = panel_y as i32 + panel_h as i32 - 2;
-    let calc_y = |depth: usize, max: usize| -> i32 {
-        let raw = base_y - (((depth as f64 / max as f64) * (panel_h as f64 - 12.0)) as i32);
-        raw.clamp(panel_y as i32, base_y)
-    };
-
-    // ── 4. Grid Lines ─────────────────────────────────────────────────────
-    let grid_step = match max_depth {
-        0..=10   => 2,
-        11..=30  => 5,
-        31..=100 => 20,
-        _        => 50,
-    };
-    let mut current_unit = grid_step;
-    while current_unit <= max_depth {
-        let grid_y = calc_y(current_unit, max_depth);
-        for gx in panel_x..(panel_x + panel_w) {
-            if (gx % 8) < 4 {
-                let idx_grid = (grid_y as usize) * stride + gx;
-                if idx_grid < buf.len() { buf[idx_grid] = 0x222233; }
-            }
-        }
-        render_text(buf, &format!("{}", current_unit), panel_x + 2, grid_y as usize - 8, stride, 0x444455, 1);
-        current_unit += grid_step;
-    }
-
-    // ── 5. Draw Series ────────────────────────────────────────────────────
-    let mut keys_to_draw: Vec<_> = agg_map.keys().collect();
-    keys_to_draw.sort_by_key(|k| (ac_prio(k.1), k.0));
-    keys_to_draw.reverse();
-
-    let mut legend_y = panel_y + 24;
-
-    for &&(sta_id, ac) in &keys_to_draw {
-        let series = &agg_map[&(sta_id, ac)];
-
-        // ── Highlight / dim decision ──────────────────────────────────────
-        let dimmed = if let Some(h) = highlight {
-            let mut is_lit = false;
-            for &(h_mac, _h_dest) in &h.txops {
-                if h_mac.0 == sta_id && h_mac.1 == ac { is_lit = true; break; }
-            }
-            if !is_lit && h.txops.is_empty() {
-                if h.keys.iter().any(|k| k.0 == sta_id && k.1 == ac) { is_lit = true; }
-            }
-            !is_lit
-        } else { false };
-
-        let is_dl = sta_id == -1;
-        let pattern_type = if is_dl { 0 } else { 2 };
-        let base_outline = if is_dl {
-            ac_color(ac)
-        } else {
-            [0xFF4444, 0xFF8822, 0xFFCC33, 0xFF55AA, 0x44AAFF, 0x44FF88, 0x8844FF, 0x44FFEE]
-                [(sta_id.unsigned_abs() as usize) % 8]
-        };
-
-        let outline_color = maybe_dim(base_outline, dimmed);
-        let fill_color    = dim_color(outline_color, if dimmed { 2 } else { 6 });
-        let fill_alpha    = if dimmed { 0.1 } else { 0.3 };
-
-        let s = series.partition_point(|(t, _)| *t < t_lo);
-        let is_active = (s > 0) || (s < series.len() && series[s].0 <= t_hi);
-
-        // ── Legend ────────────────────────────────────────────────────────
-        if is_active && legend_y + 12 < panel_y + panel_h {
-            let lbl = if is_dl {
-                format!("AP   {}", ac.to_string())
-            } else {
-                format!("STA{:<3} {}", sta_id, ac.to_string())
-            };
-            render_text(buf, &lbl, 35, legend_y, stride, maybe_dim(0xdddddd, dimmed), 2);
-            for px in 0..22usize {
-                if should_draw_pixel(px as i32, pattern_type) {
-                    for ty in 0..3 {
-                        let idx2 = (legend_y + 5 + ty) * stride + (8 + px);
-                        if idx2 < buf.len() { buf[idx2] = outline_color; }
-                    }
-                }
-            }
-            legend_y += 20;
-        }
-
-        // ── Draw step series — prev carries (x, y, depth) ────────────────
-        let mut prev: Option<(i32, i32, usize)> = None;
-        if s > 0 {
-            let (_, depth) = series[s - 1];
-            prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(depth, max_depth), depth));
-        }
-
-        for &(t, depth) in &series[s..] {
-            if t > t_hi { break; }
-            let x = x_of(t, view, panel_x, panel_w);
-            let y = calc_y(depth, max_depth);
-
-            if let Some((px, py, prev_depth)) = prev {
-                // Only paint the horizontal segment when the queue was non-zero
-                if prev_depth > 0 {
-                    for fill_x in px..x {
-                        if fill_x >= panel_x as i32 && fill_x < (panel_x + panel_w) as i32 {
-                            if should_draw_pixel(fill_x, pattern_type) {
-                                for ty in 0..3 {
-                                    let oi = (py as usize + ty) * stride + (fill_x as usize);
-                                    if oi < buf.len() { buf[oi] = outline_color; }
-                                }
-                            }
-                            draw_vline_alpha(buf, stride, fill_x, py + 3, base_y, fill_color, fill_alpha);
-                        }
-                    }
-                }
-                // Draw the vertical step transition only when at least one side is non-zero
-                if (prev_depth > 0 || depth > 0) && x >= panel_x as i32 && x < (panel_x + panel_w) as i32 {
-                    draw_vline(buf, stride, x, py, y, outline_color);
-                }
-            }
-            prev = Some((x, y, depth));
-        }
-
-        // ── Extend to right edge of panel ─────────────────────────────────
-        if let Some((px, py, prev_depth)) = prev {
-            if prev_depth > 0 {
-                let end_x = (panel_x + panel_w) as i32;
-                for fill_x in px..end_x {
-                    if fill_x >= panel_x as i32 && fill_x < end_x {
-                        if should_draw_pixel(fill_x, pattern_type) {
-                            for ty in 0..3 {
-                                let oi = (py as usize + ty) * stride + (fill_x as usize);
-                                if oi < buf.len() { buf[oi] = outline_color; }
-                            }
-                        }
-                        draw_vline_alpha(buf, stride, fill_x, py + 3, base_y, fill_color, fill_alpha);
-                    }
-                }
-            }
-        }
-
-
-    }
-
-    render_text(buf, &format!("max={}", max_depth), panel_x + 6, panel_y + 6, stride, 0x888899, 2);
-}
-
-
-pub struct VizIndex {
-    pub all: Vec<VizEvent>,
-    pub txops_by_link: HashMap<u8, Vec<usize>>,
-    pub collisions_by_link: HashMap<u8, Vec<usize>>,
-    pub backoff_by_key: HashMap<MacKey, Vec<usize>>,
-    pub qdepth_by_key: HashMap<MacKey, Vec<usize>>,
-    pub mac_keys_sorted: Vec<MacKey>,
-    pub t_min: f64,
-    pub t_max: f64,
-}
- 
-impl VizIndex {
-    pub fn build(mut events: Vec<VizEvent>) -> Self {
-        events.sort_by(|a, b| event_t(a).partial_cmp(&event_t(b)).unwrap());
-        let mut idx = VizIndex {
-            t_min: events.first().map(event_t).unwrap_or(0.0),
-            t_max: events.last().map(|e| event_end(e)).unwrap_or(1.0),
-            all: events,
-            txops_by_link: HashMap::new(),
-            collisions_by_link: HashMap::new(),
-            backoff_by_key: HashMap::new(),
-            qdepth_by_key: HashMap::new(),
-            mac_keys_sorted: Vec::new(),
-        };
-        let mut keys = HashSet::new();
-        for (i, ev) in idx.all.iter().enumerate() {
-            match ev {
-                VizEvent::TxopStart { link_id, owner, .. } => {
-                    idx.txops_by_link.entry(*link_id).or_default().push(i);
-                    keys.insert(*owner);
-                }
-                VizEvent::Collision { link_id, contenders, .. } => {
-                    idx.collisions_by_link.entry(*link_id).or_default().push(i);
-                    for k in contenders { keys.insert(*k); }
-                }
-                VizEvent::BackoffSnap { mac_key, .. } => {
-                    idx.backoff_by_key.entry(*mac_key).or_default().push(i);
-                    keys.insert(*mac_key);
-                }
-                VizEvent::QueueDepth { mac_key, .. } => {
-                    idx.qdepth_by_key.entry(*mac_key).or_default().push(i);
-                    keys.insert(*mac_key);
-                }
-            }
-        }
-        idx.mac_keys_sorted = keys.into_iter().collect();
-        idx.mac_keys_sorted.sort_by_key(|k| (k.2, k.0 != -1, k.0, ac_prio(k.1)));
-        idx
-    }
-}
- 
-fn latest_at<'a>(indices: &'a [usize], all: &'a [VizEvent], t_cursor: f64)
-    -> Option<&'a VizEvent>
-{
-    let pos = indices.partition_point(|&i| event_t(&all[i]) <= t_cursor);
-    if pos == 0 { None } else { Some(&all[indices[pos - 1]]) }
-}
- 
-fn handle_input(window: &Window, view: &mut ViewState, idx: &VizIndex, panel_w: usize, panel_x: usize, num_links: u8) {
-    if window.is_key_down(Key::Left)  || window.is_key_down(Key::A) { view.center_t -= view.span_t * 0.02; }
-    if window.is_key_down(Key::Right) || window.is_key_down(Key::D) { view.center_t += view.span_t * 0.02; }
-    if window.is_key_pressed(Key::Equal,      minifb::KeyRepeat::Yes)
-    || window.is_key_pressed(Key::NumPadPlus, minifb::KeyRepeat::Yes) { view.span_t *= 0.8; }
-    if window.is_key_pressed(Key::Minus,       minifb::KeyRepeat::Yes)
-    || window.is_key_pressed(Key::NumPadMinus, minifb::KeyRepeat::Yes) { view.span_t *= 1.25; }
-    if window.is_key_pressed(Key::Home,  minifb::KeyRepeat::No) { view.center_t = idx.t_min + view.span_t * 0.5; }
-    if window.is_key_pressed(Key::End,   minifb::KeyRepeat::No) { view.center_t = idx.t_max - view.span_t * 0.5; }
-    if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) { view.paused = !view.paused; }
-    if window.is_key_pressed(Key::Tab, minifb::KeyRepeat::No) {
-        view.selected_link = match view.selected_link {
-            None => Some(0),
-            Some(l) if l + 1 < num_links => Some(l + 1),
-            _ => None,
-        };
-    }
-    let (mx, _my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
-    if window.get_mouse_down(MouseButton::Left) {
-        if let Some((mx0, ct0)) = view.mouse_drag {
-            let dx_px    = (mx - mx0) as f64;
-            let dt_per_px = view.span_t / panel_w as f64;
-            view.center_t = ct0 - dx_px * dt_per_px;
-        } else {
-            view.mouse_drag = Some((mx, view.center_t));
-        }
-    } else {
-        view.mouse_drag = None;
-    }
-    if window.get_mouse_down(MouseButton::Right) {
-        // FIX: Use the actual panel coordinates
-        let n = ((mx as f64) - panel_x as f64) / panel_w as f64;
-        let clicked_t = view.center_t - view.span_t * 0.5 + view.span_t * n;
-        view.cursor_t = clicked_t.clamp(idx.t_min, idx.t_max);
-    }if let Some((_, scroll_y)) = window.get_scroll_wheel() {
-        if scroll_y.abs() > 0.0 {
-            let factor = if scroll_y > 0.0 { 0.85 } else { 1.18 };
-            // FIX: Use the actual panel coordinates here too
-            let n = ((mx as f64) - panel_x as f64) / panel_w as f64;
-            let n = n.clamp(0.0, 1.0);
-            let t_at_cur = view.center_t - view.span_t * 0.5 + view.span_t * n;
-            view.span_t *= factor;
-            view.center_t = t_at_cur - view.span_t * (n - 0.5);
-        }
-    }
-    if window.is_key_down(Key::PageDown) { view.row_scroll += 4; }
-    if window.is_key_down(Key::PageUp)   { view.row_scroll -= 4; }
-}
- 
-
- pub struct ActiveHighlights {
-    pub keys: HashSet<MacKey>,
-    pub txops: HashSet<(MacKey, i32)>, // (owner_mac, dest_id)
-}
-
-fn clamp_view(view: &mut ViewState, idx: &VizIndex) {
-    let total     = idx.t_max - idx.t_min;
-    view.span_t   = view.span_t.clamp(1e-6, total.max(1e-3));
-    view.center_t = view.center_t.clamp(
-        idx.t_min + view.span_t * 0.5,
-        idx.t_max - view.span_t * 0.5,
-    );
-    view.row_scroll = view.row_scroll.max(0);
-}
- 
-fn x_of(t: f64, view: &ViewState, panel_x: usize, panel_w: usize) -> i32 {
-    let t0 = view.center_t - view.span_t * 0.5;
-    let n  = (t - t0) / view.span_t;
-    panel_x as i32 + (n * panel_w as f64) as i32
-}
- 
-fn fill_rect(buf: &mut [u32], stride: usize, x: usize, y: usize, w: usize, h: usize, c: u32) {
-    let h_buf = buf.len() / stride;
-    for yy in y..(y + h).min(h_buf) {
-        let row = yy * stride;
-        for xx in x..(x + w).min(stride) { buf[row + xx] = c; }
-    }
-}
- 
-fn ac_color(ac: EdcaAc) -> u32 {
-    match ac {
-        EdcaAc::Voice      => 0xff66cc,
-        EdcaAc::Video      => 0x66ccff,
-        EdcaAc::BestEffort => 0x88dd88,
-        EdcaAc::Background => 0xaaaaaa,
-    }
-}
- 
-fn render_hud(buf: &mut [u32], stride: usize, view: &ViewState, idx: &VizIndex) {
-    fill_rect(buf, stride, 0, 0, stride, 50, 0x1a1a24);
-    let span_ms = view.span_t * 1000.0;
-    let label   = format!(
-        "t = {:.6}s   span = {:.3}ms   range = [{:.3}, {:.3}]s   {} events   {}",
-        view.center_t, span_ms, idx.t_min, idx.t_max, idx.all.len(),
-        if view.paused { "PAUSED" } else { "" },
-    );
-    render_text(buf, &label, 12, 16, stride, 0xeeeeee, 2);
-    let filter = match view.selected_link {
-        Some(l) => format!("[link filter: L{}]", l),
-        None    => "[link filter: ALL]".to_string(),
-    };
-    render_text(buf, &filter, stride.saturating_sub(260), 16, stride, 0xaaccff, 1);
-    render_text(
-        buf,
-        "L-Click: drag pan   R-Click: set cursor   Scroll: zoom in/out   Tab filter-link   ",
-        12, 36, stride, 0x888899, 1,
-    );
-    let mut leg_x = stride.saturating_sub(450);
-    let leg_y     = 36;
-    render_text(buf, "LEGEND:", leg_x, leg_y, stride, 0x888899, 1);
-    leg_x += 60;
-    for (_ac, name, col) in [
-        (EdcaAc::Voice,      "VO", 0xff66cc_u32),
-        (EdcaAc::Video,      "VI", 0x66ccff_u32),
-        (EdcaAc::BestEffort, "BE", 0x88dd88_u32),
-        (EdcaAc::Background, "BK", 0xaaaaaa_u32),
-    ] {
-        fill_rect(buf, stride, leg_x, leg_y, 10, 10, col);
-        render_text(buf, name, leg_x + 14, leg_y - 2, stride, 0xeeeeee, 1);
-        leg_x += 40;
-    }
-}
- 
-fn event_t(ev: &VizEvent) -> f64 {
-    match ev {
-        VizEvent::TxopStart   { t, .. } => *t,
-        VizEvent::Collision   { t, .. } => *t,
-        VizEvent::BackoffSnap { t, .. } => *t,
-        VizEvent::QueueDepth  { t, .. } => *t,
-    }
-}
- 
-fn event_end(ev: &VizEvent) -> f64 {
-    match ev {
-        VizEvent::TxopStart { end, .. } => *end,
-        VizEvent::Collision { end, .. } => *end,
-        VizEvent::BackoffSnap { t, .. } => *t,
-        VizEvent::QueueDepth  { t, .. } => *t,
-    }
-}
- 
-fn ac_prio(ac: EdcaAc) -> u8 {
-    match ac {
-        EdcaAc::Voice      => 0,
-        EdcaAc::Video      => 1,
-        EdcaAc::BestEffort => 2,
-        EdcaAc::Background => 3,
-    }
-}
-use crate::lib::models_mm1k::EDCA_TABLE;
-fn aifs_secs_for_ac(ac: EdcaAc) -> f64 {
-    // Standard Wi-Fi timings (adjust if your simulator uses 2.4GHz)
-    const SIFS_US: f64 = 16.0;
-    const SLOT_TIME_US: f64 = 9.0;
-
-    let aifsn = match ac {
-        EdcaAc::Voice      => EDCA_TABLE[0].aifsn,
-        EdcaAc::Video      => EDCA_TABLE[1].aifsn,
-        EdcaAc::BestEffort => EDCA_TABLE[2].aifsn,
-        EdcaAc::Background => EDCA_TABLE[3].aifsn,
-    };
-
-    // (SIFS + AIFSN * SlotTime) converted to seconds
-    (SIFS_US + (aifsn as f64 * SLOT_TIME_US)) * 1e-6
-}
- 
-fn should_draw_pixel(x: i32, pattern_type: usize) -> bool {
-    match pattern_type {
-        1 => (x / 6) % 2 == 0,
-        2 => (x / 2) % 2 == 0,
-        _ => true,
-    }
-}
- 
-fn draw_hline(buf: &mut [u32], stride: usize, x0: i32, x1: i32, y: i32, c: u32) {
-    let h = (buf.len() / stride) as i32;
-    if y < 0 || y >= h { return; }
-    let (a, b) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
-    let a = a.max(0) as usize;
-    let b = (b.min(stride as i32 - 1)) as usize;
-    let row = (y as usize) * stride;
-    for x in a..=b { buf[row + x] = c; }
-}
- 
-fn draw_vline(buf: &mut [u32], stride: usize, x: i32, y0: i32, y1: i32, c: u32) {
-    let h = (buf.len() / stride) as i32;
-    if x < 0 || x >= stride as i32 { return; }
-    let (a, b) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
-    let a = a.max(0) as usize;
-    let b = b.min(h - 1) as usize;
-    for y in a..=b { buf[y * stride + x as usize] = c; }
 }

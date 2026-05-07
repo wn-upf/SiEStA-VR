@@ -1529,6 +1529,34 @@ impl RunningStat {
 }
 
 
+
+// Events for ABR metrics reporting from each XR Server, used for additional visualization at end of each simulation. 
+#[derive(Clone, Debug)]
+pub enum AbrEvent {
+    /// Fired once per received frame — high-frequency network metrics.
+    FrameMetrics {
+        t:                    f64,
+        ip_server:            IpAddr,
+        rtt_ms:               f32,
+        peak_throughput_mbps: f32,
+        flr:                  f32,
+    },
+    /// Fired only when the ABR algorithm produces a new bitrate decision.
+    BitrateUpdate {
+        t:                    f64,
+        ip_server:            IpAddr,
+        abr_mode:             String,
+        new_bitrate_mbps:     f32,
+        prev_bitrate_mbps:    f32,
+    },
+    /// Session reset.
+    Reset {
+        t:         f64,
+        ip_server: IpAddr,
+    },
+}
+
+
 #[allow(unused)]
 // #[derive(Clone)]
 pub struct BitrateManager {
@@ -1572,18 +1600,16 @@ pub struct BitrateManager {
     pub last_nada_target_bitrate_mbps: Option<f64>, //updated on receive of NADA feedback data.
 
     aimd_manager: Option<Arc<Mutex<FOAimdRateControl>>>,
-
     framerate: f32,
-
     ewma_fowd: f32,
     ewma_owd: f32,
     bytes_size_avg: SlidingWindowAverage<f32>,
-
     obs_config: ObservationConfig,
     reward_stat: RunningStat,
     pub reward_mode: usize,
-
     pub nestvr_logger: Option<Arc<CsvNestVr>>,
+    pub abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>, 
+    ip_server: IpAddr, 
 }
 
 impl BitrateManager {
@@ -1603,6 +1629,8 @@ impl BitrateManager {
         results_path: &str, 
         name_folder_scenario: &str, 
         num_id_stats: u8, 
+        abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>,  
+
     ) -> Self {
         let decrement: usize = match nest_vr_profile {
             NestVrProfile::Anxious => 10,
@@ -1615,19 +1643,12 @@ impl BitrateManager {
         
         
         let bitrate_step_count: usize = NESTVR_STEP_COUNT;
-
         // let bitrate_ladder_mbps: Vec<u32> = (5..=100).step_by(5).collect();
-
         let max_mbps = MAX_MBPS_LADDER;
         let min_mbps = MIN_MBPS_LADDER;
-
         let (min_bps, max_bps) = (min_mbps * 1e6, max_mbps * 1e6);
-        // let initial_bitrate_mbps = 50.0;
-
         let bitrate_step_size_bps_nest = (max_bps - min_bps) / bitrate_step_count as f32;
-
         // println!("BITRATE MODE IS: {}", abr_enabled);
-
         let bitrate_mode = match abr_enabled {
             1 => {
                 // NeSt-VR
@@ -1802,10 +1823,23 @@ impl BitrateManager {
             reward_mode,
 
             nestvr_logger, 
+            abr_event_tx, 
+            ip_server, 
+
         }
     }
 
-    pub fn reset(&mut self) {
+
+    #[inline]
+    fn emit_abr_event(&self, ev: AbrEvent) {
+        if let Some(tx) = &self.abr_event_tx {
+            // try_send / send never blocks; a full/closed channel is silently dropped.
+            let _ = tx.send(ev);
+        }
+    }
+
+
+    pub fn reset(&mut self, now: TaiTime<0>, ) {
         // Reset timestamps and counters
         self.last_frame_instant = TaiTime::EPOCH;
         self.last_update_instant = TaiTime::EPOCH;
@@ -1823,6 +1857,14 @@ impl BitrateManager {
         self.ewma_fowd = 0.0;
         self.bytes_size_avg.clear();
 
+
+        let now_s = now.duration_since(TaiTime::EPOCH).as_secs_f64(); 
+
+        self.emit_abr_event(AbrEvent::Reset {
+            t: now_s, // or pass `now` if you thread it through
+            ip_server: self.ip_server, 
+        });
+     
         // Reset bitrate state
         match &mut self.bitrate_mode {
             BitrateMode::ConstantMbps(init_mbps) => {
@@ -1970,6 +2012,19 @@ impl BitrateManager {
         self.everest_last_dlong = network_stats.everest_dlong;
         self.everest_last_order = network_stats.everest_command;
 
+        let now_secs = now.duration_since(TaiTime::EPOCH).as_secs_f32();
+        let fl  = self.flr_shardloss_count.sum_flr(now_secs);
+        let sl  = self.flr_shardloss_count.sum_shard_loss(now_secs);
+        let flr = if fl + sl > 0 { fl as f32 / (fl + sl) as f32 } else { 0.0 };
+
+        self.emit_abr_event(AbrEvent::FrameMetrics {
+            t:                    taitime_to_f64!(now),
+            ip_server:            self.ip_server,
+            rtt_ms:               self.rtt_average.get_average() * 1000.0,
+            peak_throughput_mbps: self.peak_throughput_average.get_average() / 1e6,
+            flr,
+        });
+
         // if matches!(self.bitrate_mode , BitrateMode::EVeREst{ .. }) && now.duration_since(self.last_update_instant) >= Duration::from_secs_f64(BITRATE_UPDATE_INTERVAL) {
         //     print_pink!("Everest Stats:\nCapacity={:.4} mbps,\nThroughput={:.4} mbps,\nD_short={},\nD_long={},\n\n",self.everest_capacity_ewma / 1e6, self.everest_throughput_ewma / 1e6,  network_stats.everest_dshort, network_stats.everest_dlong,  );
         // }
@@ -1981,7 +2036,7 @@ impl BitrateManager {
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
-    pub fn one_pass_abr(&mut self, now: TaiTime<0>, ip_server: IpAddr) -> f32 {
+    pub fn one_pass_abr(&mut self, now: TaiTime<0>, ) -> f32 {
         const TIME_WARMUP_ABR: u64 = 5;
 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR) {
@@ -1989,7 +2044,24 @@ impl BitrateManager {
             let bitrate_bps = self.last_target_bitrate_bps;
             bitrate_bps
         } else {
-            // println!("{:.3} One pass ABR", taitime_to_f64!(now));
+
+
+             // ── Snapshot metrics BEFORE matching, for logging
+            let prev_bitrate_mbps = self.last_target_bitrate_bps / 1e6;
+            let rtt_ms            = self.rtt_average.get_average() * 1000.0;
+            let peak_throughput_avg = self.peak_throughput_average.get_average() / 1e6;
+
+            let now_secs = taitime_to_f64!(now) as f32;
+            let fl  = self.flr_shardloss_count.sum_flr(now_secs);
+            let sl  = self.flr_shardloss_count.sum_shard_loss(now_secs);
+            let flr = if fl + sl > 0 {
+                fl as f32 / (fl + sl) as f32
+            } else {
+                0.0
+            };
+
+
+
 
             let bitrate_bps: f32 = match &self.bitrate_mode {
                 // match all other cases.
@@ -2000,7 +2072,7 @@ impl BitrateManager {
                     print_prettyy!(
                         DebugColor::Navy,
                         "[{}] CBR -> Bitrate = {} Mbps",
-                        ip_server,
+                        self.ip_server,
                         bitrate_mbps
                     );
 
@@ -2154,7 +2226,7 @@ impl BitrateManager {
                         
                         logger.update_stats(
                             ts_str,
-                            ip_server.to_string(),
+                            self.ip_server.to_string(),
                             profile_config.bitrate_step_count as u32,
                             profile_config.bitrate_dec_steps as  u32,
                             profile_config.bitrate_inc_steps as  u32,
@@ -2174,31 +2246,6 @@ impl BitrateManager {
                         );
                     }
 
-                    // let heur_stats = HeuristicStats {
-                    //     bitrate_step_count: profile_config.bitrate_step_count,
-                    //     bitrate_dec_steps: profile_config.bitrate_dec_steps,
-                    //     bitrate_inc_steps: profile_config.bitrate_inc_steps,
-                    //     bitrate_step_size_mbps: self.bitrate_step_size_bps_nest / 1e6,
-                    //     r_rtt: r_rtt,
-                    //     r_inc: r_inc,
-                    //     rtt_adj_prob: profile_config.rtt_adj_prob,
-                    //     bitrate_inc_prob: profile_config.bitrate_inc_prob,
-                    //     fps_tx_avg: fps_tx_avg,
-                    //     fps_rx_avg: fps_rx_avg,
-                    //     nfr_avg: nfr_avg,
-                    //     rtt_avg_ms: rtt_avg_ms,
-                    //     nfr_thresh: profile_config.nfr_thresh,
-                    //     rtt_thresh_ms: profile_config.rtt_thresh_ms,
-                    //     requested_bitrate_mbps: bitrate_bps / 1e6,
-                    //     estimated_capacity_mbps: estimated_capacity_bps / 1e6,
-                    // };
-
-                    // print_pink!(
-                    //     // DebugColor::Purple,
-                    //     "[{}]NeSt-VR STATS-------: {:#?}",
-                    //     ip_server,
-                    //     heur_stats
-                    // );
                     self.last_target_bitrate_bps = bitrate_bps;
                     // self.last_target_bitrate_mbps = bitrate_bps / 1E6;
                     bitrate_bps
@@ -2243,6 +2290,17 @@ impl BitrateManager {
                   //         self.last_target_bitrate_bps
                   //     }
             };
+
+
+               self.emit_abr_event(AbrEvent::BitrateUpdate {
+                    t:                 taitime_to_f64!(now),
+                    ip_server:         self.ip_server,
+                    abr_mode:          self.bitrate_mode.variant_name(),
+                    new_bitrate_mbps:  bitrate_bps / 1e6,
+                    prev_bitrate_mbps, // already snapshotted at the top of the else-branch
+                });
+
+
             print_prettyy!(
                 DebugColor::Purple,
                 " Bitrate chosen -> {:.3} mbps  (last = {:.2})",
@@ -2702,6 +2760,8 @@ impl XRServer {
         edca_be_mode: bool,
         codec_selection: VideoCodec,
         results_path_name: &str,
+        abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>,   // ← add one parameter
+
     ) -> Self {
         let system_time = SystemTime::UNIX_EPOCH;
         let mut final_file;
@@ -2772,7 +2832,10 @@ impl XRServer {
                 reward_mode,
                 results_path_name, 
                 name_folder, 
-                num_id_stats
+                num_id_stats,
+                abr_event_tx,   // ← add one parameter
+
+                
             ),
 
             video_app_sender: None,
@@ -2855,7 +2918,7 @@ impl XRServer {
         self.map_rtt.clear();
 
         // reset bitrate manager & statistics manager
-        self.bitrate_manager.reset();
+        self.bitrate_manager.reset(now);
         self.STATISTICS_MANAGER.clear();
     }
 
@@ -3463,7 +3526,7 @@ impl XRServer {
                         >= duration_abr)
                     {
                         let last_bitrate_mbps =
-                            self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
+                            self.bitrate_manager.one_pass_abr(now) / 1e6;
                         self.bitrate_manager.last_update_instant = now;
 
                         let last_rtt_ms = self.last_rtt_ms_perfect_info;  
@@ -3511,7 +3574,7 @@ impl XRServer {
                     }
 
                     let (last_bitrate_mbps)  =
-                        self.bitrate_manager.one_pass_abr(now, self.ip_self) / 1e6;
+                        self.bitrate_manager.one_pass_abr(now) / 1e6;
                     self.bitrate_manager.last_update_instant = now;
 
                     let perfect_info_message = PerfectInfoBitrateMessage {

@@ -31,7 +31,7 @@ use tai_time::TaiTime;
 use regex::Regex;
 
 use crate::lib::{
-    airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential,
+    airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential, ac_prio,
     perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
     WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
     P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO, VISUALIZER_QUEUES_ENABLED, 
@@ -2691,15 +2691,7 @@ impl QueueModule {
             p.txop_limit_us as f64 * 1e-6
         }
     }
-    #[inline]
-    fn ac_prio(&mut self, ac: EdcaAc) -> u8 {
-        match ac {
-            EdcaAc::Voice => 0,
-            EdcaAc::Video => 1,
-            EdcaAc::BestEffort => 2,
-            EdcaAc::Background => 3,
-        }
-    }
+    
     #[inline]
     fn ac_idx(ac: EdcaAc) -> usize {
         match ac {
@@ -2715,7 +2707,7 @@ impl QueueModule {
 
         let mut winner = HashMap::<i32, MacKey>::new(); // sta_id → winning AC
 
-        ready.sort_by_key(|k| self.ac_prio(k.1));
+        ready.sort_by_key(|k| ac_prio(k.1));
         for key in ready {
             // iterate lowest to highest value
             let sta = key.0; // -1 for AP
@@ -3909,22 +3901,59 @@ impl QueueModule {
                             if remaining_drops == 0 { break; }
                             let overflow_key: MacKey = (sta_for_key, ac, lid);
                             if let Some(&idx) = self.mac_key_index.get(&overflow_key) {
-                                let drop_count = remaining_drops.min(self.per_flow_queues[idx].len());
-                                for _ in 0..drop_count {
-                                    if let Some(dropped) = self.per_flow_queues[idx].pop_back() {
+                               if is_ul_flow {
+                                    // UL: queue is per-flow, pop_back is safe
+                                    let drop_count = remaining_drops.min(self.per_flow_queues[idx].len());
+                                    for _ in 0..drop_count {
+                                        if let Some(dropped) = self.per_flow_queues[idx].pop_back() {
+                                            self.blocked_packet_counter += 1;
+                                            if let Some(count) = self.link_queue_depths.get_mut(&lid) {
+                                                *count = count.saturating_sub(1);
+                                            }
+                                            if let Some(c) = self.active_mac_key_counts.get_mut(&(src, ac)) {
+                                                *c = c.saturating_sub(1);
+                                            }
+                                            if let Some(entry) = self.sta_stats_cache
+                                                .get_mut(&(dropped.sta_src_id, dropped.sta_dest_id))
+                                            {
+                                                entry.packet_count = entry.packet_count.saturating_sub(1);
+                                                entry.expected_queue_delivery_ms =
+                                                    entry.per_packet_channel_access_efficiency
+                                                    * entry.packet_count as f64 * 1000.0;
+                                            }
+                                        }
+                                    }
+                                    remaining_drops -= drop_count;
+                                } else {
+                                    // DL: shared queue — target only packets for this specific destination
+                                    let target_dest = dest as i32;
+                                    let mut dropped_count = 0usize;
+                                    self.per_flow_queues[idx].retain(|p| {
+                                        if dropped_count < remaining_drops && p.sta_dest_id == target_dest {
+                                            dropped_count += 1;
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    });
+                                    for _ in 0..dropped_count {
                                         self.blocked_packet_counter += 1;
                                         if let Some(count) = self.link_queue_depths.get_mut(&lid) {
                                             *count = count.saturating_sub(1);
                                         }
-                                        let ac_key = if is_ul_flow { (src, ac) } else { (-1i32, ac) };
-                                        if let Some(c) = self.active_mac_key_counts.get_mut(&ac_key) {
+                                        if let Some(c) = self.active_mac_key_counts.get_mut(&(-1i32, ac)) {
                                             *c = c.saturating_sub(1);
                                         }
-                                        let _ = dropped; // metrics: add StatsUpdate send here if desired
                                     }
+                                    if let Some(entry) = self.sta_stats_cache.get_mut(&(src, dest)) {
+                                        entry.packet_count = entry.packet_count.saturating_sub(dropped_count);
+                                        entry.expected_queue_delivery_ms =
+                                            entry.per_packet_channel_access_efficiency
+                                            * entry.packet_count as f64 * 1000.0;
+                                    }
+                                    remaining_drops -= dropped_count;
                                 }
-                                remaining_drops -= drop_count;
-                            }
+                            } 
                         }
                     }
                 }
@@ -4223,16 +4252,14 @@ impl QueueModule {
                 'outer: for st in &self.dcf_values {
                     let (sta_id, ac, link_id) = st.mac_key;
 
-                    // Skip links that are currently mid-TXOP — their send_ampdu
-                    // callback will reschedule when they finish. We only care about
-                    // links that are idle and still have work pending.
+                    // Skip mid-TXOP links — send_ampdu will reschedule at completion
                     if *self.link_is_transmitting.get(&link_id).unwrap_or(&false) {
                         continue;
                     }
 
-                    if self.active_mac_key_counts.get(&(sta_id, ac)).copied().unwrap_or(0) > 0
-                        && (st.backoff_frozen || st.backoff_counter > 0)
-                    {
+                    // Any MAC on an idle link that has work needs a next slot tick,
+                    // whether it's frozen, counting down, OR already at zero (ready).
+                    if self.active_mac_key_counts.get(&(sta_id, ac)).copied().unwrap_or(0) > 0 {
                         need_next_slot = true;
                         break 'outer;
                     }
