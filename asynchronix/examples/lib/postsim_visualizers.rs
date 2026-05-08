@@ -14,6 +14,7 @@ const USER_PALETTE: &[u32] = &[
     0x80cbc4, // teal
     0xffcc02, // yellow
 ];
+const CW_H: usize = 140;
 
 #[inline]
 fn user_color(idx: usize) -> u32 {
@@ -141,6 +142,26 @@ struct MetricStrip {
 }
 
 
+fn hit_test_abr_legend(mx: f32, my: f32, idx: &AbrVizIndex) -> Option<usize> {
+    // Legend lives entirely inside the sidebar
+    if mx as usize >= SIDEBAR_W { return None; }
+
+    // Matches the layout in render_abr_sidebar: ly starts at 52, each item is 28px
+    let my_u = my as usize;
+    let legend_start = 52usize;
+    // let item_h       = 28usize;
+    let item_h = 44usize;
+
+    for (ip_idx, _) in idx.ip_order.iter().enumerate() {
+        let item_y = legend_start + ip_idx * item_h;
+        if my_u >= item_y && my_u < item_y + item_h {
+            return Some(ip_idx);
+        }
+    }
+    None
+}
+
+
 fn make_strips(idx: &AbrVizIndex) -> Vec<MetricStrip> {
     vec![
         MetricStrip {
@@ -240,6 +261,29 @@ fn abr_draw_vline(buf: &mut [u32], stride: usize,
         }
     }
 }
+
+fn abr_draw_hline_blend(buf: &mut [u32], stride: usize,
+                         x0: i32, x1: i32, y: i32, color: u32) {
+    if y < 0 { return; }
+    for x in x0.max(0)..x1.min(stride as i32) {
+        let i = y as usize * stride + x as usize;
+        if i < buf.len() { buf[i] = blend_screen(buf[i], color); }
+    }
+}
+
+fn abr_draw_vline_blend(buf: &mut [u32], stride: usize,
+                         x: i32, y0: i32, y1: i32, color: u32) {
+    if x < 0 || x >= stride as i32 { return; }
+    let (a, b) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    for y in a..=b {
+        if y >= 0 {
+            let i = y as usize * stride + x as usize;
+            if i < buf.len() { buf[i] = blend_screen(buf[i], color); }
+        }
+    }
+}
+
+
 fn render_abr_strip(
     buf:      &mut [u32],
     stride:   usize,
@@ -250,11 +294,12 @@ fn render_abr_strip(
     panel_w:  usize,
     view:     &AbrViewState,
     idx:      &AbrVizIndex,
+    highlight_ip: Option<usize>,  
 ) {
     let t_lo = view.center_t - view.span_t * 0.5;
     let t_hi = view.center_t + view.span_t * 0.5;
 
-    // ── NEW: dynamic Y ceiling from visible data ──────────────────────────────
+    // dynamic Y ceiling from visible data 
     let mut visible_max = 0.0f32;
     for ip in &idx.ip_order {
         let ip_map: &HashMap<IpAddr, Vec<usize>> = match strip.source {
@@ -300,43 +345,62 @@ fn render_abr_strip(
     );
 
     // Step-plot series — pass `ceil` to abr_y_of
-    for (ip_idx, ip) in idx.ip_order.iter().enumerate() {
-        let color = user_color(ip_idx);
+   
+    let draw_series = |buf: &mut [u32], ip_idx: usize, color: u32| {
+        let ip = &idx.ip_order[ip_idx];
         let ip_map: &HashMap<IpAddr, Vec<usize>> = match strip.source {
             StripSource::FrameMetrics  => &idx.by_ip_frame,
             StripSource::BitrateUpdate => &idx.by_ip_bitrate,
         };
-        let Some(indices) = ip_map.get(ip) else { continue };
-
+        let Some(indices) = ip_map.get(ip) else { return; };
         let start = indices.partition_point(|&i| abr_event_t(&idx.events[i]) < t_lo)
             .saturating_sub(1);
-
         let mut prev_x: Option<(i32, i32)> = None;
-
         for &ei in &indices[start..] {
             let ev = &idx.events[ei];
             let t  = abr_event_t(ev);
             if t > t_hi { break; }
-
             let val = match (strip.extract)(ev) { Some(v) => v, None => continue };
             let x   = abr_x_of(t, view, panel_x, panel_w);
-            let y   = abr_y_of(val, ceil, strip_y, strip_h); // <-- ceil, not strip.ceil
-
+            let y   = abr_y_of(val, ceil, strip_y, strip_h);
             if let Some((px, py)) = prev_x {
-                abr_draw_hline(buf, stride, px, x,  py, color);
-                abr_draw_vline(buf, stride, x,  py, y, dim_color(color, 2));
+                let x0 = px.max(panel_x as i32);
+                let x1 = x.min((panel_x + panel_w) as i32);
+                if x0 < x1 {
+                    abr_draw_hline_blend(buf, stride, x0, x1, py, color);
+                }
+                if x >= panel_x as i32 && x < (panel_x + panel_w) as i32 {
+                    abr_draw_vline_blend(buf, stride, x, py, y, dim_color(color, 2));
+                }
             }
             prev_x = Some((x, y));
         }
         if let Some((px, py)) = prev_x {
             let t_max_x = abr_x_of(idx.t_max, view, panel_x, panel_w)
                 .min((panel_x + panel_w) as i32);
-            if px < t_max_x {
-                abr_draw_hline(buf, stride, px, t_max_x, py, color);
+            let x0 = px.max(panel_x as i32);
+            if x0 < t_max_x {
+                abr_draw_hline_blend(buf, stride, x0, t_max_x, py, color);
             }
         }
+    };
+
+    for (ip_idx, _) in idx.ip_order.iter().enumerate() {
+        let base  = user_color(ip_idx);
+        let color = match (highlight_ip, highlight_ip.map_or(false, |h| h == ip_idx)) {
+            (Some(_), true)  => continue,
+            (Some(_), false) => dim_color(base, 5),
+            (None,    _)     => base,
+        };
+        draw_series(buf, ip_idx, color);
     }
 
+    if let Some(hi) = highlight_ip {
+        if hi < idx.ip_order.len() {
+            draw_series(buf, hi, brighten_color(user_color(hi)));
+        }
+    }
+   
     abr_draw_hline(buf, stride,
         panel_x as i32, (panel_x + panel_w) as i32,
         (strip_y + strip_h - 1) as i32, 0x2a2a3a);
@@ -351,18 +415,31 @@ fn render_abr_sidebar(
     height: usize,
     idx:    &AbrVizIndex,
     view:   &AbrViewState,
+    highlight_ip: Option<usize>, 
 ) {
     abr_fill_rect(buf, stride, 0, 0, SIDEBAR_W, height, 0x14141c);
     render_text(buf, "ABR METRICS", 8, 8, stride, 0xffffff, TEXT_SIZE_ABR * 2.0); // f32 * f32
 
     let mut ly = 52usize;
     for (ip_idx, ip) in idx.ip_order.iter().enumerate() {
-        let color = user_color(ip_idx);
+        
+        
         let mode  = idx.abr_mode_label.get(ip).map(|s| s.as_str()).unwrap_or("?");
+        let base  = user_color(ip_idx);
+
+        let color = match (highlight_ip, highlight_ip.map_or(false, |h| h == ip_idx)) {
+            (Some(_), true)  => brighten_color(base),
+            (Some(_), false) => dim_color(base, 5),
+            (None,    _)     => base,
+        };
+        let text_col = if highlight_ip.map_or(false, |h| h == ip_idx) { 0xffffff } 
+                    else if highlight_ip.is_some() { 0x666677 } 
+                    else { 0xdddddd };
         abr_fill_rect(buf, stride, 8, ly, 18, 10, color);
-        render_text(buf, &format!("{}", ip), 30, ly,      stride, 0xdddddd, TEXT_SIZE_ABR);
-        render_text(buf, mode,               30, ly + 10, stride, 0x888899, TEXT_SIZE_ABR);
-        ly += 28;
+        render_text(buf, &format!("{}", ip), 30, ly,      stride, text_col,  TEXT_SIZE_ABR);
+        render_text(buf, mode,               30, ly + 20, stride, 0x888899, TEXT_SIZE_ABR);
+        
+        ly += 44;
     }
 
     ly += 18;
@@ -568,20 +645,19 @@ pub fn run_abr_viewer(idx: AbrVizIndex) {
 
         handle_abr_input(&window, &mut view, &idx, panel_w, panel_x);
 
+        let (mx, my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
+        let highlight_ip = hit_test_abr_legend(mx, my, &idx);
+
+
         buf.fill(0x0d0d12);
 
         for (si, strip) in strips.iter().enumerate() {
             let strip_y = PANEL_PAD + si * strip_h;
-            render_abr_strip(
-                &mut buf, w,          // stride = current width
-                strip, strip_y, strip_h,
-                panel_x, panel_w,
-                &view, &idx,
-            );
+            render_abr_strip(&mut buf, w, strip, strip_y, strip_h, panel_x, panel_w, &view, &idx, highlight_ip);
         }
 
         render_abr_time_axis(&mut buf, w, h - time_axis_h, panel_x, panel_w, &view);
-        render_abr_sidebar  (&mut buf, w, h, &idx, &view);
+        render_abr_sidebar(&mut buf, w, h, &idx, &view, highlight_ip);
 
         // Cursor line
         let cx = abr_x_of(view.cursor_t, &view, panel_x, panel_w);
@@ -740,6 +816,8 @@ pub struct ViewState {
 pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
     const W: usize = 1500;
     const H: usize = 900;
+
+
     let mut window = Window::new(
         "WLAN Sim Playback",
         W, H,
@@ -806,6 +884,14 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
             panel_x, panel_w, &view, &idx,
             &None,
         );
+
+        let cw_panel_y = rows_bottom + 4;
+        render_cw_panel(
+            &mut buf, w, cw_panel_y, CW_H,
+            panel_x, panel_w, &view, &idx,
+            &highlight_keys,           // shares the same hover highlight
+        );
+
         render_qdepth_panel(
             &mut buf, w, h - 180, 160,
             panel_x, panel_w, &view, &idx,
@@ -1853,7 +1939,7 @@ impl UnifiedState {
 
             ch_view: ViewState {
                 center_t:      (viz_idx.t_min  + viz_idx.t_max)  * 0.5,
-                span_t:        (ch_full  * 0.05).max(0.001),
+                span_t:        ch_full, 
                 cursor_t:      viz_idx.t_min,
                 paused:        false,
                 selected_link: None,
@@ -2267,13 +2353,23 @@ pub fn run_unified_viewer(
             }
 
             let rows_top    = lane_y + 10;
-            let rows_bottom = content_bottom - 200;
+            // let rows_bottom = content_bottom - 200;
+            let rows_bottom = content_bottom.saturating_sub(200 + CW_H + 12);
             render_mackey_rows(
                 &mut buf, w, rows_top, rows_bottom,
                 ch_panel_x, ch_panel_w,
                 &state.ch_view, &viz_idx,
                 &None,
             );
+
+            render_cw_panel(
+                &mut buf, w,
+                rows_bottom + 4, CW_H,
+                ch_panel_x, ch_panel_w,
+                &state.ch_view, &viz_idx,
+                &ch_highlight,
+            );
+
             render_qdepth_panel(
                 &mut buf, w,
                 content_bottom - 180, 160,
@@ -2291,21 +2387,20 @@ pub fn run_unified_viewer(
 
         // 2. ABR panel (right half)
         {
-            // ABR sidebar (relative to abr_left)
-            render_abr_sidebar_clipped(
-                &mut buf, w, h, abr_left, &abr_idx, &state.abr_view,
-            );
+            let (mx, my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
+            // Translate mouse x into sidebar-local coordinates for the right panel
+            let abr_mx = mx - abr_left as f32;
+            let highlight_ip = hit_test_abr_legend(abr_mx, my, &abr_idx);
 
-            // ABR metric strips
+            render_abr_sidebar_clipped(&mut buf, w, h, abr_left, &abr_idx, &state.abr_view, highlight_ip);
             for (si, strip) in abr_strips.iter().enumerate() {
+                
+                
                 let strip_y = content_top + PANEL_PAD + si * abr_strip_h;
-                render_abr_strip(
-                    &mut buf, w,
-                    strip, strip_y, abr_strip_h,
-                    abr_panel_x, abr_panel_w,
-                    &state.abr_view, &abr_idx,
-                );
+                render_abr_strip(&mut buf, w, strip, strip_y, abr_strip_h,
+                                abr_panel_x, abr_panel_w, &state.abr_view, &abr_idx, highlight_ip);
             }
+
 
             // ABR cursor line
             let cx = abr_x_of(state.abr_view.cursor_t, &state.abr_view, abr_panel_x, abr_panel_w);
@@ -2359,12 +2454,13 @@ fn render_abr_sidebar_clipped(
     x_off:   usize,
     idx:     &AbrVizIndex,
     view:    &AbrViewState,
-) {
+    highlight_ip: Option<usize>, 
+    ) {
     let sidebar_w = SIDEBAR_W.min(stride.saturating_sub(x_off));
 
     // Temp buffer — same height, sidebar width only
     let mut tmp = vec![0u32; sidebar_w * h];
-    render_abr_sidebar(&mut tmp, sidebar_w, h, idx, view);
+    render_abr_sidebar(&mut tmp, sidebar_w, h, idx, view, highlight_ip);
 
     // Blit into the main buffer at x_off
     for row in 0..h {
@@ -2376,3 +2472,258 @@ fn render_abr_sidebar_clipped(
         }
     }
 }
+
+
+fn render_cw_panel(
+    buf:     &mut [u32], stride: usize,
+    panel_y: usize, panel_h: usize,
+    panel_x: usize, panel_w: usize,
+    view:    &ViewState,
+    idx:     &VizIndex,
+    highlight: &Option<ActiveHighlights>,
+) {
+    fill_rect(buf, stride, panel_x, panel_y, panel_w, panel_h, 0x10101a);
+    fill_rect(buf, stride, 0,       panel_y, panel_x, panel_h, 0x14141c);
+    render_text(buf, "CW", 8, panel_y + 6, stride, 0xcccccc, 2);
+
+    let t_lo = view.center_t - view.span_t * 0.5;
+    let t_hi = view.center_t + view.span_t * 0.5;
+
+    // ── 1. Build one (t, cw) step series per MacKey ───────────────────────────
+    let mut series_map: HashMap<MacKey, Vec<(f64, u32, bool)>> = HashMap::new();
+    let mut max_cw = 4u32;   // was u16
+
+
+
+    
+    for (key, indices) in &idx.backoff_by_key {
+        let mut series: Vec<(f64, u32, bool)> = indices
+            .iter()
+            .filter_map(|&ii| {
+                if let VizEvent::BackoffSnap { t, cw, frozen, .. } = &idx.all[ii] {
+                    Some((*t, *cw, *frozen))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        series.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        if !series.is_empty() {
+            series_map.insert(*key, series);
+        }
+    }
+
+    // ── 2. Find visible maximum for scale ────────────────────────────────────
+    let mut max_cw = 4u32;
+    for series in series_map.values() {
+        let s = series.partition_point(|(t, _, _)| *t < t_lo);
+        if s > 0 {
+            max_cw = max_cw.max(series[s - 1].1);
+        }
+        for &(t, cw, _) in &series[s..] {
+            if t > t_hi { break; }
+            max_cw = max_cw.max(cw);
+        }
+    }
+
+    // ── 3. Coordinate helper — log₂ scale ────────────────────────────────────
+    //
+    // CW is always a power-of-two minus one (3,7,15,31,…) so log₂ gives even
+    // spacing and avoids tiny Voice rows drowning under BE.
+    let base_y    = panel_y as i32 + panel_h as i32 - 2;
+    let plot_h    = (panel_h as f64 - 12.0).max(1.0);
+    let max_log   = (max_cw as f64 + 1.0).log2().max(1.0);
+
+    let calc_y = |cw: u32| -> i32 {   // was u16
+        let ratio = if cw == 0 {
+            0.0
+        } else {
+            (cw as f64 + 1.0).log2() / max_log
+        };
+        let raw = base_y - (ratio * plot_h) as i32;
+        raw.clamp(panel_y as i32, base_y)
+    };
+
+
+    // ── 4. Grid lines at exact EDCA CW power-of-two values ───────────────────
+    for &cw_mark in &[3u32, 7, 15, 31, 63, 127, 255, 511, 1023] {  
+        if cw_mark > max_cw { break; }
+        let gy = calc_y(cw_mark);
+        for gx in panel_x..(panel_x + panel_w) {
+            if (gx % 8) < 4 {
+                let gi = gy as usize * stride + gx;
+                if gi < buf.len() { buf[gi] = 0x222233; }
+            }
+        }
+        render_text(
+            buf, &format!("{}", cw_mark),
+            panel_x + 2, (gy as usize).saturating_sub(8),
+            stride, 0x444455, 1,
+        );
+    }
+
+    // ── 5. Consistent color / dimming helpers (mirrors render_qdepth_panel) ──
+    let key_base_color = |(sta_id, ac, _link): MacKey| -> u32 {
+        if sta_id == -1 {
+            ac_color(ac)
+        } else {
+            [0xFF4444, 0xFF8822, 0xFFCC33, 0xFF55AA,
+             0x44AAFF, 0x44FF88, 0x8844FF, 0x44FFEE]
+                [(sta_id.unsigned_abs() as usize) % 8]
+        }
+    };
+
+    // dash pattern: AP → solid, STA → dashed (same as qdepth)
+    let pattern_for = |(sta_id, _, _): MacKey| -> usize {
+        if sta_id == -1 { 0 } else { 2 }
+    };
+
+    // Sort: high-priority AC first, then by sta_id (mirrors qdepth ordering)
+    let mut keys: Vec<MacKey> = series_map.keys().copied().collect();
+    keys.sort_by_key(|k| (ac_prio(k.1), k.0, k.2));
+    keys.reverse();
+
+    // ── 6. Pass 1 — translucent fills (drawn below outlines) ─────────────────
+    for &key in &keys {
+        let series = &series_map[&key];
+        let dimmed       = is_dimmed(key.0, key.1, highlight);
+        let base_color   = key_base_color(key);
+        let outline_c    = maybe_dim(base_color, dimmed);
+        let fill_c       = dim_color(outline_c, if dimmed { 2 } else { 6 });
+        let fill_alpha   = if dimmed { 0.08 } else { 0.25 };
+
+        let s = series.partition_point(|(t, _, _)| *t < t_lo);
+        // let mut prev: Option<(i32, i32, u16)> = None;
+        let mut prev: Option<(i32, i32, u32)> = None;
+
+        if s > 0 {
+            let (_, cw, _) = series[s - 1];
+            // prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(cw), cw.try_into().unwrap()));
+            prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(cw), cw));
+        }
+
+        let emit_fill = |buf: &mut [u32], px: i32, x: i32, py: i32, prev_cw: u32| { 
+            if prev_cw == 0 { return; }
+            for fx in px..x {
+                if fx >= panel_x as i32 && fx < (panel_x + panel_w) as i32 {
+                    draw_vline_alpha(buf, stride, fx, py + 2, base_y, fill_c, fill_alpha);
+                }
+            }
+        };
+
+        for &(t, cw, _frozen) in &series[s..] {
+            if t > t_hi { break; }
+            let x = x_of(t, view, panel_x, panel_w);
+            let y = calc_y(cw);
+            if let Some((px, py, prev_cw)) = prev {
+                emit_fill(buf, px, x, py, prev_cw);
+            }
+            prev = Some((x, y, cw));
+        }
+        if let Some((px, py, prev_cw)) = prev {
+            emit_fill(buf, px, (panel_x + panel_w) as i32, py, prev_cw);
+        }
+    }
+
+    // ── 7. Pass 2 — outlines + legend (drawn on top of all fills) ────────────
+    let mut legend_y = panel_y + 24;
+
+    for &key in &keys {
+        let series       = &series_map[&key];
+        let dimmed       = is_dimmed(key.0, key.1, highlight);
+        let base_color   = key_base_color(key);
+        let outline_c    = maybe_dim(base_color, dimmed);
+        let pattern_type = pattern_for(key);
+
+        let s = series.partition_point(|(t, _, _)| *t < t_lo);
+        let is_active = s > 0 || (s < series.len() && series[s].0 <= t_hi);
+
+        // Legend swatch
+        if is_active && legend_y + 12 < panel_y + panel_h {
+            let lbl = if key.0 == -1 {
+                format!("AP   {:?} L{}", key.1, key.2)
+            } else {
+                format!("s{:<3} {:?} L{}", key.0, key.1, key.2)
+            };
+            render_text(buf, &lbl, 35, legend_y, stride, maybe_dim(0xdddddd, dimmed), 2);
+            for px in 0..22usize {
+                if should_draw_pixel(px as i32, pattern_type) {
+                    for ty in 0..2 {
+                        let ii = (legend_y + 5 + ty) * stride + (8 + px);
+                        if ii < buf.len() { buf[ii] = outline_c; }
+                    }
+                }
+            }
+            legend_y += 20;
+        }
+
+        // Step-function outline
+        // let mut prev: Option<(i32, i32, u16, bool)> = None;
+        let mut prev: Option<(i32, i32, u32, bool)> = None;
+        if s > 0 {
+            let (_, cw, frozen) = series[s - 1];
+            prev = Some((x_of(t_lo, view, panel_x, panel_w), calc_y(cw), cw, frozen));
+        }
+
+        for &(t, cw, frozen) in &series[s..] {
+            if t > t_hi { break; }
+            let x = x_of(t, view, panel_x, panel_w);
+            let y = calc_y(cw);
+
+            if let Some((px, py, prev_cw, prev_frozen)) = prev {
+                // Horizontal segment — frozen periods rendered slightly dimmer
+                let seg_color = if prev_frozen {
+                    dim_color(outline_c, 2)
+                } else {
+                    outline_c
+                };
+                if prev_cw > 0 {
+                    for fx in px..x {
+                        if fx >= panel_x as i32 && fx < (panel_x + panel_w) as i32
+                            && should_draw_pixel(fx, pattern_type)
+                        {
+                            for ty in 0..2usize {
+                                let oi = (py as usize + ty) * stride + fx as usize;
+                                if oi < buf.len() {
+                                    buf[oi] = blend_screen(buf[oi], seg_color);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Vertical step at transition
+                if (prev_cw > 0 || cw > 0)
+                    && x >= panel_x as i32 && x < (panel_x + panel_w) as i32
+                {
+                    draw_vline(buf, stride, x, py, y, outline_c);
+                }
+            }
+            prev = Some((x, y, cw, frozen));
+        }
+
+        // Extend to right edge
+        if let Some((px, py, prev_cw, prev_frozen)) = prev {
+            if prev_cw > 0 {
+                let seg_color = if prev_frozen { dim_color(outline_c, 2) } else { outline_c };
+                for fx in px..(panel_x + panel_w) as i32 {
+                    if fx >= panel_x as i32 && should_draw_pixel(fx, pattern_type) {
+                        for ty in 0..2usize {
+                            let oi = (py as usize + ty) * stride + fx as usize;
+                            if oi < buf.len() {
+                                buf[oi] = blend_screen(buf[oi], seg_color);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    render_text(
+        buf, &format!("max={}", max_cw),
+        panel_x + 6, panel_y + 6,
+        stride, 0x888899, 2,
+    );
+}
+
+

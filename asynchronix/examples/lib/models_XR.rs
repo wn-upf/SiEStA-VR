@@ -2042,6 +2042,14 @@ impl BitrateManager {
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR) {
             // println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name());
             let bitrate_bps = self.last_target_bitrate_bps;
+
+            self.emit_abr_event(AbrEvent::BitrateUpdate {
+                t:                 taitime_to_f64!(now),
+                ip_server:         self.ip_server,
+                abr_mode:          self.bitrate_mode.variant_name(),
+                new_bitrate_mbps:  bitrate_bps / 1e6,
+                prev_bitrate_mbps: bitrate_bps / 1e6, // it does not change on this warmup 
+            });
             bitrate_bps
         } else {
 
@@ -2059,8 +2067,6 @@ impl BitrateManager {
             } else {
                 0.0
             };
-
-
 
 
             let bitrate_bps: f32 = match &self.bitrate_mode {
@@ -2292,13 +2298,13 @@ impl BitrateManager {
             };
 
 
-               self.emit_abr_event(AbrEvent::BitrateUpdate {
-                    t:                 taitime_to_f64!(now),
-                    ip_server:         self.ip_server,
-                    abr_mode:          self.bitrate_mode.variant_name(),
-                    new_bitrate_mbps:  bitrate_bps / 1e6,
-                    prev_bitrate_mbps, // already snapshotted at the top of the else-branch
-                });
+            self.emit_abr_event(AbrEvent::BitrateUpdate {
+                t:                 taitime_to_f64!(now),
+                ip_server:         self.ip_server,
+                abr_mode:          self.bitrate_mode.variant_name(),
+                new_bitrate_mbps:  bitrate_bps / 1e6,
+                prev_bitrate_mbps, // already snapshotted at the top of the else-branch
+            });
 
 
             print_prettyy!(

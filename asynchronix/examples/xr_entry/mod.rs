@@ -1109,91 +1109,72 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     drop(viz_tx); 
 
 
-    let mut abr_events: Vec<crate::lib::models_XR::AbrEvent> = Vec::new();
-    while let Ok(ev) = abr_rx.try_recv() {
-        abr_events.push(ev);
-    }
-    println!("[ABR-VIZ] Collected {} ABR events.", abr_events.len());
-
-    let mut viz_events: Vec<VizEvent> = Vec::with_capacity(1024);
-    while let Ok(ev) = viz_rx.try_recv() {
-        viz_events.push(ev);
-    }
     if VISUALIZER_QUEUES_ENABLED {
-        println!(
-            "[CHANNEL-VIZ] Collected {} events, spanning from [{:.6}, {:.6}] s of simulated time",
-            viz_events.len(),
-            viz_events.first().map(event_t).unwrap_or(0.0),
-            viz_events.last().map(event_end).unwrap_or(0.0),
-        );
-    }
-
-    // let abr_handle = if !abr_events.is_empty() {
-    //     let abr_idx = AbrVizIndex::build(abr_events);
-    //     Some(std::thread::spawn(move || run_abr_viewer(abr_idx)))
-    // } else {
-    //     println!("[ABR-VIZ] No ABR events to visualize.");
-    //     None
-    // };
-
-    // let viz_handle = if VISUALIZER_QUEUES_ENABLED && !viz_events.is_empty() {
-    //     let viz_idx = VizIndex::build(viz_events);
-    //     let link_configs_clone = link_configs_clone.clone();
-    //     Some(std::thread::spawn(move || run_viewer(viz_idx, &link_configs_clone)))
-    // } else {
-    //     println!("[VIZ] No queue events to visualize (was viz_tx wired up?).");
-    //     None
-    // };
-
-    // if let Some(h) = abr_handle { h.join().unwrap(); }
-    // if let Some(h) = viz_handle { h.join().unwrap(); }
-
-    let have_abr = !abr_events.is_empty(); // Visualize both at the same time
-    let have_ch  = VISUALIZER_QUEUES_ENABLED && !viz_events.is_empty();
-
-    let viewer_handle: Option<std::thread::JoinHandle<()>> = match (have_abr, have_ch) {
-
-        // ── Unified: both datasets available ─────────────────────────────────
-        (true, true) => {
-            let abr_idx  = AbrVizIndex::build(abr_events);
-            let viz_idx  = VizIndex::build(viz_events);
-            let lc       = link_configs_clone.clone();   // Vec<LinkConfig> — moved into thread
-
-            Some(std::thread::spawn(move || {
-                run_unified_viewer(viz_idx, abr_idx, lc);
-            }))
+        let mut abr_events: Vec<crate::lib::models_XR::AbrEvent> = Vec::new();
+        while let Ok(ev) = abr_rx.try_recv() {
+            abr_events.push(ev);
         }
+        println!("[ABR-VIZ] Collected {} ABR events.", abr_events.len());
 
-        // ── Fallback: ABR only ────────────────────────────────────────────────
-        (true, false) => {
-            println!("[VIZ] No channel events — opening ABR-only viewer.");
-            let abr_idx = AbrVizIndex::build(abr_events);
-
-            Some(std::thread::spawn(move || {
-                run_abr_viewer(abr_idx);
-            }))
+        let mut viz_events: Vec<VizEvent> = Vec::with_capacity(1024);
+        while let Ok(ev) = viz_rx.try_recv() {
+            viz_events.push(ev);
         }
+            println!(
+                "[CHANNEL-VIZ] Collected {} events, spanning from [{:.6}, {:.6}] s of simulated time",
+                viz_events.len(),
+                viz_events.first().map(event_t).unwrap_or(0.0),
+                viz_events.last().map(event_end).unwrap_or(0.0),
+            );
+        
 
-        // ── Fallback: channel only ────────────────────────────────────────────
-        (false, true) => {
-            println!("[VIZ] No ABR events — opening channel-only viewer.");
-            let viz_idx = VizIndex::build(viz_events);
-            let lc      = link_configs_clone.clone();
+        let have_abr = !abr_events.is_empty(); // Visualize both at the same time
+        let have_ch  = !viz_events.is_empty();
 
-            Some(std::thread::spawn(move || {
-                run_viewer(viz_idx, &lc);
-            }))
+        let viewer_handle: Option<std::thread::JoinHandle<()>> = match (have_abr, have_ch) {
+
+            // ── Unified: both datasets available ─────────────────────────────────
+            (true, true) => {
+                let abr_idx  = AbrVizIndex::build(abr_events);
+                let viz_idx  = VizIndex::build(viz_events);
+                let lc       = link_configs_clone.clone();   // Vec<LinkConfig> — moved into thread
+
+                Some(std::thread::spawn(move || {
+                    run_unified_viewer(viz_idx, abr_idx, lc);
+                }))
+            }
+
+            // ── Fallback: ABR only ────────────────────────────────────────────────
+            (true, false) => {
+                println!("[VIZ] No channel events — opening ABR-only viewer.");
+                let abr_idx = AbrVizIndex::build(abr_events);
+
+                Some(std::thread::spawn(move || {
+                    run_abr_viewer(abr_idx);
+                }))
+            }
+
+            // ── Fallback: channel only ────────────────────────────────────────────
+            (false, true) => {
+                println!("[VIZ] No ABR events — opening channel-only viewer.");
+                let viz_idx = VizIndex::build(viz_events);
+                let lc      = link_configs_clone.clone();
+
+                Some(std::thread::spawn(move || {
+                    run_viewer(viz_idx, &lc);
+                }))
+            }
+
+            // ── Nothing to show ───────────────────────────────────────────────────
+            (false, false) => {
+                println!("[VIZ] No events to visualize.");
+                None
+            }
+        };
+
+        if let Some(h) = viewer_handle {
+            h.join().unwrap();
         }
-
-        // ── Nothing to show ───────────────────────────────────────────────────
-        (false, false) => {
-            println!("[VIZ] No events to visualize.");
-            None
-        }
-    };
-
-    if let Some(h) = viewer_handle {
-        h.join().unwrap();
     }
 
     Ok(())
