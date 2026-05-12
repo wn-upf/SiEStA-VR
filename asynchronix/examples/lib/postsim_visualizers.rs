@@ -27,6 +27,7 @@ fn abr_event_t(ev: &AbrEvent) -> f64 {
         AbrEvent::FrameMetrics  { t, .. } => *t,
         AbrEvent::BitrateUpdate { t, .. } => *t,
         AbrEvent::Reset         { t, .. } => *t,
+                AbrEvent::StaLocation   { t, .. } => *t, 
     }
 }
 
@@ -51,6 +52,15 @@ pub struct AbrVizIndex {
     pub ceil_bitrate_mbps:    f32,
     pub ceil_rtt_ms:          f32,
     pub ceil_throughput_mbps: f32,
+
+    pub by_ip_sta:    HashMap<IpAddr, Vec<usize>>,
+    /// Stable STA IP ordering (insertion = first-seen order).
+    pub ip_sta_order: Vec<IpAddr>,
+    /// World-space extents over all StaLocation events (padded).
+    pub sta_x_range:  (f32, f32),
+    pub sta_y_range: (f32, f32),   // was sta_z_range
+    // pub sta_z_range:  (f32, f32),
+
 }
 
 impl AbrVizIndex {
@@ -62,11 +72,17 @@ impl AbrVizIndex {
 
         let mut by_ip_frame:   HashMap<IpAddr, Vec<usize>> = HashMap::new();
         let mut by_ip_bitrate: HashMap<IpAddr, Vec<usize>> = HashMap::new();
+        let mut by_ip_sta:     HashMap<IpAddr, Vec<usize>> = HashMap::new();  // ← new
 
-        let mut ip_order:       Vec<IpAddr>                 = Vec::new();
-        let mut abr_mode_label: HashMap<IpAddr, String>     = HashMap::new();
+        let mut ip_order:       Vec<IpAddr>             = Vec::new();
+        let mut ip_sta_order:   Vec<IpAddr>             = Vec::new();          // ← new
+        let mut abr_mode_label: HashMap<IpAddr, String> = HashMap::new();
 
         let (mut max_br, mut max_rtt, mut max_tp) = (1.0f32, 1.0f32, 1.0f32);
+
+        // ── STA spatial extents ──────────────────────────────────────────────
+        let (mut sta_x_min, mut sta_x_max) = (f32::MAX, f32::MIN);
+        let (mut sta_y_min, mut sta_y_max) = (f32::MAX, f32::MIN);
 
         for (i, ev) in events.iter().enumerate() {
             match ev {
@@ -82,7 +98,6 @@ impl AbrVizIndex {
                 AbrEvent::BitrateUpdate { ip_server, abr_mode, new_bitrate_mbps, .. } => {
                     max_br = max_br.max(*new_bitrate_mbps);
                     abr_mode_label.insert(*ip_server, abr_mode.clone());
-                    // ensure ip_order has this ip even if no FrameMetrics came first
                     by_ip_frame.entry(*ip_server).or_insert_with(|| {
                         ip_order.push(*ip_server);
                         Vec::new()
@@ -90,20 +105,45 @@ impl AbrVizIndex {
                     by_ip_bitrate.entry(*ip_server).or_default().push(i);
                 }
                 AbrEvent::Reset { .. } => {}
+                // ── new ──────────────────────────────────────────────────────
+                AbrEvent::StaLocation { ip_sta, x,y, z, .. } => {
+                    sta_x_min = sta_x_min.min(*x);
+                    sta_x_max = sta_x_max.max(*x);
+                    sta_y_min = sta_y_min.min(*y);
+                    sta_y_max = sta_y_max.max(*y);
+                    by_ip_sta.entry(*ip_sta).or_insert_with(|| {
+                        ip_sta_order.push(*ip_sta);
+                        Vec::new()
+                    }).push(i);
+                }
             }
         }
+
+        // Pad spatial extents 10 % on each side; fall back to a 10 m box when empty.
+        let sta_x_range = if sta_x_min <= sta_x_max {
+            let p = ((sta_x_max - sta_x_min) * 0.10).max(0.5);
+            (sta_x_min - p, sta_x_max + p)
+        } else {
+            (-5.0, 5.0)
+        };
+        let y_pad = ((sta_y_max - sta_y_min) * 0.10).max(0.5);
+        let sta_y_range: (f32, f32) = (sta_y_min - y_pad, sta_y_max + y_pad);
 
         Self {
             events,
             by_ip_frame,
             by_ip_bitrate,
+            by_ip_sta,       
             ip_order,
+            ip_sta_order,
             abr_mode_label,
             t_min,
             t_max,
             ceil_bitrate_mbps:    (max_br  * 1.15).max(1.0),
             ceil_rtt_ms:          (max_rtt * 1.15).max(1.0),
             ceil_throughput_mbps: (max_tp  * 1.15).max(1.0),
+            sta_x_range,
+            sta_y_range,
         }
     }
 }
@@ -241,6 +281,26 @@ fn abr_fill_rect(buf: &mut [u32], stride: usize,
     }
 }
 
+fn abr_draw_line(buf: &mut [u32], stride: usize,
+                 mut x0: i32, mut y0: i32,
+                 x1: i32, y1: i32, color: u32) {
+    let dx =  (x1 - x0).abs();
+    let dy = -((y1 - y0).abs());
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 {
+            let i = y0 as usize * stride + x0 as usize;
+            if i < buf.len() { buf[i] = color; }
+        }
+        if x0 == x1 && y0 == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x0 += sx; }
+        if e2 <= dx { err += dx; y0 += sy; }
+    }
+}
+
 fn abr_draw_hline(buf: &mut [u32], stride: usize,
                   x0: i32, x1: i32, y: i32, color: u32) {
     if y < 0 { return; }
@@ -283,6 +343,119 @@ fn abr_draw_vline_blend(buf: &mut [u32], stride: usize,
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STA Trajectory Grid (24 cols × 12 rows, x/z horizontal plane)
+// ─────────────────────────────────────────────────────────────────────────────
+const STA_GRID_COLS: usize = 24;
+const STA_GRID_ROWS: usize = 12;
+
+fn render_sta_grid(
+    buf:      &mut [u32],
+    stride:   usize,
+    panel_x:  usize,
+    panel_w:  usize,
+    y_top:    usize,
+    height:   usize,
+    idx:      &AbrVizIndex,
+    cursor_t: f64,
+) {
+    // ── Backgrounds ──────────────────────────────────────────────────────────
+    abr_fill_rect(buf, stride, 0,       y_top, SIDEBAR_W, height, 0x10101a);
+    abr_fill_rect(buf, stride, panel_x, y_top, panel_w,   height, 0x0c0c16);
+
+    // ── Sidebar: title + per-STA legend ──────────────────────────────────────
+    render_text(buf, "STA TRAJECTORIES", 8, y_top + 6,  stride, 0xffffff, TEXT_SIZE_ABR);
+    render_text(buf, &format!("t = {:.3}s", cursor_t),
+                8, y_top + 24, stride, 0x888899, TEXT_SIZE_ABR);
+
+    let mut ly = y_top + 48;
+    for (si, ip) in idx.ip_sta_order.iter().enumerate() {
+        let color = user_color(si);
+        abr_fill_rect(buf, stride, 8, ly, 14, 10, color);
+        render_text(buf, &format!("{}", ip), 28, ly, stride, 0xdddddd, TEXT_SIZE_ABR);
+        ly += 22;
+    }
+
+    // ── Grid lines ───────────────────────────────────────────────────────────
+    let cell_w = panel_w as f32 / STA_GRID_COLS as f32;
+    let cell_h = height  as f32 / STA_GRID_ROWS as f32;
+
+    for col in 0..=STA_GRID_COLS {
+        let gx = panel_x as i32 + (col as f32 * cell_w) as i32;
+        abr_draw_vline(buf, stride, gx, y_top as i32, (y_top + height) as i32, 0x18182a);
+    }
+    for row in 0..=STA_GRID_ROWS {
+        let gy = y_top as i32 + (row as f32 * cell_h) as i32;
+        abr_draw_hline(buf, stride,
+            panel_x as i32, (panel_x + panel_w) as i32, gy, 0x18182a);
+    }
+
+    // ── Axis corner labels ───────────────────────────────────────────────────
+    let (x_min, x_max) = idx.sta_x_range;
+    let (z_min, z_max) = idx.sta_y_range;
+    let x_span = (x_max - x_min).max(1e-6);
+    let z_span = (z_max - z_min).max(1e-6);
+
+    render_text(buf, &format!("x {:.1}m", x_min),
+        panel_x + 2,              y_top + height - 14, stride, 0x445566, TEXT_SIZE_ABR);
+    render_text(buf, &format!("{:.1}m", x_max),
+        panel_x + panel_w - 46,  y_top + height - 14, stride, 0x445566, TEXT_SIZE_ABR);
+    render_text(buf, &format!("z {:.1}m", z_max),
+        panel_x + 2, y_top + 2,               stride, 0x445566, TEXT_SIZE_ABR);
+    render_text(buf, &format!("z {:.1}m", z_min),
+        panel_x + 2, y_top + height - 28,     stride, 0x445566, TEXT_SIZE_ABR);
+
+    // ── World → pixel helper (z axis: larger z = higher on screen) ───────────
+    let to_px = |x: f32, z: f32| -> (i32, i32) {
+        let nx = ((x - x_min) / x_span) as f64;
+        let nz = 1.0 - ((z - z_min) / z_span) as f64;          // flip so +z = up
+        (
+            panel_x as i32 + (nx * panel_w  as f64) as i32,
+            y_top   as i32 + (nz * height   as f64) as i32,
+        )
+    };
+
+    // ── Per-STA: trail up to cursor, then bright dot at current position ─────
+    for (si, ip) in idx.ip_sta_order.iter().enumerate() {
+        let base  = user_color(si);
+        let trail = dim_color(base, 4);
+
+        let Some(indices) = idx.by_ip_sta.get(ip) else { continue };
+
+        // binary-search to find how many samples are ≤ cursor_t
+        let end = indices.partition_point(|&i| abr_event_t(&idx.events[i]) <= cursor_t);
+        if end == 0 { continue; }
+
+        let mut prev_px: Option<(i32, i32)> = None;
+
+        for &ei in &indices[..end] {
+            if let AbrEvent::StaLocation { x, z, .. } = &idx.events[ei] {
+                let (px, py) = to_px(*x, *z);
+                if let Some((ppx, ppy)) = prev_px {
+                    abr_draw_line(buf, stride, ppx, ppy, px, py, trail);
+                }
+                prev_px = Some((px, py));
+            }
+        }
+
+        // Current position: filled circle (r = 4 px)
+        if let Some((px, py)) = prev_px {
+            let bright = brighten_color(base);
+            for dy in -4i32..=4 {
+                for dx in -4i32..=4 {
+                    if dx * dx + dy * dy <= 16 {
+                        let fx = px + dx;
+                        let fy = py + dy;
+                        if fx >= 0 && fy >= 0 {
+                            let i = fy as usize * stride + fx as usize;
+                            if i < buf.len() { buf[i] = bright; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 fn render_abr_strip(
     buf:      &mut [u32],
@@ -416,6 +589,7 @@ fn render_abr_sidebar(
     idx:    &AbrVizIndex,
     view:   &AbrViewState,
     highlight_ip: Option<usize>, 
+    max_y: Option<usize>, 
 ) {
     abr_fill_rect(buf, stride, 0, 0, SIDEBAR_W, height, 0x14141c);
     render_text(buf, "ABR METRICS", 8, 8, stride, 0xffffff, TEXT_SIZE_ABR * 2.0); // f32 * f32
@@ -439,6 +613,10 @@ fn render_abr_sidebar(
         render_text(buf, &format!("{}", ip), 30, ly,      stride, text_col,  TEXT_SIZE_ABR);
         render_text(buf, mode,               30, ly + 20, stride, 0x888899, TEXT_SIZE_ABR);
         
+        if let Some(limit) = max_y{
+            if ly + 44 > limit { break; }
+        }
+
         ly += 44;
     }
 
@@ -592,77 +770,91 @@ fn handle_abr_input(
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
+const STA_GRID_H: usize = 220; // height reserved for trajectory panel
 
 pub fn run_abr_viewer(idx: AbrVizIndex) {
     let mut window = Window::new(
         "ABR Metrics Viewer",
-        ABR_W, ABR_H,
+        ABR_W, ABR_H + STA_GRID_H,          // ← taller initial window
         WindowOptions {
-            resize: true,                        // allow edge-drag resizing
-            scale_mode: minifb::ScaleMode::Stretch, // stretch buffer to fill new size
+            resize:     true,
+            scale_mode: minifb::ScaleMode::Stretch,
             ..WindowOptions::default()
-    },
-        // WindowOptions::default(),
+        },
     ).expect("Failed to open ABR viewer window");
 
-    let mut buf = vec![0u32; ABR_W * ABR_H];
+    let mut buf = vec![0u32; ABR_W * (ABR_H + STA_GRID_H)];
 
-    let panel_x = SIDEBAR_W;
-    let panel_w = ABR_W - SIDEBAR_W - 4;
-
-    let time_axis_h = 22usize;
-    let strips      = make_strips(&idx);
-    let n_strips    = strips.len();
-    let usable_h    = ABR_H - time_axis_h - PANEL_PAD;
-    let strip_h     = usable_h / n_strips;
-
+    let strips   = make_strips(&idx);
+    let n_strips = strips.len();
     let full_range = (idx.t_max - idx.t_min).max(0.001);
 
     let mut view = AbrViewState {
         center_t:   (idx.t_min + idx.t_max) * 0.5,
-        span_t:     full_range, // exactly the data range — never wider on init
+        span_t:     full_range,
         cursor_t:   idx.t_min,
         mouse_drag: None,
     };
 
-   let mut buf = vec![0u32; ABR_W * ABR_H];
-
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        // ── Read actual current size ──────────────────────────────────────────
         let (w, h) = window.get_size();
+        if buf.len() != w * h { buf.resize(w * h, 0); }
 
-        // Reallocate only when the size actually changed
-        if buf.len() != w * h {
-            buf.resize(w * h, 0);
-        }
+        // ── Layout ───────────────────────────────────────────────────────────
+        let panel_x      = SIDEBAR_W;
+        let panel_w      = w.saturating_sub(SIDEBAR_W + 4);
+        let time_axis_h  = 22usize;
+        let sta_grid_h   = STA_GRID_H;
 
-        // ── Recompute layout from live dimensions ─────────────────────────────
-        let panel_x     = SIDEBAR_W;
-        let panel_w     = w.saturating_sub(SIDEBAR_W + 4);
-        let time_axis_h = 22usize;
-        let usable_h    = h.saturating_sub(time_axis_h + PANEL_PAD);
-        let strip_h     = (usable_h / n_strips).max(1);
+        // strips occupy everything above time-axis and STA grid
+        let usable_h = h.saturating_sub(time_axis_h + PANEL_PAD + sta_grid_h);
+        let strip_h  = (usable_h / n_strips).max(1);
 
+        let time_axis_y  = PANEL_PAD + n_strips * strip_h;
+        let sta_grid_y   = time_axis_y + time_axis_h;
+
+        // ── Input + mouse ────────────────────────────────────────────────────
         handle_abr_input(&window, &mut view, &idx, panel_w, panel_x);
 
-        let (mx, my) = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
+        let (mx, my)     = window.get_mouse_pos(MouseMode::Discard).unwrap_or((0.0, 0.0));
         let highlight_ip = hit_test_abr_legend(mx, my, &idx);
-
 
         buf.fill(0x0d0d12);
 
+        // ── Metric strips ────────────────────────────────────────────────────
         for (si, strip) in strips.iter().enumerate() {
             let strip_y = PANEL_PAD + si * strip_h;
-            render_abr_strip(&mut buf, w, strip, strip_y, strip_h, panel_x, panel_w, &view, &idx, highlight_ip);
+            render_abr_strip(
+                &mut buf, w, strip, strip_y, strip_h,
+                panel_x, panel_w, &view, &idx, highlight_ip,
+            );
         }
 
-        render_abr_time_axis(&mut buf, w, h - time_axis_h, panel_x, panel_w, &view);
-        render_abr_sidebar(&mut buf, w, h, &idx, &view, highlight_ip);
+        // ── Time axis ────────────────────────────────────────────────────────
+        render_abr_time_axis(&mut buf, w, time_axis_y, panel_x, panel_w, &view);
 
-        // Cursor line
+        // ── STA trajectory grid ──────────────────────────────────────────────
+        if !idx.by_ip_sta.is_empty() {
+            render_sta_grid(
+                &mut buf, w, panel_x, panel_w,
+                sta_grid_y, sta_grid_h,
+                &idx, view.cursor_t,
+            );
+        }
+
+        // ── Sidebar (covers full height) ─────────────────────────────────────
+
+        render_abr_sidebar(&mut buf, w, h, &idx, &view, highlight_ip, None );
+
+        // ── Cursor line (strips + time axis only) ────────────────────────────
         let cx = abr_x_of(view.cursor_t, &view, panel_x, panel_w);
         if cx >= panel_x as i32 && cx < (panel_x + panel_w) as i32 {
-            abr_draw_vline(&mut buf, w, cx, PANEL_PAD as i32, (h - time_axis_h) as i32, 0xffff66);
+            abr_draw_vline(
+                &mut buf, w, cx,
+                PANEL_PAD as i32,
+                (time_axis_y + time_axis_h) as i32,
+                0xffff66,
+            );
         }
 
         window.update_with_buffer(&buf, w, h).unwrap();
@@ -1809,7 +2001,7 @@ pub fn event_end(ev: &VizEvent) -> f64 {
     }
 }
  
-use crate::lib::models_mm1k::EDCA_TABLE;
+use crate::lib::models_mm1k::{AP_X, AP_Y, EDCA_TABLE};
 fn aifs_secs_for_ac(ac: EdcaAc) -> f64 {
     // Standard Wi-Fi timings (adjust if your simulator uses 2.4GHz)
     const SIFS_US: f64 = 16.0;
@@ -1914,15 +2106,11 @@ struct UnifiedState {
     // Range: 0.2 .. 0.8
     split_frac:    f32,
     splitter_drag: Option<SplitterDrag>,
-
     focus:         Focus,
-
     // ── Channel viewer ────────────────────────────────────────────────────────
     ch_view:       ViewState,
-
     // ── ABR viewer ────────────────────────────────────────────────────────────
     abr_view:      AbrViewState,
-
     // Sync mode: when true, right-click moves both cursors together.
     sync_cursor:   bool,
 }
@@ -1939,7 +2127,7 @@ impl UnifiedState {
 
             ch_view: ViewState {
                 center_t:      (viz_idx.t_min  + viz_idx.t_max)  * 0.5,
-                span_t:        ch_full, 
+                span_t:        ch_full,
                 cursor_t:      viz_idx.t_min,
                 paused:        false,
                 selected_link: None,
@@ -2251,6 +2439,145 @@ fn clamp_abr_view(v: &mut AbrViewState, idx: &AbrVizIndex) {
         idx.t_max - v.span_t * 0.5,
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STA mini-map — rendered inside the ABR sidebar's lower section.
+// `x_origin` is the left edge of the full ABR right-panel (= abr_left).
+// `y_top` / `height` define the reserved rectangle inside the sidebar.
+// ─────────────────────────────────────────────────────────────────────────────
+const STA_MINIMAP_H:    usize = 210;
+const STA_MINIMAP_COLS: usize = 24;
+const STA_MINIMAP_ROWS: usize = 12;
+
+fn render_sta_sidebar_minimap(
+    buf:       &mut [u32],
+    stride:    usize,
+    x_origin:  usize,
+    sidebar_w: usize,
+    y_top:     usize,
+    height:    usize,
+    idx:       &AbrVizIndex,
+    cursor_t:  f64,
+    ap_x:      f32,
+    ap_y:      f32,   // ← was ap_z
+) {
+    const PAD: usize = 6;
+    let map_x = x_origin + PAD;
+    let map_w = sidebar_w.saturating_sub(PAD * 2);
+    let map_y = y_top + 18;
+    let map_h = height.saturating_sub(22 + PAD);
+
+    abr_fill_rect(buf, stride, x_origin, y_top, sidebar_w, height, 0x10101e);
+    render_text(buf, "STA POSITIONS", x_origin + PAD, y_top + 3,
+                stride, 0x888899, TEXT_SIZE_ABR);
+
+    let cell_w = map_w as f32 / STA_MINIMAP_COLS as f32;
+    let cell_h = map_h as f32 / STA_MINIMAP_ROWS as f32;
+
+    for col in 0..=STA_MINIMAP_COLS {
+        let gx = map_x as i32 + (col as f32 * cell_w) as i32;
+        abr_draw_vline(buf, stride, gx, map_y as i32, (map_y + map_h) as i32, 0x1c1c2c);
+    }
+    for row in 0..=STA_MINIMAP_ROWS {
+        let gy = map_y as i32 + (row as f32 * cell_h) as i32;
+        abr_draw_hline(buf, stride, map_x as i32, (map_x + map_w) as i32, gy, 0x1c1c2c);
+    }
+
+    // ── Coordinate helpers ───────────────────────────────────────────────────
+    let (x_min, x_max) = idx.sta_x_range;
+    let (y_min, y_max) = idx.sta_y_range;   // ← was sta_z_range
+    let x_span = (x_max - x_min).max(1e-6);
+    let y_span = (y_max - y_min).max(1e-6); // ← was z_span
+
+    let to_px = |x: f32, y: f32| -> (i32, i32) {  // ← was (x, z)
+        let nx =  ((x - x_min) / x_span) as f64;
+        let ny = 1.0 - ((y - y_min) / y_span) as f64;  // ← was nz / z_span; +y = up
+        (
+            map_x as i32 + (nx * map_w as f64) as i32,
+            map_y as i32 + (ny * map_h as f64) as i32,
+        )
+    };
+
+    // ── AP marker ────────────────────────────────────────────────────────────
+    {
+        let (ax, ay) = to_px(ap_x, ap_y);   // ← was ap_z
+        const ARM: i32 = 7;
+
+        abr_draw_hline(buf, stride, ax - ARM, ax + ARM + 1, ay,      0xffffff);
+        abr_draw_vline(buf, stride, ax,       ay - ARM,     ay + ARM, 0xffffff);
+
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let fx = ax + dx;
+                let fy = ay + dy;
+                if fx >= 0 && fy >= 0 {
+                    let i = fy as usize * stride + fx as usize;
+                    if i < buf.len() { buf[i] = 0xffff88; }
+                }
+            }
+        }
+
+        render_text(buf, &format!("AP ({:.1},{:.1})", ap_x, ap_y),  // ← was ap_z
+                    (ax + 5).max(0) as usize, (ay - ARM - 14).max(0) as usize,
+                    stride, 0xccccaa, 1.3);
+    }
+
+    // ── Per-STA: trail + dot + live coordinate label ──────────────────────────
+    for (si, ip) in idx.ip_sta_order.iter().enumerate() {
+        let base  = user_color(si);
+        let trail = dim_color(base, 4);
+
+        let Some(indices) = idx.by_ip_sta.get(ip) else { continue };
+        let end = indices.partition_point(|&i| abr_event_t(&idx.events[i]) <= cursor_t);
+        if end == 0 { continue; }
+
+        let mut prev:       Option<(i32, i32)> = None;
+        let mut last_world: Option<(f32, f32)> = None;
+
+        for &ei in &indices[..end] {
+            if let AbrEvent::StaLocation { x, y, .. } = &idx.events[ei] {  // ← was z
+                let (px, py) = to_px(*x, *y);  // ← was *z
+                if let Some((ppx, ppy)) = prev {
+                    abr_draw_line(buf, stride, ppx, ppy, px, py, trail);
+                }
+                prev       = Some((px, py));
+                last_world = Some((*x, *y));    // ← was *z
+            }
+        }
+
+        if let Some((px, py)) = prev {
+            let bright = brighten_color(base);
+            for dy in -3i32..=3 {
+                for dx in -3i32..=3 {
+                    if dx * dx + dy * dy <= 9 {
+                        let fx = px + dx;
+                        let fy = py + dy;
+                        if fx >= 0 && fy >= 0 {
+                            let i = fy as usize * stride + fx as usize;
+                            if i < buf.len() { buf[i] = bright; }
+                        }
+                    }
+                }
+            }
+
+            if let Some((wx, wy)) = last_world {  // ← was wz
+                let label     = format!("X:{:.1} Y:{:.1}", wx, wy);  // ← was Z:
+                let label_x   = if px + 60 < (map_x + map_w) as i32 { px + 6 } else { px - 52 };
+                let label_y   = (py - 7).max(map_y as i32);
+                render_text(buf, &label,
+                            label_x.max(map_x as i32) as usize,
+                            label_y as usize,
+                            stride, bright, 1.3);
+            }
+        }
+    }
+
+    abr_draw_hline(buf, stride, map_x as i32, (map_x + map_w) as i32,  map_y as i32,           0x2a2a3e);
+    abr_draw_hline(buf, stride, map_x as i32, (map_x + map_w) as i32, (map_y + map_h) as i32,  0x2a2a3e);
+    abr_draw_vline(buf, stride, map_x as i32,           map_y as i32,  (map_y + map_h) as i32, 0x2a2a3e);
+    abr_draw_vline(buf, stride, (map_x + map_w) as i32, map_y as i32,  (map_y + map_h) as i32, 0x2a2a3e);
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run_unified_viewer(
@@ -2392,7 +2719,9 @@ pub fn run_unified_viewer(
             let abr_mx = mx - abr_left as f32;
             let highlight_ip = hit_test_abr_legend(abr_mx, my, &abr_idx);
 
-            render_abr_sidebar_clipped(&mut buf, w, h, abr_left, &abr_idx, &state.abr_view, highlight_ip);
+            // Replace the existing render_abr_sidebar_clipped call with:
+            let minimap_y = content_bottom.saturating_sub(STA_MINIMAP_H);
+            render_abr_sidebar_clipped(&mut buf, w, h, abr_left, &abr_idx, &state.abr_view, highlight_ip, minimap_y);
             for (si, strip) in abr_strips.iter().enumerate() {
                 
                 
@@ -2407,14 +2736,28 @@ pub fn run_unified_viewer(
             if cx >= abr_panel_x as i32 && cx < (abr_panel_x + abr_panel_w) as i32 {
                 abr_draw_vline(&mut buf, w, cx, content_top as i32, content_bottom as i32, 0xffff66);
             }
-        }
 
+            // ── STA minimap in lower sidebar ─────────────────────────────────────────
+            if !abr_idx.by_ip_sta.is_empty() {
+                let minimap_y = content_bottom.saturating_sub(STA_MINIMAP_H);
+                render_sta_sidebar_minimap(
+                    &mut buf, w,
+                    abr_left,            // left edge of the full right panel
+                    ABR_SIDEBAR_W,
+                    minimap_y,
+                    STA_MINIMAP_H,
+                    &abr_idx,
+                    state.abr_view.cursor_t,
+                    AP_X as f32,
+                    AP_Y as f32, 
+
+                );
+            }
+        }
         // 3. Splitter bar
         render_splitter(&mut buf, w, h, splitter_x);
-
         // 4. Shared HUD (draws over both halves)
         render_unified_hud(&mut buf, w, &state, &viz_idx, &abr_idx);
-
         // 5. Shared time axis
         render_unified_time_axis(
             &mut buf, w, w, h,
@@ -2442,7 +2785,6 @@ pub fn run_unified_viewer(
 }
 
 // ── Helper: render ABR sidebar offset to the right half ──────────────────────
-//
 // The original render_abr_sidebar draws at x=0; we need it offset to `x_off`.
 // Rather than refactoring the original, we render into a small temp buffer and
 // blit it across.  This keeps both viewers' internals unchanged.
@@ -2455,12 +2797,13 @@ fn render_abr_sidebar_clipped(
     idx:     &AbrVizIndex,
     view:    &AbrViewState,
     highlight_ip: Option<usize>, 
+    max_y: usize, 
     ) {
     let sidebar_w = SIDEBAR_W.min(stride.saturating_sub(x_off));
 
     // Temp buffer — same height, sidebar width only
     let mut tmp = vec![0u32; sidebar_w * h];
-    render_abr_sidebar(&mut tmp, sidebar_w, h, idx, view, highlight_ip);
+    render_abr_sidebar(&mut tmp, sidebar_w, h, idx, view, highlight_ip, Some(max_y));
 
     // Blit into the main buffer at x_off
     for row in 0..h {

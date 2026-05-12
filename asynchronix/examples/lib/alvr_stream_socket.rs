@@ -2958,7 +2958,7 @@ impl<H: Serialize> StreamSender<H> {
 
                 // Assume `selected_codec` is of type VideoCodec::AV1 or VideoCodec::HEVC
                 let mut encoder = match self.codec_selection {
-                    VideoCodec::HEVC => ChunkedEncoder::Hevc(ChunkedHevcEncoder::new(
+                    VideoCodec::HEVC => ChunkedEncoder::HevcSoftware(ChunkedSoftwareHevcEncoder::new(
                         &input_path,
                         WIDTH_ENCODER as u32,
                         HEIGHT_ENCODER as u32,

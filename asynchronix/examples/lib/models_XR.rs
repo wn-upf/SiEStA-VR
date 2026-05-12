@@ -1554,6 +1554,16 @@ pub enum AbrEvent {
         t:         f64,
         ip_server: IpAddr,
     },
+    /// Fired once per received tracking packet — STA world-space position.
+    /// `ip_sta` is `self.ip_client`; x/z are the horizontal plane, y is height.
+    StaLocation {
+        t:      f64,
+        ip_sta: IpAddr,
+        x:      f32,
+        y:      f32,
+        z:      f32,
+    },
+
 }
 
 
@@ -2212,7 +2222,7 @@ impl BitrateManager {
                             }
                         }
                     }
-                    // print_pink!("bitrate after Nest: {} Mbps", f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps ));
+                    print_pink!("[{}] bitrate after Nest: {} Mbps", self.ip_server, f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps ));
                     // Ensure bitrate is below the estimated network capacity
                     let capacity_upper_limit =
                         profile_config.capacity_scaling_factor * estimated_capacity_bps;
@@ -2220,8 +2230,6 @@ impl BitrateManager {
                     bitrate_bps = f32::min(bitrate_bps, capacity_upper_limit);
                     // Ensure bitrate is always within the configured range
                     bitrate_bps = minmax_bitrate(bitrate_bps, max_bps, min_bps);
-
-                    // print_red!("bitrate ladder: {:?}", self.bitrate_ladder_bps);
 
                     bitrate_bps =
                         upper_bound_bitrate(bitrate_bps, &self.bitrate_ladder_bps.clone().unwrap());
@@ -3167,6 +3175,18 @@ impl XRServer {
                                     let eye_gazes: [Option<Pose>; 2] = track.face_data.eye_gazes; 
                                     let quat_eye_gazes = eye_gazes.map(|opt_pose| opt_pose.map(|pose| pose.orientation));
                                     
+                                    // ── Emit STA location event for post-sim visualizer ──────────────────────
+                                    let t_s = now.duration_since(TaiTime::EPOCH).as_secs_f64();
+                                    if let Some(tx) = &self.bitrate_manager.abr_event_tx {
+                                        let _ = tx.send(AbrEvent::StaLocation {
+                                            t:      t_s,
+                                            ip_sta: self.ip_client,        // STA identity
+                                            x:      log_entry.position.x,
+                                            y:      log_entry.position.y,
+                                            z:      log_entry.position.z,
+                                        });
+                                    }
+
                                     self.csv_tracking.update_stats(
                                         now,
                                         log_entry.device_id,
@@ -3600,9 +3620,10 @@ impl XRServer {
 
                 if count % 80 == 0 {
                     print_green!(
-                        "{} [{}]  Current bitrate: {} Mbps",
+                        "{} [{}] ABR: {} | Current bitrate: {:?} Mbps",
                         format_elapsed!(now),
                         self.ip_self,
+                        self.bitrate_manager.bitrate_mode.variant_name(), 
                         self.bitrate_manager.last_target_bitrate_bps / 1e6
                     );
                 }
@@ -4596,7 +4617,11 @@ impl XRClient {
     ) {
         std::thread::spawn(move || {
             let mut window =
-                Window::new(&initial_title, width, height, WindowOptions::default()).unwrap();
+                Window::new(&initial_title, width, height, WindowOptions {
+            resize: true,                           // allow edge-drag resizing
+            scale_mode: minifb::ScaleMode::Stretch, // stretch buffer to fill new size
+            ..WindowOptions::default()}, 
+            ).unwrap();
             window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
 
             // 1. Create a buffer to hold the last valid image (Persistent State)
