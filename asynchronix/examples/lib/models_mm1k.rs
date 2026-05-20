@@ -29,6 +29,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 use regex::Regex;
+use crate::lib::ParquetQueue;
+
 
 use crate::lib::{
     airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential, ac_prio,
@@ -2239,7 +2241,7 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
 }
 
 // #[allow(unused)]
-#[derive(Clone)]
+// #[derive(Clone)]
 pub struct QueueModule {
     // pub output_port_sta1: Output<AmpduPacket>,
     pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
@@ -2261,7 +2263,9 @@ pub struct QueueModule {
     // pub arrival_rate: f64,
     pub service_rate: f64,
     // pub t0_time: Instant,
-    pub csv_metrics: CsvType,
+    // pub csv_metrics: CsvType,
+    pub csv_metrics_network: Option<CsvType>,
+    pub parquet_metrics_network: Option<ParquetQueue>,
 
     pub coords_queue: Coords,
     pub p_tx: f64,
@@ -2412,6 +2416,8 @@ impl QueueModule {
             link_outputs.insert(link_config.link_id, Output::default());
             being_served.insert(link_config.link_id, false);
         }
+        let csv_metrics_network = if crate::lib::NETWORK_CSV_LOGGING{Some(CsvType::new(&folder_dir, results_path).expect("?? CSVTYPE"))} else{None}; 
+        let parquet_metrics_network: Option<ParquetQueue> = if crate::lib::NETWORK_PARQUET_LOGGING{Some(ParquetQueue::new(&folder_dir, results_path).expect("?? PARQUETTYPE"))} else{None};
 
         Self {
             // queue: VecDeque::with_capacity(queue_size),
@@ -2429,7 +2435,8 @@ impl QueueModule {
             queue_length_counter: 0,
             service_rate: 0.0,
             // t0_time: Instant::now(),
-            csv_metrics: CsvType::new(&folder_dir, results_path).expect("?? CSVTYPE"),
+            csv_metrics_network,
+            parquet_metrics_network, 
             coords_queue: Coords::with_coords(AP_X, AP_Y, 0.0), // To test.
             p_tx: P_TX,
             STA_coords_grid: Vec::new(),
@@ -3458,7 +3465,8 @@ impl QueueModule {
                         let alvr_header = u.alvr_header; 
                         // CSV write outside the lock
                         let row_ac = u.edca_ac.to_string();   // per-row, not per-AMPDU
-                        self.csv_metrics.update_stats(
+                        if let Some(metrics) = &self.csv_metrics_network{
+                            metrics.update_stats(
                             u.now,
                             u.packet_id as usize,
                             u.queue_length_when_out,
@@ -3474,9 +3482,31 @@ impl QueueModule {
                             prev_cw_val as usize,
                             prev_retries,
                             prev_drawn_bo,
-                            row_ac,
-                            alvr_header, 
+                            row_ac.clone(),
+                            alvr_header.clone(), 
                         );
+                        }
+                        if let Some(parquet_metrics) = &self.parquet_metrics_network {
+                            parquet_metrics.update_stats(
+                                u.now,
+                                u.packet_id as usize,
+                                u.queue_length_when_out,
+                                u.T_s,
+                                u.T_q,
+                                u.length_packet,
+                                u.sta_src_id,
+                                u.sta_dest_id,
+                                u.ampdu_id,
+                                u.is_collision,
+                                u.collision_backoff,
+                                u.link_id as usize,
+                                prev_cw_val as usize,
+                                prev_retries,
+                                prev_drawn_bo,
+                                row_ac,
+                                alvr_header, 
+                            );
+                        }
                     }
                 }
             }

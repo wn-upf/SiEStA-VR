@@ -203,7 +203,9 @@ impl VRPair {
             0,
             ap_coords,
             random_seed, 
-            test_distances_everest_bool
+            test_distances_everest_bool,
+            None, 
+            server_ip,
         );
         let mut sta_client = STA_extended::new(
             // initial_bitrate * 1e6,
@@ -218,7 +220,9 @@ impl VRPair {
             0,
             ap_coords,
             random_seed, 
-            test_distances_everest_bool
+            test_distances_everest_bool,
+            None, 
+            client_ip,
 
         );
 
@@ -332,35 +336,52 @@ const PAUSE_MEAN: f64 = 12.0;      // Increased from 10.0 to space them out
 const PAUSE_MIN: f64 = 4.0;
 const PAUSE_MAX: f64 = 25.0;
 
+// fn generate_session_timeline<R: Rng>(
+//     rng: &mut R,
+//     stoptime: f64,
+// ) -> Vec<(f64, f64)> {
+//     let start_time_pause = truncated_exponential_seconds(rng, PAUSE_MIN, 3.0, 8.0);
+
+//     let mut t = start_time_pause;
+//     let mut sessions = Vec::new();
+
+//     while t < stoptime {
+//         // Using the new constants here
+//         let dur = rng.gen_range(MIN_SESSION_DUR..=MAX_SESSION_DUR);
+
+//         let pause = truncated_exponential_seconds(
+//             rng, 
+//             PAUSE_MEAN, 
+//             PAUSE_MIN, 
+//             PAUSE_MAX
+//         );
+
+//         let start = t;
+//         let end = (t + dur).min(stoptime);
+//         sessions.push((start, end));
+
+//         t += dur + pause;
+//     }
+
+//     sessions
+// }
 fn generate_session_timeline<R: Rng>(
     rng: &mut R,
     stoptime: f64,
 ) -> Vec<(f64, f64)> {
-    let start_time_pause = truncated_exponential_seconds(rng, PAUSE_MIN, 3.0, 8.0);
+    // Calculate the single start delay
+    let start = truncated_exponential_seconds(rng, PAUSE_MIN, 3.0, 8.0);
 
-    let mut t = start_time_pause;
     let mut sessions = Vec::new();
 
-    while t < stoptime {
-        // Using the new constants here
-        let dur = rng.gen_range(MIN_SESSION_DUR..=MAX_SESSION_DUR);
-
-        let pause = truncated_exponential_seconds(
-            rng, 
-            PAUSE_MEAN, 
-            PAUSE_MIN, 
-            PAUSE_MAX
-        );
-
-        let start = t;
-        let end = (t + dur).min(stoptime);
-        sessions.push((start, end));
-
-        t += dur + pause;
+    // Ensure the start time hasn't already exceeded the stoptime
+    if start < stoptime {
+        sessions.push((start, stoptime));
     }
 
     sessions
 }
+
 #[derive(Clone, Debug)]
 pub struct SimParams {
     pub stoptime: f64,
@@ -765,7 +786,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         };
         let sta_id_dl = PREFIX_ID_DOWNLINK + 50 + i as i32;
         let sta_id_ul = PREFIX_ID_UPLINK + 50 + i as i32;
-
+        let bg_ip_addr: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, (i as i32 + crate::lib::PREFIX_ID_BG) as u8, 1));
         // let sta_id = 300 + i as i32;
 
         let bg_sta = STA_extended::new(
@@ -782,6 +803,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             ap_coords,
             seed, 
             test_distances_everest_bool, 
+            Some(abr_tx.clone()),
+            bg_ip_addr, 
         );
 
         let mbox_bg_sta = Mailbox::new();

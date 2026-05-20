@@ -20,11 +20,22 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use arrow::array::*;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use crossbeam_channel::{bounded, Sender};
+use std::{fs, path::Path, thread};
+use std::{fs::create_dir_all, io::BufWriter, };
+
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 pub const BATCH_SIZE_CSV_QUEUE: usize = 256 * 4;
 pub const BATCH_SIZE_CSV_VIDEO: usize = 64; 
+pub const BATCH_SIZE_CSV_XR: usize = 64;
 
 
 // const PE_DURATION: f64 = 16E-6;         // 802.11ax/be Packet Extension (4-20 us, Max 20us for QAM-4096 STAs)
@@ -59,7 +70,7 @@ pub const PREFIX_ID_DOWNLINK: i32 = 100;
 #[allow(unused)]
 pub const PREFIX_ID_UPLINK: i32 = 200;
 #[allow(unused)]
-pub const PREFIX_ID_BG: i32 = 300;
+pub const PREFIX_ID_BG: i32 = 50;
 // Define a constant to control debugging
 
 pub mod alvr_packets;
@@ -82,6 +93,17 @@ pub mod gcc_nada_estimator;
 pub const DEBUG_EDCA: bool =            false;
 pub const DEBUG_MLO: bool =             false;
 pub const DEBUG_PRINT_ENABLED: bool =   false; // Change to false to disable
+
+
+pub const NETWORK_CSV_LOGGING: bool =  false; // Log CSV for all networking tx/rx or collisions, MAC
+pub const XR_CSV_LOGGING: bool =       false; // Log CSV per XR session, with application measured metrics
+pub const TRACKING_CSV_LOGGING: bool = false; // Log CSV per XR session, with tracking and eye movement metrics. 
+
+pub const NETWORK_PARQUET_LOGGING: bool =  true; // Log Parquet for all networking tx/rx or collisions, MAC
+pub const XR_PARQUET_LOGGING: bool =       true; // Log Parquet per XR session, with application measured metrics
+pub const TRACKING_PARQUET_LOGGING: bool = true; // Log Parquet files per XR session, with tracking and eye movement metrics.
+
+
 
 pub const VISUALIZER_QUEUES_ENABLED: bool = true; // Set to true to enable visualizer events for queue states
 pub const USE_FFMPEG_DEMO: bool = false;
@@ -572,16 +594,16 @@ macro_rules! render_hud_grid {
         }
     };
 }
-// Renders ASCII text into the minifb window with coordinates.
+// Renders ASCII and common Greek text into the minifb window with coordinates.
 pub fn render_text<T>(
-        buffer: &mut [u32],
-        text: &str,
-        x: usize,
-        y: usize,
-        stride: usize,
-        color: u32,
-        scale_input: T,
-    ) where T: AsPrimitive<f32> {
+    buffer: &mut [u32],
+    text: &str,
+    x: usize,
+    y: usize,
+    stride: usize,
+    color: u32,
+    scale_input: T,
+) where T: num_traits::cast::AsPrimitive<f32> { // Assumes num_traits::cast::AsPrimitive or equivalent is imported
 
     const FONT_WIDTH: usize = 5;
     const FONT_HEIGHT: usize = 7;
@@ -594,7 +616,7 @@ pub fn render_text<T>(
 
     let scaled_char_spacing = CHAR_SPACING as f32 * scale;
 
-    // Extended font with lowercase letters
+    // Extended font with lowercase letters and Greek support
     let font = [
         // Space (0)
         [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
@@ -707,6 +729,11 @@ pub fn render_text<T>(
         [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11], // x
         [0x00, 0x00, 0x11, 0x11, 0x0F, 0x01, 0x0E], // y
         [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F], // z
+        
+        // --- Added Greek Glyphs (Indices 90-92) ---
+        [0x00, 0x00, 0x12, 0x15, 0x0E, 0x15, 0x12], // α (Index 90)
+        [0x10, 0x1C, 0x12, 0x1C, 0x12, 0x1C, 0x10], // β (Index 91)
+        [0x00, 0x11, 0x11, 0x13, 0x1D, 0x11, 0x10], // μ / µ (Index 92)
     ];
 
     let mut char_cursor_x = x as f32;
@@ -744,6 +771,12 @@ pub fn render_text<T>(
             '^' => 62,
             '_' => 63,
             'a'..='z' => (c as usize) - ('a' as usize) + 64,
+            
+            // --- Added Greek Match Arms ---
+            'α' => 90,
+            'β' => 91,
+            'μ' | 'µ' => 92, // Maps both Unicode variants of micro/mu
+            
             _ => 0,
         };
 
@@ -771,7 +804,6 @@ pub fn render_text<T>(
         char_cursor_x += (FONT_WIDTH as f32 * scale) + scaled_char_spacing;
     }
 }
-
 
 #[derive(PartialEq)]
 pub enum GraphType {
@@ -2133,7 +2165,6 @@ impl CsvData {
         }
     }
 }
-use std::io::BufWriter;
 
 #[derive(Clone)]
 pub struct CsvType {
@@ -2283,6 +2314,189 @@ impl CsvType {
     }
 }
 
+
+#[derive(Debug)]
+pub struct QueueRow {
+    pub timestamp:              String,
+    pub packet_id:              usize,
+    pub queue_size:             usize,
+    pub l_packet:               usize,
+    pub t_s:                    f64,
+    pub t_q:                    f64,
+    pub id_src:                 i32,
+    pub id_dest:                i32,
+    pub ampdu_id:               u32,
+    pub is_collision:           bool,
+    pub t_collision:            f64,
+    pub link_id:                usize,
+    pub cw_value:               usize,
+    pub backoff_retry_counter:  u8,
+    pub last_bo_drawn:          u32,
+    pub edca_ac:                String,
+    pub alvr_frame:             u32,   // next_packet_index
+    pub alvr_shard:             u32,   // shard_index
+    pub alvr_stream_id:         String,
+}
+
+fn queue_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("timestamp",             DataType::Utf8,    false),
+        Field::new("packet_id",             DataType::UInt64,  false),
+        Field::new("queue_size",            DataType::UInt64,  false),
+        Field::new("l_packet",              DataType::UInt64,  false),
+        Field::new("t_s",                   DataType::Float64, false),
+        Field::new("t_q",                   DataType::Float64, false),
+        Field::new("id_src",                DataType::Int32,   false),
+        Field::new("id_dest",               DataType::Int32,   false),
+        Field::new("ampdu_id",              DataType::UInt32,  false),
+        Field::new("is_collision",          DataType::Boolean, false),
+        Field::new("t_collision",           DataType::Float64, false),
+        Field::new("link_id",               DataType::UInt64,  false),
+        Field::new("cw_value",              DataType::UInt64,  false),
+        Field::new("backoff_retry_counter", DataType::UInt8,   false),
+        Field::new("last_bo_drawn",         DataType::UInt32,  false),
+        Field::new("edca_ac",               DataType::Utf8,    false),
+        Field::new("alvr_frame",            DataType::UInt32,  false),
+        Field::new("alvr_shard",            DataType::UInt32,  false),
+        Field::new("alvr_stream_id",        DataType::Utf8,    false),
+    ]))
+}
+
+fn queue_rows_to_batch(rows: &[QueueRow], schema: &Arc<Schema>) -> RecordBatch {
+    let timestamp:   StringArray  = rows.iter().map(|r| Some(r.timestamp.as_str())).collect();
+    let packet_id:   UInt64Array  = rows.iter().map(|r| r.packet_id  as u64).collect();
+    let queue_size:  UInt64Array  = rows.iter().map(|r| r.queue_size as u64).collect();
+    let l_packet:    UInt64Array  = rows.iter().map(|r| r.l_packet   as u64).collect();
+    let t_s:         Float64Array = rows.iter().map(|r| r.t_s).collect();
+    let t_q:         Float64Array = rows.iter().map(|r| r.t_q).collect();
+    let id_src:      Int32Array   = rows.iter().map(|r| r.id_src).collect();
+    let id_dest:     Int32Array   = rows.iter().map(|r| r.id_dest).collect();
+    let ampdu_id:    UInt32Array  = rows.iter().map(|r| r.ampdu_id).collect();
+    // let collision:   BooleanArray = rows.iter().map(|r| r.is_collision as usize).collect();
+    let collision:   BooleanArray = rows.iter().map(|r| Some(r.is_collision)).collect();
+    let t_collision: Float64Array = rows.iter().map(|r| r.t_collision).collect();
+    let link_id:     UInt64Array  = rows.iter().map(|r| r.link_id  as u64).collect();
+    let cw_value:    UInt64Array  = rows.iter().map(|r| r.cw_value  as u64).collect();
+    let retries:     UInt8Array   = rows.iter().map(|r| r.backoff_retry_counter).collect();
+    let last_bo:     UInt32Array  = rows.iter().map(|r| r.last_bo_drawn).collect();
+    let edca_ac:     StringArray  = rows.iter().map(|r| Some(r.edca_ac.as_str())).collect();
+    let alvr_frame:  UInt32Array  = rows.iter().map(|r| r.alvr_frame).collect();
+    let alvr_shard:  UInt32Array  = rows.iter().map(|r| r.alvr_shard).collect();
+    let alvr_stream: StringArray  = rows.iter().map(|r| Some(r.alvr_stream_id.as_str())).collect();
+
+    RecordBatch::try_new(Arc::clone(schema), vec![
+        Arc::new(timestamp),
+        Arc::new(packet_id),  Arc::new(queue_size), Arc::new(l_packet),
+        Arc::new(t_s),        Arc::new(t_q),
+        Arc::new(id_src),     Arc::new(id_dest),
+        Arc::new(ampdu_id),   Arc::new(collision),  Arc::new(t_collision),
+        Arc::new(link_id),    Arc::new(cw_value),   Arc::new(retries),
+        Arc::new(last_bo),    Arc::new(edca_ac),
+        Arc::new(alvr_frame), Arc::new(alvr_shard), Arc::new(alvr_stream),
+    ]).expect("queue schema/column mismatch")
+}
+
+pub struct ParquetQueue {
+    tx:     Option<Sender<QueueRow>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ParquetQueue {
+    pub fn new(folder_name: &str, results_folder: &str) -> std::io::Result<Self> {
+        let dir = Path::new(results_folder).join(folder_name);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("QUEUE_stats.parquet");
+        let schema = queue_schema();
+        let file   = fs::File::create(&path)?;
+        let props  = WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::SNAPPY)
+            .build();
+        let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        let (tx, rx) = bounded::<QueueRow>(8192);
+
+        let handle = thread::spawn(move || {
+            let mut writer = writer;
+            let mut buf: Vec<QueueRow> = Vec::with_capacity(BATCH_SIZE_CSV_QUEUE);
+            while let Ok(row) = rx.recv() {
+                buf.push(row);
+                if buf.len() >= BATCH_SIZE_CSV_QUEUE {
+                    let batch = queue_rows_to_batch(&buf, &schema);
+                    if writer.write(&batch).is_err() { break; }
+                    buf.clear();
+                }
+            }
+            if !buf.is_empty() {
+                let batch = queue_rows_to_batch(&buf, &schema);
+                let _ = writer.write(&batch);
+            }
+            let _ = writer.close();
+        });
+
+        Ok(Self {
+            tx:     Some(tx),
+            handle: Some(handle),
+        })
+    }
+
+    /// Mirrors the original update_stats signature exactly
+    pub fn update_stats(
+        &self,
+        now: TaiTime<0>,
+        id_packet: usize,
+        queue_size: usize,
+        ts: f64,
+        tq: f64,
+        length_packet: usize,
+        id_src: i32,
+        id_dest: i32,
+        ampdu_id: u32,
+        is_collision: bool,
+        t_collision: f64,
+        link_id: usize,
+        cw_val: usize,
+        num_retries_backoff: u8,
+        last_backoff: u32,
+        edca_ac: String,
+        alvr_data: HeaderALVRStream,
+    ) {
+        if let Some(tx) = self.tx.clone() {
+            let _ = tx.send(QueueRow {
+                timestamp:             format_timestamp!(now),
+                packet_id:             id_packet,
+                queue_size,
+                l_packet:              length_packet,
+                t_s:                   ts,
+                t_q:                   tq,
+                id_src,
+                id_dest,
+                ampdu_id,
+                is_collision,
+                t_collision,
+                link_id,
+                cw_value:              cw_val,
+                backoff_retry_counter: num_retries_backoff,
+                last_bo_drawn:         last_backoff,
+                edca_ac,
+                alvr_frame:            alvr_data.next_packet_index,
+                alvr_shard:            alvr_data.shard_index,
+                alvr_stream_id:        crate::lib::alvr_stream_socket::get_stream_name(
+                alvr_data.stream_id
+                ).to_string(),
+            });
+        }
+    }
+}
+
+impl Drop for ParquetQueue {   // and ParquetTracking
+    fn drop(&mut self) {
+        drop(self.tx.take());  // close channel first
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();  // wait for writer.close() to finish
+        }
+    }
+}
 // Optionally, implement Drop to flush any remaining data on drop
 impl Drop for CsvType {
     fn drop(&mut self) {

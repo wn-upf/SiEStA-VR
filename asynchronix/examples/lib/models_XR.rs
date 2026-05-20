@@ -99,6 +99,13 @@ use std::process::{Command as altCommand, Stdio};
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use arrow::array::*;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use std::{fs::create_dir_all,  };
+
 ////////////////////////////////////// CONSTS//////////////////////////////////////// TODO: STANDARDIZE AND GROUP CONSTS
 
 #[allow(unused)]
@@ -1562,6 +1569,7 @@ pub enum AbrEvent {
         x:      f32,
         y:      f32,
         z:      f32,
+        is_bg:  bool, 
     },
 
 }
@@ -2681,6 +2689,188 @@ impl CsvTracking {
     }
 }
 
+
+const BATCH_SIZE_TRACKING: usize = 512;
+
+#[derive(Debug)]
+pub struct TrackingRow {
+    pub timestamp:       String,
+    pub device_id:       u64,
+    pub pos_x:           f32,
+    pub pos_y:           f32,
+    pub pos_z:           f32,
+    pub interarrival_ms: f32,
+    pub eye_l_x:         f32,
+    pub eye_l_y:         f32,
+    pub eye_l_z:         f32,
+    pub eye_l_w:         f32,
+    pub eye_r_x:         f32,
+    pub eye_r_y:         f32,
+    pub eye_r_z:         f32,
+    pub eye_r_w:         f32,
+}
+
+fn tracking_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("timestamp",       DataType::Utf8,    false),
+        Field::new("device_id",       DataType::UInt64,  false),
+        Field::new("pos_x",           DataType::Float32, false),
+        Field::new("pos_y",           DataType::Float32, false),
+        Field::new("pos_z",           DataType::Float32, false),
+        Field::new("interarrival_ms", DataType::Float32, false),
+        // NaN-capable: eye fields use nullable=true since Option<Quat> can be None
+        Field::new("eye_l_x",         DataType::Float32, true),
+        Field::new("eye_l_y",         DataType::Float32, true),
+        Field::new("eye_l_z",         DataType::Float32, true),
+        Field::new("eye_l_w",         DataType::Float32, true),
+        Field::new("eye_r_x",         DataType::Float32, true),
+        Field::new("eye_r_y",         DataType::Float32, true),
+        Field::new("eye_r_z",         DataType::Float32, true),
+        Field::new("eye_r_w",         DataType::Float32, true),
+    ]))
+}
+
+fn tracking_rows_to_batch(rows: &[TrackingRow], schema: &Arc<Schema>) -> RecordBatch {
+    let timestamp: StringArray  = rows.iter().map(|r| Some(r.timestamp.as_str())).collect();
+    let device_id: UInt64Array  = rows.iter().map(|r| r.device_id).collect();
+    let pos_x:     Float32Array = rows.iter().map(|r| r.pos_x).collect();
+    let pos_y:     Float32Array = rows.iter().map(|r| r.pos_y).collect();
+    let pos_z:     Float32Array = rows.iter().map(|r| r.pos_z).collect();
+    let ia_ms:     Float32Array = rows.iter().map(|r| r.interarrival_ms).collect();
+
+    // Use Option<f32> so None -> Arrow null (cleaner than NaN sentinels in CSV)
+    let eye_l_x: Float32Array = rows.iter().map(|r| to_opt(r.eye_l_x)).collect();
+    let eye_l_y: Float32Array = rows.iter().map(|r| to_opt(r.eye_l_y)).collect();
+    let eye_l_z: Float32Array = rows.iter().map(|r| to_opt(r.eye_l_z)).collect();
+    let eye_l_w: Float32Array = rows.iter().map(|r| to_opt(r.eye_l_w)).collect();
+    let eye_r_x: Float32Array = rows.iter().map(|r| to_opt(r.eye_r_x)).collect();
+    let eye_r_y: Float32Array = rows.iter().map(|r| to_opt(r.eye_r_y)).collect();
+    let eye_r_z: Float32Array = rows.iter().map(|r| to_opt(r.eye_r_z)).collect();
+    let eye_r_w: Float32Array = rows.iter().map(|r| to_opt(r.eye_r_w)).collect();
+
+    RecordBatch::try_new(Arc::clone(schema), vec![
+        Arc::new(timestamp), Arc::new(device_id),
+        Arc::new(pos_x),     Arc::new(pos_y),   Arc::new(pos_z), Arc::new(ia_ms),
+        Arc::new(eye_l_x),   Arc::new(eye_l_y), Arc::new(eye_l_z), Arc::new(eye_l_w),
+        Arc::new(eye_r_x),   Arc::new(eye_r_y), Arc::new(eye_r_z), Arc::new(eye_r_w),
+    ]).expect("tracking schema/column mismatch")
+}
+
+/// NaN (from unwrap_or on missing Quat) becomes a proper Arrow null
+#[inline]
+fn to_opt(v: f32) -> Option<f32> {
+    if v.is_nan() { None } else { Some(v) }
+}pub struct ParquetTracking {
+    tx:              Option<Sender<TrackingRow>>,
+    handle:          Option<thread::JoinHandle<()>>,
+    pub recent_gazes:    Arc<Mutex<VecDeque<[Option<Quat>; 2]>>>,
+    pub max_window_size: usize,
+}
+
+impl ParquetTracking {
+    pub fn new(
+        folder_name:  &str,
+        num_id:       u8,
+        results_path: &str,
+        fps:          f32,
+        t_abr:        f32,
+    ) -> std::io::Result<Self> {
+        let dir = Path::new(results_path).join(folder_name);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("TRACKING_stats{num_id}.parquet"));
+        let schema = tracking_schema();
+        let file   = std::fs::File::create(&path)?;
+        let props  = WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::SNAPPY)
+            .build();
+        let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        let (tx, rx) = bounded::<TrackingRow>(8192);
+
+        // ← capture the handle instead of discarding it
+        let handle = thread::spawn(move || {
+            let mut writer = writer;
+            let mut buf: Vec<TrackingRow> = Vec::with_capacity(BATCH_SIZE_TRACKING);
+            while let Ok(row) = rx.recv() {
+                buf.push(row);
+                if buf.len() >= BATCH_SIZE_TRACKING {
+                    let batch = tracking_rows_to_batch(&buf, &schema);
+                    if writer.write(&batch).is_err() { break; }
+                    buf.clear();
+                }
+            }
+            if !buf.is_empty() {
+                let batch = tracking_rows_to_batch(&buf, &schema);
+                let _ = writer.write(&batch);
+            }
+            let _ = writer.close();
+        });
+
+        let expected_polling_rate = fps * 3.0;
+        let max_window_size = (expected_polling_rate * t_abr).ceil() as usize;
+
+        Ok(Self {
+            tx:     Some(tx),   // ← wrap in Some
+            handle: Some(handle), // ← store the handle
+            recent_gazes: Arc::new(Mutex::new(VecDeque::with_capacity(max_window_size))),
+            max_window_size,
+        })
+    }
+
+    pub fn update_stats(
+        &self,
+        now:             TaiTime<0>,
+        device_id:       u64,
+        pos:             [f32; 3],
+        interarrival_ms: f32,
+        eye_gazes:       [Option<Quat>; 2],
+    ) {
+        {
+            let mut window = self.recent_gazes.lock().unwrap();
+            if window.len() >= self.max_window_size {
+                window.pop_front();
+            }
+            window.push_back(eye_gazes);
+        }
+
+        let (lx, ly, lz, lw) = eye_gazes[0]
+            .map(|q| (q.x, q.y, q.z, q.w))
+            .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
+        let (rx, ry, rz, rw) = eye_gazes[1]
+            .map(|q| (q.x, q.y, q.z, q.w))
+            .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
+
+        // ← send through Option
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(TrackingRow {
+                timestamp:       format_elapsed!(now),
+                device_id,
+                pos_x:           pos[0],
+                pos_y:           pos[1],
+                pos_z:           pos[2],
+                interarrival_ms,
+                eye_l_x: lx, eye_l_y: ly, eye_l_z: lz, eye_l_w: lw,
+                eye_r_x: rx, eye_r_y: ry, eye_r_z: rz, eye_r_w: rw,
+            });
+        }
+    }
+
+    pub fn get_gaze_window(&self) -> Vec<[Option<Quat>; 2]> {
+        self.recent_gazes.lock().unwrap().iter().cloned().collect()
+    }
+}
+
+impl Drop for ParquetTracking {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+
 #[derive(Debug)]
 struct TrackingLog {
     device_id: u64,
@@ -2729,7 +2919,9 @@ pub struct XRServer {
     pub output_perfect_information_bitrate: Output<PerfectInfoBitrateMessage>,
     pub last_tracking_rx_instant: TaiTime<0>,
 
-    pub csv_tracking: CsvTracking,
+    pub csv_tracking: Option<CsvTracking>,
+    pub parquet_tracking: Option<ParquetTracking>,
+
     pub sim_unique_string: String,
 
     pub nada_sender: Option<Arc<Mutex<NadaSender>>>,
@@ -2825,6 +3017,9 @@ impl XRServer {
 
         let num_id_stats = crate::lib::get_4_octet(ip_self);
 
+        let csv_tracking = if crate::lib::TRACKING_CSV_LOGGING{ Some(CsvTracking::new(name_folder, num, results_path_name, frame_rate, t_update_abr, ).unwrap())} else{None};
+        let parquet_tracking = if crate::lib::TRACKING_PARQUET_LOGGING{ Some(ParquetTracking::new(name_folder, num, results_path_name, frame_rate, t_update_abr, ).unwrap())} else{None};
+
 
         Self {
             ip_self,
@@ -2891,9 +3086,9 @@ impl XRServer {
             deterministic_frame_sizes_bool, 
             abr_enabled,
             output_perfect_information_bitrate: Output::default(),
-
             last_tracking_rx_instant: t0_sim,
-            csv_tracking: CsvTracking::new(name_folder, num, results_path_name, frame_rate, t_update_abr, ).unwrap(),
+            csv_tracking, 
+            parquet_tracking,
             sim_unique_string: sim_unique_string.to_string(),
             nada_sender,
             fov_optix_manager: fovoptix_struct,
@@ -3184,20 +3379,36 @@ impl XRServer {
                                             x:      log_entry.position.x,
                                             y:      log_entry.position.y,
                                             z:      log_entry.position.z,
+                                            is_bg:  false, 
                                         });
                                     }
 
-                                    self.csv_tracking.update_stats(
-                                        now,
-                                        log_entry.device_id,
-                                        [
-                                            log_entry.position.x,
-                                            log_entry.position.y,
-                                            log_entry.position.z,
-                                        ],
-                                        interarrival_tracking_ms,
-                                        quat_eye_gazes, 
-                                    );
+                                    if let Some(trackingg) = &self.csv_tracking{
+                                        trackingg.update_stats(
+                                            now,
+                                            log_entry.device_id,
+                                            [
+                                                log_entry.position.x,
+                                                log_entry.position.y,
+                                                log_entry.position.z,
+                                            ],
+                                            interarrival_tracking_ms,
+                                            quat_eye_gazes, 
+                                        );
+                                    }
+                                    if let Some(parquet_tracking) = &self.parquet_tracking {
+                                        parquet_tracking.update_stats(
+                                            now,
+                                            log_entry.device_id,
+                                            [
+                                                log_entry.position.x,
+                                                log_entry.position.y,
+                                                log_entry.position.z,
+                                            ],
+                                            interarrival_tracking_ms,
+                                            quat_eye_gazes, 
+                                        );
+                                    }
                                     self.last_tracking_rx_instant = now;
 
                                     // later: push to CSV logger
@@ -3637,8 +3848,11 @@ impl XRServer {
                 //     _ => 100.0,
                 // };
 
-                let gaze_history: Vec<[Option<Quat>; 2]> = self.csv_tracking.get_gaze_window();
-
+                let gaze_history = if let Some(history) =  &self.csv_tracking {
+                    history.get_gaze_window() 
+                    } else {
+                        Vec::new()
+                    };
                 let mut buffer_emu = send_socket // generate the actual video frame data
                     .get_buffer_emu(
                         &header,
@@ -5949,7 +6163,7 @@ impl XRClient {
                             );
                         }
                     } else {
-                        print!(".");
+                        // print!(".");
                     }
                 }
 
@@ -6393,7 +6607,9 @@ pub struct STA_extended {
     pub ap_coords: Coords, // used for BG DL traffic in TX
 
     pub test_rwalk: bool, 
-
+    pub location_event_sender: Option<crossbeam::channel::Sender<AbrEvent>>, 
+    pub instant_last_location_event: TaiTime<0> ,
+    pub ip_addr: IpAddr,
 
 
 }
@@ -6413,6 +6629,8 @@ impl STA_extended {
         ap_coords: Coords,
         input_seed: u64, 
         test_rwalk: bool, 
+        location_event_sender: Option<crossbeam::channel::Sender<AbrEvent>>, 
+        ip_addr: IpAddr, 
     ) -> Self {
         let arrival_rate_BG_bps = arrival_rate_BG_lambda_packets_per_s * mean_length_BG;
 
@@ -6442,6 +6660,10 @@ impl STA_extended {
             ap_coords,
             current_angle: 0.0, 
             test_rwalk, 
+            location_event_sender,
+            instant_last_location_event: TaiTime::EPOCH, 
+            ip_addr, 
+
         }
     }
 
@@ -6626,8 +6848,23 @@ impl STA_extended {
                 packet.sta_src_id = packet_src;
                 packet.sta_dest_id = packet_dest;
                 packet.sta_src_coords = sta_coords;
-                // println!("src coords: {:?}", sta_coords);
 
+                let now = context.scheduler.time();
+                let t_s = now.duration_since(TaiTime::EPOCH).as_secs_f64();
+                if now.duration_since(self.instant_last_location_event) >= Duration::from_secs(1){
+                    self.instant_last_location_event = now.clone(); // just reset timer
+                    
+                    if let Some(tx) = &self.location_event_sender {
+                        let _ = tx.send(AbrEvent::StaLocation {
+                            t:      t_s,
+                            ip_sta: self.ip_addr,        // STA identity
+                            x:      self.sta_coordinates.x as f32,
+                            y:      self.sta_coordinates.y as f32,
+                            z:      self.sta_coordinates.z as f32,
+                            is_bg:  true, 
+                        });
+                    }
+                }
                 // crate::print_dblue!(
                 //     "{} [TGAPP{}] Packet {} generated | SRC: {} Dest:  {} | self.coords = {:?}, EDCA_AC: {:?}",
                 //     format_elapsed!(context.scheduler.time()),

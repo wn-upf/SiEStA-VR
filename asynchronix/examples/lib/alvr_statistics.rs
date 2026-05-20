@@ -1,6 +1,6 @@
 use crate::lib::alvr_packets::ClientStatistics;
 use crate::lib::alvr_packets::NetworkStatisticsPacket;
-use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV_VIDEO};
+use crate::lib::{SlidingWindowAverage, BATCH_SIZE_CSV_VIDEO, BATCH_SIZE_CSV_XR};
 
 use crate::lib::DebugColor;
 use crate::lib::{
@@ -19,6 +19,15 @@ use std::{
     time::{Duration, Instant},
 };
 use tai_time::TaiTime;
+use arrow::array::*;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use crossbeam_channel::{bounded, Sender};
+use std::{fs, sync::Arc, thread};
+use std::{fs::create_dir_all, io::BufWriter, };
+
 
 #[allow(unused)]
 #[derive(Clone)]
@@ -108,7 +117,9 @@ pub struct StatisticsManager {
 
     id_XR: IpAddr,
 
-    csv_sink: CsvSink,
+    csv_xr_logger: Option<CsvSink>,
+    parquet_xr_logger: Option<ParquetSink>,
+
     // optional: only log every N frames
     // stats_stride: usize,
     frame_counter: usize,
@@ -117,12 +128,10 @@ pub struct StatisticsManager {
     flr_shardloss_count: TimedVecFLR,
 }
 
-use crossbeam_channel::{bounded, Sender};
-use std::{fs::create_dir_all, io::BufWriter, thread};
 // use csv::Writer;
 
-#[derive(serde::Serialize, Clone, Debug)]
-struct StatsRow {
+#[derive(serde::Serialize, Clone, Debug, Copy)]
+pub struct StatsRow {
     timestamp: f64,
     frame_index: usize,
     frame_size_bytes: usize,
@@ -147,6 +156,142 @@ struct StatsRow {
     flr_deadline: usize,
     shardloss_deadline: usize,
 }
+
+
+fn xr_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("timestamp",                     DataType::Float64, false),
+        Field::new("frame_index",                   DataType::UInt64,  false),
+        Field::new("frame_size_bytes",              DataType::UInt64,  false),
+        Field::new("server_fps",                    DataType::Float32, false),
+        Field::new("frame_span_ms",                 DataType::Float32, false),
+        Field::new("interarrival_jitter_ms",        DataType::Float32, false),
+        Field::new("ow_delay_ms",                   DataType::Float32, false),
+        Field::new("filtered_ow_delay_ms",          DataType::Float32, false),
+        Field::new("rtt_ms",                        DataType::Float32, false),
+        Field::new("frame_interarrival_ms",         DataType::Float32, false),
+        Field::new("frame_jitter_ms",               DataType::Float32, false),
+        Field::new("frames_skipped",                DataType::UInt32,  false),
+        Field::new("shards_lost",                   DataType::Int64,   false), // isize → i64
+        Field::new("shards_duplicated",             DataType::UInt32,  false),
+        Field::new("instant_network_throughput_bps",DataType::Float32, false),
+        Field::new("peak_network_throughput_bps",   DataType::Float32, false),
+        Field::new("nominal_bitrate",               DataType::Float32, false),
+        Field::new("interval_avg_plot_throughput",  DataType::Float32, false),
+        Field::new("decoder_jitterbuffer_level",    DataType::UInt8,   false),
+        Field::new("num_rebuffering_events",        DataType::UInt8,   false),
+        Field::new("flr_deadline",                  DataType::UInt64,  false),
+        Field::new("shardloss_deadline",            DataType::UInt64,  false),
+    ]))
+}
+
+fn xr_rows_to_batch(rows: &[StatsRow], schema: &Arc<Schema>) -> RecordBatch {
+    let timestamp:   Float64Array = rows.iter().map(|r| r.timestamp).collect();
+    let frame_idx:   UInt64Array  = rows.iter().map(|r| r.frame_index as u64).collect();
+    let frame_bytes: UInt64Array  = rows.iter().map(|r| r.frame_size_bytes as u64).collect();
+    let server_fps:  Float32Array = rows.iter().map(|r| r.server_fps).collect();
+    let frame_span:  Float32Array = rows.iter().map(|r| r.frame_span_ms).collect();
+    let ia_jitter:   Float32Array = rows.iter().map(|r| r.interarrival_jitter_ms).collect();
+    let ow_delay:    Float32Array = rows.iter().map(|r| r.ow_delay_ms).collect();
+    let filt_ow:     Float32Array = rows.iter().map(|r| r.filtered_ow_delay_ms).collect();
+    let rtt:         Float32Array = rows.iter().map(|r| r.rtt_ms).collect();
+    let frame_ia:    Float32Array = rows.iter().map(|r| r.frame_interarrival_ms).collect();
+    let frame_jit:   Float32Array = rows.iter().map(|r| r.frame_jitter_ms).collect();
+    let skipped:     UInt32Array  = rows.iter().map(|r| r.frames_skipped).collect();
+    let lost:        Int64Array   = rows.iter().map(|r| r.shards_lost as i64).collect();
+    let duped:       UInt32Array  = rows.iter().map(|r| r.shards_duplicated).collect();
+    let inst_tput:   Float32Array = rows.iter().map(|r| r.instant_network_throughput_bps).collect();
+    let peak_tput:   Float32Array = rows.iter().map(|r| r.peak_network_throughput_bps).collect();
+    let nom_br:      Float32Array = rows.iter().map(|r| r.nominal_bitrate).collect();
+    let avg_tput:    Float32Array = rows.iter().map(|r| r.interval_avg_plot_throughput).collect();
+    let jb_level:    UInt8Array   = rows.iter().map(|r| r.decoder_jitterbuffer_level).collect();
+    let rebuf:       UInt8Array   = rows.iter().map(|r| r.num_rebuffering_events).collect();
+    let flr:         UInt64Array  = rows.iter().map(|r| r.flr_deadline as u64).collect();
+    let shard_dl:    UInt64Array  = rows.iter().map(|r| r.shardloss_deadline as u64).collect();
+
+    RecordBatch::try_new(Arc::clone(schema), vec![
+        Arc::new(timestamp),
+        Arc::new(frame_idx),  Arc::new(frame_bytes), Arc::new(server_fps),
+        Arc::new(frame_span), Arc::new(ia_jitter),   Arc::new(ow_delay),
+        Arc::new(filt_ow),    Arc::new(rtt),          Arc::new(frame_ia),
+        Arc::new(frame_jit),  Arc::new(skipped),      Arc::new(lost),
+        Arc::new(duped),      Arc::new(inst_tput),    Arc::new(peak_tput),
+        Arc::new(nom_br),     Arc::new(avg_tput),     Arc::new(jb_level),
+        Arc::new(rebuf),      Arc::new(flr),          Arc::new(shard_dl),
+    ]).expect("video schema/column mismatch — fix field order")
+}
+
+pub struct ParquetSink {
+    tx:     Option<Sender<StatsRow>>,   // Option so we can drop it before joining
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ParquetSink {
+    pub fn new(results_path: &str, folder: &str, file_stem: &str) -> std::io::Result<Self> {
+        let dir = Path::new(results_path).join(folder);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{file_stem}.parquet"));
+
+        let schema = xr_schema();
+        let file   = fs::File::create(&path)?;
+        let props  = WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::SNAPPY)
+            .build();
+        let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        let (tx, rx) = bounded::<StatsRow>(8192);
+
+        let handle = thread::spawn(move || {
+            let mut writer = writer;
+            let mut buf: Vec<StatsRow> = Vec::with_capacity(BATCH_SIZE_CSV_XR);
+
+            while let Ok(row) = rx.recv() {
+                buf.push(row);
+                if buf.len() >= BATCH_SIZE_CSV_XR {
+                    let batch = xr_rows_to_batch(&buf, &schema);
+                    if writer.write(&batch).is_err() { break; }
+                    buf.clear();
+                }
+            }
+            // Drain remainder after channel closes
+            if !buf.is_empty() {
+                let batch = xr_rows_to_batch(&buf, &schema);
+                let _ = writer.write(&batch);
+            }
+            // CRITICAL: writes the Parquet footer — without this the file is unusable
+            if let Err(e) = writer.close() {
+                eprintln!("[ParquetSink] failed to close writer: {e}");
+            }
+        });
+
+        Ok(Self {
+            tx:     Some(tx),
+            handle: Some(handle),
+        })
+    }
+
+    #[inline]
+    pub fn write(&self, row: StatsRow) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(row);
+        }
+    }
+}
+
+impl Drop for ParquetSink {
+    fn drop(&mut self) {
+        // 1. Close the channel — tells the thread the stream is done
+        drop(self.tx.take());
+        // 2. Wait for the thread to finish draining + writer.close()
+        if let Some(h) = self.handle.take() {
+            if let Err(e) = h.join() {
+                eprintln!("[ParquetSink] writer thread panicked: {e:?}");
+            }
+        }
+    }
+}
+
 
 struct CsvSink {
     tx: Sender<StatsRow>,
@@ -245,7 +390,8 @@ impl StatisticsManager {
         let num = crate::lib::get_4_octet(ip_self);
         let file_stem = format!("XR_stats_{num:?}");
 
-        let csv_sink = CsvSink::new(results_path, folder, &file_stem).expect("failed to init CSV sink");
+        let csv_xr_logger = if crate::lib::XR_CSV_LOGGING{Some(CsvSink::new(results_path, folder, &file_stem).expect("failed to init CSV sink"))} else {None};
+        let parquet_xr_logger = if crate::lib::XR_PARQUET_LOGGING{Some(ParquetSink::new(results_path, folder, &file_stem).expect("failed to init Parquet sink"))} else {None};
 
         Self {
             history_buffer: VecDeque::new(),
@@ -328,7 +474,8 @@ impl StatisticsManager {
             last_stats: GraphNetworkStatisticsCsv::default(),
 
             id_XR: ip_self,
-            csv_sink,
+            csv_xr_logger,
+            parquet_xr_logger,
             frame_counter: 0,
             framerate_server,
             flr_shardloss_count: TimedVecFLR::new(1.0),
@@ -578,8 +725,13 @@ impl StatisticsManager {
             flr_deadline: self.last_stats.flr_deadline,
             shardloss_deadline: self.last_stats.shardloss_deadline,
         };
-
-        self.csv_sink.write(row);
+        if let Some(sink) = &self.csv_xr_logger{
+            sink.write(row); 
+        }
+        if let Some(parksink) = &self.parquet_xr_logger{
+            parksink.write(row); 
+        }
+        // self.csv_sink.write(row);
 
         // // Call method to save data to CSV
         // if self.save_network_stats_to_csv().is_err() {
