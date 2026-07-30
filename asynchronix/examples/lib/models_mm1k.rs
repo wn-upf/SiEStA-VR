@@ -1359,18 +1359,18 @@ impl QueueMechanism {
                         format!("DL: AP→STA{}", packet.sta_dest_id)
                     };
 
-                    crate::print_dblue!(
-                            "{:.6}[BW EMU {} ({:.5}->{:.5})] | {} | Limit: {:.2} Mbps | Tokens: {:.0}/{:.0} Mbits ",
-                            format_elapsed!(now),
-                            self.id_sta,
-                            format_elapsed!(valid_from),
-                            format_elapsed!(valid_until),
-                            direction,
-                            max_bps / 1e6,
-                            current_tokens / 1e6,
-                            max_tokens / 1e6,
-                            // token_refill_rate / 1e6
-                        );
+                    // crate::print_dblue!(
+                    //         "{:.6}[BW EMU {} ({:.5}->{:.5})] | {} | Limit: {:.2} Mbps | Tokens: {:.0}/{:.0} Mbits ",
+                    //         format_elapsed!(now),
+                    //         self.id_sta,
+                    //         format_elapsed!(valid_from),
+                    //         format_elapsed!(valid_until),
+                    //         direction,
+                    //         max_bps / 1e6,
+                    //         current_tokens / 1e6,
+                    //         max_tokens / 1e6,
+                    //         // token_refill_rate / 1e6
+                    //     );
 
                     self.last_bw_pattern_logged = Some((now, idx));
                     return; // Only log one pattern per call

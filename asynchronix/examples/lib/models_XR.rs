@@ -3291,6 +3291,106 @@ impl Drop for ParquetTracking {
     }
 }
 
+const BATCH_SIZE_BITRATE: usize = 512;
+
+#[derive(Debug)]
+pub struct BitrateRow {
+    pub timestamp:    String,
+    pub frame_index:  u64,
+    pub bitrate_mbps: f32,
+}
+
+fn bitrate_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("timestamp",    DataType::Utf8,    false),
+        Field::new("frame_index",  DataType::UInt64,  false),
+        Field::new("bitrate_mbps", DataType::Float32, false),
+    ]))
+}
+
+fn bitrate_rows_to_batch(rows: &[BitrateRow], schema: &Arc<Schema>) -> RecordBatch {
+    let timestamp:    StringArray  = rows.iter().map(|r| Some(r.timestamp.as_str())).collect();
+    let frame_index:  UInt64Array  = rows.iter().map(|r| r.frame_index).collect();
+    let bitrate_mbps: Float32Array = rows.iter().map(|r| r.bitrate_mbps).collect();
+
+    RecordBatch::try_new(Arc::clone(schema), vec![
+        Arc::new(timestamp), Arc::new(frame_index), Arc::new(bitrate_mbps),
+    ]).expect("bitrate schema/column mismatch")
+}
+
+pub struct ParquetBitrate {
+    tx:     Option<Sender<BitrateRow>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ParquetBitrate {
+    pub fn new(
+        folder_name:  &str,
+        num_id:       u8,
+        results_path: &str,
+    ) -> std::io::Result<Self> {
+        let dir = Path::new(results_path).join(folder_name);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("BITRATE_stats{num_id}.parquet"));
+        let schema = bitrate_schema();
+        let file   = std::fs::File::create(&path)?;
+        let props  = WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::SNAPPY)
+            .build();
+        let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        let (tx, rx) = bounded::<BitrateRow>(8192);
+
+        let handle = thread::spawn(move || {
+            let mut writer = writer;
+            let mut buf: Vec<BitrateRow> = Vec::with_capacity(BATCH_SIZE_BITRATE);
+            while let Ok(row) = rx.recv() {
+                buf.push(row);
+                if buf.len() >= BATCH_SIZE_BITRATE {
+                    let batch = bitrate_rows_to_batch(&buf, &schema);
+                    if writer.write(&batch).is_err() { break; }
+                    buf.clear();
+                }
+            }
+            if !buf.is_empty() {
+                let batch = bitrate_rows_to_batch(&buf, &schema);
+                let _ = writer.write(&batch);
+            }
+            let _ = writer.close();
+        });
+
+        Ok(Self {
+            tx:     Some(tx),
+            handle: Some(handle),
+        })
+    }
+
+    pub fn update_stats(
+        &self,
+        now:          TaiTime<0>,
+        frame_index:  u64,
+        bitrate_mbps: f32,
+    ) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(BitrateRow {
+                timestamp: format_elapsed!(now),
+                frame_index,
+                bitrate_mbps,
+            });
+        }
+    }
+}
+
+impl Drop for ParquetBitrate {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 
 #[derive(Debug)]
 struct TrackingLog {
@@ -3342,6 +3442,7 @@ pub struct XRServer {
 
     pub csv_tracking: Option<CsvTracking>,
     pub parquet_tracking: Option<ParquetTracking>,
+    pub parquet_bitrate: Option<ParquetBitrate>,
 
     pub sim_unique_string: String,
 
@@ -3440,6 +3541,7 @@ impl XRServer {
 
         let csv_tracking = if crate::lib::TRACKING_CSV_LOGGING{ Some(CsvTracking::new(name_folder, num, results_path_name, frame_rate, t_update_abr, ).unwrap())} else{None};
         let parquet_tracking = if crate::lib::TRACKING_PARQUET_LOGGING{ Some(ParquetTracking::new(name_folder, num, results_path_name, frame_rate, t_update_abr, ).unwrap())} else{None};
+        let parquet_bitrate = if crate::lib::BITRATE_PARQUET_LOGGING{ Some(ParquetBitrate::new(name_folder, num, results_path_name, ).unwrap())} else{None};
 
 
         Self {
@@ -3507,8 +3609,9 @@ impl XRServer {
             abr_enabled,
             output_perfect_information_bitrate: Output::default(),
             last_tracking_rx_instant: t0_sim,
-            csv_tracking, 
+            csv_tracking,
             parquet_tracking,
+            parquet_bitrate,
             sim_unique_string: sim_unique_string.to_string(),
             nada_sender,
             fov_optix_manager: fovoptix_struct,
@@ -4277,6 +4380,14 @@ impl XRServer {
                 }
 
                 let current_bitrate_mbps: f32 = self.bitrate_manager.last_target_bitrate_bps / 1e6;
+
+                if let Some(parquet_bitrate) = &self.parquet_bitrate {
+                    parquet_bitrate.update_stats(
+                        now,
+                        self.frames_sent_counter as u64,
+                        current_bitrate_mbps,
+                    );
+                }
 
                 // let max_bitrate_ladder_mbps: f32 = match self.bitrate_manager.bitrate_mode { // only useful for online VQ analysis
                 //     BitrateMode::NestVr {

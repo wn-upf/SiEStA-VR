@@ -593,6 +593,11 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let mut bg_sta_mailboxes = Vec::new();
     let mut bg_sta_addresses = Vec::new();
 
+    // (xr_server index, its real bandwidth trace) — only populated for Oracle ABR (abr=8), so
+    // each regime change can be scheduled as an exact event instead of waiting on the periodic
+    // t_update_abr poll in generate_video_frame.
+    let mut oracle_bandwidth_traces: Vec<(usize, Vec<NetworkPattern>)> = Vec::new();
+
     let mut emu_addresses = Vec::new();
 
     let mut all_sta_ids = Vec::new();
@@ -772,6 +777,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         xr_client_addresses.push(vr.mbox_xr_client.address());
         xr_server_addresses.push(vr.mbox_xr_server.address());
 
+        if current_abr_mode == 8 {
+            oracle_bandwidth_traces.push((i, vr.emu_link.get_network_patterns().to_vec()));
+        }
+
         // Only push to emu_addresses for the "close" users
         if i < n_close {
             emu_addresses.push(vr.mbox_emu_link.address());
@@ -858,6 +867,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             XRClient::input_coordinates_STA,
             &vr.mbox_xr_client.address(),
         );
+
+        vr.sta_client
+            .outport_coords_queue
+            .connect(QueueModule::input_coords_update, &mbox_queue);
 
         for (link_id, output) in queue.link_outputs.iter_mut() {
             // println!("connecting link id {} to corresponding sta", link_id);
@@ -954,6 +967,49 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let scheduler = simu.scheduler();
 
     let packet_size = PACKET_SIZE_SOCKETS_BYTES;
+
+    // Oracle ABR: schedule an exact event at every bandwidth-pattern regime boundary so it
+    // reacts the instant the cap changes, instead of waiting on the periodic t_update_abr poll.
+    // Drops additionally get a second, earlier event ORACLE_LOOKAHEAD_SECS ahead of the actual
+    // transition, so a frame already in flight (sized for the still-higher current bitrate) has
+    // a head start draining before the link's capacity actually shrinks. Upcoming *increases*
+    // are deliberately NOT preempted: ramping up before the old, still-active (lower) cap
+    // expires would recreate the exact same overshoot in reverse.
+    for (idx, trace) in &oracle_bandwidth_traces {
+        let addr = &xr_server_addresses[*idx];
+        let mut prev_cap_mbps: Option<f64> = None;
+        for pattern in trace {
+            if let NetworkPattern::Bandwidth { max_bps, valid_from, .. } = pattern {
+                let t = valid_from.duration_since(MonotonicTime::EPOCH).as_secs_f64();
+                let cap_mbps = *max_bps / 1e6;
+
+                if prev_cap_mbps.is_some_and(|prev| cap_mbps < prev) {
+                    let lookahead_t = t - crate::lib::models_XR::ORACLE_LOOKAHEAD_SECS as f64;
+                    if lookahead_t > 0.0 {
+                        scheduler
+                            .schedule_event(
+                                Duration::from_secs_f64(lookahead_t),
+                                XRServer::oracle_apply_lookahead_cap,
+                                cap_mbps as f32,
+                                addr,
+                            )
+                            .unwrap();
+                    }
+                }
+                prev_cap_mbps = Some(cap_mbps);
+
+                // The first segment starts exactly at sim start (t=0): the scheduler rejects a
+                // deadline that isn't strictly in the future, and the periodic ABR poll picks
+                // it up within its first tick anyway, so just skip it here.
+                if t <= 0.0 {
+                    continue;
+                }
+                scheduler
+                    .schedule_event(Duration::from_secs_f64(t), XRServer::oracle_bandwidth_step, (), addr)
+                    .unwrap();
+            }
+        }
+    }
 
     // Schedule XR events
     for addr in &emu_addresses {

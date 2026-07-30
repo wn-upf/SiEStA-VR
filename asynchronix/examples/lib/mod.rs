@@ -99,13 +99,14 @@ pub const NETWORK_CSV_LOGGING: bool =  false; // Log CSV for all networking tx/r
 pub const XR_CSV_LOGGING: bool =       false; // Log CSV per XR session, with application measured metrics
 pub const TRACKING_CSV_LOGGING: bool = false; // Log CSV per XR session, with tracking and eye movement metrics. 
 
-pub const NETWORK_PARQUET_LOGGING: bool =  true; // Log Parquet for all networking tx/rx or collisions, MAC
+pub const NETWORK_PARQUET_LOGGING: bool =  false; // Log Parquet for all networking tx/rx or collisions, MAC
 pub const XR_PARQUET_LOGGING: bool =       true; // Log Parquet per XR session, with application measured metrics
 pub const TRACKING_PARQUET_LOGGING: bool = true; // Log Parquet files per XR session, with tracking and eye movement metrics.
+pub const BITRATE_PARQUET_LOGGING: bool =  true; // Log Parquet per XR session, with the bitrate used for each generated video frame.
 
 
 
-pub const VISUALIZER_QUEUES_ENABLED: bool = true; // Set to true to enable visualizer events for queue states
+pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
 pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]
