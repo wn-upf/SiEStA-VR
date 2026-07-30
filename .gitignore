@@ -6,7 +6,7 @@ profile.json
 */*Results*/*
 
 Results/*
-python_RL/tb/
+python_RL/
 *.mkv
 *.mp4
 *.hevc
@@ -19,8 +19,12 @@ video_samples_vmaf/*
 *.hevc
 *wandb*
 simu_decode_samples/*
-python_RL/runs/*
-python_RL/Res*
+
+# RL / legacy run scripts kept only on the rlgames branch
+abr_xrun.sh
+rl_eval.sh
+rl_train.sh
+xrun.sh
 
 *_pycache_*
 .venv/*
