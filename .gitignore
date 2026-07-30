@@ -2,6 +2,8 @@ target
 Cargo.lock
 *.ans
 profile.json
+*Results*/*
+*/*Results*/*
 
 Results/*
 python_RL/tb/
@@ -18,3 +20,8 @@ video_samples_vmaf/*
 *wandb*
 simu_decode_samples/*
 python_RL/runs/*
+python_RL/Res*
+
+*_pycache_*
+.venv/*
+viz_screenshots/

@@ -30,9 +30,9 @@ macro_rules! gcc_debug {
 
 
 pub const GCC_WINDOW_SIZE: usize = 20;
-pub const GCC_MIN_CONFIGURED_BITRATE: f64 = 5.0 * 1000. * 1000.; //5Mbps
+pub const GCC_MIN_CONFIGURED_BITRATE: f64 = 10.0 * 1000. * 1000.; //10Mbps
 pub const GCC_MAX_CONFIGURED_BITRATE: f64 = MAX_MBPS_LADDER as f64 * 1000.0 * 1000.0; //100Mbps
-pub const GCC_INIT_CONFIGURED_BITRATE: f64 = 15.0 * 1000. * 1000.; //15Mbps
+pub const GCC_INIT_CONFIGURED_BITRATE: f64 = GCC_MAX_CONFIGURED_BITRATE; // start at ladder max (100Mbps)
 pub const GCC_INCREASE_COEF_ALPHA: f64 = 1.08;
 pub const GCC_DECREASE_COEF_BETA: f64 = 0.85;
 pub const GCC_DEFAULT_RTT: i64 = 200; //200ms
@@ -1176,9 +1176,9 @@ pub const NADA_PARAM_PRIO: f64 = 1.0; //Weight of priority of the flow | 1.0
 /**
  * Min and Max rate of application supported by media encoder | 150 Kbps & 1.5 Mbps
  **/
-pub const RMCAT_CC_DEFAULT_RMIN: i64 = 2_000_000; // 5Mbps
+pub const RMCAT_CC_DEFAULT_RMIN: i64 = GCC_MIN_CONFIGURED_BITRATE as i64; // 10Mbps
 pub const RMCAT_CC_DEFAULT_RMAX: i64 = GCC_MAX_CONFIGURED_BITRATE as i64; //100Mbps
-pub const NADA_INITIAL_RATE: i64 = 15_000_000; //15Mbps
+pub const NADA_INITIAL_RATE: i64 = RMCAT_CC_DEFAULT_RMAX; // start at ladder max (100Mbps)
 pub const NADA_PARAM_XREF: i64 = 20; //Reference congestion level | 20ms
 pub const NADA_PARAM_KAPPA: f64 = 0.5; //Scaling parameter for gradual rate update | 0.5
 pub const NADA_PARAM_ETA: f64 = 2.0; //Scaling parameter for gradual rate update | 2.0
