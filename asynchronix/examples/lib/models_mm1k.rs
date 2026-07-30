@@ -7,8 +7,10 @@ use crate::{
     print_prettyyyy,
     print_red,
     print_yellow, // print_blue, print_dblue, print_green, print_pretty,
+    print_dblue,
 };
 use crossbeam::channel::{unbounded, Receiver, Sender};
+use rand::distributions::WeightedIndex;
 use rand::Rng;
 use std::cmp::{self, max};
 use std::collections::{HashMap, VecDeque};
@@ -51,6 +53,11 @@ pub const AP_Y: f64 = ROOM_H / 2.0;
 pub const MAX_EMULATED_QUEUE_PACKETS: usize = 10000;
 pub const CSV_PER_PACKET: bool = true; // To collect Queueing times, Service, queue state, collisions per-packet in QUEUE_STATS.csv
 
+/// TEMP DEBUG: per-packet trace of every `try_send_bandwidth` decision (outcome, token level,
+/// rate, elapsed wait) to `stdout`. Very verbose — meant to be flipped on only while diagnosing
+/// the emulated-link burst/thinning issue, then set back to `false` (or deleted) once resolved.
+pub const BANDWIDTH_TRACE_ENABLED: bool = false;
+
 pub const STEP1_TBEGIN: f64 = 10.0;
 pub const STEP1_TEND: f64 = 20.0;
 
@@ -64,8 +71,55 @@ pub const BANDWIDTH_LIMIT_S1: f64 = 100E6;
 pub const BANDWIDTH_LIMIT_S2: f64 = 95E6;
 pub const BANDWIDTH_LIMIT_S3: f64 = 90E6;
 
-pub const REFILL_INTERVAL_TBF: Duration = Duration::from_micros(500);
 pub const MTU_EMULATED: f64 = 1500.0 * 8.0 * 10.0; // allow bursts of N MTUs
+
+/// Lowest frame rate this burst sizing needs to cover — the *longer* the frame period, the
+/// more bits accumulate into one frame at a given rate, so the lowest configured fps is the
+/// worst case for how wide a burst window needs to be (see `BANDWIDTH_BURST_MS`).
+pub const BANDWIDTH_BURST_MIN_FPS: f64 = 60.0;
+
+/// How many average-sized frames the token bucket must be able to admit in one shot, at
+/// `BANDWIDTH_BURST_MIN_FPS`. 20x is deliberately generous — real keyframes only run ~1.8-2x
+/// the mean frame size (measured off the HEVC/AV1 frame-size CSVs) — so this comfortably
+/// covers keyframe spikes with headroom to spare, rather than being tuned to the exact
+/// measured ratio.
+pub const BANDWIDTH_BURST_FRAMES: f64 = 20.0;
+
+/// Token-bucket burst capacity for every `NetworkPattern::Bandwidth`, expressed as
+/// milliseconds of data *at that pattern's `token_refill_rate`* — see `new_bandwidth` for why
+/// this is derived from the refill rate rather than from a fixed bit count or from `max_bps`.
+///
+/// A bigger burst window only changes how much can be admitted *instantaneously* after an idle
+/// gap — it does not raise the sustained rate a flow can achieve, because the bucket is still
+/// hard-capped at this size and only ever refills at `token_refill_rate` (the real, unchanged
+/// bandwidth limit). Over any window of time `T`, total admitted bits stays bounded by
+/// `bucket_capacity + token_refill_rate * T`, so the long-run average converges to
+/// `token_refill_rate` regardless of how large this constant is — widening it trades *how
+/// bursty* admission is allowed to be for *how much* it can burst, not the throughput limit
+/// itself.
+///
+/// `avg_frame_bits(rate) = rate / fps`, so requiring
+/// `bucket_capacity(rate) = rate * BANDWIDTH_BURST_MS / 1000 >= BANDWIDTH_BURST_FRAMES *
+/// avg_frame_bits(rate)` simplifies to a rate-independent `BANDWIDTH_BURST_MS` — one constant
+/// covers every Markov regime, not just whichever rate it was tuned against.
+pub const BANDWIDTH_BURST_MS: f64 = 1000.0 * BANDWIDTH_BURST_FRAMES / BANDWIDTH_BURST_MIN_FPS;
+
+/// netem's default `limit` (queue depth) in packets when a `qdisc ... netem rate <X>`
+/// command doesn't specify one explicitly (see iproute2 q_netem.c: `#define DEFAULT_LIMIT 1000`).
+pub const NETEM_DEFAULT_LIMIT_PACKETS: f64 = 1000.0;
+/// Reference packet size (bits) used to convert netem's packet-count `limit` into an
+/// equivalent worst-case queueing delay for a given rate.
+pub const NETEM_REFERENCE_PACKET_BITS: f64 = 1500.0 * 8.0;
+
+/// Token-bucket burst window (ms) for the flat NIC-speed cap only (see
+/// `EmulatedLink::new_with_bandwidth`) — deliberately much smaller than `BANDWIDTH_BURST_MS`.
+/// Sized to ~2 MTUs' worth of transmission time at a 1 Gbps NIC rate, so the bucket only ever
+/// banks a couple of packets' worth of credit and `try_send_bandwidth` keeps debiting it
+/// packet-by-packet, forcing the drain loop to re-check (and effectively pace) each packet
+/// instead of letting a whole burst (e.g. one video frame) through in a single instantaneous
+/// pass — restoring per-packet serialization at the NIC rate without reintroducing the old
+/// separate `link_free_time` deadline mechanism.
+pub const NIC_CAP_BURST_MS: f64 = 2.0 * NETEM_REFERENCE_PACKET_BITS / 1e9 * 1000.0;
 
 
 pub const STR_PLUS_MODE_MLO: bool = true; // Set to true for STR+ mode, running backoffs and assigning traffic to link in last moment.
@@ -474,11 +528,17 @@ impl QueueStats {
 
 // First, let's add a new enum for distribution types
 // #[derive(Clone, Debug) ]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")] // optional: emits "gaussian"/"uniform" instead of Rust‑style names
 pub enum JitterDistributionType {
     Gaussian,
     Uniform,
+}
+
+impl Default for JitterDistributionType {
+    fn default() -> Self {
+        JitterDistributionType::Uniform
+    }
 }
 
 #[allow(unused, unused_variables)]
@@ -511,6 +571,10 @@ pub enum NetworkPattern {
         max_tokens: f64,
         token_refill_rate: f64,
         last_refill: f64,
+        /// Packets that would need to wait longer than this to drain are dropped
+        /// instead of queued, mirroring netem's packet-count `limit` (default 1000
+        /// packets) converted to an equivalent worst-case queueing delay at this rate.
+        max_latency: Duration,
 
         #[serde(with = "taitime_serde")]
         valid_from: TaiTime<0>,
@@ -538,58 +602,82 @@ use crate::lib::{HeaderALVRStream, taitime_serde};
 
 #[allow(unused)]
 impl NetworkPattern {
-    /// Create a new `NetworkPattern` of type Bandwidth
+    /// Create a new `NetworkPattern` of type Bandwidth.
+    ///
+    /// `max_bps` is purely a *reported* cap — external readers (the Oracle ABR's regime-change
+    /// scheduling in `xr_entry::mod`, the trace CSV, the visualizer) read this field directly to
+    /// know "what's the limit for this segment", so it must always be the real rate, whatever the
+    /// caller intends that to mean. It is NOT used for the internal token-bucket sizing below —
+    /// conflating the two (making the bucket's capacity `max_bps` bits) previously made the
+    /// bucket's refill-from-empty time equal to a fixed 1 second regardless of rate, which for
+    /// bursty/framed traffic (arriving faster than it drains) meant only the very first burst was
+    /// admitted whole; every later one tail-trickled out one packet at a time once that one-time
+    /// credit was spent, killing 802.11 aggregation and collapsing real goodput. The bucket is
+    /// instead sized off `token_refill_rate` as `BANDWIDTH_BURST_MS` worth of data at that rate,
+    /// so it fully refills between bursts arriving faster than that (e.g. video frames) — letting
+    /// each burst through in one shot — independent of whatever `max_bps` is reporting.
+    ///
+    /// `max_latency` mirrors netem's packet-count `limit` (default 1000 packets when
+    /// unspecified, e.g. `tc qdisc add ... netem rate <X>`), converted to an equivalent
+    /// worst-case queueing delay at this rate using a 1500-byte reference packet:
+    /// `NETEM_DEFAULT_LIMIT_PACKETS * NETEM_REFERENCE_PACKET_BITS / token_refill_rate`.
+    /// Packets that would need to wait longer than this are dropped rather than queued.
+    ///
+    /// `current_tokens` starts at 0, not `max_tokens`: a real `tc qdisc add/change ... netem
+    /// rate <X>` grants no banked burst credit at activation — the very next packet is paced
+    /// at the new rate immediately. Pre-filling the bucket here previously let every regime
+    /// transition (e.g. each dwell step in a bandwidth test) absorb a `BANDWIDTH_BURST_MS`-sized
+    /// burst for free with zero queueing delay, which shows up as the sim's RTT staying flat for
+    /// a beat *after* the real cap has already kicked in on ALVR, before finally catching up —
+    /// a phase lag at regime onset that real netem does not have. `max_tokens` still stays at
+    /// `bucket_capacity` so bursts accumulated from *within-regime* idle gaps (e.g. between
+    /// video frames, once the regime is already up and running) are unaffected — only the
+    /// one-time free credit at regime start is removed.
     pub fn new_bandwidth(
         max_bps: f64,
         token_refill_rate: f64,
         valid_from: TaiTime<0>,
         valid_until: TaiTime<0>,
     ) -> Self {
+        Self::new_bandwidth_with_burst_ms(
+            max_bps,
+            token_refill_rate,
+            valid_from,
+            valid_until,
+            BANDWIDTH_BURST_MS,
+        )
+    }
+
+    /// Same as `new_bandwidth`, but with the token-bucket burst window (normally
+    /// `BANDWIDTH_BURST_MS`, sized to admit a whole video frame at once) overridden — used by
+    /// the flat NIC-speed cap (`EmulatedLink::new_with_bandwidth`), which needs a per-packet
+    /// serialization budget instead: at NIC rates (e.g. 1 Gbps) `BANDWIDTH_BURST_MS` worth of
+    /// tokens is tens of megabits, big enough to admit an entire burst (e.g. one video frame's
+    /// packets) in the same `drain()` pass with zero inter-packet delay, instead of pacing them
+    /// out at the NIC rate like a real link would.
+    pub fn new_bandwidth_with_burst_ms(
+        max_bps: f64,
+        token_refill_rate: f64,
+        valid_from: TaiTime<0>,
+        valid_until: TaiTime<0>,
+        burst_ms: f64,
+    ) -> Self {
         let valid_s = valid_from.duration_since(TaiTime::EPOCH).as_secs_f64();
+        let max_latency = Duration::from_secs_f64(
+            NETEM_DEFAULT_LIMIT_PACKETS * NETEM_REFERENCE_PACKET_BITS / token_refill_rate,
+        );
+        let bucket_capacity = token_refill_rate * burst_ms / 1000.0;
 
         Self::Bandwidth {
             max_bps,
-            current_tokens: max_bps, // Initialize tokens to maximum
-            max_tokens: max_bps,     // Maximum bucket capacity
+            current_tokens: 0.0,         // No banked burst credit at regime activation
+            max_tokens: bucket_capacity, // Maximum bucket capacity, reachable via in-regime refill
             token_refill_rate,
             last_refill: valid_s,
+            max_latency,
             valid_from,
             valid_until,
         }
-    }
-    fn bandwidth_account(
-        &mut self,
-        now: TaiTime<0>,
-        packet_bits: Option<f64>,
-    ) -> (bool /*can_send*/, Duration /*delay if not*/) {
-        let Self::Bandwidth {
-            current_tokens,
-            max_tokens,
-            token_refill_rate,
-            last_refill,
-            ..
-        } = self
-        else {
-            unreachable!()
-        };
-
-        let mut now = now.duration_since(TaiTime::EPOCH).as_secs_f64();
-        // Refill
-        let dt = now - *last_refill;
-        *current_tokens = (*current_tokens + dt * *token_refill_rate).min(*max_tokens);
-        *last_refill = now;
-
-        if let Some(bits) = packet_bits {
-            if *current_tokens >= bits {
-                *current_tokens -= bits; // send – netem path
-                return (true, Duration::ZERO);
-            }
-            let need = bits - *current_tokens; // queue – netem path
-            *current_tokens -= bits; // go negative – keep the deficit
-            let delay = need / *token_refill_rate;
-            return (false, Duration::from_secs_f64(delay));
-        }
-        (false, Duration::ZERO) // called as pure refill
     }
 
     pub fn csv_headers() -> &'static [&'static str] {
@@ -689,6 +777,7 @@ impl NetworkPattern {
                 last_refill,
                 valid_from,
                 valid_until,
+                max_latency: _,
             } => {
                 // blanks for OnOffPeriodic (4) + ProbabilisticDrop (3) = 7 fields
                 row.extend((0..7).map(|_| String::new()));
@@ -778,30 +867,6 @@ impl NetworkPattern {
         }
     }
 
-    /// Consumes tokens from the bucket and returns `true` if sufficient tokens exist
-    pub fn consume_tokens(&mut self, packet_size: usize) -> bool {
-        match self {
-            Self::Bandwidth {
-                current_tokens,
-                max_tokens,
-                token_refill_rate,
-                ..
-            } => {
-                let packet_tokens = (packet_size * 8) as f64; // Convert packet size to bits
-                let refilled_tokens = token_refill_rate.min(*max_tokens - *current_tokens);
-                *current_tokens += refilled_tokens; // Refill tokens
-                if *current_tokens >= packet_tokens {
-                    *current_tokens -= packet_tokens; // Consume tokens
-                    true
-                } else {
-                    false
-                }
-            }
-            // Other patterns could return `true` or implement specific logic
-            _ => true, // Default to always allowing transmission
-        }
-    }
-
     /// Placeholder for creating other network patterns
     pub fn new_constant() -> Self {
         Self::Constant
@@ -814,15 +879,13 @@ pub struct EmulatedLink {
     queue_mechanism: QueueMechanism,
     /// Optional bandwidth emulation in bits per second (e.g., 1_000_000_000 for 1 Gbps)
     bandwidth_bps: Option<u64>,
-    /// Time when the link will be free (last packet finishes transmission)
-    link_free_time: TaiTime<0>,
 }
 #[allow(unused)]
 impl EmulatedLink {
     /// Create a new emulated link.
     /// - `max_queue_size`: maximum packets to buffer in the emulator
     /// - `now`: current simulator time as a `TaiTime`
-    /// - `tests`: tuple flags `(bandwidth, jitter, packet_loss, random_events)`
+    /// - `tests`: tuple flags `(bandwidth, jitter, packet_loss, random_events, markov)`
 
     pub fn get_network_patterns(&self) -> &[NetworkPattern] {
         &self.queue_mechanism.network_emulator.get_patterns()
@@ -831,20 +894,25 @@ impl EmulatedLink {
     pub fn new(
         max_queue_size: usize,
         now: TaiTime<0>,
-        emulated_tests: Option<(bool, bool, bool, bool)>,
+        emulated_tests: Option<(bool, bool, bool, bool, bool)>,
         id_sta: IpAddr,
+        sim_duration_secs: f64,
+        viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
     ) -> Self {
         let queue_mechanism: QueueMechanism;
 
         if let Some(values_tests) = emulated_tests {
-            queue_mechanism = QueueMechanism::new(max_queue_size, now, values_tests, id_sta);
+            queue_mechanism =
+                QueueMechanism::new(max_queue_size, now, values_tests, id_sta, sim_duration_secs, viz_tx.as_ref());
         } else {
             print_yellow!("NO PATTERNS?",);
             queue_mechanism = QueueMechanism::new(
                 MAX_EMULATED_QUEUE_PACKETS,
                 TaiTime::EPOCH,
-                (false, false, false, false),
+                (false, false, false, false, false),
                 id_sta,
+                0.0,
+                viz_tx.as_ref(),
             );
         }
 
@@ -852,21 +920,50 @@ impl EmulatedLink {
             output: Default::default(),
             queue_mechanism,
             bandwidth_bps: None, // Disabled by default for backward compatibility
-            link_free_time: now,
         }
     }
 
     /// Create a new emulated link with bandwidth emulation (e.g., 1 Gbps).
     /// - `bandwidth_bps`: bandwidth in bits per second (e.g., 1_000_000_000 for 1 Gbps)
+    ///
+    /// Enforced as an ordinary `NetworkPattern::Bandwidth`, going through the same token-bucket
+    /// accounting as Markov/CBR patterns — *not* the old per-packet `link_free_time`
+    /// serialization deadline. That old approach computed a single-packet-wide deadline at
+    /// arrival and made `drain()` block strictly on it, so even packets from the same
+    /// same-instant burst (e.g. one video frame) each needed their own separately-scheduled
+    /// drain — one packet released per event, regardless of how much headroom the *actual*
+    /// (Markov) bandwidth limit had. Folding it into the same pattern list lets a fast NIC cap
+    /// (1 Gbps is far above any realistic Markov/CBR rate) stay a non-binding formality instead
+    /// of becoming the accidental bottleneck that serializes every burst.
+    ///
+    /// Uses `NIC_CAP_BURST_MS`, not the default `BANDWIDTH_BURST_MS`, for its token bucket: the
+    /// default is deliberately sized to admit a whole video frame at once for slow Markov/CBR
+    /// patterns, but at NIC rates that same window is tens of megabits of burst credit — enough
+    /// to let every packet of a burst drain in the same pass with no inter-packet delay, instead
+    /// of pacing them out at the NIC rate the way a real link would.
     pub fn new_with_bandwidth(
         max_queue_size: usize,
         now: TaiTime<0>,
-        emulated_tests: Option<(bool, bool, bool, bool)>,
+        emulated_tests: Option<(bool, bool, bool, bool, bool)>,
         id_sta: IpAddr,
         bandwidth_bps: Option<u64>,
+        sim_duration_secs: f64,
+        viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
     ) -> Self {
-        let mut link = Self::new(max_queue_size, now, emulated_tests, id_sta);
+        let mut link = Self::new(max_queue_size, now, emulated_tests, id_sta, sim_duration_secs, viz_tx);
         link.bandwidth_bps = bandwidth_bps;
+        if let Some(bw) = bandwidth_bps {
+            let valid_until = now
+                .checked_add(Duration::from_secs_f64(sim_duration_secs.max(1.0)))
+                .unwrap_or(now);
+            link.queue_mechanism.network_emulator.add_pattern(NetworkPattern::new_bandwidth_with_burst_ms(
+                bw as f64,
+                bw as f64,
+                now,
+                valid_until,
+                NIC_CAP_BURST_MS,
+            ));
+        }
         link
     }
 
@@ -874,10 +971,19 @@ impl EmulatedLink {
     pub fn new_1gbps(
         max_queue_size: usize,
         now: TaiTime<0>,
-        emulated_tests: Option<(bool, bool, bool, bool)>,
+        emulated_tests: Option<(bool, bool, bool, bool, bool)>,
         id_sta: IpAddr,
+        sim_duration_secs: f64,
     ) -> Self {
-        Self::new_with_bandwidth(max_queue_size, now, emulated_tests, id_sta, Some(1_000_000_000))
+        Self::new_with_bandwidth(
+            max_queue_size,
+            now,
+            emulated_tests,
+            id_sta,
+            Some(1_000_000_000),
+            sim_duration_secs,
+            None,
+        )
     }
 
     /// Enable or disable bandwidth emulation
@@ -885,106 +991,100 @@ impl EmulatedLink {
         self.bandwidth_bps = bandwidth_bps;
     }
 
-    /// Calculate transmission delay for a packet based on its size and configured bandwidth
-    fn calculate_transmission_delay(&self, packet_size_bits: usize, now: TaiTime<0>, ) -> Option<Duration> {
-        self.bandwidth_bps.map(|bw| {
-            // Transmission time = (packet_size_bits) / (bandwidth_bps)
-            // let packet_size_bits = (packet_size_bytes as u64) * 8;
-            let delay_nanos = (packet_size_bits as u64 * 1_000_000_000) / bw;
-
-            Duration::from_nanos(delay_nanos.max(1))
-        })
-    }
-
     /// Handle packet arrival from a STA. Applies emulation logic, possibly queuing or dropping.
-    pub async fn input(&mut self, mut packet: MpduPacket, context: &Context<Self>) {
+    ///
+    /// The flat NIC-speed cap (`bandwidth_bps`), if enabled, is applied as an ordinary
+    /// `NetworkPattern::Bandwidth` added once in `new_with_bandwidth` — not here — so it goes
+    /// through the same batch-capable token-bucket accounting as Markov/CBR patterns instead of
+    /// a separate per-packet serialization deadline.
+    pub async fn input(&mut self, packet: MpduPacket, context: &Context<Self>) {
         let now = context.scheduler.time();
 
-        // Apply bandwidth emulation if enabled
-        if let Some(transmission_delay) =
-            self.calculate_transmission_delay(packet.length_packet_bits, now)
-        {   
-
-            let time_to_transmit = now.checked_add(transmission_delay).unwrap(); 
-            // debug_print!(DebugColor::Magenta, "{} Delaying transmission of {} bits packet by {} ns (Arrives on {}) | ALVR F: {}, S: {}", format_elapsed!(now), packet.length_packet_bits, transmission_delay.as_secs_f32() * 1e9, format_elapsed!(time_to_transmit), packet.header_alvr.next_packet_index, packet.header_alvr.shard_index); 
-
-            // Calculate when this packet can start transmission
-            let transmission_start = if now >= self.link_free_time {
-                now // Link is free, start immediately
-            } else {
-                self.link_free_time // Link is busy, queue behind previous packet
-            };
-
-            // Update when the link will be free
-            self.link_free_time = transmission_start + transmission_delay;
-
-            // Set the packet's deadline
-            packet.emulated_added_delay_deadline = Some(self.link_free_time);
-        }
-
-        // Delegate to the queue mechanism
-        match self.queue_mechanism.enqueue_or_transmit(packet, context) {
-            
-            EnqueueResult::Transmitted(pkt) => {
-                if let Some(deadline) = pkt.emulated_added_delay_deadline {
-                    // Force the packet into the queue
-                    self.queue_mechanism.queue.push_back(pkt);
-                    
-                    let now = context.scheduler.time();
-                    let should_schedule = match self.queue_mechanism.next_flush_scheduled {
-                        Some(scheduled) => deadline < scheduled,
-                        None => true,
-                    };
-
-                    if should_schedule {
-                        let delay = deadline.duration_since(now).max(Duration::from_nanos(1));
-                        self.queue_mechanism.next_flush_scheduled = Some(deadline);
-                        context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
-                    }
-                } else {
-                    // Truly no emulation delay at all: forward immediately
-                    self.output.send(pkt).await;
+        match self.queue_mechanism.enqueue(packet, now) {
+            EnqueueOutcome::Dropped => {}
+            EnqueueOutcome::Queued => {
+                // If a flush is already pending, it'll reach this packet in due course. Otherwise,
+                // *schedule* the first drain rather than running it inline: siblings from the same
+                // logical burst (e.g. the rest of one video frame) are typically sent via separate
+                // sequential calls into `input` at this same simulated instant. Draining synchronously
+                // here would dispatch this packet alone — with the queue empty again before the next
+                // sibling even exists — so nothing downstream ever sees them as a batch. Deferring by
+                // one scheduler tick lets every same-instant arrival enqueue first; `drain()` then
+                // sees the whole batch at once and can release it together (or ration it fairly, if
+                // there isn't bandwidth for all of it).
+                if self.queue_mechanism.next_flush_scheduled.is_none() {
+                    self.schedule_drain_at(now, now, context);
                 }
             }
-            
-            // EnqueueResult::Transmitted(pkt) => {
-            //     // No emulation delay: forward immediately
-            //     self.output.send(pkt).await;
-            // }
-            EnqueueResult::Queued(queued_pkt) => {
-                if let Some(deadline) = queued_pkt.emulated_added_delay_deadline {
-                    let now = context.scheduler.time();
-                    
-                    // Only schedule a new flush if we aren't already waiting for an earlier one
-                    let should_schedule = match self.queue_mechanism.next_flush_scheduled {
-                        Some(scheduled) => deadline < scheduled,
-                        None => true,
-                    };
+        }
+    }
 
-                    if should_schedule {
-                        let delay = deadline.duration_since(now).max(Duration::from_nanos(1));
-                        self.queue_mechanism.next_flush_scheduled = Some(deadline);
-                        context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
-                    }
+    /// Drains as many queued packets as currently possible, evaluated fresh against whatever
+    /// Bandwidth pattern is active *right now* — not a deadline computed once when a packet was
+    /// enqueued. This is what lets an improving link speed up an existing backlog: a packet
+    /// that queued behind a slow (e.g. Congested) regime gets re-checked against whatever
+    /// regime is active by the time we get to it, instead of draining at a schedule frozen
+    /// under the regime that was active when it arrived.
+    async fn drain(&mut self, context: &Context<Self>) {
+        let now = context.scheduler.time();
+        self.queue_mechanism.next_flush_scheduled = None;
+
+        // TEMP DEBUG: sample the emulated-queue depth at most once per 10 ms, so a backlog
+        // building up during a bandwidth drop (bufferbloat) is visible as a time series without
+        // emitting one line per drain call.
+        let should_log_drain = match self.queue_mechanism.last_drain_logged {
+            None => true,
+            Some(last) => now.duration_since(last) >= Duration::from_millis(10),
+        };
+        if should_log_drain {
+            self.queue_mechanism.last_drain_logged = Some(now);
+            let now_s = now.duration_since(TaiTime::EPOCH).as_secs_f64();
+            // print_red!(
+            //     "[DRAIN-DBG {:.6} {}] queue_len={}",
+            //     now_s,
+            //     self.queue_mechanism.id_sta,
+            //     self.queue_mechanism.queue.len()
+            // );
+        }
+
+        loop {
+            let Some(front) = self.queue_mechanism.queue.front() else { break };
+
+            if now < front.bandwidth_eligible_at {
+                let wake_at = front.bandwidth_eligible_at;
+                self.schedule_drain_at(wake_at, now, context);
+                return;
+            }
+
+            let bits = front.packet.length_packet_bits as f64;
+            let elapsed_wait = now.duration_since(front.enqueued_at);
+            match self.queue_mechanism.network_emulator.try_send_bandwidth(now, bits, elapsed_wait) {
+                BandwidthOutcome::Sent => {
+                    let front = self.queue_mechanism.queue.pop_front().unwrap();
+                    self.output.send(front.packet).await;
+                }
+                BandwidthOutcome::Wait(retry_in) => {
+                    let wake_at = now.checked_add(retry_in).unwrap_or(now);
+                    self.schedule_drain_at(wake_at, now, context);
+                    return;
+                }
+                BandwidthOutcome::ExceedsLimit => {
+                    // Would need to wait longer than the emulated netem `limit` — drop rather
+                    // than let it (and everything behind it, since this is FIFO) sit forever.
+                    self.queue_mechanism.queue.pop_front();
                 }
             }
-            // EnqueueResult::Queued(queued_pkt) => {
-            //     // Scheduled for delayed transmission
-            //     if let Some(deadline) = queued_pkt.emulated_added_delay_deadline {
-            //         let delay = deadline.duration_since(now).max(Duration::from_nanos(1));
-            //         // Schedule a flush event
-
-            //         self.queue_mechanism.next_flush_scheduled = Some(deadline);
-            //         context
-            //             .scheduler
-            //             .schedule_event(delay, Self::flush_queue, ())
-            //             .unwrap();
-            //     }
-            // }
-            EnqueueResult::Dropped => {
-                // Do nothing
-            }
         }
+    }
+
+    /// Schedules the next `drain` wake-up. Only ever called once per `drain` invocation (each
+    /// call path `return`s right after), and `drain` always resets `next_flush_scheduled` to
+    /// `None` at the top of its own call, so there's no earlier-vs-later comparison to make —
+    /// just record the one pending wake-up and schedule it.
+    fn schedule_drain_at(&mut self, wake_at: TaiTime<0>, now: TaiTime<0>, context: &Context<Self>) {
+        self.queue_mechanism.next_flush_scheduled = Some(wake_at);
+        let delay = wake_at.duration_since(now).max(Duration::from_nanos(1));
+        context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
     }
 
     pub fn flush_queue<'a>(
@@ -992,81 +1092,43 @@ impl EmulatedLink {
         _: (),
         context: &'a Context<Self>,
     ) -> impl Future<Output = ()> + Send + 'a {
-        async move {
-            let now = context.scheduler.time();
-            self.queue_mechanism.next_flush_scheduled = None;
-
-            // 1. Send only packets that are actually due NOW
-            while let Some(front_pkt) = self.queue_mechanism.queue.front() {
-                if let Some(deadline) = front_pkt.emulated_added_delay_deadline {
-                    if deadline <= now {
-                        // Pop and send
-                        if let Some(pkt) = self.queue_mechanism.queue.pop_front() {
-                            self.output.send(pkt).await;
-                        }
-                        continue; // Check next packet
-                    }
-                }
-                break; // Next packet isn't ready yet
-            }
-
-            // 2. Schedule the next flush for the new head of the queue
-            if let Some(next_pkt) = self.queue_mechanism.queue.front() {
-                if let Some(next_deadline) = next_pkt.emulated_added_delay_deadline {
-                    let delay = next_deadline.duration_since(now).max(Duration::from_nanos(1));
-                    self.queue_mechanism.next_flush_scheduled = Some(next_deadline);
-
-                    context.scheduler.schedule_event(delay, Self::flush_queue, ()).unwrap();
-                }
-            }
-        }
+        async move { self.drain(context).await; }
     }
-    // pub fn flush_queue<'a>(
-    //     &'a mut self,
-    //     _: (),
-    //     context: &'a Context<Self>,
-    // ) -> impl Future<Output = ()> + Send + 'a {
-    //     async move {
-    //         self.queue_mechanism.next_flush_scheduled = None;
-    //         // This now efficiently gets only the ready packets
-    //         let ready = self.queue_mechanism.process_emu_queued_packets(context);
-    //         for pkt in ready {
-    //             self.output.send(pkt).await;
-    //         }
-    //         // Efficiently schedule the next flush based on the *new* front packet.
-    //         if let Some(next_pkt) = self.queue_mechanism.queue.front() {
-    //             if let Some(next_deadline) = next_pkt.emulated_added_delay_deadline {
-    //                 let now = context.scheduler.time();
-    //                 let delay = next_deadline
-    //                     .duration_since(now)
-    //                     .max(Duration::from_nanos(1));
-    //                 self.queue_mechanism.next_flush_scheduled = Some(next_deadline);
-
-    //                 context
-    //                     .scheduler
-    //                     .schedule_event(delay, Self::flush_queue, ())
-    //                     .unwrap();
-    //             }
-    //         }
-    //     }
-    // }
 }
 
 impl Model for EmulatedLink {}
 
-#[derive(Debug)]
-pub enum EnqueueResult {
-    Transmitted(MpduPacket), // Packet was immediately transmitted
-    Queued(MpduPacket),      // Packet was added to the queue
-    Dropped,                 // Packet was dropped due to queue overflow
+pub enum EnqueueOutcome {
+    Queued,
+    Dropped, // ProbabilisticDrop hit, or the emulated queue was already at `max_queue_size`
 }
+
+/// A packet waiting in `QueueMechanism`'s queue, plus the scheduling metadata that lets
+/// bandwidth service be re-evaluated against whatever pattern is active *at drain time* (see
+/// `EmulatedLink::drain`) instead of a deadline frozen at arrival.
+#[derive(Clone, Debug)]
+struct QueuedPacket {
+    packet: MpduPacket,
+    /// When this packet was originally enqueued — used to measure its *actual* cumulative
+    /// time-in-queue (see `EmulatedLink::drain`), as opposed to `try_send_bandwidth`'s own
+    /// per-attempt wait estimate, which never sees more than one packet's worth of shortfall
+    /// at a time and so can't by itself detect a backlog that's grown well past the emulated
+    /// netem `limit`.
+    enqueued_at: TaiTime<0>,
+    /// Not eligible for bandwidth accounting before this — the NIC-level (`bandwidth_bps`)
+    /// serialization deadline plus this packet's one-shot Jitter delay, both decided once at
+    /// arrival since neither depends on backlog or on a rate that might later change.
+    bandwidth_eligible_at: TaiTime<0>,
+}
+
 #[derive(Clone)]
 pub struct QueueMechanism {
-    queue: VecDeque<MpduPacket>,              // Packet queue
+    queue: VecDeque<QueuedPacket>,             // Packet queue
     network_emulator: NetworkPatternEmulator, // Bandwidth pattern
     max_queue_size: usize,
     next_flush_scheduled: Option<TaiTime<0>>,
     last_bw_pattern_logged: Option<(TaiTime<0>, usize)>, // (last_log_time, pattern_index)
+    last_drain_logged: Option<TaiTime<0>>,               // TEMP DEBUG: throttle for drain-depth log
     id_sta: IpAddr,
 }
 
@@ -1074,8 +1136,10 @@ impl QueueMechanism {
     pub fn new(
         max_emulated_queue_packets: usize,
         _now: TaiTime<0>,
-        tests: (bool, bool, bool, bool),
+        tests: (bool, bool, bool, bool, bool),
         id_sta: IpAddr,
+        sim_duration_secs: f64,
+        viz_tx: Option<&crossbeam::channel::Sender<VizEvent>>,
     ) -> Self {
         let mut network_emulator = NetworkPatternEmulator::new(id_sta);
 
@@ -1100,7 +1164,7 @@ impl QueueMechanism {
             .checked_add(Duration::from_secs_f64(STEP3_TEND))
             .unwrap();
 
-        let (test_bw, test_jitter, test_pl, test_random) = tests;
+        let (test_bw, test_jitter, test_pl, test_random, test_markov) = tests;
 
         // Assume these time values are defined appropriately:
         let overall_start = _now.checked_add(Duration::from_secs(10)).unwrap();
@@ -1142,6 +1206,23 @@ impl QueueMechanism {
                 JitterDistributionType::Uniform, // Distribution for event duration
                 50e6,                            // Maximum bps (1Mbps) as mean_value
                 40e6,                            // Variance
+            );
+        }
+
+        if test_markov {
+            // Covers the whole simulation (from _now, not the 10s->65s demo window the other
+            // test modes use above) so trace richness scales automatically with sim_duration_secs
+            // instead of needing a hand-tuned event count/window.
+            let markov_end = _now
+                .checked_add(Duration::from_secs_f64(sim_duration_secs))
+                .unwrap();
+            network_emulator.add_markov_modulated_bandwidth(
+                &WIFI_CLOUD_VR_STATES,
+                &WIFI_CLOUD_VR_TRANSITIONS,
+                _now,
+                markov_end,
+                0, // start in "Excellent"
+                viz_tx,
             );
         }
 
@@ -1220,123 +1301,31 @@ impl QueueMechanism {
             max_queue_size: max_emulated_queue_packets,
             next_flush_scheduled: None,
             last_bw_pattern_logged: None,
+            last_drain_logged: None,
             id_sta,
         }
     }
 
-    pub fn enqueue_or_transmit(
-        &mut self,
-        mut packet: MpduPacket,
-        context: &Context<EmulatedLink>,
-    ) -> EnqueueResult {
-        let now = context.scheduler.time();
-        // print_yellow!("{} Enqueue or transmit? ", format_elapsed!(now));
-
-        // let mut dbg_reason = "no‑pattern";
-        // let mut _dbg_delay  = Duration::ZERO;
-        // let _dbg_packet = packet.clone();
-
-        if self.network_emulator.last_update_time + REFILL_INTERVAL_TBF <= now {
-            self.network_emulator.refill_all_buckets(now);
-        }
+    /// Applies one-shot arrival effects (ProbabilisticDrop, Jitter) and, unless dropped or the
+    /// queue is already full, pushes the packet in. Bandwidth is *not* decided here — see
+    /// `EmulatedLink::drain`, which re-evaluates it fresh against whatever pattern is active at
+    /// actual drain time instead of a deadline computed once now.
+    pub fn enqueue(&mut self, packet: MpduPacket, now: TaiTime<0>) -> EnqueueOutcome {
         self.log_active_bw_patterns(now, &packet);
-        
-        // if packet.length_packet_bits == 0 {
-        //     packet.length_packet_bits = packet.data_inner.len() * 8; // fallback for early traffic, len is in bytes (converted to bits)
-        // }
-        // Get the potential delay for the packet
-        let reason = match self
-            .network_emulator
-            .should_transmit_with_delay(&mut packet, now)
-        {
-            Some(delay) if delay == Duration::ZERO => {
-                // Immediate transmission possible
-                // dbg_reason = "immediate";
-                EnqueueResult::Transmitted(packet)
-            }
-            Some(delay) => {
-                // Add the delay to the packet's queue_in_instant
-                let mut delayed_packet = packet.clone();
-                delayed_packet.emulated_added_delay_deadline = now.checked_add(delay);
-
-                // Enqueue the packet
-                if self.queue.len() < self.max_queue_size {
-                    let needs_flush = match self.next_flush_scheduled {
-                        None => true,
-                        Some(scheduled_time) => {
-                            // Only reschedule if this packet would be ready sooner
-                            delayed_packet.emulated_added_delay_deadline.unwrap() < scheduled_time
-                        }
-                    };
-
-                    self.queue.push_back(delayed_packet.clone());
-                    if needs_flush {
-                        EnqueueResult::Queued(delayed_packet)
-                    } else {
-                        // Don't trigger new scheduling
-                        EnqueueResult::Queued(MpduPacket {
-                            emulated_added_delay_deadline: None,
-                            ..delayed_packet
-                        })
-                    }
-                } else {
-                    // print_red!(
-                    //     "[NETEM FULL queue] Packet DROPPED (ALVR Stream: {} | Frame_id: {} , {} / {})",
-                    //     // delayed_packet.packet_id,
-                    //     delayed_packet.header_alvr.stream_id,
-                    //     delayed_packet.header_alvr.next_packet_index,
-                    //     delayed_packet.header_alvr.shard_index,
-                    //     delayed_packet.header_alvr.shards_count
-                    // );
-                    EnqueueResult::Dropped
+        match self.network_emulator.apply_arrival_effects(&packet, now) {
+            ArrivalOutcome::Drop => EnqueueOutcome::Dropped,
+            ArrivalOutcome::Delay(jitter_extra) => {
+                if self.queue.len() >= self.max_queue_size {
+                    return EnqueueOutcome::Dropped;
                 }
-            }
-            None => {
-                // dbg_reason = "drop";
-                EnqueueResult::Dropped
-            }
-        };
-
-        // db_debug_bgprint!(
-        //     DebugColor::Cyan,
-        //     "[NETEM] t={:.6}  decision={}  delay={:.6}  pkt_len={} ",
-        //     format_elapsed!(now),
-        //     dbg_reason,
-        //     dbg_delay.as_secs_f64(),
-        //     dbg_packet.length_packet,
-        //     // active_patterns
-        //         // .first()
-        //         // .map(|p| if let NetworkPattern::Bandwidth { current_tokens, .. } = p { *current_tokens } else { 0. })
-        // );
-        reason
-    }
-
-
-    pub fn process_emu_queued_packets(
-        &mut self,
-        context: &Context<EmulatedLink>,
-    ) -> Vec<MpduPacket> {
-        let now = context.scheduler.time();
-        let mut ready: Vec<MpduPacket> = Vec::new();
-
-        // *** OPTIMIZATION ***
-        // Efficiently process only the ready packets from the front.
-        // This loop stops as soon as it finds a packet that is not ready.
-        while let Some(p) = self.queue.front() {
-            if let Some(deadline) = p.emulated_added_delay_deadline {
-                if now >= deadline {
-                    // Packet is ready, pop it and add to the ready list
-                    ready.push(self.queue.pop_front().unwrap()); // We know it's Some
-                } else {
-                    // The front packet is not ready, so no subsequent packet can be.
-                    break;
-                }
-            } else {
-                // Packet has no deadline, treat as dropped (matches original logic)
-                self.queue.pop_front();
+                // Stack onto any NIC-level (bandwidth_bps) serialization deadline already set
+                // by EmulatedLink, instead of clobbering it — the two delay sources compound.
+                let nic_floor = packet.emulated_added_delay_deadline.unwrap_or(now).max(now);
+                let bandwidth_eligible_at = nic_floor.checked_add(jitter_extra).unwrap_or(nic_floor);
+                self.queue.push_back(QueuedPacket { packet, enqueued_at: now, bandwidth_eligible_at });
+                EnqueueOutcome::Queued
             }
         }
-        ready
     }
 
     fn log_active_bw_patterns(&mut self, now: TaiTime<0>, packet: &MpduPacket) {
@@ -1399,22 +1388,109 @@ pub enum RandomEventKind {
     Bandwidth,
 }
 
+/// One state of a semi-Markov bandwidth process: a bps range sampled once per visit (one
+/// "regime", e.g. a stable MCS/contention level) and a dwell-time range sampled per visit
+/// from an exponential distribution around `mean_dwell_secs` (clamped to the given range so
+/// a single unlucky sample can't produce a degenerate near-zero or runaway-long segment).
+#[derive(Clone, Copy, Debug)]
+pub struct MarkovBandwidthState {
+    pub name: &'static str,
+    pub bps_range: (f64, f64),
+    pub dwell_range_secs: (f64, f64),
+    pub mean_dwell_secs: f64,
+}
+
+/// Cloud-VR-over-Wi-Fi preset: 5 steady-state regimes (bandwidth set by 802.11ac/ax MCS
+/// level and airtime contention) plus a short transient `Fade` state for body/multipath
+/// blocking events. Order must match `WIFI_CLOUD_VR_TRANSITIONS` below.
+///
+/// Dwell times give each visit enough length (mean 6-8s) for an ABR agent running on a
+/// ~1s control loop to actually settle on a bitrate and reap sustained reward from matching
+/// it, rather than the regime changing before it can react. Combined with the transition
+/// matrix below (tuned for a near-uniform time-share across Excellent/Good/Fair/Poor, with
+/// Congested a bit rarer and Fade rare/brief), this deliberately over-represents Poor/
+/// Congested relative to a real, typical Wi-Fi deployment — trading realism for a training
+/// curriculum that reliably visits the whole bandwidth range every episode instead of
+/// mostly sitting in Excellent/Good. If you want stock-realistic time shares back, bias
+/// the transition matrix's self-loops/edges toward the top states again.
+pub const WIFI_CLOUD_VR_STATES: [MarkovBandwidthState; 6] = [
+    MarkovBandwidthState {
+        name: "Excellent",
+        bps_range: (90e6, 125e6),
+        dwell_range_secs: (3.0, 20.0),
+        mean_dwell_secs: 8.0,
+    },
+    MarkovBandwidthState {
+        name: "Good",
+        bps_range: (80e6, 110e6),
+        dwell_range_secs: (3.0, 20.0),
+        mean_dwell_secs: 10.0,
+    },
+    MarkovBandwidthState {
+        name: "Fair",
+        bps_range: (40e6, 80e6),
+        dwell_range_secs: (3.0, 20.0),
+        mean_dwell_secs: 10.0,
+    },
+    MarkovBandwidthState {
+        name: "Poor",
+        bps_range: (35e6, 65e6),
+        dwell_range_secs: (3.0, 20.0),
+        mean_dwell_secs: 10.0,
+    },
+    MarkovBandwidthState {
+        name: "Congested",
+        bps_range: (35e6, 45e6),
+        dwell_range_secs: (2.0, 15.0),
+        mean_dwell_secs: 6.0,
+    },
+    MarkovBandwidthState {
+        name: "Fade",
+        bps_range: (15e6, 20e6),
+        dwell_range_secs: (0.1, 2.0),
+        mean_dwell_secs: 0.6,
+    },
+];
+
+/// Row-stochastic transition matrix for `WIFI_CLOUD_VR_STATES` (state indices: 0=Excellent,
+/// 1=Good, 2=Fair, 3=Poor, 4=Congested, 5=Fade). Each row sums to 1.0.
+///
+/// States 0-4 form a birth-death chain (only adjacent-severity moves, e.g. Excellent can't
+/// jump straight to Congested) with *symmetric* edge weights (0.20 each way at every edge):
+/// for a birth-death chain, adjacent-pair detailed balance means the embedded-chain
+/// stationary distribution only depends on the ratio of paired edge weights, not on the
+/// self-loop size — so equal edges alone give Excellent/Good/Fair/Poor a near-identical
+/// long-run time share (~20% each) regardless of how sticky each self-loop is.
+/// `Congested` reuses Excellent's "only one neighbor" shape, ending up slightly rarer
+/// (~15-16%). Every state 0-4 leaks 6% probability to `Fade`, which is not sticky (no
+/// self-loop) and returns uniformly to one of states 0-4 — since Fade's own dwell is tiny
+/// (mean 0.6s) this keeps it a rare, brief excursion (<1% of total time) rather than a
+/// persistent regime, which is the one place realism (fades are brief) is kept strictly.
+pub const WIFI_CLOUD_VR_TRANSITIONS: [[f64; 6]; 6] = [
+    // Excellent
+    [0.74, 0.20, 0.00, 0.00, 0.00, 0.06],
+    // Good
+    [0.15, 0.54, 0.25, 0.00, 0.00, 0.06],
+    // Fair
+    [0.00, 0.20, 0.54, 0.20, 0.00, 0.06],
+    // Poor
+    [0.00, 0.00, 0.20, 0.54, 0.20, 0.06],
+    // Congested
+    [0.00, 0.00, 0.00, 0.20, 0.74, 0.06],
+    // Fade (returns uniformly to any ambient regime; never self-loops)
+    [0.20, 0.20, 0.20, 0.20, 0.20, 0.00],
+];
+
 #[allow(unused)]
 #[derive(Clone, Debug)]
 pub struct NetworkPatternEmulator {
     patterns: Vec<NetworkPattern>,
-    last_update_time: TaiTime<0>,
-    last_update_only_DBG_NETEM: TaiTime<0>,
-    debug_counter: usize, // Counter to track the calls
     ip_parent: IpAddr,
 }
 impl NetworkPatternEmulator {
     pub fn new(ip_parent: IpAddr) -> Self {
         Self {
             patterns: Vec::new(),
-            last_update_time: TaiTime::default(),
-            last_update_only_DBG_NETEM: TaiTime::default(),
-            debug_counter: 0,
             ip_parent,
         }
     }
@@ -1588,181 +1664,132 @@ impl NetworkPatternEmulator {
         }
     }
 
+    /// Fills `[overall_start, overall_end)` with contiguous `Bandwidth` patterns driven by a
+    /// semi-Markov chain over `states`/`transitions` (see `WIFI_CLOUD_VR_STATES` for a ready
+    /// preset). Unlike `add_random_events`, richness is not tied to a manually-tuned event
+    /// `count`: the walk simply keeps emitting segments until it reaches `overall_end`, so the
+    /// same state/transition table produces equally rich traces for a 1-minute or 1-hour run.
+    ///
+    /// Each visit to a state samples one bandwidth value (a "regime", e.g. one MCS/contention
+    /// level) for its whole dwell, and one dwell duration (exponential around
+    /// `mean_dwell_secs`, clamped to `dwell_range_secs`) before transitioning to the next
+    /// state per `transitions[current_state]`. Because states cover the entire window with no
+    /// gaps, there's no "default/unconstrained" bandwidth to fall back into between segments,
+    /// unlike the sparse overlay events from `add_random_events`.
+    pub fn add_markov_modulated_bandwidth<const N: usize>(
+        &mut self,
+        states: &[MarkovBandwidthState; N],
+        transitions: &[[f64; N]; N],
+        overall_start: TaiTime<0>,
+        overall_end: TaiTime<0>,
+        initial_state: usize,
+        viz_tx: Option<&crossbeam::channel::Sender<VizEvent>>,
+    ) {
+        let mut rng = rand::thread_rng();
+        let mut current_state = initial_state;
+        let mut current_time: TaiTime<0> = overall_start;
+
+        while current_time < overall_end {
+            let state = &states[current_state];
+
+            let (min_dwell, max_dwell) = state.dwell_range_secs;
+            let dwell_dist = Exp::new(1.0 / state.mean_dwell_secs)
+                .expect("mean_dwell_secs must be positive");
+            let dwell_secs = dwell_dist.sample(&mut rng).clamp(min_dwell, max_dwell);
+
+            let seg_end = match current_time.checked_add(Duration::from_secs_f64(dwell_secs)) {
+                Some(t) => t.min(overall_end),
+                None => overall_end,
+            };
+
+            // .min()/.max() guards against a state whose bps_range got entered/edited backwards
+            // — gen_range panics on an inverted (empty) range instead of just swapping it.
+            let (bw_min, bw_max) = state.bps_range;
+            let bps = rng.gen_range(bw_min.min(bw_max)..=bw_min.max(bw_max));
+
+            crate::print_dblue!(
+                "[{}] Markov state {} : {:.5} -> {:.5} | {:.2} Mbps",
+                self.ip_parent,
+                state.name,
+                format_elapsed!(current_time),
+                format_elapsed!(seg_end),
+                bps / 1e6
+            );
+
+            self.add_pattern(NetworkPattern::new_bandwidth(
+                bps,
+                bps,
+                current_time,
+                seg_end,
+            ));
+
+            if VISUALIZER_QUEUES_ENABLED {
+                if let Some(tx) = viz_tx {
+                    let _ = tx.try_send(VizEvent::BandwidthChange {
+                        t: current_time.duration_since(TaiTime::EPOCH).as_secs_f64(),
+                        end: seg_end.duration_since(TaiTime::EPOCH).as_secs_f64(),
+                        ip: self.ip_parent,
+                        state_name: Some(state.name),
+                        mbps: (bps / 1e6) as f32,
+                    });
+                }
+            }
+
+            current_time = seg_end;
+
+            let weights = &transitions[current_state];
+            current_state = WeightedIndex::new(weights)
+                .expect("each transition row must have a positive weight sum")
+                .sample(&mut rng);
+        }
+    }
+
     pub fn add_pattern(&mut self, pattern: NetworkPattern) {
         self.patterns.push(pattern);
     }
 
-    pub fn check_active_patterns(&self, current_time: TaiTime<0>) -> (bool, bool) {
-        let mut any_active = false;
-        let mut just_ended = false;
-
-        for pattern in &self.patterns {
-            if let NetworkPattern::Bandwidth {
-                valid_from,
-                valid_until,
-                ..
-            } = pattern
-            {
-                // Check if pattern is active
-                if current_time >= *valid_from && current_time <= *valid_until {
-                    any_active = true;
-                }
-                // Check if pattern just ended (within last 100ms)
-                let end_window = valid_until
-                    .checked_add(Duration::from_millis(100))
-                    .unwrap_or(*valid_until);
-                if current_time > *valid_until && current_time <= end_window {
-                    just_ended = true;
-                }
-            }
-        }
-        (any_active, just_ended)
+    /// One-shot, per-packet effects decided at arrival: ProbabilisticDrop (may drop outright)
+    /// and Jitter (an extra fixed delay). Unlike Bandwidth, neither depends on queue backlog or
+    /// on a rate that might change while this packet later waits, so there's no correctness
+    /// reason to defer them to drain time — see `try_send_bandwidth` for that.
+    pub fn apply_arrival_effects(&mut self, packet: &MpduPacket, now: TaiTime<0>) -> ArrivalOutcome {
+        self.apply_arrival_effects_labeled(now, &|| packet.print(DebugColor::Red))
     }
 
-    pub fn refill_all_buckets(&mut self, now: TaiTime<0>) {
-        for pattern in &mut self.patterns {
-            if let NetworkPattern::Bandwidth { .. } = pattern {
-                // Refill without packet accounting
-                pattern.bandwidth_account(now, None);
-            }
-        }
+    /// Same as `apply_arrival_effects`, for callers with no `MpduPacket` (e.g. real-network
+    /// mode's raw shard bytes) — the drop-log line falls back to a generic label instead of
+    /// the packet's own debug print.
+    pub fn apply_arrival_effects_bits(&mut self, now: TaiTime<0>) -> ArrivalOutcome {
+        self.apply_arrival_effects_labeled(now, &|| "<real-net shard>".to_string())
     }
 
-    #[allow(unused_assignments)]
-    pub fn should_transmit_with_delay(
+    fn apply_arrival_effects_labeled(
         &mut self,
-        packet: &mut MpduPacket,
-        current_time: TaiTime<0>,
-        // bandwidth_limit_bps_parent: f64,
-    ) -> Option<Duration> {
-        // Update time-based patterns
-        let alvr_header = packet.header_alvr.clone();
-        if self.last_update_time == TaiTime::default() {
-            self.last_update_time = current_time;
-        }
+        now: TaiTime<0>,
+        label: &dyn Fn() -> String,
+    ) -> ArrivalOutcome {
+        let mut total_delay = Duration::ZERO;
 
-        if packet.has_consumed_emu_tokens == true {
-            return Some(Duration::ZERO);
-        }
-
-        let _time_delta = current_time.duration_since(self.last_update_time);
-        let _time_delta_dbg = current_time.duration_since(self.last_update_only_DBG_NETEM);
-
-        self.last_update_only_DBG_NETEM = current_time;
-        self.last_update_time = current_time;
-
-        let (_has_active, just_ended) = self.check_active_patterns(current_time);
-        // / If a pattern just ended, signal to purge the queue
-        if just_ended {
-            // print_green!(
-            //     "{} [PATTERN TRANSITION] Bandwidth pattern just ended, need to purge queue",
-            //     format_elapsed!(current_time)
-            // );
-            // return Some(Duration::from_micros(16));
-            return None; // Signal to drop the packet, was causing excessive drops
-        }
-
-        // Find all active bandwidth patterns at the current time
-        let mut active_patterns: Vec<_> = self
-            .patterns
-            .iter_mut()
-            .filter_map(|pattern| {
-                if let NetworkPattern::Bandwidth {
-                    valid_from,
-                    valid_until,
-                    ..
-                } = pattern
-                {
-                    if current_time >= *valid_from && current_time <= *valid_until {
-                        Some(pattern)
-                    } else {
-                        None
+        for pattern in self.patterns.iter_mut() {
+            match pattern {
+                NetworkPattern::ProbabilisticDrop { drop_probability, valid_from, valid_until } => {
+                    if now < *valid_from || now > *valid_until {
+                        continue;
                     }
-                } else if let NetworkPattern::ProbabilisticDrop {
-                    valid_from,
-                    valid_until,
-                    drop_probability: _,
-                } = pattern
-                {
-                    if current_time >= *valid_from && current_time <= *valid_until {
-                        Some(pattern)
-                    } else {
-                        None
-                    }
-                } else if let NetworkPattern::Jitter {
-                    mean_delay: _,
-                    distribution_type: _,
-                    variance: _, // Standard deviation for Gaussian, half-width for Uniform
-                    correlation_pct: _, // Correlation with previous delay (0-100%)
-                    last_delay: _, // Stores previous delay for correlation
-                    valid_from,
-                    valid_until,
-                } = pattern
-                {
-                    if current_time >= *valid_from && current_time <= *valid_until {
-                        Some(pattern)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Warn if multiple active patterns
-        if active_patterns.len() > 1 {
-            debug_bgprint!(
-                DebugColor::Lavender,
-                "WARNING: Multiple active bandwidth patterns detected at {:4.9}",
-                format_elapsed!(current_time)
-            );
-        }
-
-        match active_patterns.first_mut() {
-            Some(pattern) => match pattern {
-                NetworkPattern::ProbabilisticDrop {
-                    drop_probability,
-                    valid_from,
-                    valid_until,
-                } => {
-                    let mut rng = rand::thread_rng(); // Create a random number generator
-                    let rand_value: f64 = rng.gen(); // Generate a random value between 0 and 1
+                    let mut rng = rand::thread_rng();
+                    let rand_value: f64 = rng.gen();
 
                     if rand_value < *drop_probability {
                         print_red!(
                             "[{} | RANDOM LOSS ( {:.5} -> {:.5} )]  prob= {:.4}! {:?}",
-                            format_elapsed!(current_time),
-                            format_elapsed!(valid_from),
-                            format_elapsed!(valid_until),
+                            format_elapsed!(now),
+                            format_elapsed!(*valid_from),
+                            format_elapsed!(*valid_until),
                             *drop_probability,
-                            packet.print(DebugColor::Red)
+                            label()
                         );
-                        return None; // Drop the packet
-                    } else {
-                        return Some(Duration::ZERO); // transmit inmediatelyOM
+                        return ArrivalOutcome::Drop;
                     }
-                }
-
-                NetworkPattern::Bandwidth {
-                    // current_tokens,
-                    // max_tokens,
-                    // token_refill_rate,
-                    // valid_from,
-                    // valid_until,
-                    ..
-                } => {
-                        let pkt_bits = packet.length_packet_bits as f64;
-                        let (can_send, delay) = pattern.bandwidth_account(current_time, Some(pkt_bits));
-                        if can_send {
-                            packet.has_consumed_emu_tokens = true;
-                            return Some(Duration::ZERO);
-                        }
-                        else {
-                            packet.has_consumed_emu_tokens = true;   // we already debited the bucket
-                            return Some(delay);
-                        }
-
-                        // return Some(delay);          // queued, tokens NOT deducted yet  
                 }
 
                 NetworkPattern::Jitter {
@@ -1774,66 +1801,200 @@ impl NetworkPatternEmulator {
                     valid_from,
                     valid_until,
                 } => {
+                    if now < *valid_from || now > *valid_until {
+                        continue;
+                    }
                     let mut rng = rand::thread_rng();
 
-                    // Calculate the new random delay
                     let random_component = match distribution_type {
                         JitterDistributionType::Gaussian => {
-                            // Using a normal distribution
                             let normal = rand_distr::Normal::new(0.0, *variance).unwrap();
                             rng.sample(normal)
                         }
-                        JitterDistributionType::Uniform => {
-                            // Using a uniform distribution centered on 0 with width 2*variance
+                        // gen_range panics on an empty range, which -variance..variance
+                        // is whenever variance == 0.0 (a fixed, non-random delay -- a
+                        // valid and common config, not an edge case to reject).
+                        JitterDistributionType::Uniform if *variance > 0.0 => {
                             rng.gen_range(-*variance..*variance)
                         }
+                        JitterDistributionType::Uniform => 0.0,
                     };
 
-                    // Apply correlation with previous delay if correlation_pct > 0
                     let correlated_offset = if *correlation_pct > 0.0 {
-                        // Calculate deviation from mean of last delay
                         let last_deviation = last_delay.as_secs_f64() - mean_delay.as_secs_f64();
-
-                        // Apply correlation factor
-                        let correlation_factor = *correlation_pct / 100.0;
-                        last_deviation * correlation_factor
+                        last_deviation * (*correlation_pct / 100.0)
                     } else {
                         0.0
                     };
 
-                    // Combine mean delay, random component, and correlation
                     let new_delay_secs =
-                        mean_delay.as_secs_f64() + random_component + correlated_offset;
-
-                    // Ensure delay is not negative
-                    let new_delay_secs = new_delay_secs.max(0.0);
-
-                    // Update last_delay for next packet
+                        (mean_delay.as_secs_f64() + random_component + correlated_offset).max(0.0);
                     *last_delay = Duration::from_secs_f64(new_delay_secs);
-                    self.debug_counter += 1;
 
-                    // if self.debug_counter >= 4096 {
-                    //     print_red!("{:4.9} [DBG JITTER ({:.5} -> {:.5})] Delay: {:.3} ms | Mean: {:.3} ms, Rand: {:.3} ms, Corr: {:.3} ms | (ALVR F_id: {} - {}/{})",
-                    //         format_elapsed!(current_time),
-                    //         format_elapsed!(valid_from),
-                    //         format_elapsed!(valid_until),
-                    //         new_delay_secs * 1000.0,
-                    //         mean_delay.as_secs_f64() * 1000.0,
-                    //         random_component * 1000.0,
-                    //         correlated_offset * 1000.0,
-                    //         alvr_header.next_packet_index,
-                    //         alvr_header.shard_index,
-                    //         alvr_header.shards_count - 1
-                    //     );
-                    // }
-
-                    return Some(Duration::from_secs_f64(new_delay_secs));
+                    total_delay += Duration::from_secs_f64(new_delay_secs);
                 }
-                _ => return Some(Duration::ZERO),
-            },
-            None => Some(Duration::ZERO), // No active pattern
+
+                NetworkPattern::Bandwidth { .. }
+                | NetworkPattern::Constant
+                | NetworkPattern::OnOffPeriodic { .. } => continue,
+            }
         }
+
+        ArrivalOutcome::Delay(total_delay)
     }
+
+    /// Attempts to account `bits` against every Bandwidth pattern active *right now*, refilling
+    /// each for elapsed time first. Nothing is debited unless *all* currently-active patterns
+    /// have enough tokens (a two-phase peek-then-commit, so a packet that fails on one pattern
+    /// never partially double-charges another). This is re-evaluated fresh on every call — a
+    /// packet that couldn't be sent against a slow (e.g. Congested) regime a moment ago gets
+    /// re-checked against whatever regime is active *now*, instead of a one-shot deadline
+    /// computed once and left to go stale. Compare to a real qdisc/token bucket, which
+    /// re-checks token availability at actual dequeue time rather than precomputing a future
+    /// send time when a packet is enqueued — an improving link speeds up an existing backlog
+    /// instead of ignoring it.
+    ///
+    /// Returns `Sent` if accounted for now, `Wait(estimate)` if not enough tokens yet (nothing
+    /// debited — `estimate` is just a scheduling hint, re-derived at the next attempt), or
+    /// `ExceedsLimit` if that estimated wait already exceeds the most restrictive active
+    /// pattern's `max_latency` (the emulated netem `limit`) — checked fresh each attempt rather
+    /// than frozen at arrival, so a packet isn't condemned by a since-improved worst case.
+    /// `elapsed_wait` is how long this packet has *already* sat in the queue (since it was
+    /// originally enqueued), not just what this one attempt needs — see the `ExceedsLimit`
+    /// check below for why the per-attempt wait alone can't detect a backlog that's grown past
+    /// the emulated netem `limit`.
+    pub fn try_send_bandwidth(&mut self, now: TaiTime<0>, bits: f64, elapsed_wait: Duration) -> BandwidthOutcome {
+        let now_s = now.duration_since(TaiTime::EPOCH).as_secs_f64();
+
+        let mut any_active = false;
+        let mut all_sufficient = true;
+        let mut max_wait = Duration::ZERO;
+        let mut min_limit: Option<Duration> = None;
+
+        // TEMP DEBUG (BANDWIDTH_TRACE_ENABLED): snapshot of the last active pattern touched
+        // this call, purely for the trace print below — remove once the burst/thinning issue
+        // is root-caused.
+        let mut trace_tokens = 0.0_f64;
+        let mut trace_max_tokens = 0.0_f64;
+        let mut trace_rate = 0.0_f64;
+
+        for pattern in self.patterns.iter_mut() {
+            let NetworkPattern::Bandwidth {
+                valid_from,
+                valid_until,
+                max_latency,
+                current_tokens,
+                max_tokens,
+                token_refill_rate,
+                last_refill,
+                ..
+            } = pattern
+            else {
+                continue;
+            };
+            if now < *valid_from || now > *valid_until {
+                continue;
+            }
+            any_active = true;
+
+            let dt = now_s - *last_refill;
+            *current_tokens = (*current_tokens + dt * *token_refill_rate).min(*max_tokens);
+            *last_refill = now_s;
+
+            if *current_tokens < bits {
+                all_sufficient = false;
+                let need = bits - *current_tokens;
+                max_wait = max_wait.max(Duration::from_secs_f64(need / *token_refill_rate));
+
+                // Only a pattern that's actually short on tokens (i.e. genuinely constraining
+                // this packet) contributes its netem `limit` to the drop threshold. A
+                // non-binding pattern — notably the fast flat NIC cap (1 Gbps), whose bucket is
+                // never empty at realistic loads — must NOT: its `max_latency` is tiny (1000
+                // packets drain in ~12ms at 1 Gbps) and, if folded in via `min`, would collapse
+                // the effective drop threshold far below the real (slow) bottleneck's limit,
+                // dropping packets — and thus whole video frames — that the real bandwidth limit
+                // would have queued and delivered fine.
+                min_limit = Some(min_limit.map_or(*max_latency, |m: Duration| m.min(*max_latency)));
+            }
+
+            trace_tokens = *current_tokens;
+            trace_max_tokens = *max_tokens;
+            trace_rate = *token_refill_rate;
+        }
+
+        if !any_active {
+            return BandwidthOutcome::Sent;
+        }
+        if all_sufficient {
+            for pattern in self.patterns.iter_mut() {
+                let NetworkPattern::Bandwidth { valid_from, valid_until, current_tokens, .. } = pattern else {
+                    continue;
+                };
+                if now >= *valid_from && now <= *valid_until {
+                    *current_tokens -= bits;
+                }
+            }
+            if BANDWIDTH_TRACE_ENABLED {
+                print_dblue!(
+                    "[BW-TRACE {:.6} {}] Sent    bits={:.0} tokens={:.0}/{:.0} rate={:.2}Mbps elapsed_wait={:.3}ms",
+                    now_s, self.ip_parent, bits, trace_tokens, trace_max_tokens, trace_rate / 1e6,
+                    elapsed_wait.as_secs_f64() * 1000.0
+                );
+            }
+            return BandwidthOutcome::Sent;
+        }
+        if elapsed_wait + max_wait > min_limit.unwrap() {
+            if BANDWIDTH_TRACE_ENABLED {
+                print_red!(
+                    "[BW-TRACE {:.6} {}] ExceedsLimit bits={:.0} tokens={:.0}/{:.0} rate={:.2}Mbps elapsed_wait={:.3}ms max_wait={:.3}ms limit={:.3}ms",
+                    now_s, self.ip_parent, bits, trace_tokens, trace_max_tokens, trace_rate / 1e6,
+                    elapsed_wait.as_secs_f64() * 1000.0, max_wait.as_secs_f64() * 1000.0,
+                    min_limit.unwrap().as_secs_f64() * 1000.0
+                );
+            }
+            return BandwidthOutcome::ExceedsLimit;
+        }
+        if BANDWIDTH_TRACE_ENABLED {
+            print_yellow!(
+                "[BW-TRACE {:.6} {}] Wait    bits={:.0} tokens={:.0}/{:.0} rate={:.2}Mbps elapsed_wait={:.3}ms max_wait={:.3}ms",
+                now_s, self.ip_parent, bits, trace_tokens, trace_max_tokens, trace_rate / 1e6,
+                elapsed_wait.as_secs_f64() * 1000.0, max_wait.as_secs_f64() * 1000.0
+            );
+        }
+        BandwidthOutcome::Wait(max_wait)
+    }
+}
+
+/// Convenience wrapper around `add_markov_modulated_bandwidth` pinned to the
+/// `WIFI_CLOUD_VR_STATES`/`WIFI_CLOUD_VR_TRANSITIONS` preset -- used by real-network mode's
+/// `net_emu_writer` so it doesn't need to know the preset's type parameters, only that it
+/// wants "the Markov Wi-Fi trace".
+pub fn add_markov_wifi_cloud_vr_bandwidth(
+    emulator: &mut NetworkPatternEmulator,
+    overall_start: TaiTime<0>,
+    overall_end: TaiTime<0>,
+    initial_state: usize,
+    viz_tx: Option<&crossbeam::channel::Sender<VizEvent>>,
+) {
+    emulator.add_markov_modulated_bandwidth(
+        &WIFI_CLOUD_VR_STATES,
+        &WIFI_CLOUD_VR_TRANSITIONS,
+        overall_start,
+        overall_end,
+        initial_state,
+        viz_tx,
+    );
+}
+
+pub enum ArrivalOutcome {
+    Drop,
+    Delay(Duration),
+}
+
+pub enum BandwidthOutcome {
+    Sent,
+    Wait(Duration),
+    ExceedsLimit,
 }
 
 #[derive(Debug, Default)]
@@ -1988,6 +2149,9 @@ pub struct Medium {
     tx_owner: Option<MacKey>,        // who currently holds TXOP (only while busy)
     last_txop_owner: Option<MacKey>, // who last held a TXOP (sticky for logging)
     last_txop_end: TaiTime<0>,       // when that TXOP ended}
+
+    max_busy_reached: TaiTime<0>, // High-water mark to prevent double-counting overlapping busy periods
+    accumulated_busy_s: f32,      // Total seconds the medium has spent busy
 }
 impl Medium {
     #[inline]
@@ -1995,18 +2159,22 @@ impl Medium {
         now >= self.busy_until && now >= self.nav_until
     }
     #[inline]
-    pub fn start_txop(&mut self, t: TaiTime<0>, owner: MacKey) {
+    pub fn start_txop(&mut self, now: TaiTime<0>, t: TaiTime<0>, owner: MacKey) {
+
+        self.integrate_busy_time(now, t);
         self.busy_until = t;
         self.tx_owner = Some(owner)
     }
     /// Busy due to collision/backoff/NAV (no owner)
     #[inline]
-    pub fn occupy_collision(&mut self, until: TaiTime<0>) {
+    pub fn occupy_collision(&mut self, now: TaiTime<0>, until: TaiTime<0>) {
+        self.integrate_busy_time(now, until);
         self.tx_owner = None;
         self.busy_until = until;
     }
     #[inline]
-    pub fn _set_nav_until(&mut self, t: TaiTime<0>) {
+    pub fn set_nav_until(&mut self, now: TaiTime<0>, t: TaiTime<0>) {
+        self.integrate_busy_time(now, t);
         self.nav_until = t;
     }
 
@@ -2049,6 +2217,40 @@ impl Medium {
     pub fn _last_end(&self) -> TaiTime<0> {
         self.last_txop_end
     }
+
+    #[inline]
+    fn integrate_busy_time(&mut self, now: TaiTime<0>, until: TaiTime<0>) {
+        // Start counting from either `now` or our highest recorded busy time, whichever is later.
+        // (This prevents counting time that has already passed, or double-counting overlaps)
+        let start = if now > self.max_busy_reached { now } else { self.max_busy_reached };
+
+        if until > start {
+            // Assuming TaiTime can be converted to f32 seconds.
+            // Adjust this subtraction to match your specific TaiTime API if needed.
+            let added_duration = until.duration_since(TaiTime::EPOCH).as_secs_f32() - start.duration_since(TaiTime::EPOCH).as_secs_f32();
+            self.accumulated_busy_s += added_duration;
+            self.max_busy_reached = until;
+        }
+    }
+
+    #[inline]
+    pub fn get_accumulated_busy_s(&self) -> f32 {
+        self.accumulated_busy_s
+    }
+
+    /// Calculates overall utilization from the start of the simulation [0.0 to 1.0]
+    #[inline]
+    pub fn overall_utilization(&self, opt_sim_start_time: Option<TaiTime<0>>, now: TaiTime<0>) -> f32 {
+        let sim_start_time = if let Some(tai_time) = opt_sim_start_time {
+            tai_time
+        } else {
+            TaiTime::EPOCH
+        };
+        let total_time = now.duration_since(TaiTime::EPOCH).as_secs_f32() - sim_start_time.duration_since(TaiTime::EPOCH).as_secs_f32();
+        if total_time <= 0.0 { return 0.0; }
+        (self.accumulated_busy_s / total_time).clamp(0.0, 1.0)
+    }
+
 }
 
 #[derive(Clone, Debug)]
@@ -2238,6 +2440,16 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
         sta_src: i32, //new field for per-device queue
         sta_dest: i32, //new field for per-device queue
     },
+    /// Bandwidth-pattern regime change on an emulated link — emitted once per segment as a
+    /// semi-Markov bandwidth chain (see `add_markov_modulated_bandwidth`) transitions into a
+    /// new state, so post-sim viewers can overlay the applied bandwidth trace.
+    BandwidthChange {
+        t: f64,
+        end: f64,
+        ip: IpAddr,
+        state_name: Option<&'static str>,
+        mbps: f32,
+    },
 }
 
 // #[allow(unused)]
@@ -2319,7 +2531,7 @@ impl QueueModule {
         PL_prob: f64,
         vec_ids: Vec<i32>,
         folder_dir: String,
-        emulated_tests: Option<(bool, bool, bool, bool)>,
+        emulated_tests: Option<(bool, bool, bool, bool, bool)>,
         link_configs: Vec<LinkConfig>, // NEW: Configure available links
         mlo_linkselection_strat: LinkSelectionStrategy,
         packs_per_ampdu: usize,
@@ -2493,8 +2705,11 @@ impl QueueModule {
 
     #[inline]
     fn emit_visualization_event(&self, ev: VizEvent) {
-        if let Some(tx) = &self.viz_tx {
+        if !VISUALIZER_QUEUES_ENABLED{return;}
+        else{
+            if let Some(tx) = &self.viz_tx {
             let _ = tx.try_send(ev);  // never block the sim
+            }
         }
     }
 
@@ -2656,21 +2871,27 @@ impl QueueModule {
                 // Borrow-checker note: we can't call `&self` methods here because `st` holds &mut.
                 // Push directly through the sender.
                     if let Some(tx) = &self.viz_tx {
-                        let _ = tx.try_send(VizEvent::BackoffSnap {
-                            t: t_secs(now),
-                            mac_key: key,
-                            counter: st.backoff_counter,
-                            cw: st.cw,
-                            frozen: st.backoff_frozen,
-                            medium_free_since: t_secs(st.medium_free_since),
+                        if VISUALIZER_QUEUES_ENABLED{
+                            let _ = tx.try_send(VizEvent::BackoffSnap {
+                                t: t_secs(now),
+                                mac_key: key,
+                                counter: st.backoff_counter,
+                                cw: st.cw,
+                                frozen: st.backoff_frozen,
+                                medium_free_since: t_secs(st.medium_free_since),
                         });
+
+                        }
                     }
                 }
 
 
         }
-        
-        if !ready_per_link.is_empty() {
+
+        // NOTE: `summary` is only ever read by `debug_edca!`, which compiles away when
+        // DEBUG_EDCA is false. Building it unconditionally cost a String + one format!
+        // per contender on every 9 µs slot tick, so it is gated on the same const.
+        if DEBUG_EDCA && !ready_per_link.is_empty() {
             // Build a short summary string
             let mut summary = String::new();
             for (link_id, contenders) in &ready_per_link {
@@ -2996,88 +3217,94 @@ impl QueueModule {
     }
 
     #[inline]
-    pub async fn cache_input_packet(&mut self, packet: MpduPacket, link_id: u8) {
-        let key = (packet.sta_src_id, packet.sta_dest_id);
+    pub async fn cache_input_packet(&mut self, length_packet_bits: usize,
+        sta_src_id: i32,
+        sta_dest_id: i32,
+        sta_src_coords: Coords,   // Copy
+        edca_ac: EdcaAc,      // Copy
+        link_id: u8
+        ) {
+            let key = (sta_src_id, sta_dest_id);
 
-        // Do all immutable reading from `self` *before* the mutable borrow.
-        let is_ul = packet.sta_src_id > packet.sta_dest_id;
-        let mac_key_edca = if is_ul {
-            (packet.sta_src_id, packet.edca_ac, link_id)
-        } else {
-            (-1, packet.edca_ac, link_id)
-        };
+            // Do all immutable reading from `self` *before* the mutable borrow.
+            let is_ul = sta_src_id > sta_dest_id;
+            let mac_key_edca = if is_ul {
+                (sta_src_id, edca_ac, link_id)
+            } else {
+                (-1, edca_ac, link_id)
+            };
 
-        let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
-        // All immutable borrows happen here and end immediately
-        let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
-        let coords_queue = self.coords_queue; // Assuming Coords is Copy
-        let p_tx = self.p_tx; // f64 is Copy
+            let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
+            // All immutable borrows happen here and end immediately
+            let cap_s_edca = self.txop_cap_secs(&mac_key_edca);
+            let coords_queue = self.coords_queue; // Assuming Coords is Copy
+            let p_tx = self.p_tx; // f64 is Copy
 
-        let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
-            // Calculate transmission delay for a single packet
-            let resultz = airtime_ampdu(
-                packet.length_packet_bits as f64,
-                1,
-                coords_queue,
-                packet.sta_src_coords,
-                p_tx,
-                channel_width,
-            );
-
-            // Binary search
-            let mut low = 1;
-            let mut high = self.packs_per_ampdu as i32;
-            let mut optimal_n_packets = 0;
-            let mut resultz_full_ampdu = airtime_ampdu(
-                packet.length_packet_bits as f64 * high as f64,
-                high,
-                coords_queue,
-                packet.sta_src_coords,
-                p_tx,
-                channel_width,
-            );
-
-            while low <= high {
-                let mid = (low + high) / 2;
-                let test_resultz = airtime_ampdu(
-                    packet.length_packet_bits as f64 * mid as f64,
-                    mid,
+            let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
+                // Calculate transmission delay for a single packet
+                let resultz = airtime_ampdu(
+                    length_packet_bits as f64,
+                    1,
                     coords_queue,
-                    packet.sta_src_coords,
+                    sta_src_coords,
                     p_tx,
                     channel_width,
                 );
 
-                // Use the pre-calculated cap_s_edca variable
-                if test_resultz.0 <= DEFAULT_TMAX_AGG || test_resultz.0 <= cap_s_edca {
-                    optimal_n_packets = mid;
-                    resultz_full_ampdu = test_resultz;
-                    low = mid + 1;
-                } else {
-                    high = mid - 1;
+                // Binary search
+                let mut low = 1;
+                let mut high = self.packs_per_ampdu as i32;
+                let mut optimal_n_packets = 0;
+                let mut resultz_full_ampdu = airtime_ampdu(
+                    length_packet_bits as f64 * high as f64,
+                    high,
+                    coords_queue,
+                    sta_src_coords,
+                    p_tx,
+                    channel_width,
+                );
+
+                while low <= high {
+                    let mid = (low + high) / 2;
+                    let test_resultz = airtime_ampdu(
+                        length_packet_bits as f64 * mid as f64,
+                        mid,
+                        coords_queue,
+                        sta_src_coords,
+                        p_tx,
+                        channel_width,
+                    );
+
+                    // Use the pre-calculated cap_s_edca variable
+                    if test_resultz.0 <= DEFAULT_TMAX_AGG || test_resultz.0 <= cap_s_edca {
+                        optimal_n_packets = mid;
+                        resultz_full_ampdu = test_resultz;
+                        low = mid + 1;
+                    } else {
+                        high = mid - 1;
+                    }
                 }
-            }
-            // Note: packet_count starts at 0, will be incremented below
-            StaRateInfo {
-                total_transmission_delay_single: resultz.0,
-                total_transmission_delay_fullampdu: resultz_full_ampdu.0,
-                fullampdu_max_size: optimal_n_packets as usize,
-                packet_count: 0,
-                weighted_rate_single: resultz.0, // First value for EWMA
-                weighted_rate_fullampdu: resultz_full_ampdu.0, // First value for EWMA
-                // Avoid division by zero if optimal_n_packets is 0
-                per_packet_channel_access_efficiency: resultz_full_ampdu.0
-                    / (optimal_n_packets.max(1) as f64),
-                expected_queue_delivery_ms: 0.0,
-            }
-        }); // <-- Mutable borrow of self.sta_stats_cache ends here
+                // Note: packet_count starts at 0, will be incremented below
+                StaRateInfo {
+                    total_transmission_delay_single: resultz.0,
+                    total_transmission_delay_fullampdu: resultz_full_ampdu.0,
+                    fullampdu_max_size: optimal_n_packets as usize,
+                    packet_count: 0,
+                    weighted_rate_single: resultz.0, // First value for EWMA
+                    weighted_rate_fullampdu: resultz_full_ampdu.0, // First value for EWMA
+                    // Avoid division by zero if optimal_n_packets is 0
+                    per_packet_channel_access_efficiency: resultz_full_ampdu.0
+                        / (optimal_n_packets.max(1) as f64),
+                    expected_queue_delivery_ms: 0.0,
+                }
+            }); // <-- Mutable borrow of self.sta_stats_cache ends here
 
-        entry.packet_count += 1;
+            entry.packet_count += 1;
 
-        // Re-calculate the expected delivery time based on the new count
-        entry.expected_queue_delivery_ms =
-            entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
-    }
+            // Re-calculate the expected delivery time based on the new count
+            entry.expected_queue_delivery_ms =
+                entry.per_packet_channel_access_efficiency * entry.packet_count as f64 * 1000.0;
+        }
 
     #[inline]
     pub async fn input(&mut self, mut pkt: MpduPacket, ctx: &Context<Self>) {
@@ -3105,7 +3332,7 @@ impl QueueModule {
                     if cur_depth < self.queue_maxsize_dl {
                  
 
-                        self.cache_input_packet(pkt.clone(), link_id).await;
+                        self.cache_input_packet( pkt.length_packet_bits ,pkt.sta_src_id, pkt.sta_dest_id, pkt.sta_src_coords, pkt.edca_ac, link_id).await;
 
                         // *self.mac_queue_depths.entry(mac_key_dl).or_insert(0) += 1;
                         // *self.queue_depth_mut(&mac_key_dl) += 1;
@@ -3204,7 +3431,7 @@ impl QueueModule {
                     if current_depth <self.ul_capacity_queue_device {
 
                         packet.queue_in_instant = now; // UL packets always go in queue, later they're dropped if they exceed max of STA/EDCA_AC virtual queue.
-                        self.cache_input_packet(packet.clone(), link_id).await;
+                        self.cache_input_packet( packet.length_packet_bits ,packet.sta_src_id, packet.sta_dest_id, packet.sta_src_coords, packet.edca_ac, link_id).await;
                         
                         let idx = self.mac_key_index[&mac_key_ul];
                         let new_depth: usize = current_depth + 1;
@@ -3270,6 +3497,14 @@ impl QueueModule {
         } else { // guard against BG DL+UL traffic being sent to both inputs.
              // println!("[Input UL Discard] NOT UL (SRC: {} !> DST: {} ) ", packet.sta_src_id , packet.sta_dest_id, );
         }
+    }
+
+    /// Keeps `STA_coords_map` in sync with a STA's live position (e.g. random-walk or scripted
+    /// distance test movement), since DL airtime/rate lookups read from this map rather than
+    /// from per-packet coordinates.
+    #[inline]
+    pub async fn input_coords_update(&mut self, update: (i32, Coords), _context: &Context<Self>) {
+        self.STA_coords_map.insert(update.0 as usize, update.1);
     }
 
     fn get_ampdu_utility(
@@ -3904,30 +4139,55 @@ impl QueueModule {
             let now = context.scheduler.time();
 
             // UL capacity check (same as before)
-            let overflowing_flows: HashMap<(i32,i32), usize> = self.sta_stats_cache
-                .iter()
-                .filter_map(|((src, dest), info)| {
-                    let is_ul = src > dest;
-                    let limit = if is_ul { self.ul_capacity_queue_device } else { self.queue_maxsize_dl };
-                    if info.packet_count > limit {
-                        Some(((*src, *dest), info.packet_count - limit))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // let overflowing_flows: HashMap<(i32,i32), usize> = self.sta_stats_cache
+            //     .iter()
+            //     .filter_map(|((src, dest), info)| {
+            //         let is_ul = src > dest;
+            //         let limit = if is_ul { self.ul_capacity_queue_device } else { self.queue_maxsize_dl };
+            //         if info.packet_count > limit {
+            //             Some(((*src, *dest), info.packet_count - limit))
+            //         } else {
+            //             None
+            //         }
+            //     })
+            //     .collect();
 
+            // Optimized: // Only pay for the collection when there's actually something overflowing
+            let has_overflow = self.sta_stats_cache.iter().any(|((src, dest), info)| {
+                let limit = if src > dest {
+                    self.ul_capacity_queue_device
+                } else {
+                    self.queue_maxsize_dl
+                };
+                info.packet_count > limit
+            });
 
-            if !overflowing_flows.is_empty() {
-                for ((src, dest), excess_count) in overflowing_flows {
+            if has_overflow {
+                // now do the collect — same logic, just not always
+                let overflowing_flows: HashMap<(i32,i32), usize> = self.sta_stats_cache
+                    .iter()
+                    .filter_map(|((src, dest), info)| {
+                        let is_ul = src > dest;
+                        let limit = if is_ul { self.ul_capacity_queue_device } else { self.queue_maxsize_dl };
+                        if info.packet_count > limit {
+                            Some(((*src, *dest), info.packet_count - limit))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                    for ((src, dest), excess_count) in overflowing_flows {
                     let is_ul_flow = src > dest;
                     let sta_for_key: i32 = if is_ul_flow { src } else { -1 };
 
                     // Try every AC × link combination for this flow direction.
                     for ac in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort, EdcaAc::Background] {
                         let mut remaining_drops = excess_count;
-                        let link_ids: Vec<u8> = self.link_mediums.keys().copied().collect();
-                        for lid in link_ids {
+                        // let link_ids: Vec<u8> = self.link_mediums.keys().copied().collect();
+                        // let link_ids: SmallVec<[u8; 4]> = self.link_mediums.keys().copied().collect();
+
+                        for &lid in self.link_mediums.keys() {
                             if remaining_drops == 0 { break; }
                             let overflow_key: MacKey = (sta_for_key, ac, lid);
                             if let Some(&idx) = self.mac_key_index.get(&overflow_key) {
@@ -3983,12 +4243,12 @@ impl QueueModule {
                                     }
                                     remaining_drops -= dropped_count;
                                 }
-                            } 
+                            }
                         }
                     }
                 }
             }
-          
+
             // Get ready contenders per link
             let ready_per_link: HashMap<u8, Vec<MacKey>> = self.tick_backoff(now);
 
@@ -4016,7 +4276,7 @@ impl QueueModule {
                     let T_col_dur = Duration::from_secs_f32(T_col);
                     // print_yellow!("{:.5} [Channel {} collision!] T_col:{:.5}| contenders: {:?} ", taitime_to_f64!(now), link_id, T_col, contenders );
                     if let Some(medium) = self.link_mediums.get_mut(&link_id) {
-                        medium.occupy_collision(now + T_col_dur);
+                        medium.occupy_collision(now, now + T_col_dur);
                         
                         if VISUALIZER_QUEUES_ENABLED {
                             self.emit_visualization_event(VizEvent::Collision {
@@ -4066,7 +4326,9 @@ impl QueueModule {
                         );
 
                         let st = self.dcf(key);
-                            if let Some(tx) = &self.viz_tx {
+
+                        if let Some(tx) = &self.viz_tx {
+                            if VISUALIZER_QUEUES_ENABLED{
                                 let _ = tx.try_send(VizEvent::BackoffSnap {
                                     t: t_secs(now),
                                     mac_key: *key,
@@ -4074,8 +4336,9 @@ impl QueueModule {
                                     cw: st.cw,
                                     frozen: st.backoff_frozen,
                                     medium_free_since: t_secs(st.medium_free_since),
-                                });
+                                    });
                             }
+                        }
 
                     }
 
@@ -4217,7 +4480,7 @@ impl QueueModule {
 
                 // Occupy medium on this link
                 if let Some(medium) = self.link_mediums.get_mut(&link_id) {
-                    medium.start_txop(now + ampdu_airtime, winner_key);
+                    medium.start_txop(now, now + ampdu_airtime, winner_key);
                     let unique_ids: Vec<u32> = ampdu_to_send.mpdu_packets
                         .iter()
                         .map(|p| p.header_alvr.next_packet_index)
@@ -4278,7 +4541,8 @@ impl QueueModule {
             
             let mut need_next_slot = false;
 
-            if self.per_flow_queues.iter().any(|dq| !dq.is_empty()) {
+            // if self.per_flow_queues.iter().any(|dq| !dq.is_empty()) {
+            if self.link_queue_depths.values().any(|&d| d > 0) {
                 'outer: for st in &self.dcf_values {
                     let (sta_id, ac, link_id) = st.mac_key;
 
@@ -4446,3 +4710,43 @@ impl Sink {
 }
 
 impl Model for Sink {}
+
+#[cfg(test)]
+mod markov_scratch_tests {
+    use super::*;
+    #[test]
+    fn markov_time_share_check() {
+        // Non-overlapping placeholder ranges, same dwell/transitions as the real preset,
+        // purely so this check can attribute each generated segment to a state unambiguously
+        // (the real WIFI_CLOUD_VR_STATES ranges legitimately overlap between Excellent/Good).
+        let mut test_states = WIFI_CLOUD_VR_STATES;
+        test_states[0].bps_range = (1000.0, 1099.0); // Excellent
+        test_states[1].bps_range = (900.0, 999.0);   // Good
+        test_states[2].bps_range = (800.0, 899.0);   // Fair
+        test_states[3].bps_range = (700.0, 799.0);   // Poor
+        test_states[4].bps_range = (600.0, 699.0);   // Congested
+        test_states[5].bps_range = (500.0, 599.0);   // Fade
+
+        let mut totals = [0.0f64; 6];
+        let names = ["Excellent","Good","Fair","Poor","Congested","Fade"];
+        for _ in 0..20000 {
+            let mut emu = NetworkPatternEmulator::new(IpAddr::V4(std::net::Ipv4Addr::new(127,0,0,1)));
+            let start = TaiTime::<0>::EPOCH;
+            let end = start.checked_add(Duration::from_secs_f64(300.0)).unwrap();
+            emu.add_markov_modulated_bandwidth(&test_states, &WIFI_CLOUD_VR_TRANSITIONS, start, end, 0, None);
+            for p in emu.get_patterns() {
+                if let NetworkPattern::Bandwidth { valid_from, valid_until, max_bps, .. } = p {
+                    let dur = valid_until.duration_since(*valid_from).as_secs_f64();
+                    let idx = test_states.iter().position(|s| {
+                        *max_bps >= s.bps_range.0 && *max_bps <= s.bps_range.1
+                    }).unwrap();
+                    totals[idx] += dur;
+                }
+            }
+        }
+        let grand_total: f64 = totals.iter().sum();
+        for (n, t) in names.iter().zip(totals.iter()) {
+            println!("{:10} time_frac={:.4}", n, t/grand_total);
+        }
+    }
+}

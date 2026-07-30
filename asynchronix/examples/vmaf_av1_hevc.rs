@@ -8,7 +8,7 @@ use tokio::{sync::Semaphore};
 mod lib;
 use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedHevcEncoder, ChunkedEncoder, ChunkedSoftwareHevcEncoder, VideoCodec};
 // bring your types into scope (adjust these paths to your project)
-use crate::lib::{DEBUG_PRINT_ENABLED, models_XR::{HEIGHT_ENCODER, SCALE_FACTOR_WINDOW, WIDTH_ENCODER, HevcDecoder, Av1Decoder, VideoDecoder}, render_text,};
+use crate::lib::{DEBUG_PRINT_ENABLED, models_XR::{HEIGHT_ENCODER, SCALE_FACTOR_FFMPEG_WINDOW, WIDTH_ENCODER, HevcDecoder, Av1Decoder, VideoDecoder}, render_text,};
 use std::fs;
 use std::path::PathBuf;
 use crate::lib::{DebugColor, };
@@ -938,8 +938,8 @@ fn draw_pair(
     const W: usize = WIDTH_ENCODER;
     const H: usize = HEIGHT_ENCODER;
     // Increased scale for the window content if needed, or keep standard
-    let sw = (W as f64 * SCALE_FACTOR_WINDOW) as usize;
-    let sh = (H as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let sw = (W as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
+    let sh = (H as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
     let ww = sw * 2 + 10;
 
     let left = resize_nn(&rgb_to_u32(rgb_l), W, H, sw, sh);
@@ -976,10 +976,10 @@ fn draw_pair(
         3,
     );
 
-    let debug_x = (OCR_X as f64 * SCALE_FACTOR_WINDOW) as usize;
-    let debug_y = (OCR_Y as f64 * SCALE_FACTOR_WINDOW) as usize;
-    let debug_w =((OCR_W as f64 * 5.0) * SCALE_FACTOR_WINDOW) as usize; // *5 for 5 digits
-    let debug_h = (OCR_H as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let debug_x = (OCR_X as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
+    let debug_y = (OCR_Y as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
+    let debug_w =((OCR_W as f64 * 5.0) * SCALE_FACTOR_FFMPEG_WINDOW) as usize; // *5 for 5 digits
+    let debug_h = (OCR_H as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
 
     // Draw RED box on Left (Distorted)
     // draw_debug_rect(&mut buf, ww, debug_x, debug_y, debug_w, debug_h, 0xFF0000);

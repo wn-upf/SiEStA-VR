@@ -55,12 +55,15 @@ pub const DEBUG_FFMPEG_AV1_LOGS: bool = false;
 pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring this from input args to simulator
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
-pub const MAX_HISTORY_SIZE: usize = 64; // shorter term averages
+pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
                                         // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
 pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(30);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
-pub const OFFSET_VIDEO: f64 = 15.0;
+pub const OFFSET_VIDEO: f64 = 95.0;
+
+pub const VBV_SETTING_RELAXATION_MULTIPLIER: f32 = 3.0; // Relax the VBV buffer size, only one frame makes lower bitrates (<35 Mbps) generate frames much larger in average than the expected.
+
 
 // pub const CHUNK_SIZE_FRAMES: usize = 300;
 // pub const IDR_FRAME_SIZE_GOP: usize = 60;
@@ -257,8 +260,8 @@ impl ChunkedAv1Encoder {
         let frame_duration_ms = 1000.0 / self.framerate;
         let bufsize_ms = frame_duration_ms.max(20.0); // Force at least 20ms for AV1: The maximum buffer size must be between [20, 10000]
 
-        let bufsize_kbits = bitrate_mbps * 1000.0 * (bufsize_ms / 1000.0);
-
+        let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
+                // Relaxation multiplier because only one frame makes lower bitrates (<35 Mbps) generate frames much larger in average than the expected.
         let bufsize_str = if self.vbv_perframe{
             format!("{:.0}k", bufsize_kbits)
         }
@@ -554,13 +557,13 @@ impl ChunkedSoftwareHevcEncoder {
     }
 
     pub fn clear_buffers(&mut self) {
-        self.parser.buffer.clear();
+        self.parser.reset_for_new_chunk();
         self.frame_queue.clear();
         while let Ok(_) = self.frame_rx.try_recv() {}
     }
 
     pub fn clear_parser(&mut self) {
-        self.parser.buffer.clear();
+        self.parser.reset_for_new_chunk();
     }
     #[inline]
     pub async fn start_chunking(&mut self, bitrate_mbps: f32, now: TaiTime<0>, latest_gaze: Vec<[Option<Quat>; 2]>) {
@@ -568,22 +571,18 @@ impl ChunkedSoftwareHevcEncoder {
         self.bitrate = format!("{:.2}M", bitrate_adjusted_fps);
 
         let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
-        // let start_frame_idx: usize = self.chunk_index * frames_per_chunk;
-        // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
-
         let exact_offset = self.current_offset;
-        // let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize  + self.chunk_index * frames_per_chunk ;
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
-        
-        let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate;
-        // let bufsize_str = format!("{:.0}k", bufsize_kbits);
-        
+
+        // let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate;
+        let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
+        // Relaxation multiplier because only one frame makes lower bitrates (<35 Mbps) generate frames much larger in average than the expected.
         let bufsize_str = if self.vbv_perframe{
             format!("{:.0}k", bufsize_kbits)
         }
         else{
             format!("{:.0}k", bitrate_mbps * 1000.0)
-        }; 
+        };
 
         println!(
             "{} - {} SOFTWARE CHUNKING with bitrate {} Mbps",
@@ -591,7 +590,7 @@ impl ChunkedSoftwareHevcEncoder {
             self.encoder_str,
             bitrate_mbps,
         );
-        self.parser.buffer.clear();
+        self.parser.reset_for_new_chunk();
 
         let mut command = FfmpegCommand::new();
         
@@ -806,6 +805,13 @@ impl ChunkedSoftwareHevcEncoder {
                 }
             }
         }
+        // ffmpeg exited: nothing more will complete the currently open frame's
+        // boundary, so flush it now (discarded if it's only leftover parameter sets).
+        if let Some(frame) = self.parser.flush_final_frame() {
+            if let Err(e) = self.frame_tx.send(frame) {
+                eprintln!("{} Error sending frame: {}", e, self.encoder_str,);
+            }
+        }
 
         let _ = child.wait();
 
@@ -911,13 +917,13 @@ impl ChunkedHevcEncoder {
     }
 
     pub fn clear_buffers(&mut self) {
-        self.parser.buffer.clear();
+        self.parser.reset_for_new_chunk();
         self.frame_queue.clear();
         while let Ok(_) = self.frame_rx.try_recv() {}
     }
 
     pub fn clear_parser(&mut self) {
-        self.parser.buffer.clear();
+        self.parser.reset_for_new_chunk();
     }
 
     /// Continuously spawn ffmpeg processes to produce video chunks.
@@ -941,12 +947,12 @@ impl ChunkedHevcEncoder {
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
         
         let bufsize_str = if self.vbv_perframe{
-            let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al. 
+            let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
             format!("{:.0}k", bufsize_kbits)
         }
         else{
             format!("{:.0}k", bitrate_mbps * 1000.0)
-        }; 
+        };
 
         println!(
             "{} - {} CHUNKING with bitrate {} Mbps",
@@ -954,7 +960,7 @@ impl ChunkedHevcEncoder {
             self.encoder_str,
             bitrate_mbps,
         );
-        self.parser.buffer.clear();
+        self.parser.reset_for_new_chunk();
 
         let fovea_w = 1000;
         let fovea_h = 1000;
@@ -1164,6 +1170,13 @@ impl ChunkedHevcEncoder {
                     eprintln!("{} Error reading ffmpeg chunk: {}", e, self.encoder_str,);
                     break;
                 }
+            }
+        }
+        // ffmpeg exited: nothing more will complete the currently open frame's
+        // boundary, so flush it now (discarded if it's only leftover parameter sets).
+        if let Some(frame) = self.parser.flush_final_frame() {
+            if let Err(e) = self.frame_tx.send(frame) {
+                eprintln!("{} Error sending frame: {}", e, self.encoder_str,);
             }
         }
         // let _ = child.wait();
@@ -2212,23 +2225,23 @@ impl StreamSocket {
 
                     frame_span = max_time.duration_since(min_time).as_secs_f32();
 
-                    // frame_interarrival = max_time
-                    //     .duration_since(self.prev_frame_rx_instant)
-                    //     .as_secs_f32();
-
-                    frame_interarrival = min_time
-                        .checked_duration_since(self.prev_frame_rx_instant)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs_f32();
-
-                    // Also update prev with min_time for consistency
-                    self.prev_frame_rx_instant = min_time;
-
                     if self.prev_frame_rx_instant == TaiTime::EPOCH {
                         frame_interarrival = Duration::ZERO.as_secs_f32(); // prevent very high values at begginning of simulation.
+                    } else {
+                        frame_interarrival = min_time
+                            .checked_duration_since(self.prev_frame_rx_instant)
+                            .unwrap_or(Duration::ZERO)
+                            .as_secs_f32();
                     }
 
-                    self.prev_frame_rx_instant = max_time;
+                    // Use min_time (start-of-frame) consistently on both sides of this
+                    // measurement, mirroring the single reference point used on the encoder
+                    // side (report_encoded_frame_server). Previously this was overwritten with
+                    // max_time (end-of-frame) right after, so every sample actually measured
+                    // min_time(N) - max_time(N-1) = (true inter-frame period) - (previous
+                    // frame's frame_span) — systematically shrinking frame_interarrival and
+                    // inflating the derived rx fps above the real tx fps.
+                    self.prev_frame_rx_instant = min_time;
 
                     all_bytes_in_frame = values.iter().map(|shard| shard.rx_bytes).sum();
                     all_bytes_in_frame_app = values.iter().map(|shard| shard.rx_bytes_app).sum();

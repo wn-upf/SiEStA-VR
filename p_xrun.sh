@@ -29,8 +29,7 @@ DEBUG_LOGS=0
 results_path_name="Results_quicktest_${SLURM_ARRAY_JOB_ID}"
 
 simTime=35.0
-EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing)
-k_queue=5000            ## Leaves room for UL traffic (Per-sta). DL traffic queue at AP is constant set at 1K packets
+EMU_TEST_TYPE=("STD")   #  emulated link tests: Can be "BW", "JI", "PL", "RANDOM", or "STD" for different effects. (STD does nothing) ## MARKOV added for emulating different 'states' and transitions of emulated bandwidth across the entire simulation
 # RANDOM_SEEDS=(1)
 MLO_policies=(1)        ## 0 => PrimaryFirst, 1 => Opportunistic, 2 => LyapunovBackpressure. 
                         ## (Is ignored if the const STR_PLUS_MODE_MLO is set to true)
@@ -132,11 +131,11 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                                                 NAME_ABR="ABR_${ABR}"
                                                                                                 (( SIM_COUNT++ ))  # ← increment
 
-                                                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes $delay_app_mac_enabled" >> "$temp_file"
+                                                                                                echo "./target/release/examples/XR_sim $simTime $mean_length_BG $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes $delay_app_mac_enabled" >> "$temp_file"
                                                                                                                                                                             
                                                                                                 if [ "$DEBUG_LOGS" = 1 ] || [ "$SERIAL_EXECUTION" = 1 ]; then
                                                                                                     rm out_log.ans
-                                                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes $delay_app_mac_enabled" "out_log.ans"
+                                                                                                    script -c "./target/release/examples/XR_sim $simTime $mean_length_BG $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $USE_FOVEATION $VBV_PERFRAME $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name $tracking_bool $deterministic_video_sizes $delay_app_mac_enabled" "out_log.ans"
                                                                                                     
                                                                                                     sleep 5
                                                                                                 fi
@@ -151,7 +150,7 @@ for test in "${EMU_TEST_TYPE[@]}"; do
                                                                                                 #     # Run samply against your binary and arguments. 
                                                                                                 #     # The -o flag tells samply where to save the profile.
                                                                                                 #     samply record -o $PROFILE_HTML_FILE -- \
-                                                                                                #         ./target/release/examples/XR_sim $simTime $mean_length_BG $k_queue $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
+                                                                                                #         ./target/release/examples/XR_sim $simTime $mean_length_BG $distance $bitrate $PL $nxr $nbg $rate_BG $is_ul $test $video_sample $FPS $close_users $close_distance $seed $gop $intrarefresh $ABR $nest_profile $RANDOMWALK_TEST $SIM_COUNT $observation_type $reward_mode $T_ABR $MLO_config $edca_be $MLO_policy $ampdu_packs $codec $results_path_name
 
                                                                                                 #     echo "--- Interactive profile saved to $PROFILE_HTML_FILE ---"
                                                                                                 #     exit 0 # Exit the job after generating the profile

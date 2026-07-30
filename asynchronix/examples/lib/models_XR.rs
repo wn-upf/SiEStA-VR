@@ -126,8 +126,37 @@ pub const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - fi
     + mem::size_of::<f32>(); // tx relative timestamp
 
 pub const MAX_MBPS_LADDER: f32 = 100.0;
-pub const MIN_MBPS_LADDER: f32 = 10.0; 
-pub const NESTVR_STEP_COUNT: usize = 10; 
+pub const MIN_MBPS_LADDER: f32 = 10.0;
+/// How far under the currently active bandwidth cap the Oracle ABR mode (abr=8) targets.
+pub const ORACLE_BITRATE_MARGIN_MBPS: f32 = 5.0;
+/// How far ahead of a bandwidth-pattern regime *drop* the Oracle ABR mode preemptively lowers
+/// its target bitrate — gives an already-in-flight, higher-bitrate-sized frame time to drain
+/// before the link's capacity actually shrinks, instead of only reacting at the exact instant
+/// of the drop (which still leaves a backlog to serialize through the new, smaller pipe).
+/// Upcoming *increases* are not preempted — see the scheduling comment in `run_sim`.
+pub const ORACLE_LOOKAHEAD_SECS: f32 = 0.01;
+/// AIMD-style asymmetry: drops apply immediately (reacting slowly to a shrinking cap is what
+/// causes real congestion collapse), but climbs are capped at this constant Mbps/s — a real
+/// sender ramps up cautiously because it can't be sure new headroom is real/sustained, and a
+/// step jump would inject an oversized frame into a channel/queue that hasn't caught up yet.
+pub const ORACLE_RAMP_UP_MBPS_PER_SEC: f32 = 1.0;
+/// Floor for the Oracle ABR mode (abr=8).
+pub const MIN_ORACLE_BITRATE_MBPS: f32 = 5.0;
+pub const NESTVR_STEP_COUNT: usize = 9;
+
+/// When true, the simulated ABR implementations (NeSt-VR, GCC, NADA, EVeREst) match the
+/// realistic constraints of the real ALVR/NeSt-VR client-server pair instead of the idealized
+/// behavior the simulator used before this was introduced:
+///   - NeSt-VR/EVeREst step the bitrate ladder down by one rung if no client_stats packet has
+///     arrived within STATS_TIMEOUT_FRAME_MULTIPLIER frame intervals, mirroring NeSt-VR's
+///     `check_stats_timeout` watchdog (alvr/server/src/bitrate.rs), instead of assuming stats
+///     always arrive on schedule.
+///   - EVeREst's rate-adaptation thresholds no longer assume the client has perfect knowledge of
+///     the server's exact bitrate ladder rungs; it instead assumes a doubling ladder
+///     (BITRATE_STEP_RATIO = 0.5), matching NeSt-VR's client_core/src/connection.rs.
+/// When false, the simulator keeps its original idealized behavior (no watchdog, exact ladder
+/// lookups for EVeREst's b1/b2).
+pub const ALVR_REALISTIC_ABR: bool = true;
 
 pub const FPS_RANDOMIZED_EPSILON_RENDERING_SERVER: bool = true;
 pub const DISPLAY_GRAPH_MAX_FRAMES: usize = 100;
@@ -140,7 +169,7 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 #[allow(unused)]
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
-pub const SCALE_FACTOR_WINDOW: f64 = 0.4; // X:1 scaling for 4k visuals in lower res screens
+pub const SCALE_FACTOR_FFMPEG_WINDOW: f64 = 0.1; // X:1 scaling for 4k visuals in lower res screens
 pub const SCALE_FACTOR_GRAPH: f32 = 0.6;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -1275,6 +1304,20 @@ impl HevcDecoder {
 #[allow(unused)]
 pub enum BitrateMode {
     ConstantMbps(f32),
+    /// Port of real ALVR's `BitrateMode::Adaptive` (alvr/server/src/bitrate.rs). Unlike ALVR,
+    /// this simulator doesn't model encoder/decoder pipeline latency, so `encoder_latency_limiter`
+    /// / `decoder_latency_limiter` are dropped; `max_network_latency_ms` is reinterpreted against
+    /// `rtt_average` (the only network-latency signal this simulator tracks) instead of ALVR's
+    /// full frame network_latency. Crucially, `bitrate_average_mbps` (the throughput
+    /// `saturation_multiplier` scales) is fed the same way ALVR feeds it: per-frame, as
+    /// `frame_size_bits / network_rtt`, so a bigger RTT directly shrinks the throughput sample
+    /// itself — not just via the separate `max_rtt_ms` cap below.
+    Adaptive {
+        saturation_multiplier: f32,
+        max_bitrate_mbps: Option<f32>,
+        min_bitrate_mbps: Option<f32>,
+        max_rtt_ms: Option<f32>,
+    },
     EVeREst {
         // d_upper: f32,
         // d_lower: f32,
@@ -1303,17 +1346,28 @@ pub enum BitrateMode {
     FovOptixPort {
         last_bitrate_mbps: f32, // FovOptix requires additional network probing, TODO.
     },
+
+    /// Cheats: reads the bandwidth cap actually in effect *right now* on this pair's own
+    /// emulated link (no lookahead into future regime changes) and targets `cap - margin_mbps`.
+    /// A ceiling baseline for comparing the other ABR algorithms against.
+    Oracle {
+        margin_mbps: f32,
+        min_mbps: f32,
+        max_mbps: f32,
+    },
 }
 
 impl BitrateMode {
     fn variant_name(&self) -> String {
         match self {
             BitrateMode::ConstantMbps(val) => format!("CBR {} Mbps", val),
+            BitrateMode::Adaptive { .. } => "Adaptive".to_string(),
             BitrateMode::EVeREst { .. } => "EVeREst-Intra".to_string(),
             BitrateMode::NestVr { .. } => "NeSt-VR".to_string(),
             BitrateMode::GCCPort { .. } => "GCC Port".to_string(),
             BitrateMode::NADACiscoPort {} => "NADA Port".to_string(),
             BitrateMode::FovOptixPort { .. } => "FovOptix Port".to_string(),
+            BitrateMode::Oracle { margin_mbps, .. } => format!("Oracle (-{:.0} Mbps)", margin_mbps),
         }
     }
 }
@@ -1546,6 +1600,8 @@ pub enum AbrEvent {
         ip_server:            IpAddr,
         rtt_ms:               f32,
         peak_throughput_mbps: f32,
+        /// Instantaneous (un-averaged) per-frame throughput sample, Mbps.
+        instant_throughput_mbps: f32,
         flr:                  f32,
     },
     /// Fired only when the ABR algorithm produces a new bitrate decision.
@@ -1605,6 +1661,11 @@ pub struct BitrateManager {
     everest_time_last_throughput_update: TaiTime<0>,
     everest_last_order: EverestCommand,
 
+    /// Last time a client_stats packet was received. Drives the ALVR_REALISTIC_ABR watchdog
+    /// (see `check_stats_timeout`), mirroring NeSt-VR's `last_stats_received`
+    /// (alvr/server/src/bitrate.rs).
+    last_stats_received: TaiTime<0>,
+
     last_target_bitrate_bps: f32,
 
     bitrate_ladder_bps: Option<Vec<f32>>,
@@ -1626,8 +1687,11 @@ pub struct BitrateManager {
     reward_stat: RunningStat,
     pub reward_mode: usize,
     pub nestvr_logger: Option<Arc<CsvNestVr>>,
-    pub abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>, 
-    ip_server: IpAddr, 
+    pub abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>,
+    ip_server: IpAddr,
+    /// Real bandwidth-pattern trace of this pair's own emulated link — read by
+    /// `BitrateMode::Oracle`.
+    oracle_bandwidth_trace: Vec<NetworkPattern>,
 }
 
 impl BitrateManager {
@@ -1646,8 +1710,9 @@ impl BitrateManager {
         reward_mode: usize,
         results_path: &str, 
         name_folder_scenario: &str, 
-        num_id_stats: u8, 
-        abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>,  
+        num_id_stats: u8,
+        abr_event_tx: Option<crossbeam::channel::Sender<AbrEvent>>,
+        network_effects: &[NetworkPattern], // this pair's real applied bandwidth trace, for BitrateMode::Oracle
 
     ) -> Self {
         let decrement: usize = match nest_vr_profile {
@@ -1666,6 +1731,16 @@ impl BitrateManager {
         let min_mbps = MIN_MBPS_LADDER;
         let (min_bps, max_bps) = (min_mbps * 1e6, max_mbps * 1e6);
         let bitrate_step_size_bps_nest = (max_bps - min_bps) / bitrate_step_count as f32;
+
+        // ABR modes (NeSt-VR, EVeREst, GCC, NADA, FovOptix, Oracle) start at the top of the
+        // bitrate ladder instead of the CLI-configured `initial_bitrate_mbps`, so they always
+        // ramp down from the max rather than up from an arbitrary starting point. CBR is
+        // unaffected — it's meant to hold the configured constant.
+        let seed_bitrate_mbps = match abr_enabled {
+            1 | 2 | 4 | 5 | 6 | 8 => MAX_MBPS_LADDER,
+            _ => initial_bitrate_mbps,
+        };
+
         // println!("BITRATE MODE IS: {}", abr_enabled);
         let bitrate_mode = match abr_enabled {
             1 => {
@@ -1708,12 +1783,12 @@ impl BitrateManager {
                     },
                     max_bitrate_mbps: max_mbps,
                     min_bitrate_mbps: min_mbps,
-                    initial_bitrate_mbps,
+                    initial_bitrate_mbps: seed_bitrate_mbps,
                     nest_vr_profile: ProfileConfig {
                         update_interval_nestvr_s: t_update_abr as f32,
                         max_bitrate_mbps: max_mbps,
                         min_bitrate_mbps: min_mbps,
-                        initial_bitrate_mbps: initial_bitrate_mbps,
+                        initial_bitrate_mbps: seed_bitrate_mbps,
 
                         bitrate_step_count,
                         bitrate_inc_steps: 1,
@@ -1751,8 +1826,29 @@ impl BitrateManager {
             }
             5 => BitrateMode::NADACiscoPort {},
             6 => BitrateMode::FovOptixPort {
-                last_bitrate_mbps: initial_bitrate_mbps,
+                last_bitrate_mbps: seed_bitrate_mbps,
             },
+
+            8 => {
+                BitrateMode::Oracle {
+                    margin_mbps: ORACLE_BITRATE_MARGIN_MBPS,
+                    min_mbps: MIN_ORACLE_BITRATE_MBPS,
+                    max_mbps: MAX_MBPS_LADDER,
+                }
+            }
+
+            9 => {
+                // Adaptive (ported from real ALVR's BitrateMode::Adaptive). Defaults mirror
+                // ALVR's settings.rs defaults where applicable (saturation_multiplier=0.95,
+                // max_network_latency_ms=8ms — reinterpreted here as max_rtt_ms since this
+                // simulator has no encoder/decoder pipeline latency to fold into the measurement).
+                BitrateMode::Adaptive {
+                    saturation_multiplier: 0.95,
+                    max_bitrate_mbps: Some(max_mbps),
+                    min_bitrate_mbps: Some(min_mbps),
+                    max_rtt_ms: Some(8.0),
+                }
+            }
 
             _ => BitrateMode::ConstantMbps(initial_bitrate_mbps),
         };
@@ -1762,6 +1858,43 @@ impl BitrateManager {
             ip_server,
             bitrate_mode.variant_name()
         );
+
+        match &bitrate_mode {
+            BitrateMode::ConstantMbps(bitrate_mbps) => {
+                print_green!("[{}] CBR fixed bitrate: {:.1} Mbps", ip_server, bitrate_mbps);
+            }
+            BitrateMode::Adaptive { saturation_multiplier, max_bitrate_mbps, min_bitrate_mbps, max_rtt_ms } => {
+                print_green!(
+                    "[{}] Adaptive: saturation={:.2}, max={:?} Mbps, min={:?} Mbps, max_rtt={:?} ms",
+                    ip_server, saturation_multiplier, max_bitrate_mbps, min_bitrate_mbps, max_rtt_ms
+                );
+            }
+            BitrateMode::EVeREst { bitrate_ladder_mbps } => {
+                print_green!("[{}] EVeREst bitrate ladder: {:?} Mbps", ip_server, bitrate_ladder_mbps);
+            }
+            BitrateMode::NestVr { .. } => {
+                let ladder_mbps: Vec<f32> = bitrate_ladder_std_bps.iter().map(|b| b / 1e6).collect();
+                print_green!("[{}] NeSt-VR bitrate ladder: {:?} Mbps", ip_server, ladder_mbps);
+            }
+            BitrateMode::GCCPort { .. } => {
+                print_green!(
+                    "[{}] GCC Port: continuous rate control (no ladder), bounded to [{:.1}, {:.1}] Mbps",
+                    ip_server, MIN_MBPS_LADDER, MAX_MBPS_LADDER
+                );
+            }
+            BitrateMode::NADACiscoPort { .. } => {
+                print_green!("[{}] NADA Port: continuous rate control (no ladder)", ip_server);
+            }
+            BitrateMode::FovOptixPort { .. } => {
+                print_green!("[{}] FovOptix Port: continuous rate control (no ladder)", ip_server);
+            }
+            BitrateMode::Oracle { min_mbps, max_mbps, .. } => {
+                print_green!(
+                    "[{}] Oracle: continuous rate control (no ladder), bounded to [{:.1}, {:.1}] Mbps",
+                    ip_server, min_mbps, max_mbps
+                );
+            }
+        }
 
         let flr_vec: TimedVecFLR = TimedVecFLR::new(1.0 as f32); // let's take FLR 1 sec sliding window. TODO: input arg
         let buflevel_vec = TimedVecBuffer::new(t_update_abr as f32);
@@ -1793,7 +1926,7 @@ impl BitrateManager {
             frame_interval_average: SlidingWindowAverage::new(0.0, max_history_size),
             // encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size), // Unused in this simulator.
             // network_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
-            bitrate_average_mbps: SlidingWindowAverage::new(initial_bitrate_mbps, max_history_size),
+            bitrate_average_mbps: SlidingWindowAverage::new(seed_bitrate_mbps, max_history_size),
             // last_target_bitrate_mbps: initial_bitrate_mbps,
             update_interval_s: Duration::from_secs_f32(t_update_abr),
 
@@ -1816,10 +1949,11 @@ impl BitrateManager {
             everest_time_last_capacity_update: TaiTime::EPOCH,
             everest_time_last_throughput_update: TaiTime::EPOCH,
             bitrate_mode,
-            last_target_bitrate_bps: initial_bitrate_mbps * 1e6,
+            last_target_bitrate_bps: seed_bitrate_mbps * 1e6,
             bitrate_ladder_bps: Some(bitrate_ladder_std_bps),
             bitrate_step_size_bps_nest,
             everest_last_order: EverestCommand::Continue,
+            last_stats_received: TaiTime::EPOCH,
             flr_shardloss_count: flr_vec,
             jitbuf_avg_count: buflevel_vec,
             last_rebuffer_avg_sum: 0,
@@ -1833,16 +1967,17 @@ impl BitrateManager {
             ewma_fowd: 0.0,
             ewma_owd: 0.0,
             bytes_size_avg: SlidingWindowAverage::new(
-                initial_bitrate_mbps / initial_framerate * 1e6,
+                seed_bitrate_mbps / initial_framerate * 1e6,
                 max_history_size,
             ),
             obs_config,
             reward_stat: RunningStat::default(),
             reward_mode,
 
-            nestvr_logger, 
-            abr_event_tx, 
-            ip_server, 
+            nestvr_logger,
+            abr_event_tx,
+            ip_server,
+            oracle_bandwidth_trace: network_effects.to_vec(),
 
         }
     }
@@ -1861,6 +1996,7 @@ impl BitrateManager {
         // Reset timestamps and counters
         self.last_frame_instant = TaiTime::EPOCH;
         self.last_update_instant = TaiTime::EPOCH;
+        self.last_stats_received = TaiTime::EPOCH;
         self.frame_index = 0;
 
         // Clear sliding window averages
@@ -1888,15 +2024,18 @@ impl BitrateManager {
             BitrateMode::ConstantMbps(init_mbps) => {
                 self.last_target_bitrate_bps = *init_mbps * 1e6;
             }
+            BitrateMode::Adaptive { max_bitrate_mbps, .. } => {
+                self.last_target_bitrate_bps = max_bitrate_mbps.unwrap_or(MAX_MBPS_LADDER) * 1e6;
+            }
             BitrateMode::EVeREst {
                 bitrate_ladder_mbps,
             } => {
-                self.last_target_bitrate_bps = bitrate_ladder_mbps[0] * 1e6;
+                self.last_target_bitrate_bps = *bitrate_ladder_mbps.last().unwrap() * 1e6;
             }
             BitrateMode::NestVr {
-                min_bitrate_mbps, ..
+                max_bitrate_mbps, ..
             } => {
-                self.last_target_bitrate_bps = *min_bitrate_mbps * 1e6;
+                self.last_target_bitrate_bps = *max_bitrate_mbps * 1e6;
             }
 
             BitrateMode::GCCPort {
@@ -1914,9 +2053,14 @@ impl BitrateManager {
             }
 
             BitrateMode::FovOptixPort { .. } => {
+                self.last_target_bitrate_bps = MAX_MBPS_LADDER * 1e6;
                 if self.aimd_manager.is_none() {
                     self.aimd_manager = Some(Arc::new(Mutex::new(FOAimdRateControl::new(true))));
                 }
+            }
+
+            BitrateMode::Oracle { max_mbps, .. } => {
+                self.last_target_bitrate_bps = *max_mbps * 1e6;
             }
         }
 
@@ -1959,6 +2103,8 @@ impl BitrateManager {
         now: TaiTime<0>,
         send_instant: TaiTime<0>,
     ) {
+        self.last_stats_received = now;
+
         match &mut self.bitrate_mode {
             BitrateMode::GCCPort { gcc_estimator, .. } => {
                 let current_frame_send_timestamp = taitime_to_f64!(send_instant) * 1e6; // input units: micros
@@ -1984,10 +2130,30 @@ impl BitrateManager {
 
         self.rtt_average.submit_sample(network_rtt.as_secs_f32());
 
+        // Feeds BitrateMode::Adaptive exactly like ALVR's bitrate_average
+        // (alvr/server/src/bitrate.rs::report_frame_latencies): per-frame throughput computed as
+        // frame_size_bits / network_rtt, so a bigger RTT directly shrinks the sample itself
+        // rather than only being applied afterwards through a separate cap.
+        if network_rtt > Duration::ZERO {
+            let frame_size_bits = network_stats.bytes_in_frame as f32 * 8.0;
+            let sample_mbps = frame_size_bits / network_rtt.as_secs_f32() / 1e6;
+            self.bitrate_average_mbps.submit_sample(sample_mbps);
+        }
+
         self.peak_throughput_average
             .submit_sample(peak_throughput_bps);
-        self.frame_interarrival_average
-            .submit_sample(frame_interarrival_s);
+        // `StatisticsManager::report_network_statistics` returns a hardcoded 7.0s sentinel for
+        // `frame_interarrival` on the very first stats packet of a session (no real prior arrival
+        // to diff against yet) and skips its own internal average for that sample -- but this
+        // average lives here, in the caller, so without mirroring that skip a stray 7s sample
+        // gets mixed into an otherwise ~11ms-scale window. That craters `fps_rx_avg` for the next
+        // few `one_pass_abr` calls and made NeSt-VR spuriously step the bitrate down right after
+        // session start. A real interarrival gap is never anywhere near 1s, so treat that as the
+        // "not a real sample" signal directly rather than depending on the exact sentinel value.
+        if frame_interarrival_s < 1.0 {
+            self.frame_interarrival_average
+                .submit_sample(frame_interarrival_s);
+        }
         self.bytes_size_avg
             .submit_sample(network_stats.bytes_in_frame as f32);
 
@@ -2033,13 +2199,19 @@ impl BitrateManager {
         let now_secs = now.duration_since(TaiTime::EPOCH).as_secs_f32();
         let fl  = self.flr_shardloss_count.sum_flr(now_secs);
         let sl  = self.flr_shardloss_count.sum_shard_loss(now_secs);
-        let flr = if fl + sl > 0 { fl as f32 / (fl + sl) as f32 } else { 0.0 };
+        let flr = if fl > 0 { fl as f32 / self.framerate as f32 } else { 0.0 };
 
+        let instant_throughput = if frame_interarrival_s > 0.0 {
+            network_stats.bytes_in_frame as f32 / frame_interarrival_s // bps
+        } else {
+            0.0
+        };
         self.emit_abr_event(AbrEvent::FrameMetrics {
             t:                    taitime_to_f64!(now),
             ip_server:            self.ip_server,
             rtt_ms:               self.rtt_average.get_average() * 1000.0,
             peak_throughput_mbps: self.peak_throughput_average.get_average() / 1e6,
+            instant_throughput_mbps: instant_throughput / 1e6,
             flr,
         });
 
@@ -2054,8 +2226,76 @@ impl BitrateManager {
         self.flr_shardloss_count.push_new(fl, sl, timestep_f32);
     }
 
+    /// If too long has passed since the last client_stats packet, assume the network link has
+    /// stalled (rather than waiting for stats that may never come) and preemptively step the
+    /// bitrate down by one ladder rung. Mirrors NeSt-VR's `check_stats_timeout`
+    /// (alvr/server/src/bitrate.rs). Only active when `ALVR_REALISTIC_ABR` is set; otherwise the
+    /// simulator keeps its original idealized assumption that stats always arrive on time.
+    fn check_stats_timeout(&mut self, now: TaiTime<0>) {
+        if !ALVR_REALISTIC_ABR {
+            return;
+        }
+
+        const STATS_TIMEOUT_FRAME_MULTIPLIER: u32 = 3;
+
+        let frame_interval = if self.frame_interval_average.get_average() > 0.0 {
+            Duration::from_secs_f32(self.frame_interval_average.get_average())
+        } else {
+            Duration::from_secs_f32(1.0 / self.framerate)
+        };
+        let timeout = frame_interval * STATS_TIMEOUT_FRAME_MULTIPLIER;
+
+        // `last_stats_received` is seeded to `TaiTime::EPOCH` at construction/reset as a "no
+        // stats received yet" sentinel, not a real arrival time. Diffing `now` (already several
+        // seconds past EPOCH once a session actually starts) against that sentinel would blow
+        // past `timeout` on the very first call and step the seeded max-ladder bitrate down
+        // before a single client_stats packet has arrived. Skip the timeout check entirely until
+        // the first real stats packet lands and sets a real timestamp here.
+        if self.last_stats_received == TaiTime::EPOCH {
+            return;
+        }
+
+        let Some(elapsed) = now.checked_duration_since(self.last_stats_received) else {
+            return;
+        };
+        if elapsed < timeout {
+            return;
+        }
+        self.last_stats_received = now;
+
+        let Some(ladder) = self.bitrate_ladder_bps.clone() else {
+            return;
+        };
+        if ladder.is_empty() {
+            return;
+        }
+
+        let current_bps = upper_bound_bitrate(self.last_target_bitrate_bps, &ladder);
+        let index = ladder
+            .iter()
+            .position(|&bps| bps == current_bps)
+            .unwrap_or(0);
+        let new_bps = ladder[index.saturating_sub(1)];
+
+        if new_bps != self.last_target_bitrate_bps {
+            print_prettyy!(
+                DebugColor::Purple,
+                "[{}] BitrateManager: no client_stats received for {:?}, stepping bitrate down from {:.2} to {:.2} Mbps",
+                self.ip_server,
+                timeout,
+                self.last_target_bitrate_bps / 1e6,
+                new_bps / 1e6
+            );
+            self.last_target_bitrate_bps = new_bps;
+        }
+    }
+
     pub fn one_pass_abr(&mut self, now: TaiTime<0>, ) -> f32 {
-        const TIME_WARMUP_ABR: u64 = 5;
+        if matches!(self.bitrate_mode, BitrateMode::NestVr { .. } ) {
+            self.check_stats_timeout(now);
+        }
+
+        const TIME_WARMUP_ABR: u64 = 8;
 
         if now.duration_since(TaiTime::EPOCH) < Duration::from_secs(TIME_WARMUP_ABR) {
             // println!("No ABR (warmup) {} -> {}. Mode: {}", format_elapsed!(now), TIME_WARMUP_ABR, self.bitrate_mode.variant_name());
@@ -2103,6 +2343,52 @@ impl BitrateManager {
                     *bitrate_mbps as f32 * 1e6 as f32
                 }
 
+                BitrateMode::Adaptive {
+                    saturation_multiplier,
+                    max_bitrate_mbps,
+                    min_bitrate_mbps,
+                    max_rtt_ms,
+                } => {
+                    // Ported from real ALVR's BitrateMode::Adaptive (alvr/server/src/bitrate.rs).
+                    // No encoder/decoder latency limiter here — this simulator doesn't model
+                    // pipeline latency. bitrate_average_mbps is fed per-frame as
+                    // size_bits / network_rtt (see report_network_statistics_abr), so it is
+                    // already RTT-sensitive before saturation_multiplier is applied — this is
+                    // the dominant RTT effect on the output bitrate. max_rtt_ms then applies a
+                    // second, independent cap on top, standing in for ALVR's
+                    // max_network_latency_ms (which used full frame network_latency; here we use
+                    // rtt_average, this simulator's only comparable signal).
+                    let achieved_throughput_bps =
+                        f32::max(self.bitrate_average_mbps.get_average(), 1e-9) * 1e6;
+
+                    let mut bitrate_bps = achieved_throughput_bps * saturation_multiplier;
+
+                    if let Some(max_ms) = max_rtt_ms {
+                        let rtt_s = f32::max(self.rtt_average.get_average(), 1e-9);
+                        let max = achieved_throughput_bps * (max_ms / 1000.0) / rtt_s;
+                        bitrate_bps = f32::min(bitrate_bps, max);
+                    }
+
+                    if let Some(max) = max_bitrate_mbps {
+                        bitrate_bps = f32::min(bitrate_bps, max * 1e6);
+                    }
+                    if let Some(min) = min_bitrate_mbps {
+                        bitrate_bps = f32::max(bitrate_bps, min * 1e6);
+                    }
+
+                    print_prettyy!(
+                        DebugColor::Navy,
+                        "[{}] Adaptive -> throughput(RTT-scaled)={:.2} Mbps, rtt={:.1} ms -> Bitrate = {:.2} Mbps",
+                        self.ip_server,
+                        achieved_throughput_bps / 1e6,
+                        self.rtt_average.get_average() * 1000.0,
+                        bitrate_bps / 1e6
+                    );
+
+                    self.last_target_bitrate_bps = bitrate_bps;
+                    bitrate_bps
+                }
+
                 BitrateMode::EVeREst {
                     bitrate_ladder_mbps,
                 } => {
@@ -2138,11 +2424,18 @@ impl BitrateManager {
                     };
                     let mut bitrate_bps = new_mbps * 1e6;
 
-                    let n_users =
-                        (self.everest_capacity_ewma / self.everest_throughput_ewma).ceil() as usize;
-                    let capacity_margin_bps = self.everest_capacity_ewma / (n_users as f32 + 1.0);
-
-                    bitrate_bps = f32::min(capacity_margin_bps, bitrate_bps);
+                    // Before the first real capacity/throughput sample arrives from the client,
+                    // both EWMAs are still 0.0 — dividing them here would spuriously clamp
+                    // bitrate_bps to 0 (then snapped up to the ladder's *minimum* rung by
+                    // upper_bound_bitrate below), silently overriding the seeded starting
+                    // bitrate. Skip the capacity-margin clamp until we have real feedback.
+                    if self.everest_throughput_ewma > 0.0 {
+                        let n_users = (self.everest_capacity_ewma / self.everest_throughput_ewma)
+                            .ceil() as usize;
+                        let capacity_margin_bps =
+                            self.everest_capacity_ewma / (n_users as f32 + 1.0);
+                        bitrate_bps = f32::min(capacity_margin_bps, bitrate_bps);
+                    }
                     if let Some(ladder) = &self.bitrate_ladder_bps {
                         bitrate_bps = upper_bound_bitrate(bitrate_bps, ladder);
                     } else {
@@ -2195,6 +2488,31 @@ impl BitrateManager {
                         0.0
                     };
 
+                    // Before the encoder has produced a single real frame, frame_interval_average
+                    // is still sitting at its cold-start seed of 0.0 (no submit_sample() yet).
+                    // Falling through to fps_tx_avg = 1/1e-9 would make nfr_avg spuriously ~0,
+                    // tripping the nfr_thresh branch below and knocking one step off the seeded
+                    // starting bitrate before any real telemetry exists. Skip the inc/dec
+                    // decision entirely until we have a real frame-interval sample.
+                    //
+                    // Also require a few samples (not just one) on both the tx side
+                    // (frame_interval_average) and the rx side (frame_interarrival_average)
+                    // before trusting their ratio. The two windows are fed from independent
+                    // event streams -- frame generation on the server vs. stats-packet arrival
+                    // from the client -- and the rx side only starts filling in after the first
+                    // full round trip plus jitter-buffer warm-up, so right after session start
+                    // fps_tx_avg reaches its steady ~90fps well before fps_rx_avg does. Computing
+                    // nfr_avg off 1-2 samples on each side produces noise of a few tenths of a
+                    // percent, which is enough to dip under nfr_thresh (0.99) and spuriously step
+                    // the bitrate down with zero real congestion. STATS_TIMEOUT_FRAME_MULTIPLIER
+                    // (3) is reused here as the same grace period already given to the
+                    // no-stats-received watchdog in check_stats_timeout.
+                    const MIN_SAMPLES_FOR_NFR: usize = 30;
+                    let has_frame_timing_sample = self.frame_interval_average.get_average() > 0.0
+                        && self.frame_interval_average.history_buffer_len() >= MIN_SAMPLES_FOR_NFR
+                        && self.frame_interarrival_average.history_buffer_len()
+                            >= MIN_SAMPLES_FOR_NFR;
+
                     let nfr_avg = fps_rx_avg / fps_tx_avg;
                     let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
 
@@ -2203,34 +2521,33 @@ impl BitrateManager {
 
                     let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
 
-                    // print_yellow!("nfr_avg = {}, rtt_avg = {} ms, r_inc = {}, r_rtt = {}, STEP SIZE = {} Mbps", nfr_avg, rtt_avg_ms, r_inc, r_rtt, self.bitrate_step_size_bps_nest / 1e6 );
+                    if has_frame_timing_sample {
+                        if nfr_avg < profile_config.nfr_thresh {
+                            // decrease
+                            // print_yellow!("decrease (nfr_thresh)",);
 
-                    if nfr_avg < profile_config.nfr_thresh {
-                        // decrease
-                        // print_yellow!("decrease (nfr_thresh)",);
-
-                        bitrate_bps -= profile_config.bitrate_dec_steps as f32
-                            * self.bitrate_step_size_bps_nest;
-                    } else {
-                        if rtt_avg_ms > profile_config.rtt_thresh_ms {
-                            if r_rtt <= profile_config.rtt_adj_prob {
-                                // decrease
-                                // print_yellow!("decrease (rtt prob)",);
-
-                                bitrate_bps -= profile_config.bitrate_dec_steps as f32
-                                    * self.bitrate_step_size_bps_nest;
-                            }
+                            bitrate_bps -= profile_config.bitrate_dec_steps as f32
+                                * self.bitrate_step_size_bps_nest;
                         } else {
-                            if r_inc <= profile_config.bitrate_inc_prob {
-                                // increase
-                                // print_yellow!("INCREASE (rtt prob)",);
+                            if rtt_avg_ms > profile_config.rtt_thresh_ms {
+                                if r_rtt <= profile_config.rtt_adj_prob {
+                                    // decrease
+                                    // print_yellow!("decrease (rtt prob)",);
 
-                                bitrate_bps += profile_config.bitrate_inc_steps as f32
-                                    * self.bitrate_step_size_bps_nest;
+                                    bitrate_bps -= profile_config.bitrate_dec_steps as f32
+                                        * self.bitrate_step_size_bps_nest;
+                                }
+                            } else {
+                                if r_inc <= profile_config.bitrate_inc_prob {
+                                    // increase
+                                    // print_yellow!("INCREASE (rtt prob)",);
+
+                                    bitrate_bps += profile_config.bitrate_inc_steps as f32
+                                        * self.bitrate_step_size_bps_nest;
+                                }
                             }
                         }
                     }
-                    print_pink!("[{}] bitrate after Nest: {} Mbps", self.ip_server, f32::min( f32::max(bitrate_bps / 1e6, *min_bitrate_mbps), *max_bitrate_mbps ));
                     // Ensure bitrate is below the estimated network capacity
                     let capacity_upper_limit =
                         profile_config.capacity_scaling_factor * estimated_capacity_bps;
@@ -2311,6 +2628,24 @@ impl BitrateManager {
                   //     _ => {
                   //         self.last_target_bitrate_bps
                   //     }
+
+                BitrateMode::Oracle { margin_mbps, min_mbps, max_mbps } => {
+                    let (margin_mbps, min_mbps) = (*margin_mbps, *min_mbps);
+                    // Cap over the lookahead horizon (not just at `now`), so this periodic poll
+                    // anticipates an imminent drop instead of re-snapping up to the still-active
+                    // current cap during the pre-drop window and undoing the event-driven
+                    // preemptive drop — see `oracle_min_cap_over_lookahead_mbps`.
+                    //
+                    // No active Bandwidth pattern covering `now` (e.g. unconstrained link) —
+                    // hold the last target rather than snapping to some arbitrary default.
+                    let cap_la = self.oracle_min_cap_over_lookahead_mbps(now);
+                    let bitrate_bps = match cap_la {
+                        Some(cap_mbps) => (cap_mbps - margin_mbps).max(min_mbps).min(*max_mbps) * 1e6,
+                        None => self.last_target_bitrate_bps,
+                    };
+                    self.last_target_bitrate_bps = bitrate_bps;
+                    bitrate_bps
+                }
             };
 
 
@@ -2333,6 +2668,92 @@ impl BitrateManager {
         }
     }
 
+    /// Snap directly to the bandwidth cap active at `now` — bypasses both the periodic
+    /// `t_update_abr` gate and the ABR warmup window in `one_pass_abr`, so `BitrateMode::Oracle`
+    /// can react the instant a bandwidth-pattern regime actually changes (see
+    /// `XRServer::oracle_bandwidth_step`, scheduled once per segment boundary in `run_sim`)
+    /// instead of waiting for the next periodic poll. No-op for every other ABR mode.
+    pub fn oracle_snap_to_cap(&mut self, now: TaiTime<0>) {
+        let Some(cap_mbps) = self.oracle_bandwidth_trace.iter().find_map(|p| {
+            if let NetworkPattern::Bandwidth { max_bps, valid_from, valid_until, .. } = p {
+                (now >= *valid_from && now < *valid_until).then_some((*max_bps / 1e6) as f32)
+            } else {
+                None
+            }
+        }) else { return };
+
+        self.oracle_apply_cap(now, cap_mbps);
+    }
+
+    /// Targets `cap_mbps - margin_mbps` (floored at `min_mbps`), ramp-limited on the way up —
+    /// used both by `oracle_snap_to_cap` (cap looked up for `now`) and by
+    /// `XRServer::oracle_apply_lookahead_cap` (an *upcoming* segment's cap, applied
+    /// `ORACLE_LOOKAHEAD_SECS` early so an already-in-flight frame has time to drain before a
+    /// drop actually lands). No-op for every other ABR mode.
+    pub fn oracle_apply_cap(&mut self, now: TaiTime<0>, cap_mbps: f32) {
+        let BitrateMode::Oracle { margin_mbps, min_mbps, max_mbps } = &self.bitrate_mode else { return };
+        let (margin_mbps, min_mbps, _max_mbps) = (*margin_mbps, *min_mbps, *max_mbps);
+
+        let new_mbps = self.oracle_ramp_target_mbps(cap_mbps, margin_mbps, min_mbps, now);
+        let bitrate_bps = new_mbps * 1e6;
+        self.last_target_bitrate_bps = bitrate_bps;
+        self.last_update_instant = now;
+    }
+
+    /// Ramp-limited Oracle target, in Mbps, for a newly observed `cap_mbps`. Drops (the
+    /// unclamped target is *below* the last one) apply immediately — reacting slowly to a
+    /// shrinking cap is what causes real congestion collapse. Climbs are capped at
+    /// `ORACLE_RAMP_UP_MBPS_PER_SEC`, mirroring a real sender's cautious ramp-up: it can't be
+    /// sure newly reported headroom is real/sustained, and a step jump would inject an
+    /// oversized frame into a channel/queue that hasn't caught up to the new capacity yet.
+    fn oracle_ramp_target_mbps(&self, cap_mbps: f32, margin_mbps: f32, min_mbps: f32, now: TaiTime<0>) -> f32 {
+        let target_mbps = (cap_mbps - margin_mbps).max(min_mbps);
+        let prev_mbps = self.last_target_bitrate_bps / 1e6;
+
+        if target_mbps >= prev_mbps {
+            let elapsed_s = now.duration_since(self.last_update_instant).as_secs_f32().max(0.0);
+            (prev_mbps + ORACLE_RAMP_UP_MBPS_PER_SEC * elapsed_s).min(target_mbps)
+        } else {
+            target_mbps
+        }
+    }
+
+    /// The *minimum* Bandwidth cap (Mbps) in effect at any point across
+    /// `[now, now + ORACLE_LOOKAHEAD_SECS]`, or `None` if no pattern covers `now` at all (an
+    /// unconstrained gap — caller should hold its last target).
+    ///
+    /// Used by the periodic Oracle poll so it anticipates an imminent *drop* exactly like the
+    /// event-driven `oracle_apply_lookahead_cap` does: taking the min over the lookahead horizon
+    /// means the poll targets the lower, about-to-become-active cap during the window instead of
+    /// re-snapping to the current (still-high, about-to-expire) cap and ramping the bitrate back
+    /// up right before the change. It only ever pulls the target *down* ahead of a transition —
+    /// an upcoming *increase* leaves the (lower) current cap as the min, so increases are not
+    /// preempted, matching the scheduler's "preempt drops, not increases" policy.
+    fn oracle_min_cap_over_lookahead_mbps(&self, now: TaiTime<0>) -> Option<f32> {
+        let horizon = now
+            .checked_add(Duration::from_secs_f64(ORACLE_LOOKAHEAD_SECS as f64))
+            .unwrap_or(now);
+
+        let mut covers_now = false;
+        let mut min_cap: Option<f32> = None;
+        for p in &self.oracle_bandwidth_trace {
+            if let NetworkPattern::Bandwidth { max_bps, valid_from, valid_until, .. } = p {
+                if now >= *valid_from && now < *valid_until {
+                    covers_now = true;
+                }
+                // Pattern overlaps [now, horizon]? (valid_from <= horizon so a segment starting
+                // exactly at the horizon — i.e. a drop LOOKAHEAD away — is included.)
+                if *valid_from <= horizon && *valid_until > now {
+                    let cap = (*max_bps / 1e6) as f32;
+                    min_cap = Some(min_cap.map_or(cap, |m: f32| m.min(cap)));
+                }
+            }
+        }
+        if !covers_now {
+            return None;
+        }
+        min_cap
+    }
 
     pub fn vmaf_manual_function(&self, bitrate_mbps: f32) -> f32 {
         // values obtained empirically by scipy curve_fit via VMAF on bitrate ladder
@@ -3039,12 +3460,11 @@ impl XRServer {
                 obs_config,
                 t_update_abr,
                 reward_mode,
-                results_path_name, 
-                name_folder, 
+                results_path_name,
+                name_folder,
                 num_id_stats,
                 abr_event_tx,   // ← add one parameter
-
-                
+                effects,
             ),
 
             video_app_sender: None,
@@ -3129,6 +3549,22 @@ impl XRServer {
         // reset bitrate manager & statistics manager
         self.bitrate_manager.reset(now);
         self.STATISTICS_MANAGER.clear();
+    }
+
+    /// Scheduled once per bandwidth-pattern segment boundary (see `run_sim`) so
+    /// `BitrateMode::Oracle` reacts to a regime change at the exact instant it happens,
+    /// instead of waiting for the next periodic `t_update_abr` poll in `generate_video_frame`.
+    pub fn oracle_bandwidth_step(&mut self, _: (), context: &Context<Self>) {
+        let now = context.scheduler.time();
+        self.bitrate_manager.oracle_snap_to_cap(now);
+    }
+
+    /// Scheduled `ORACLE_LOOKAHEAD_SECS` before an upcoming bandwidth *drop* (see `run_sim`),
+    /// so `BitrateMode::Oracle` preemptively targets the lower, about-to-become-active cap
+    /// instead of only reacting once the drop has already landed.
+    pub fn oracle_apply_lookahead_cap(&mut self, cap_mbps: f32, context: &Context<Self>) {
+        let now = context.scheduler.time();
+        self.bitrate_manager.oracle_apply_cap(now, cap_mbps);
     }
 
     pub fn handle_control_packet(&mut self, packet: ClientControlPacket, now: TaiTime<0>) {
@@ -3528,7 +3964,7 @@ impl XRServer {
                                     tx_instant: tx_r_instant,
                                     frame_losses: None, 
                                 };
-                                packet.data_inner = buffer[..packet_length_bytes as usize].to_vec();
+                                packet.data_inner = buffer[..packet_length_bytes as usize].into();
 
                                 if packet.header_alvr.shard_index == 0 {
                                     debug_print!(
@@ -3758,6 +4194,7 @@ impl XRServer {
 
                 if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || // One pass every BITRATE_UPDATE_INTERVAL
                     !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCPort{ .. }) || !matches!(self.bitrate_manager.bitrate_mode, BitrateMode::FovOptixPort{..})
+                    || !matches!(self.bitrate_manager.bitrate_mode, BitrateMode::Oracle{..})
                 {
                     if (now.duration_since(self.bitrate_manager.last_update_instant)
                         >= duration_abr)
@@ -4453,7 +4890,7 @@ pub struct EyeGazeModel {
 impl Default for EyeGazeModel {
     fn default() -> Self {
         Self {
-            saccade_freq: 1.5, // Toned down from 3.0
+            saccade_freq: 2.5, // Toned down from 3.0
             max_yaw: 0.20,     // Toned down from 0.35
             max_pitch: 0.15,   // Toned down from 0.26
             microsaccade_amplitude: 0.002, // Smoother microsaccades
@@ -4664,9 +5101,11 @@ pub struct XRClient {
     window_tx: Option<UnboundedSender<WindowCommand>>, // The handle to talk to the window
     consecutive_lost_counter: usize,
 
-    pub client_history_metrics: ClientHistory, 
-    pub gaze_model: EyeGazeModel, 
-    pub no_uplink_tracking: bool, 
+    pub client_history_metrics: ClientHistory,
+    pub gaze_model: EyeGazeModel,
+    pub no_uplink_tracking: bool,
+
+    pub t_vsync: Duration,
 }
 
 #[allow(unused)]
@@ -4704,8 +5143,8 @@ impl XRClient {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         // 3. Calculate Window Dimensions
-        let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-        let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+        let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
+        let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
         let total_height = window_height + GRAPH_HUD_HEIGHT;
 
         let initial_title = format!("Client [{}] - Waiting for Stream...", server_ip);
@@ -4819,7 +5258,8 @@ impl XRClient {
                 framerate: fps, 
                 ..Default::default()
             },
-            no_uplink_tracking:no_ul_tracking_bool,         
+            no_uplink_tracking:no_ul_tracking_bool,
+            t_vsync: Duration::from_secs_f64(1.0 / fps as f64),
         }
     }
 
@@ -5211,7 +5651,7 @@ impl XRClient {
                                     tx_instant: tx_r_instant,
                                     frame_losses: None, 
                                 };
-                                packet.data_inner = buffer[..packet_length_bytes as usize].to_vec();
+                                packet.data_inner = buffer[..packet_length_bytes as usize].into();
                                 packet.length_packet_bits = packet_length_bytes as usize * 8  + 100 * 8; // convert length (bytes) to bits + ALVR App header (100 bytes);
 
                                 if !self.edca_be_mode {
@@ -5276,7 +5716,7 @@ impl XRClient {
             &packet,
         )?;
         let mut packetz = MpduPacket::new();
-        packetz.data_inner = buffer[0..packet_size].to_vec();
+        packetz.data_inner = buffer[0..packet_size].into();
         packetz.length_packet_bits = packet_size * 8; // convert to bits
 
         match packet {
@@ -5597,30 +6037,19 @@ impl XRClient {
                         self.d_long_exp_avg = (interarrival / T_LONG_EVEREST_S * frame_span)
                             + (1.0 - interarrival / T_LONG_EVEREST_S) * self.d_long_exp_avg;
 
-                        // let d_lower_everest =
-                        let mut bitrate_mbps = self.last_perfect_info_update.bitrate_mbps; // we assume the client always has perfect knowledge of the current bitrate. 
-                        let bitrate_bps_comp = bitrate_mbps * 1e6;
+                        const T_LOW_EVEREST_S: f32 = 0.005;
+                        const T_HIGH_EVEREST_S: f32 = 0.020;
 
-                        if !self.bitrate_ladder_perfect_info_update.is_empty() {
-                            let &value_b2 = self
-                                .bitrate_ladder_perfect_info_update
-                                .iter()
-                                .find(|&&x| x > bitrate_bps_comp)
-                                .unwrap_or_else(|| {
-                                    // if nothing higher, use the highest available:
-                                    self.bitrate_ladder_perfect_info_update
-                                        .last()
-                                        .unwrap_or(&bitrate_bps_comp)
-                                });
-                            let d_lower_everest =
-                                bitrate_bps_comp / value_b2 * (1.0 / self.framerate); // IFT in average or expectation from fps? assuming FPS
-
-                            // print_yellow!("b1 = {}, b2 = {} , 1/FPS = {}", bitrate_bps_comp, value_b2, 1.0/self.framerate);
-
-                            let d_upper_everest = 1.0 / self.framerate;
-
-                            const T_LOW_EVEREST_S: f32 = 0.005;
-                            const T_HIGH_EVEREST_S: f32 = 0.020;
+                        if ALVR_REALISTIC_ABR {
+                            // A real ALVR client has no visibility into the server's exact
+                            // bitrate or bitrate ladder rungs (no perfect-info channel exists in
+                            // practice). It instead assumes a doubling ladder (B2 = 2 * B1), so
+                            // B1/B2 is always 0.5 and d_lower reduces to a constant fraction of
+                            // the frame period, matching NeSt-VR's client_core/src/connection.rs.
+                            const BITRATE_STEP_RATIO: f32 = 0.5; // B1/B2 for a doubling ladder
+                            let d_period = 1.0 / self.framerate;
+                            let d_lower_everest = BITRATE_STEP_RATIO * d_period;
+                            let d_upper_everest = d_period;
 
                             if self.d_short_exp_avg >= d_upper_everest {
                                 self.d_short_exp_avg = T_LOW_EVEREST_S;
@@ -5630,9 +6059,37 @@ impl XRClient {
                                 self.d_long_exp_avg = T_HIGH_EVEREST_S;
                                 command_abr_everest = EverestCommand::SpeedUp;
                             }
+                        } else {
+                            // Idealized: the client is assumed to have perfect knowledge of the
+                            // server's current bitrate and its exact ladder rungs.
+                            let bitrate_mbps = self.last_perfect_info_update.bitrate_mbps;
+                            let bitrate_bps_comp = bitrate_mbps * 1e6;
 
-                            // crate::print_blue!("[CLIENT EVEREST ]------------------------------\nIs D_short({}) >= D_upper({})? -> {}\nIs D_long({}) < D_lower({})? -> {}\nCMD={:?}",
-                            //          self.d_short_exp_avg, d_upper_everest, self.d_short_exp_avg >= d_upper_everest , self.d_long_exp_avg, d_lower_everest,  self.d_long_exp_avg < d_lower_everest, command_abr_everest );
+                            if !self.bitrate_ladder_perfect_info_update.is_empty() {
+                                let &value_b2 = self
+                                    .bitrate_ladder_perfect_info_update
+                                    .iter()
+                                    .find(|&&x| x > bitrate_bps_comp)
+                                    .unwrap_or_else(|| {
+                                        // if nothing higher, use the highest available:
+                                        self.bitrate_ladder_perfect_info_update
+                                            .last()
+                                            .unwrap_or(&bitrate_bps_comp)
+                                    });
+                                let d_lower_everest =
+                                    bitrate_bps_comp / value_b2 * (1.0 / self.framerate); // IFT in average or expectation from fps? assuming FPS
+
+                                let d_upper_everest = 1.0 / self.framerate;
+
+                                if self.d_short_exp_avg >= d_upper_everest {
+                                    self.d_short_exp_avg = T_LOW_EVEREST_S;
+                                    command_abr_everest = EverestCommand::SlowDown;
+                                }
+                                if self.d_long_exp_avg < d_lower_everest {
+                                    self.d_long_exp_avg = T_HIGH_EVEREST_S;
+                                    command_abr_everest = EverestCommand::SpeedUp;
+                                }
+                            }
                         }
                     }
 
@@ -5821,15 +6278,11 @@ impl XRClient {
     ) -> impl Future<Output = ()> + Send + 'a {
         async move {
             let now = context.scheduler.time();
+            let T_vsync = self.t_vsync; // cached field, not recomputed every frame
             // 1. Setup Timing & Dimensions
-            let T_vsync = Duration::from_secs_f64(1.0 / self.framerate as f64);
-            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-            let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+            let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
+            let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
             let total_window_height = window_height + GRAPH_HUD_HEIGHT;
-
-            // Allocate the buffer for this frame (Backbuffer)
-            let mut display_buffer = vec![0u32; window_width * total_window_height];
-            let mut should_update_window = false;
 
             // 2. Decoder Initialization (Run once)
             if self.original_decoder.is_none() && USE_FFMPEG_DEMO {
@@ -5850,15 +6303,17 @@ impl XRClient {
             }
 
             // 3. CSV Setup (Async)
-            let third_octet = get_third_octet(self.server_ip).unwrap();
-
-            let csv_path_str = format!(
-                "{}/{}/trace_offline_video{}.csv",
-                self.results_path, self.name_folder, third_octet
-            );
-            let csv_path = get_prefix_path(&csv_path_str);
 
             if self.offline_csv_trace.writer.is_none() && USE_FFMPEG_DEMO {
+
+                let third_octet = get_third_octet(self.server_ip).unwrap();
+
+                let csv_path_str = format!(
+                    "{}/{}/trace_offline_video{}.csv",
+                    self.results_path, self.name_folder, third_octet
+                );
+                let csv_path = get_prefix_path(&csv_path_str);
+
                 if std::path::Path::new(&csv_path).exists() {
                     print_green!("LOGGING: Found CSV, opening for append: {}", csv_path);
                     self.offline_csv_trace.path = csv_path.clone().into();
@@ -5988,106 +6443,70 @@ impl XRClient {
             }
 
             // ---------------------------------------------------------
-            // RENDERING BLOCK (Prepare buffer for thread)
+            // RENDERING BLOCK
             // ---------------------------------------------------------
+            if let Some(tx) = &self.window_tx {
+                // Only allocate when there is actually a window to send to
+                let mut display_buffer = vec![0u32; window_width * total_window_height];
+                let mut should_send = false;
 
-            // CASE A: We have a decoded frame ready
-            if let Some((frame, frame_i)) = decoded_frame_candidate {
-                let lost_frames_aux = self.lost_ids_reference_buffer.clone();
+                // Re-use title slot to avoid two separate sends in spinning mode
+                let mut title = format!("{} - [{}]", format_elapsed!(now), self.server_ip);
 
-                // Render video to buffer
-                display_single_frame_with_info_buffered(
-                    &frame,
-                    frame_i as usize, // Pass as usize
-                    &mut display_buffer,         // Pass the buffer
-                    window_width,                // Pass the stride
-                    now,
-                    self.last_perfect_info_update.clone(),
-                    lost_frames_aux,
-                    &mut self.lost_frames_buffer,
-                    &self.bm_string,
-                    &self.frame_size_history_vec,
-                    GRAPH_HUD_HEIGHT,
-                    self.framerate,
-                    self.codec_selection,
-                    SCALE_FACTOR_GRAPH,
-                    &mut self.client_history_metrics, 
-                    self.current_coordinates_tracking, 
-                );
-
-                // Reset tracking
-                self.lost_ids_reference_buffer.clear();
-                should_update_window = true;
-            }
-            // CASE B: No frame (Rebuffering/Spinning)
-            else {
-                // Calculate elapsed time for animation
-                let is_start = self.last_seen_id == 0;
-
-                // Condition 2: Loss Threshold Exceeded
-                let is_network_bad = self.consecutive_lost_counter >= SPINNER_LOSS_THRESHOLD;
-
-                if is_start || is_network_bad {
-                    // --- SPINNING MODE ---
-                    let elapsed = now.duration_since(self.t_0).as_secs_f32();
-
-                    // Draw spinner on top of the EXISTING display_buffer
-                    // (which currently holds the last valid frame)
-                    crate::lib::render_loading_spinner(
-                        &mut display_buffer,
-                        window_width,
-                        window_height,
-                        elapsed,
+                if let Some((frame, frame_i)) = decoded_frame_candidate {
+                    // CASE A: decoded frame
+                    let lost_frames_aux = self.lost_ids_reference_buffer.clone();
+                    display_single_frame_with_info_buffered(
+                        &frame, frame_i as usize, &mut display_buffer, window_width, now,
+                        self.last_perfect_info_update.clone(), lost_frames_aux,
+                        &mut self.lost_frames_buffer, &self.bm_string,
+                        &self.frame_size_history_vec, GRAPH_HUD_HEIGHT,
+                        self.framerate, self.codec_selection, SCALE_FACTOR_GRAPH,
+                        &mut self.client_history_metrics, self.current_coordinates_tracking,
                     );
-
-                    // Optional: Black out the HUD area if you want, or leave it
-                    let hud_color = 0x101010;
-                    for y in window_height..total_window_height {
-                        for x in 0..window_width {
-                            display_buffer[y * window_width + x] = hud_color;
-                        }
-                    }
-                    if let Some(tx) = &self.window_tx {
-                        let _ = tx.send(WindowCommand::Update {
-                            buffer: display_buffer.clone(),
-                            width: window_width,
-                            height: total_window_height,
-                            title: "Buffering...".to_string(),
-                        });
-                    }
-                    should_update_window = true;
+                    should_send = true;
                 } else {
-                    // --- FREEZE MODE ---
+                    // CASE B: no frame
+                    let is_start      = self.last_seen_id == 0;
+                    let is_network_bad = self.consecutive_lost_counter >= SPINNER_LOSS_THRESHOLD;
+
+                    if is_start || is_network_bad {
+                        let elapsed = now.duration_since(self.t_0).as_secs_f32();
+                        crate::lib::render_loading_spinner(
+                            &mut display_buffer, window_width, window_height, elapsed,
+                        );
+                        // Blackout HUD — slice fill instead of nested loop
+                        display_buffer[window_height * window_width..].fill(0x101010);
+                        title = "Buffering...".to_string();
+                        should_send = true;
+                    }
+                    // FREEZE MODE: should_send stays false, nothing allocated is used
                 }
-            }
 
-            // ---------------------------------------------------------
-            // SEND TO DISPLAY THREAD
-            // ---------------------------------------------------------
-            if should_update_window {
-                if let Some(tx) = &self.window_tx {
-                    let title = format!("{} - [{}]", format_elapsed!(now), self.server_ip);
-
-                    let cmd = WindowCommand::Update {
-                        buffer: display_buffer, // Moves the vector to the other thread
+                if should_send {
+                    // Single send, display_buffer MOVED — no clone anywhere
+                    if let Err(e) = tx.send(WindowCommand::Update {
+                        buffer: display_buffer,
                         width: window_width,
                         height: total_window_height,
                         title,
-                    };
-
-                    // Non-blocking send
-                    if let Err(e) = tx.send(cmd) {
-                        // This usually means the window was closed by the user
+                    }) {
                         if USE_FFMPEG_DEMO {
-                            print_red!("Display thread channel closed (Window closed?): {}", e);
+                            print_red!("Display thread channel closed: {}", e);
                         }
-                        else{
-                            // it is expected, no window is created in the faster mode 
-                        }
-                        self.window_tx = None; // Stop trying to send
+                        self.window_tx = None;
                     }
                 }
+                // If !should_send (freeze mode): display_buffer is simply dropped here.
+                // Cost: one Vec alloc we could theoretically skip, but freeze mode is
+                // uncommon. Can add a pre-check if it shows up in profiles.
             }
+
+            // Always clear regardless of display state
+            self.lost_ids_reference_buffer.clear();
+            // ---------------------------------------------------------
+            // SEND TO DISPLAY THREAD
+            // ---------------------------------------------------------
 
             // Schedule Next VSYNC
             context
@@ -6123,7 +6542,7 @@ impl XRClient {
         for packet in packet_vec {
             let header = packet.header_alvr;
 
-            let buffer = packet.data_inner.clone();
+            let buffer = packet.data_inner;
             // println!("buffer is {:?}", &buffer[..100]);
 
             match header.stream_id.clone() {
@@ -6337,8 +6756,8 @@ pub fn display_single_frame_with_info_buffered(
     client_coords: Vec3, 
 ) -> bool {
     // 1) Compute scaled dimensions
-    let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
-    let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_WINDOW) as usize;
+    let scaled_w = (WIDTH_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
+    let scaled_h = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
     let total_h = scaled_h + hud_height;
 
     // Safety check
@@ -6576,6 +6995,42 @@ pub struct TimedFrame {
     timestamp: TaiTime<0>, // this timestamp corresponds to the receive instant of an A-MPDU by any STA
 }
 
+// Scripted radial distance test (movement_mode == 2): hold near, ramp out, hold far, ramp back,
+// hold near, then repeat. See `radial_test_distance`.
+//
+// RADIAL_TEST_END_DIST is chosen (at the default SLO80 / 80 MHz channel width) to land in the
+// MCS2 band (Pr in [-77, -74) dBm, ~13.6-15.8 m) so MCS2 is the lowest MCS reached at the far
+// end of the walk, instead of dropping further to MCS1/MCS0.
+pub const RADIAL_TEST_START_DIST: f64 = 1.5;
+pub const RADIAL_TEST_END_DIST: f64 = 20.0;
+pub const RADIAL_TEST_HOLD_SECS: f64 = 20.0;
+pub const RADIAL_TEST_RAMP_SECS: f64 = 90.0;
+pub const RADIAL_TEST_CYCLE_SECS: f64 =
+    2.0 * RADIAL_TEST_HOLD_SECS + 2.0 * RADIAL_TEST_RAMP_SECS + RADIAL_TEST_HOLD_SECS;
+
+/// Distance from the AP at time `t` (seconds since the STA started moving) for the scripted
+/// radial distance test. The pattern loops every `RADIAL_TEST_CYCLE_SECS`.
+fn radial_test_distance(t: f64) -> f64 {
+    let t_mod = t.rem_euclid(RADIAL_TEST_CYCLE_SECS);
+    let ramp_out_end = RADIAL_TEST_HOLD_SECS + RADIAL_TEST_RAMP_SECS;
+    let hold_far_end = ramp_out_end + RADIAL_TEST_HOLD_SECS;
+    let ramp_back_end = hold_far_end + RADIAL_TEST_RAMP_SECS;
+
+    if t_mod < RADIAL_TEST_HOLD_SECS {
+        RADIAL_TEST_START_DIST
+    } else if t_mod < ramp_out_end {
+        let frac = (t_mod - RADIAL_TEST_HOLD_SECS) / RADIAL_TEST_RAMP_SECS;
+        RADIAL_TEST_START_DIST + frac * (RADIAL_TEST_END_DIST - RADIAL_TEST_START_DIST)
+    } else if t_mod < hold_far_end {
+        RADIAL_TEST_END_DIST
+    } else if t_mod < ramp_back_end {
+        let frac = (t_mod - hold_far_end) / RADIAL_TEST_RAMP_SECS;
+        RADIAL_TEST_END_DIST - frac * (RADIAL_TEST_END_DIST - RADIAL_TEST_START_DIST)
+    } else {
+        RADIAL_TEST_START_DIST
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[allow(unused)]
 // #[derive(Clone)]
@@ -6584,6 +7039,10 @@ pub struct STA_extended {
     pub output_network_port: Output<MpduPacket>,
 
     pub outport_coords_xrclient: Output<Coords>, // only used so the XRClient can know its coordinates in real time, will be input in Tracking packets!
+
+    // Broadcasts (sta_id, coords) to QueueModule so the channel/rate model sees live movement
+    // instead of the coordinates snapshotted once at simulation setup.
+    pub outport_coords_queue: Output<(i32, Coords)>,
 
     pub to_app_socket: Output<TimedFrame>,
     // pub to_app_socket_end_ampdu: Output<bool>,
@@ -6606,8 +7065,8 @@ pub struct STA_extended {
     pub random_seed: StdRng,
     pub ap_coords: Coords, // used for BG DL traffic in TX
 
-    pub test_rwalk: bool, 
-    pub location_event_sender: Option<crossbeam::channel::Sender<AbrEvent>>, 
+    pub movement_mode: usize, // 0: static (default distance) | 1: random walk test | 2: scripted radial distance test
+    pub location_event_sender: Option<crossbeam::channel::Sender<AbrEvent>>,
     pub instant_last_location_event: TaiTime<0> ,
     pub ip_addr: IpAddr,
 
@@ -6627,10 +7086,10 @@ impl STA_extended {
         arrival_rate_BG_lambda_packets_per_s: f64,
         is_ul_bg: usize,
         ap_coords: Coords,
-        input_seed: u64, 
-        test_rwalk: bool, 
-        location_event_sender: Option<crossbeam::channel::Sender<AbrEvent>>, 
-        ip_addr: IpAddr, 
+        input_seed: u64,
+        movement_mode: usize,
+        location_event_sender: Option<crossbeam::channel::Sender<AbrEvent>>,
+        ip_addr: IpAddr,
     ) -> Self {
         let arrival_rate_BG_bps = arrival_rate_BG_lambda_packets_per_s * mean_length_BG;
 
@@ -6642,6 +7101,7 @@ impl STA_extended {
         Self {
             output_network_port: Default::default(),
             outport_coords_xrclient: Default::default(),
+            outport_coords_queue: Default::default(),
             to_app_socket: Default::default(),
             // to_app_socket_end_ampdu: Default::default(),
             sta_id: src,
@@ -6658,11 +7118,11 @@ impl STA_extended {
             is_ul_bg,
             random_seed,
             ap_coords,
-            current_angle: 0.0, 
-            test_rwalk, 
+            current_angle: 0.0,
+            movement_mode,
             location_event_sender,
-            instant_last_location_event: TaiTime::EPOCH, 
-            ip_addr, 
+            instant_last_location_event: TaiTime::EPOCH,
+            ip_addr,
 
         }
     }
@@ -6673,13 +7133,35 @@ impl STA_extended {
             context: &'a Context<Self>,
         ) -> impl Future<Output = ()> + Send + 'a {
             async move {
-                const LIMIT_RADIUS: f64 = 11.5; 
-                const STEP_SIZE: f64 = 0.02; 
+                const LIMIT_RADIUS: f64 = 11.5;
+                const STEP_SIZE: f64 = 0.02;
                 const DELTA_T: f64 = 0.01;
                 // Persistence factor: 0.0 is pure random, 0.9 is very "straight" lines
-                const PERSISTENCE: f64 = 0.65; 
+                const PERSISTENCE: f64 = 0.65;
+                const SCRIPTED_STEP_DT: f64 = 0.1;
 
-                let next_update_time = if self.test_rwalk{
+                let next_update_time = if self.movement_mode == 2 {
+                    // Scripted radial distance test: hold at RADIAL_TEST_START_DIST, ramp out to
+                    // RADIAL_TEST_END_DIST, hold, ramp back, hold — then repeat. Moves along the
+                    // same direction from the AP as the STA's original placement.
+                    let now = context.scheduler.time();
+                    let elapsed = now.duration_since(self.t_0).as_secs_f64();
+                    let target_dist = radial_test_distance(elapsed);
+
+                    let dir_x = self.orig_sta_coordinates.x - self.ap_coords.x;
+                    let dir_y = self.orig_sta_coordinates.y - self.ap_coords.y;
+                    let orig_dist = (dir_x.powi(2) + dir_y.powi(2)).sqrt();
+                    let (unit_x, unit_y) = if orig_dist > 1e-9 {
+                        (dir_x / orig_dist, dir_y / orig_dist)
+                    } else {
+                        (1.0, 0.0)
+                    };
+
+                    self.sta_coordinates.x = self.ap_coords.x + unit_x * target_dist;
+                    self.sta_coordinates.y = self.ap_coords.y + unit_y * target_dist;
+
+                    SCRIPTED_STEP_DT
+                } else if self.movement_mode == 1 {
                     let mut rng = rand::thread_rng();
 
                     // 1. True Correlated Angle (Smooths the movement in all 360 degrees)
@@ -6719,6 +7201,9 @@ impl STA_extended {
                 }; 
 
                 self.outport_coords_xrclient.send(self.sta_coordinates.clone()).await;
+                if self.movement_mode != 0 {
+                    self.outport_coords_queue.send((self.sta_id, self.sta_coordinates.clone())).await;
+                }
 
                 context.scheduler.schedule_event(
                     std::time::Duration::from_secs_f64(next_update_time),

@@ -1,8 +1,49 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::Path;
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+use image::{ImageBuffer, Rgb};
+use rand::Rng;
 use crate::lib::models_XR::AbrEvent;
 use crate::lib::{render_text, ac_prio,} ;
+
+// ── Auto-screenshot: dumps the first rendered frame of each viewer window to
+// disk so batch/eval runs get a visual record without requiring a human to
+// look at (or close) the interactive window.
+const SCREENSHOT_DIR: &str = "viz_screenshots";
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Saves `buf` (minifb's 0RGB pixel format) as `viz_screenshots/<sim_tag>_<viewer_kind>.png`.
+fn save_screenshot(buf: &[u32], w: usize, h: usize, sim_tag: &str, viewer_kind: &str) {
+    if let Err(e) = std::fs::create_dir_all(SCREENSHOT_DIR) {
+        eprintln!("[VIZ] Failed to create screenshot dir {}: {}", SCREENSHOT_DIR, e);
+        return;
+    }
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            let px = buf[y * w + x];
+            let r = ((px >> 16) & 0xFF) as u8;
+            let g = ((px >> 8)  & 0xFF) as u8;
+            let b = ( px        & 0xFF) as u8;
+            img.put_pixel(x as u32, y as u32, Rgb([r, g, b]));
+        }
+    }
+    // sim_tag alone can collide across parallel eval workers (same seed/sim_id
+    // reused in different runs), so tack on a random suffix to keep filenames unique.
+    let rand_suffix: u32 = rand::thread_rng().gen();
+    let filename = format!("{}_{}_{:08x}.png", sanitize_filename(sim_tag), viewer_kind, rand_suffix);
+    let path = Path::new(SCREENSHOT_DIR).join(&filename);
+    match img.save(&path) {
+        Ok(())  => println!("[VIZ] Saved screenshot: {}", path.display()),
+        Err(e) => eprintln!("[VIZ] Failed to save screenshot {}: {}", path.display(), e),
+    }
+}
 
 use std::time::Instant;
 const SPEED_MIN:  f64   = 9e-6;   // 9 µs of sim-time per real-second
@@ -93,6 +134,7 @@ pub struct AbrVizIndex {
     pub ceil_bitrate_mbps:    f32,
     pub ceil_rtt_ms:          f32,
     pub ceil_throughput_mbps: f32,
+    pub ceil_instant_throughput_mbps: f32,
 
     pub by_ip_sta:    HashMap<IpAddr, Vec<usize>>,
     /// Stable STA IP ordering (insertion = first-seen order).
@@ -120,6 +162,7 @@ impl AbrVizIndex {
         let mut abr_mode_label: HashMap<IpAddr, String> = HashMap::new();
 
         let (mut max_br, mut max_rtt, mut max_tp) = (1.0f32, 1.0f32, 1.0f32);
+        let mut max_itp = 1.0f32;
 
         // ── STA spatial extents ──────────────────────────────────────────────
         let (mut sta_x_min, mut sta_x_max) = (f32::MAX, f32::MIN);
@@ -127,9 +170,10 @@ impl AbrVizIndex {
 
         for (i, ev) in events.iter().enumerate() {
             match ev {
-                AbrEvent::FrameMetrics { ip_server, peak_throughput_mbps, rtt_ms, .. } => {
+                AbrEvent::FrameMetrics { ip_server, peak_throughput_mbps, instant_throughput_mbps, rtt_ms, .. } => {
                     max_rtt = max_rtt.max(*rtt_ms);
                     max_tp  = max_tp .max(*peak_throughput_mbps);
+                    max_itp = max_itp.max(*instant_throughput_mbps);
                     let entry = by_ip_frame.entry(*ip_server).or_insert_with(|| {
                         ip_order.push(*ip_server);
                         Vec::new()
@@ -183,6 +227,7 @@ impl AbrVizIndex {
             ceil_bitrate_mbps:    (max_br  * 1.15).max(1.0),
             ceil_rtt_ms:          (max_rtt * 1.15).max(1.0),
             ceil_throughput_mbps: (max_tp  * 1.15).max(1.0),
+            ceil_instant_throughput_mbps: (max_itp * 1.15).max(1.0),
             sta_x_range,
             sta_y_range,
         }
@@ -208,7 +253,11 @@ const SIDEBAR_W: usize = 370;   // was 220  — must fit ~30-char readout line a
 const PANEL_PAD: usize = 10;    // was 8
 const LABEL_H:   usize = 26;    // was 18   — strip label height at scale 1.8
 
-const TEXT_SIZE_ABR: f32 = 1.8; 
+const TEXT_SIZE_ABR: f32 = 1.8;
+// Fixed y-axis ceiling for the Bitrate strip (unlike the other strips, which
+// autoscale to the visible time window) — keeps the scale comparable across
+// scenarios/checkpoints instead of rescaling with whatever bitrate is onscreen.
+const BITRATE_CEIL_MBPS: f32 = 120.0;
 #[derive(Clone, Copy)]
 enum StripSource { FrameMetrics, BitrateUpdate }
 
@@ -289,7 +338,7 @@ fn make_strips(idx: &AbrVizIndex) -> Vec<MetricStrip> {
                 AbrEvent::BitrateUpdate { new_bitrate_mbps, .. } => Some(*new_bitrate_mbps),
                 _ => None,
             },
-            ceil:     idx.ceil_bitrate_mbps,
+            ceil:     BITRATE_CEIL_MBPS,
             source:   StripSource::BitrateUpdate,
             decimals: 1,
         },
@@ -301,6 +350,17 @@ fn make_strips(idx: &AbrVizIndex) -> Vec<MetricStrip> {
                 _ => None,
             },
             ceil:     idx.ceil_throughput_mbps,
+            source:   StripSource::FrameMetrics,
+            decimals: 1,
+        },
+        MetricStrip {
+            label:   "Instant Throughput",
+            unit:    "Mbps",
+            extract: |ev| match ev {
+                AbrEvent::FrameMetrics { instant_throughput_mbps, .. } => Some(*instant_throughput_mbps),
+                _ => None,
+            },
+            ceil:     idx.ceil_instant_throughput_mbps,
             source:   StripSource::FrameMetrics,
             decimals: 1,
         },
@@ -546,6 +606,92 @@ fn render_sta_grid(
     }
 }
 
+/// Purple dashed step-line color — traces the applied bandwidth cap (see
+/// `VizEvent::BandwidthChange`) on the Peak Throughput strip.
+const BANDWIDTH_MARKER_COLOR: u32 = 0xb266ff;
+
+/// High-frequency dashed horizontal segment (short on/off so it reads as a distinct
+/// "limit" line rather than a solid measured series), `width` px thick.
+fn abr_draw_dashed_hline(buf: &mut [u32], stride: usize, x0: i32, x1: i32, y: i32, color: u32, width: i32) {
+    if y < 0 { return; }
+    const DASH_ON: i32 = 3;
+    const DASH_OFF: i32 = 2;
+    let mut x = x0.max(0);
+    let x_end = x1.min(stride as i32);
+    while x < x_end {
+        let seg_end = (x + DASH_ON).min(x_end);
+        for dy in 0..width {
+            let yy = y + dy;
+            if yy < 0 { continue; }
+            let base = yy as usize * stride;
+            if base + seg_end as usize <= buf.len() {
+                buf[base + x as usize..base + seg_end as usize].fill(color);
+            }
+        }
+        x += DASH_ON + DASH_OFF;
+    }
+}
+
+/// High-frequency dashed vertical segment — connects consecutive bandwidth-cap steps.
+fn abr_draw_dashed_vline(buf: &mut [u32], stride: usize, x: i32, y0: i32, y1: i32, color: u32, width: i32) {
+    if x < 0 { return; }
+    let (a, b) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    const DASH_ON: i32 = 3;
+    const DASH_OFF: i32 = 2;
+    let mut y = a;
+    while y <= b {
+        let seg_end = (y + DASH_ON).min(b);
+        for yy in y.max(0)..=seg_end {
+            for dx in 0..width {
+                let xx = x + dx;
+                if xx < 0 || xx >= stride as i32 { continue; }
+                let i = yy as usize * stride + xx as usize;
+                if i < buf.len() { buf[i] = color; }
+            }
+        }
+        y += DASH_ON + DASH_OFF;
+    }
+}
+
+/// Overlays a purple, high-frequency dashed step-line tracing the applied bandwidth cap
+/// (from `NetworkPatternEmulator::add_markov_modulated_bandwidth`) at its own Mbps scale on
+/// the Bitrate strip, so tuning the Markov chain's dwell/transition parameters can be
+/// visually cross-checked against the ABR's chosen bitrate.
+fn render_bandwidth_overlay(
+    buf:     &mut [u32],
+    stride:  usize,
+    strip_y: usize,
+    strip_h: usize,
+    panel_x: usize,
+    panel_w: usize,
+    view:    &AbrViewState,
+    ceil:    f32,
+    viz_idx: &VizIndex,
+) {
+    let t_lo = view.center_t - view.span_t * 0.5;
+    let t_hi = view.center_t + view.span_t * 0.5;
+
+    let start = viz_idx.all.partition_point(|e| event_t(e) < t_lo).saturating_sub(1);
+    let mut prev_end: Option<(i32, i32)> = None;
+    for ev in &viz_idx.all[start..] {
+        let t = event_t(ev);
+        if t > t_hi { break; }
+        let VizEvent::BandwidthChange { end, mbps, .. } = ev else { continue };
+
+        let x0 = abr_x_of(t, view, panel_x, panel_w).max(panel_x as i32);
+        let x1 = abr_x_of(*end, view, panel_x, panel_w).min((panel_x + panel_w) as i32);
+        let y  = abr_y_of(*mbps, ceil, strip_y, strip_h);
+
+        if let Some((px, py)) = prev_end {
+            abr_draw_dashed_vline(buf, stride, px, py, y, BANDWIDTH_MARKER_COLOR, 2);
+        }
+        if x0 < x1 {
+            abr_draw_dashed_hline(buf, stride, x0, x1, y, BANDWIDTH_MARKER_COLOR, 2);
+        }
+        prev_end = Some((x1, y));
+    }
+}
+
 fn render_abr_strip(
     buf:      &mut [u32],
     stride:   usize,
@@ -556,34 +702,43 @@ fn render_abr_strip(
     panel_w:  usize,
     view:     &AbrViewState,
     idx:      &AbrVizIndex,
-    highlight_ip: Option<usize>,  
+    highlight_ip: Option<usize>,
+    viz_idx:  Option<&VizIndex>,
 ) {
     let t_lo = view.center_t - view.span_t * 0.5;
     let t_hi = view.center_t + view.span_t * 0.5;
 
-    // dynamic Y ceiling from visible data 
-    let mut visible_max = 0.0f32;
-    for ip in &idx.ip_order {
-        let ip_map: &HashMap<IpAddr, Vec<usize>> = match strip.source {
-            StripSource::FrameMetrics  => &idx.by_ip_frame,
-            StripSource::BitrateUpdate => &idx.by_ip_bitrate,
-        };
-        let Some(indices) = ip_map.get(ip) else { continue };
-        let start = indices.partition_point(|&i| abr_event_t(&idx.events[i]) < t_lo)
-            .saturating_sub(1);
-        for &ei in &indices[start..] {
-            let t = abr_event_t(&idx.events[ei]);
-            if t > t_hi { break; }
-            if let Some(v) = (strip.extract)(&idx.events[ei]) {
-                visible_max = visible_max.max(v);
+    // Bitrate stays pinned to a fixed scale — zoom/visible-window rescaling
+    // makes it hard to visually compare the ABR's chosen bitrate against the
+    // ladder ceiling across scenarios, unlike the other (genuinely unbounded)
+    // strips below.
+    let ceil = if strip.label == "Bitrate" {
+        BITRATE_CEIL_MBPS
+    } else {
+        // dynamic Y ceiling from visible data
+        let mut visible_max = 0.0f32;
+        for ip in &idx.ip_order {
+            let ip_map: &HashMap<IpAddr, Vec<usize>> = match strip.source {
+                StripSource::FrameMetrics  => &idx.by_ip_frame,
+                StripSource::BitrateUpdate => &idx.by_ip_bitrate,
+            };
+            let Some(indices) = ip_map.get(ip) else { continue };
+            let start = indices.partition_point(|&i| abr_event_t(&idx.events[i]) < t_lo)
+                .saturating_sub(1);
+            for &ei in &indices[start..] {
+                let t = abr_event_t(&idx.events[ei]);
+                if t > t_hi { break; }
+                if let Some(v) = (strip.extract)(&idx.events[ei]) {
+                    visible_max = visible_max.max(v);
+                }
             }
         }
-    }
-    // Pad 15 % above visible max; fall back to the global ceil when empty.
-    let ceil = if visible_max > 0.0 {
-        (visible_max * 1.15).max(1e-3)
-    } else {
-        strip.ceil          // global fallback when no data in view
+        // Pad 15 % above visible max; fall back to the global ceil when empty.
+        if visible_max > 0.0 {
+            (visible_max * 1.15).max(1e-3)
+        } else {
+            strip.ceil          // global fallback when no data in view
+        }
     };
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -662,7 +817,13 @@ fn render_abr_strip(
             draw_series(buf, hi, brighten_color(user_color(hi)));
         }
     }
-   
+
+    if strip.label == "Bitrate" {
+        if let Some(viz_idx) = viz_idx {
+            render_bandwidth_overlay(buf, stride, strip_y, strip_h, panel_x, panel_w, view, ceil, viz_idx);
+        }
+    }
+
     abr_draw_hline(buf, stride,
         panel_x as i32, (panel_x + panel_w) as i32,
         (strip_y + strip_h - 1) as i32, 0x2a2a3a);
@@ -910,7 +1071,16 @@ fn handle_abr_input(
 // ─────────────────────────────────────────────────────────────────────────────
 const STA_GRID_H: usize = 220; // height reserved for trajectory panel
 
-pub fn run_abr_viewer(idx: AbrVizIndex) {
+/// `close_requested`, if given, is polled each frame alongside the window's own
+/// close button / Escape -- lets a caller that reopens this viewer across repeated
+/// runs close a still-open previous window itself instead of letting old graphs
+/// pile up window after window. `None` behaves exactly as before: open until the
+/// user closes it by hand.
+pub fn run_abr_viewer(
+    idx: AbrVizIndex,
+    sim_tag: &str,
+    close_requested: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
     let mut window = Window::new(
         "ABR Metrics Viewer",
         ABR_W, ABR_H + STA_GRID_H,          // ← taller initial window
@@ -934,7 +1104,12 @@ pub fn run_abr_viewer(idx: AbrVizIndex) {
         mouse_drag: None,
     };
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    let mut screenshot_taken = false;
+
+    while window.is_open()
+        && !window.is_key_down(Key::Escape)
+        && !close_requested.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    {
         let (w, h) = window.get_size();
         if buf.len() != w * h { buf.resize(w * h, 0); }
 
@@ -964,7 +1139,7 @@ pub fn run_abr_viewer(idx: AbrVizIndex) {
             let strip_y = PANEL_PAD + si * strip_h;
             render_abr_strip(
                 &mut buf, w, strip, strip_y, strip_h,
-                panel_x, panel_w, &view, &idx, highlight_ip,
+                panel_x, panel_w, &view, &idx, highlight_ip, None,
             );
         }
 
@@ -997,6 +1172,11 @@ pub fn run_abr_viewer(idx: AbrVizIndex) {
         }
 
         window.update_with_buffer(&buf, w, h).unwrap();
+
+        if !screenshot_taken {
+            save_screenshot(&buf, w, h, sim_tag, "abr");
+            screenshot_taken = true;
+        }
     }
 }
 
@@ -1007,7 +1187,7 @@ pub fn run_abr_viewer(idx: AbrVizIndex) {
 // ##########################################################################################################################################################
 // ##########################################################################################################################################################
 
-// END ABR VIEWER 
+// END ABR VIEWER
 // #############################################################################
 /////////////////////////////////////// CHANNEL VIEWER /////////////////////////////////////////
 
@@ -1156,7 +1336,7 @@ pub struct ViewState {
 // ----------------------------------------------------------------
 // run_viewer  – now queries mouse pos and builds highlight each frame
 // ----------------------------------------------------------------
-pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
+pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig], sim_tag: &str) {
     const W: usize = 1500;
     const H: usize = 900;
 
@@ -1181,6 +1361,8 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
         row_scroll:    0,
         mouse_drag:    None,
     };
+
+    let mut screenshot_taken = false;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // ── live dimensions ───────────────────────────────────────────────
@@ -1248,6 +1430,11 @@ pub fn run_viewer(idx: VizIndex, link_configs: &[LinkConfig]) {
         }
 
         window.update_with_buffer(&buf, w, h).unwrap();
+
+        if !screenshot_taken {
+            save_screenshot(&buf, w, h, sim_tag, "channel");
+            screenshot_taken = true;
+        }
     }
 }
 
@@ -2093,6 +2280,7 @@ pub struct VizIndex {
     pub collisions_by_link: HashMap<u8, Vec<usize>>,
     pub backoff_by_key: HashMap<MacKey, Vec<usize>>,
     pub qdepth_by_key: HashMap<MacKey, Vec<usize>>,
+    pub bandwidth_by_ip: HashMap<IpAddr, Vec<usize>>,
     pub mac_keys_sorted: Vec<MacKey>,
     pub t_min: f64,
     pub t_max: f64,
@@ -2111,6 +2299,7 @@ pub struct VizIndex {
         let mut collisions_by_link: HashMap<u8,     Vec<usize>> = HashMap::new();
         let mut backoff_by_key:     HashMap<MacKey, Vec<usize>> = HashMap::new();
         let mut qdepth_by_key:      HashMap<MacKey, Vec<usize>> = HashMap::new();
+        let mut bandwidth_by_ip:    HashMap<IpAddr, Vec<usize>> = HashMap::new();
         let mut keys:               HashSet<MacKey>             = HashSet::new();
 
         for (i, ev) in events.iter().enumerate() {
@@ -2130,6 +2319,9 @@ pub struct VizIndex {
                 VizEvent::QueueDepth { mac_key, .. } => {
                     qdepth_by_key.entry(*mac_key).or_default().push(i);
                     keys.insert(*mac_key);
+                }
+                VizEvent::BandwidthChange { ip, .. } => {
+                    bandwidth_by_ip.entry(*ip).or_default().push(i);
                 }
             }
         }
@@ -2223,6 +2415,7 @@ pub struct VizIndex {
             collisions_by_link,
             backoff_by_key,
             qdepth_by_key,
+            bandwidth_by_ip,
             mac_keys_sorted,
             qdepth_series,
             cw_series,
@@ -2428,19 +2621,21 @@ fn render_hud(buf: &mut [u32], stride: usize, view: &ViewState, idx: &VizIndex) 
  
 pub fn event_t(ev: &VizEvent) -> f64 {
     match ev {
-        VizEvent::TxopStart   { t, .. } => *t,
-        VizEvent::Collision   { t, .. } => *t,
-        VizEvent::BackoffSnap { t, .. } => *t,
-        VizEvent::QueueDepth  { t, .. } => *t,
+        VizEvent::TxopStart      { t, .. } => *t,
+        VizEvent::Collision      { t, .. } => *t,
+        VizEvent::BackoffSnap    { t, .. } => *t,
+        VizEvent::QueueDepth     { t, .. } => *t,
+        VizEvent::BandwidthChange { t, .. } => *t,
     }
 }
- 
+
 pub fn event_end(ev: &VizEvent) -> f64 {
     match ev {
-        VizEvent::TxopStart { end, .. } => *end,
-        VizEvent::Collision { end, .. } => *end,
-        VizEvent::BackoffSnap { t, .. } => *t,
-        VizEvent::QueueDepth  { t, .. } => *t,
+        VizEvent::TxopStart      { end, .. } => *end,
+        VizEvent::Collision      { end, .. } => *end,
+        VizEvent::BackoffSnap    { t, .. } => *t,
+        VizEvent::QueueDepth     { t, .. } => *t,
+        VizEvent::BandwidthChange { end, .. } => *end,
     }
 }
  
@@ -3649,6 +3844,7 @@ pub fn run_unified_viewer(
     viz_idx:      VizIndex,
     abr_idx:      AbrVizIndex,
     link_configs: Vec<LinkConfig>,     // ← now owned, move into thread freely
+    sim_tag:      String,
     )
  {
     let mut window = Window::new(
@@ -3668,6 +3864,8 @@ pub fn run_unified_viewer(
     let abr_strips  = make_strips(&abr_idx);
     let n_abr       = abr_strips.len();
     let num_links   = link_configs.len() as u8;
+
+    let mut screenshot_taken = false;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
 
@@ -3834,7 +4032,8 @@ pub fn run_unified_viewer(
                 
                 let strip_y = content_top + PANEL_PAD + si * abr_strip_h;
                 render_abr_strip(&mut buf, w, strip, strip_y, abr_strip_h,
-                                abr_panel_x, abr_panel_w, &state.abr_view, &abr_idx, highlight_ip);
+                                abr_panel_x, abr_panel_w, &state.abr_view, &abr_idx, highlight_ip,
+                                Some(&viz_idx));
             }
 
 
@@ -3894,6 +4093,11 @@ pub fn run_unified_viewer(
         }
 
         window.update_with_buffer(&buf, w, h).unwrap();
+
+        if !screenshot_taken {
+            save_screenshot(&buf, w, h, &sim_tag, "unified");
+            screenshot_taken = true;
+        }
     }
 }
 

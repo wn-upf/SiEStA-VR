@@ -37,7 +37,7 @@ use std::{fs, u64};
 use crate::lib::postsim_visualizers::{event_t, event_end}; 
 pub const SIM_START_TIME: u64 = 1;
 pub const PACKET_SIZE_SOCKETS_BYTES: usize = 1400;
-pub const NUM_INPUT_ARGS_SIM: usize = 37;
+pub const NUM_INPUT_ARGS_SIM: usize = 36;
 pub const BANDWIDTH_EMU_LINK: Option<u64> = Some(100E7 as u64); // 1 Gbps link
 // pub const BANDWIDTH_EMU_LINK: Option<u64> = None; 
 
@@ -83,17 +83,16 @@ impl VRPair {
         distance: f64,
         name_folder: &str,
         test: &str,
-        patterns: &[NetworkPattern],
         file_name_video: &str,
         fps: f32,
         gop_size: usize,
         intrarefresh: bool,
-        use_foveation: bool, 
-        vbv_perframe: bool, 
+        use_foveation: bool,
+        vbv_perframe: bool,
         abr_enabled: usize,
         nest_vr_profile: &NestVrProfile,
-        netem_values_tests: Option<(bool, bool, bool, bool)>,
-        test_distances_everest_bool: bool,
+        netem_values_tests: Option<(bool, bool, bool, bool, bool)>,
+        movement_mode: usize, // 0: static (default distance) | 1: random walk test | 2: scripted radial distance test
         t_end_simu: f64,
         simu_unique_str: &str,
         obs_config: ObservationConfig,
@@ -107,7 +106,8 @@ impl VRPair {
         no_uplink_tracking_bool: bool, 
         deterministic_frame_sizes_bool: bool, 
         delay_app_mac_enabled_bool: bool, 
-        abr_event_tx: Option<crossbeam::channel::Sender<crate::lib::models_XR::AbrEvent>>, 
+        abr_event_tx: Option<crossbeam::channel::Sender<crate::lib::models_XR::AbrEvent>>,
+        viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
 
     ) -> Self {
         let initial_bitrate = initial_bitrate_orig;
@@ -124,23 +124,56 @@ impl VRPair {
             4 => "GCC Port",
             5 => "NADA Port",
             6 => "FovOptix Port",
+            8 => "Oracle",
+            9 => "Adaptive",
             _ => "???",
         };
 
         let server_id = PREFIX_ID_DOWNLINK + pair_index as i32;
         let client_id = PREFIX_ID_UPLINK + pair_index as i32;
-        let server_ip = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
+        let server_ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 1));
         let client_ip: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, pair_index as u8, 2));
 
         let server_coords: Coords = ap_coords.clone();
 
         let mut client_coords = Coords::with_coords(distance + AP_X, AP_Y, 0.0);
-        
-        if test_distances_everest_bool {
-            let mut rng = thread_rng();
-            client_coords = random_room_coords(&mut rng);
-        } else {
+
+        match movement_mode {
+            1 => {
+                let mut rng = thread_rng();
+                client_coords = random_room_coords(&mut rng);
+            }
+            2 => {
+                // Scripted radial distance test starts at RADIAL_TEST_START_DIST from the AP.
+                client_coords = Coords::with_coords(
+                    crate::lib::models_XR::RADIAL_TEST_START_DIST + AP_X,
+                    AP_Y,
+                    0.0,
+                );
+            }
+            _ => {} // do nothing, keep the input arg distances
         }
+
+        let bandwidth_emu_link = if delay_app_mac_enabled_bool {
+            BANDWIDTH_EMU_LINK // Convert Mbps to bps
+        } else {
+            None
+        };
+
+        let mut emu_link = EmulatedLink::new_with_bandwidth(
+            MAX_EMULATED_QUEUE_PACKETS,
+            t0,
+            netem_values_tests,
+            server_ip,
+            bandwidth_emu_link,
+            t_end_simu,
+            viz_tx,
+        );
+
+        // The real, per-pair applied bandwidth trace — used instead of the shared `patterns`
+        // arg (an independently-sampled "scratch" draw, see `emu_effects` in run_sim) so the
+        // Oracle ABR mode and the trace CSV both reflect what actually limited this pair.
+        let real_bandwidth_trace = emu_link.get_network_patterns().to_vec();
 
         let mut xr_server = XRServer::new(
             server_ip,
@@ -149,13 +182,13 @@ impl VRPair {
             fps,
             initial_bitrate as f32,
             name_folder,
-            patterns,
+            &real_bandwidth_trace,
             file_name_video,
             gop_size,
             intrarefresh,
-            use_foveation, 
-            vbv_perframe, 
-            deterministic_frame_sizes_bool, 
+            use_foveation,
+            vbv_perframe,
+            deterministic_frame_sizes_bool,
 
             abr_enabled,
             nest_vr_profile,
@@ -167,8 +200,8 @@ impl VRPair {
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
             codec_selection,
-            results_path_name, 
-            abr_event_tx,   
+            results_path_name,
+            abr_event_tx,
 
         );
 
@@ -185,9 +218,9 @@ impl VRPair {
             PACKET_SIZE_SOCKETS_BYTES,
             edca_be_mode,
             codec_selection,
-            results_path_name, 
-            random_seed, 
-            no_uplink_tracking_bool, 
+            results_path_name,
+            random_seed,
+            no_uplink_tracking_bool,
         );
 
         let mut sta_server = STA_extended::new(
@@ -202,9 +235,9 @@ impl VRPair {
             0.0,
             0,
             ap_coords,
-            random_seed, 
-            test_distances_everest_bool,
-            None, 
+            random_seed,
+            movement_mode,
+            None,
             server_ip,
         );
         let mut sta_client = STA_extended::new(
@@ -219,26 +252,11 @@ impl VRPair {
             0.0,
             0,
             ap_coords,
-            random_seed, 
-            test_distances_everest_bool,
-            None, 
+            random_seed,
+            movement_mode,
+            None,
             client_ip,
 
-        );
-
-        let bandwidth_emu_link = if delay_app_mac_enabled_bool {
-            BANDWIDTH_EMU_LINK // Convert Mbps to bps
-        } else {
-            None
-        };
-
-
-        let mut emu_link = EmulatedLink::new_with_bandwidth(
-            MAX_EMULATED_QUEUE_PACKETS,
-            t0,
-            netem_values_tests,
-            server_ip,
-            bandwidth_emu_link,
         );
 
         let mbox_xr_server = Mailbox::new();
@@ -386,7 +404,6 @@ fn generate_session_timeline<R: Rng>(
 pub struct SimParams {
     pub stoptime: f64,
     pub mean_length_bg: f64,
-    pub k_queue: usize,
     pub distance: f64,
     pub initial_bitrate: f64, // Mbps
     pub pl_prob: f64,
@@ -406,7 +423,7 @@ pub struct SimParams {
     pub vbv_per_frame: usize,          // 0/1, per-second if set to 0. 
     pub abr: usize, // 0 CBR | 1 Nest-VR | 2 Everest | 3 ?? | 4 GCC | 5 NADA | 6 FovOptix
     pub nest_vr_choice: usize, // 0 Speedy | 1 Balanced | 2 Anxious
-    pub test_distances_everest: usize, // 0/1
+    pub test_distances_everest: usize, // 0: static | 1: random walk test | 2: scripted radial distance test (1.5m<->20m)
     pub sim_id: usize,
     pub observation_type: usize,
     pub reward_mode: usize, // 0-> naive , 1-> normalized, 2-> ??? todo shaping.
@@ -431,40 +448,39 @@ pub fn parse_cli_to_params(args: &[String]) -> SimParams {
     SimParams {
         stoptime:               args[1].parse().unwrap(),
         mean_length_bg:         args[2].parse().unwrap(),
-        k_queue:                args[3].parse().unwrap(),
-        distance:               args[4].parse().unwrap(),
-        initial_bitrate:        args[5].parse().unwrap(),
-        pl_prob:                args[6].parse().unwrap(),
-        n_xr:                   args[7].parse().unwrap(),
-        n_bg:                   args[8].parse().unwrap(),
-        rate_bps_bg_in:         args[9].parse().unwrap(),
-        is_ul_bg_traffic:       args[10].parse().unwrap(),
-        test_type:              args[11].clone(),
-        video_filename:         args[12].clone(),
-        fps_arg:                args[13].parse().unwrap(),
-        n_close:                args[14].parse().unwrap(),
-        distance_close:         args[15].parse().unwrap(),
-        seed:                   args[16].parse().unwrap(),
-        gop_size:               args[17].parse().unwrap(),
-        intra_refresh:          args[18].parse().unwrap(),
-        use_foveation:          args[19].parse().unwrap(), 
-        vbv_per_frame:          args[20].parse().unwrap(), 
-        abr:                    args[21].parse().unwrap(),
-        nest_vr_choice:         args[22].parse().unwrap(),
-        test_distances_everest: args[23].parse().unwrap(),
-        sim_id:                 args[24].parse().unwrap(),
-        observation_type:       args[25].parse().unwrap(),
-        reward_mode:            args[26].parse().unwrap(),
-        t_update_abr:           args[27].parse().unwrap(),
-        mlo_channel_config:     args[28].parse().unwrap(),
-        edca_be:                args[29].parse().unwrap(),
-        mlo_link_sel_policy:    args[30].parse().unwrap(),
-        packs_per_ampdu:        args[31].parse().unwrap(),
-        codec_input_arg:        args[32].parse().unwrap(),
-        name_results_path:      args[33].clone(),
-        no_uplink_tracking:     args[34].parse().unwrap(), 
-        deterministic_frame_sizes: args[35].parse().unwrap(), 
-        delay_app_mac_enabled: args[36].parse().unwrap(), 
+        distance:               args[3].parse().unwrap(),
+        initial_bitrate:        args[4].parse().unwrap(),
+        pl_prob:                args[5].parse().unwrap(),
+        n_xr:                   args[6].parse().unwrap(),
+        n_bg:                   args[7].parse().unwrap(),
+        rate_bps_bg_in:         args[8].parse().unwrap(),
+        is_ul_bg_traffic:       args[9].parse().unwrap(),
+        test_type:              args[10].clone(),
+        video_filename:         args[11].clone(),
+        fps_arg:                args[12].parse().unwrap(),
+        n_close:                args[13].parse().unwrap(),
+        distance_close:         args[14].parse().unwrap(),
+        seed:                   args[15].parse().unwrap(),
+        gop_size:               args[16].parse().unwrap(),
+        intra_refresh:          args[17].parse().unwrap(),
+        use_foveation:          args[18].parse().unwrap(),
+        vbv_per_frame:          args[19].parse().unwrap(),
+        abr:                    args[20].parse().unwrap(),
+        nest_vr_choice:         args[21].parse().unwrap(),
+        test_distances_everest: args[22].parse().unwrap(),
+        sim_id:                 args[23].parse().unwrap(),
+        observation_type:       args[24].parse().unwrap(),
+        reward_mode:            args[25].parse().unwrap(),
+        t_update_abr:           args[26].parse().unwrap(),
+        mlo_channel_config:     args[27].parse().unwrap(),
+        edca_be:                args[28].parse().unwrap(),
+        mlo_link_sel_policy:    args[29].parse().unwrap(),
+        packs_per_ampdu:        args[30].parse().unwrap(),
+        codec_input_arg:        args[31].parse().unwrap(),
+        name_results_path:      args[32].clone(),
+        no_uplink_tracking:     args[33].parse().unwrap(),
+        deterministic_frame_sizes: args[34].parse().unwrap(),
+        delay_app_mac_enabled: args[35].parse().unwrap(),
 
     }
 }
@@ -478,7 +494,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let SimParams {
         stoptime,
         mean_length_bg,
-        k_queue,
         distance,
         initial_bitrate,
         pl_prob,
@@ -526,16 +541,17 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
 
     // Set test constants based on test_type parameter
-    let (test_bandwidth, test_jitter, test_pl, test_random) = match test_type.as_str() {
-        "BW" => (true, false, false, false),
-        "JI" => (false, true, false, false),
-        "PL" => (false, false, true, false),
-        "RANDOM" => (false, false, false, true),
-        _ => (false, false, false, false), // Default/STD case
+    let (test_bandwidth, test_jitter, test_pl, test_random, test_markov) = match test_type.as_str() {
+        "BW" => (true, false, false, false, false),
+        "JI" => (false, true, false, false, false),
+        "PL" => (false, false, true, false, false),
+        "RANDOM" => (false, false, false, true, false),
+        "MARKOV" => (false, false, false, false, true),
+        _ => (false, false, false, false, false), // Default/STD case
     };
 
     // Use the test type from parameter as suffix directly
-    let suffix = if ["BW", "JI", "PL", "STD", "RANDOM"].contains(&test_type.as_str()) {
+    let suffix = if ["BW", "JI", "PL", "STD", "RANDOM", "MARKOV"].contains(&test_type.as_str()) {
         test_type.as_str()
     } else {
         "STD" // Default suffix if invalid test type provided
@@ -560,8 +576,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
     // Create output directory
    let name_folder = format!(
-        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_{}_noTrack{:.0}_fibonacciVid{:.0}_delayAppMac{:.0}",
-        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, mlo_policy.to_string(), no_uplink_tracking as usize, deterministic_frame_sizes, delay_app_mac_enabled, 
+        "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_RWALK{:.0}",
+        stoptime, distance, initial_bitrate, fps_arg, gop_size, intra_refresh, use_foveation, vbv_per_frame, pl_prob, packs_per_ampdu, n_xr, n_bg, rate_bps_bg_in ,is_ul_bg_traffic,  n_close, distance_close, seed,abr, edca_be, test_distances_everest,
     );
         
     let output_path = format!("{}/{}", name_results_path ,name_folder);
@@ -608,19 +624,29 @@ pub fn run_sim(params: SimParams) -> Result<()> {
 
 
     // Create and configure queue
+    // NOTE: `queue_size` (2nd positional arg) is dead in `models_mm1k.rs`'s current
+    // `QueueModule::new` -- the body already hardcodes `DOWNLINK_QUEUE_SIZE`/`UPLINK_QUEUE_SIZE`
+    // instead of using it -- but the parameter itself hasn't been deleted from the signature yet
+    // (pending a separate reconciliation pass on that file), so a placeholder is still required
+    // here. `k_queue` was removed from `SimParams`/CLI args since it no longer does anything.
     let mut queue = QueueModule::new(
         all_sta_ids.len(),
-        k_queue.saturating_sub(1),
+        0, // vestigial `queue_size` placeholder -- see note above
         pl_prob,
         all_sta_ids.clone(),
         name_folder.clone(),
-        Some((test_bandwidth, test_jitter, test_pl, test_random)),
+        Some((test_bandwidth, test_jitter, test_pl, test_random, test_markov)),
         link_configs,
         mlo_policy,
         packs_per_ampdu,
-        &name_results_path, 
-        Some(viz_tx.clone()), 
+        &name_results_path,
+        Some(viz_tx.clone()),
     );
+
+    queue.sta_capabilities.insert(-1, StaCapabilities { // Initialize DL capabilities for the single AP
+        _is_str_capable: true,
+        links: available_links.clone(),
+    });
 
     for sta_id in &all_sta_ids {
         // This ensures that in MLO0, everyone gets [0],
@@ -665,23 +691,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         "n_close_users must not exceed total XR users"
     );
 
-    let localhost_v4 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-
-
-    let bandwidth_emu_link = if delay_app_mac_enabled_bool {
-            BANDWIDTH_EMU_LINK // Convert Mbps to bps
-        } else {
-            None
-    };
-
-    let scratch_link = EmulatedLink::new_with_bandwidth(
-        MAX_EMULATED_QUEUE_PACKETS,
-        t0,
-        Some((test_bandwidth, test_jitter, test_pl, test_random)),
-        localhost_v4,
-        bandwidth_emu_link,
-    );
-
     let codec_selection = match codec_input_arg.as_str() {
         "AV1" => VideoCodec::AV1,
         "HEVC" => VideoCodec::HEVC,
@@ -690,8 +699,6 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             VideoCodec::HEVC
         }
     };
-
-    let emu_effects: Vec<NetworkPattern> = scratch_link.get_network_patterns().to_vec();
 
     let obs_config = match observation_type {
         0 => ObservationConfig::Raw,
@@ -733,17 +740,16 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             current_distance, // Use the conditional distance here
             &name_folder,
             suffix,
-            &emu_effects,
             &video_filename,
             current_fps,
             gop_size,
             intra_refresh != 0,
-            use_foveation!= 0, 
-            vbv_per_frame != 0, 
+            use_foveation!= 0,
+            vbv_per_frame != 0,
             current_abr_mode,
             &nest_vr_profile,
-            Some((test_bandwidth, test_jitter, test_pl, test_random)),
-            test_distances_everest_bool,
+            Some((test_bandwidth, test_jitter, test_pl, test_random, test_markov)),
+            test_distances_everest,
             stoptime,
             &sim_unique_string,
             obs_config,
@@ -756,8 +762,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             seed, 
             no_uplink_tracking_bool, 
             deterministic_frame_sizes_bool, 
-            delay_app_mac_enabled_bool, 
-            Some(abr_tx.clone()), 
+            delay_app_mac_enabled_bool,
+            Some(abr_tx.clone()),
+            Some(viz_tx.clone()),
 
         );
 
@@ -802,7 +809,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             is_ul_bg_traffic,
             ap_coords,
             seed, 
-            test_distances_everest_bool, 
+            test_distances_everest, 
             Some(abr_tx.clone()),
             bg_ip_addr, 
         );
@@ -909,7 +916,16 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     }
 
     // Build simulation
-    let mut sim_builder = SimInit::new().add_model(queue, mbox_queue, "Queue");
+    // The model graph is a serial event chain (XR server -> emu link -> STA -> queue -> ...),
+    // so extra worker threads never find stealable work; they only add park/unpark syscalls.
+    // `SimInit::new()` would spawn `num_cpus::get()` of them. One thread => single-threaded
+    // executor, no cross-thread wakeups. Override with XRSIM_THREADS if ever needed.
+    let sim_threads: usize = std::env::var("XRSIM_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut sim_builder =
+        SimInit::with_num_threads(sim_threads).add_model(queue, mbox_queue, "Queue");
 
     // Add XR pairs to simulation
     for (i, vr) in vr_pairs.into_iter().enumerate() {
@@ -1161,9 +1177,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 let abr_idx  = AbrVizIndex::build(abr_events);
                 let viz_idx  = VizIndex::build(viz_events);
                 let lc       = link_configs_clone.clone();   // Vec<LinkConfig> — moved into thread
+                let sim_tag  = sim_unique_string.clone();
 
                 Some(std::thread::spawn(move || {
-                    run_unified_viewer(viz_idx, abr_idx, lc);
+                    run_unified_viewer(viz_idx, abr_idx, lc, sim_tag);
                 }))
             }
 
@@ -1171,9 +1188,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             (true, false) => {
                 println!("[VIZ] No channel events — opening ABR-only viewer.");
                 let abr_idx = AbrVizIndex::build(abr_events);
+                let sim_tag = sim_unique_string.clone();
 
                 Some(std::thread::spawn(move || {
-                    run_abr_viewer(abr_idx);
+                    run_abr_viewer(abr_idx, &sim_tag, None);
                 }))
             }
 
@@ -1182,9 +1200,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 println!("[VIZ] No ABR events — opening channel-only viewer.");
                 let viz_idx = VizIndex::build(viz_events);
                 let lc      = link_configs_clone.clone();
+                let sim_tag = sim_unique_string.clone();
 
                 Some(std::thread::spawn(move || {
-                    run_viewer(viz_idx, &lc);
+                    run_viewer(viz_idx, &lc, &sim_tag);
                 }))
             }
 

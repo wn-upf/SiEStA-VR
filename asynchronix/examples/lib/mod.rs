@@ -1786,6 +1786,12 @@ pub struct HevcParser {
     pub vps: Option<Vec<u8>>,
     pub sps: Option<Vec<u8>>,
     pub pps: Option<Vec<u8>>,
+    // NAL units accumulated so far for the frame that is still open (its closing
+    // boundary - the next VCL NAL - hasn't been seen yet). Persisted across calls to
+    // get_frames() so a frame isn't split just because a call returned before its
+    // boundary NAL had arrived from ffmpeg.
+    pending_frame: Vec<u8>,
+    pending_has_vcl: bool,
 }
 #[allow(dead_code)]
 impl HevcParser {
@@ -1795,12 +1801,23 @@ impl HevcParser {
             vps: None,
             sps: None,
             pps: None,
+            pending_frame: Vec::new(),
+            pending_has_vcl: false,
         }
     }
 
     /// Add more encoded data to the parser buffer
     pub fn add_data(&mut self, data: &[u8]) {
         self.buffer.extend_from_slice(data);
+    }
+
+    /// Reset all per-stream state, including the still-open pending frame. Call this
+    /// when starting a new chunk (new ffmpeg process/bytestream) so no state leaks
+    /// across chunk boundaries.
+    pub fn reset_for_new_chunk(&mut self) {
+        self.buffer.clear();
+        self.pending_frame.clear();
+        self.pending_has_vcl = false;
     }
 
     /// Find the next NAL unit start code in the buffer
@@ -1911,40 +1928,53 @@ impl HevcParser {
         nal
     }
 
-    /// Get all complete frames currently in the buffer
+    /// Get all complete frames currently in the buffer.
+    ///
+    /// A frame is only emitted once its closing boundary (the next VCL NAL) has
+    /// actually been seen; NAL units accumulated since the last confirmed boundary
+    /// are kept in `pending_frame` across calls instead of being flushed blindly.
+    /// This avoids splitting off a spurious "frame" made of just VPS/SPS/PPS when a
+    /// read() call returns parameter sets before the first slice NAL has arrived.
     pub fn get_frames(&mut self) -> Vec<Vec<u8>> {
         let mut frames = Vec::new();
-        let mut current_frame = Vec::new();
-        let mut saw_vcl = false;
 
         while let Some(nal) = self.next_nal_unit() {
             // VCL NAL units (0-31) contain the actual picture data
             let is_vcl = nal.nal_type <= 31;
 
-            // If we see a VCL NAL and already saw one before, it's a new frame
-            if is_vcl && saw_vcl {
-                if !current_frame.is_empty() {
-                    frames.push(current_frame);
-                    current_frame = Vec::new();
+            // If we see a VCL NAL and already saw one before, the previous frame is done
+            if is_vcl && self.pending_has_vcl {
+                if !self.pending_frame.is_empty() {
+                    frames.push(std::mem::take(&mut self.pending_frame));
                 }
-                saw_vcl = false;
+                self.pending_has_vcl = false;
             }
 
             if is_vcl {
-                saw_vcl = true;
+                self.pending_has_vcl = true;
             }
 
-            // Add start code and NAL data to current frame
-            current_frame.extend_from_slice(&[0, 0, 0, 1]);
-            current_frame.extend_from_slice(&nal.data);
-        }
-
-        // Add the last frame if it's not empty
-        if !current_frame.is_empty() {
-            frames.push(current_frame);
+            // Add start code and NAL data to the still-open frame
+            self.pending_frame.extend_from_slice(&[0, 0, 0, 1]);
+            self.pending_frame.extend_from_slice(&nal.data);
         }
 
         frames
+    }
+
+    /// Flush whatever is left accumulated in `pending_frame`, e.g. once the ffmpeg
+    /// process for a chunk has exited and no more NAL boundaries will arrive.
+    /// Returns `None` (discarding the leftover bytes) if the pending data never saw
+    /// a VCL NAL - i.e. it's just trailing parameter sets, not a real picture.
+    pub fn flush_final_frame(&mut self) -> Option<Vec<u8>> {
+        let had_vcl = self.pending_has_vcl;
+        self.pending_has_vcl = false;
+        let frame = std::mem::take(&mut self.pending_frame);
+        if had_vcl && !frame.is_empty() {
+            Some(frame)
+        } else {
+            None
+        }
     }
 
     // New methods to access parameter sets
@@ -2889,7 +2919,7 @@ pub struct MpduPacket {
     pub sta_src_coords: Coords,
     pub queue_length_when_out: usize,
 
-    pub data_inner: Vec<u8>,
+    pub data_inner: Arc<[u8]>,
     pub header_alvr: HeaderALVRStream,
 
     pub has_consumed_emu_tokens: bool,
@@ -2945,7 +2975,7 @@ impl MpduPacket {
             sta_src_coords: Coords::with_coords(0.0, 0.0, 0.0),
 
             queue_length_when_out: 0,
-            data_inner: vec![],
+            data_inner: Arc::new([]),
             header_alvr: HeaderALVRStream::default(),
             has_consumed_emu_tokens: false,
             emulated_added_delay_deadline: None,
