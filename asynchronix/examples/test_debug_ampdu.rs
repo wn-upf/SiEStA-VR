@@ -101,7 +101,7 @@ pub fn airtime_ampdu(
         _ if Pr >= -46.0 => (12, 5.0 / 6.0, 13),               // MCS 13
         _ => (1, 1.0 / 2.0, 1),                                // Catch-all for Pr out of range
     };
-    // println!("P_rx = {}", Pr);
+
 
     let Subcarriers = match channel_width {
         320 => 3920, // 320 MHz: data subcarriers (EHT / Wi-Fi7)

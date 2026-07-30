@@ -159,7 +159,7 @@ pub struct DeviceMotion {
     pub angular_velocity: Vec3,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ClientStatistics {
     pub target_timestamp: Duration, // identifies the frame
     pub frame_index: i32,
@@ -231,6 +231,7 @@ pub struct NetworkStatisticsPacket {
     pub everest_dshort: f32,
     pub everest_dlong: f32,
     pub everest_command: EverestCommand,
+
     pub buffer_level_decoder: u8,
     pub rebuffering_events_last_s: u8,
 
