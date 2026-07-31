@@ -1029,7 +1029,8 @@ fn make_encoder_task(
                     framerate_fps,
                     idr_freq as usize, // GOP size
                     intra_refresh,
-                    use_foveation, 
+                    use_foveation,
+                    true, // vbv_perframe
                 ))
             },
             VideoCodec::HEVC => {
@@ -1040,13 +1041,14 @@ fn make_encoder_task(
                     width,
                     height,
                     &format!("{}M", bitrate_mbps),
-                    1.0, 
+                    1.0,
                     name,
                     offset_video,
                     framerate_fps,
                     idr_freq as usize,
                     intra_refresh,
-                    use_foveation, 
+                    use_foveation,
+                    true, // vbv_perframe
                 ))
             }
         }; 
@@ -1068,7 +1070,7 @@ fn make_encoder_task(
             // (re)fill the encoder’s internal queue
             // UPDATED: The new library signature takes (bitrate, TaiTime)
             // The logic for IDR/GOP is now internal to the encoder struct set in ::new()
-            enc.start_chunking(bitrate_mbps, now).await;
+            enc.start_chunking(bitrate_mbps, now, Vec::new()).await;
 
             // drain all frames this chunk produced (but never overrun our trace)
             while produced < trace.len() {
@@ -1637,13 +1639,9 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
             _ => { eprintln!("Skipping {}, unknown codec", folder_name); continue; }
         };
 
-        // Determine GUI usage (logic preserved)
-        let user = std::env::var("USER").unwrap_or_default();
-        let use_gui = match user.as_str() {
-            "boris" => true,
-            "fmaura" => false,
-            _ => std::env::var("DISPLAY").is_ok(),
-        };
+        // Show the live preview window only when a display is actually available
+        // (e.g. not on a headless SLURM node).
+        let use_gui = std::env::var("DISPLAY").is_ok();
 
         // Find CSV within folder
         let csv_entries = fs::read_dir(&path).expect("Read subdir failed");

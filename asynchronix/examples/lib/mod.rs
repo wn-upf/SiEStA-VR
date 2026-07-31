@@ -106,7 +106,7 @@ pub const BITRATE_PARQUET_LOGGING: bool =  true; // Log Parquet per XR session, 
 
 
 
-pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
+pub const VISUALIZER_QUEUES_ENABLED: bool = true; // Set to true to enable visualizer events for queue states
 pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]

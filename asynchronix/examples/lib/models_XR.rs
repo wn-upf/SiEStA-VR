@@ -169,7 +169,10 @@ pub const FRAMERATE_WINDOWS: usize = 60;
 #[allow(unused)]
 pub const TARGET_FRAMES_DECODER_QUEUE: usize = DECODER_BUFFERING_FRAMES; // unused at the moment,
 
-pub const SCALE_FACTOR_FFMPEG_WINDOW: f64 = 0.1; // X:1 scaling for 4k visuals in lower res screens
+pub const SCALE_FACTOR_FFMPEG_WINDOW: f64 = 0.25; // X:1 scaling for 4k visuals in lower res screens
+// Window width tracks WIDTH_ENCODER * SCALE_FACTOR_FFMPEG_WINDOW (see `vsync`/`display_single_frame_with_info_buffered`).
+// The HUD's right-side cluster (trajectory graph + info grid, see `display_single_frame_with_info_buffered`)
+// needs at least ~708px of that width to avoid overlapping; 0.3 gives 1152px.
 pub const SCALE_FACTOR_GRAPH: f32 = 0.6;
 
 // pub const UPDATE_BITRATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -2202,7 +2205,7 @@ impl BitrateManager {
         let flr = if fl > 0 { fl as f32 / self.framerate as f32 } else { 0.0 };
 
         let instant_throughput = if frame_interarrival_s > 0.0 {
-            network_stats.bytes_in_frame as f32 / frame_interarrival_s // bps
+            network_stats.bytes_in_frame as f32 * 8.0 / frame_interarrival_s // bits/s
         } else {
             0.0
         };
