@@ -4,7 +4,14 @@
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Wi-Fi 7](https://img.shields.io/badge/Protocol-IEEE%20802.11be-blue.svg)](https://en.wikipedia.org/wiki/IEEE_802.11be)
 
-**SiESTA-VR** is a high-fidelity, discrete-event simulation framework designed to evaluate the stringent latency and throughput requirements of next-generation wireless networks. Built on a fork of the asynchronous [**NeXosim**](https://github.com/asynchronics/nexosim) library in Rust, it provides a robust environment for researching Cloud VR interactive streaming over **IEEE 802.11be (Wi-Fi 7)**.
+**SiESTA-VR** is a discrete-event simulator of Cloud VR streaming over Wi-Fi. It reproduces the full bidirectional pipeline of a real system like ALVR — video encoding, MAC-layer transmission, ABR bitrate adaptation, decoding — down to individual MPDUs on an **IEEE 802.11be (Wi-Fi 7)** channel, so you can study how network conditions (contention, MLO, mobility, background traffic, packet loss) affect VR quality of experience without needing physical hardware or a real wireless testbed.
+
+**Why it's useful:** Cloud VR has tight latency/throughput requirements that are expensive and slow to test at scale on real networks — you'd need multiple headsets, APs, and controlled interference to sweep even a handful of scenarios. SiESTA-VR runs those sweeps in software, in parallel, on a laptop or an HPC cluster, while still modeling the physical and MAC layer in enough detail (EDCA contention, A-MPDU aggregation, MLO link scheduling) that the results are representative of real Wi-Fi behavior.
+
+**What it generates:** every run produces per-user QoE telemetry (frame delay, RTT, jitter, frame/shard loss, throughput), MAC-layer traces (per-MPDU transmission, collisions, contention windows), ABR bitrate-decision logs, and head-mobility traces — as CSV or Parquet — plus, optionally, a live per-user GUI of the decoded video and a scrubbable post-simulation visualizer of channel activity and ABR behavior. See [Simulation Outputs](#simulation-outputs) below for the full breakdown. 
+
+Future extensions to this framework will integrate python RL libraries (SB3, RLlib), in order to train decision-making agents to optimize network parameters, application parameters, or both.   
+The simulation engine is built on a fork of the asynchronous [**NeXosim**](https://github.com/asynchronics/nexosim) library in Rust, adapted for networking simulation.
 
 ---
 
@@ -38,18 +45,17 @@ To compute VMAF metrics and handle video transcoding recorded from simulations, 
 
 ### Asset Configuration
 
-**1. Live Transcoding Mode (Video Assets):**
+**1. Live Transcoding Mode (Real Video pipeline):**
 Ensure your video source files are located in the `video_samples_vmaf` folder. The simulation expects interpolated 4K videos formatted as `<video_filename>_<FPS>fps.mp4` (e.g., interpolated using FFmpeg `minterpolate`).
 > *Note: Sample 4K/60FPS videos can be obtained from the [Blender Open Data platform](http://bbb3d.renderfarming.net/download.html). Running a specific FPS in the simulation requires a source video matching that framerate.*
 
-**2. Lightweight Mode (CSV Logs):**
+**2. Lightweight Mode (Recommended, based on CSV logs):**
 For faster execution without real-time transcoding, set `USE_FFMPEG_DEMO = False`. The simulator will read frame sizes from the `csv_framesizes` directory instead, using the naming convention `<codec>_<video_filename>_<FPS>fps.csv`.
 > *Tip: Custom CSV logs can be generated from arbitrary video samples across specific FPS and bitrates by running the script in `examples/p_encode2csv.rs`:* `cargo run --release --example p_encode2csv`
 
 ---
 
-## 📊 Simulation Outputs: 
-The simulator has a debug feature when setting `DEBUG_PRINT_ENABLED = True`, where most components of a VR session at the lowest level produce events logging the simulation timestamp and information about the ongoing processes for each VR session, using macros for coloring the terminal output. Similar debugging features are found with `DEBUG_EDCA` and `DEBUG_MLO`, more focused on the respective mechanisms. If `SERIAL_EXECUTION=1` in the bash script, the entire output of a simulation is saved into an ANSI file named `out_log.ans`, which can be inspected for debugging purposes during or after a simulation. For speed, most debugging prints are disabled as the default. 
+## 📊 Simulation Outputs
 
 When `USE_FFMPEG_DEMO = True`, every simulated VR client generates a window with a Graphical User Interface (GUI) showing the decoded video and simulation parameters, user trajectory and a sliding window of QoS metrics. This is exemplified in the next figure, which shows the per-user GUIs of 3 CBR users streaming while performing a random walk:
 <p align="center">
@@ -57,7 +63,7 @@ When `USE_FFMPEG_DEMO = True`, every simulated VR client generates a window with
 </p>
 
 
-For dataset creation, upon execution of each simulated scenario the framework generates a uniquely named directory based on the specific input arguments to the simulation. Specifically, the lengthy folder scenario name creates a subfolder inside the `results_path_name` destination path, based on the following string: 
+Upon execution of each simulated scenario the framework generates a uniquely named directory based on the specific input arguments to the simulation. Specifically, the lengthy folder scenario name creates a subfolder inside the `results_path_name` destination path, based on the following string: 
 ```rust
    let name_folder = format!(
         "sim_T{:.0}_D{:.1}_Br{:.1}Mbps_FPS{:.0}_Codec{codec_input_arg}_GoP{:.0}_IR{:.0}_Foveate{:.0}_VBVframe{:.0}_macPL{:.1}_aggAMPDU={:.0}_NXR{:.0}_NBG{:.0}_BGLambda{:.0}_UL{:.0}_{suffix}_{video_filename}_Nclose{:.0}_dclose{:.1}_S{:.0}_ABR{:.0}_{mlo_channel_config}_EDCAbe{:.0}_RWALK{:.0}",
@@ -95,17 +101,20 @@ For a simulation configuring $N_{XR}$ total users, telemetry is divided per-user
 | **`TRACKING_stats_{id}.{csv,parquet}`** | **Uplink Mobility Tracking:** Records the kinematics of the VR headset. Includes the high-frequency polling `timestamp`, the device coordinates (`pos_x`, `pos_y`, `pos_z`), and the generation `interarrival_ms` defining the uplink tracking data rate. |
 | **`BITRATE_stats_{id}.parquet`** | **ABR Decision Trace:** One row per generated video frame recording the bitrate the active ABR algorithm selected for that frame, useful for reconstructing the exact bitrate ladder trajectory of NeSt-VR/EVeREst/GCC/NADA/Oracle runs without re-deriving it from `XR_stats`. Parquet-only (no CSV logging toggle exists for this stream). |
 | **`trace_emu_effects_{id}.csv`** | **Network Emulation Dynamics:** Traces the exact timing and parameters of the exogenous synthetic network effects (if any) applied to a user's connection pipeline. It tracks bandwidth limits (`bw_max_bps`), jitter variances (`jit_variance`), and forced `drop_probability`, specially useful for reproducibility when bandwidth effects are randomly spread over a simulation (e.g., when the `EMU_TEST_TYPE` setting is set to `"RANDOM"`). |  
+### Debug logging outputs
+
+The simulator has a debug feature when setting `DEBUG_PRINT_ENABLED = True`, where most components of a VR session at the lowest level produce events logging the simulation timestamp and information about the ongoing processes for each VR session, using macros for coloring the terminal output. Similar debugging features are found with `DEBUG_EDCA` and `DEBUG_MLO`, more focused on the respective mechanisms. If `SERIAL_EXECUTION=1` in the bash script, the entire output of a simulation is saved into an ANSI file named `out_log.ans`, which can be inspected for debugging purposes during or after a simulation. For speed, most debugging prints are disabled as the default. 
 
 ### Post-Simulation Channel & ABR Visualizer
 
 Beyond the persisted CSV/Parquet files, SiESTA-VR can replay a simulation's medium activity and ABR decisions in an interactive `minifb` window once the run finishes, controlled by `VISUALIZER_QUEUES_ENABLED` in [`asynchronix/examples/lib/mod.rs`](asynchronix/examples/lib/mod.rs) (`true` by default).
 
 While the simulation runs, the queue model emits `VizEvent`s (per-link TXOP grabs, collisions, contending STAs, MCS, aggregated A-MPDU contents down to the ALVR stream/frame IDs carried in each transmission) and the XR server/client emit `AbrEvent`s (per-frame metrics and bitrate ladder updates). Both streams are collected in memory and, right after the simulation loop ends, handed to a scrubbable timeline viewer (`postsim_visualizers.rs`) that opens automatically.
-The unified window is split into a **channel view** (left) and an **ABR view** (right), sharing a common simulated-time cursor:
+The unified window is split into a **channel view** (left) and an **ABR view** (right), sharing a common simulated-time cursor in yellow indicating the instant seen in both interactive windows. The time base of each view is independent, and can be zoomed in/out independently. 
 
 ![Post-simulation channel & ABR visualizer](assets/Siesta_visualizer_annotated.png)
 
-The screenshot above is a real capture from a 6-VR-user, 3-link MLO run (`MLO80-80-320`: two 80MHz links plus one 320MHz link) with EDCA active. Link 2's 320MHz channel is four times wider than links 0/1, so its transmissions finish noticeably faster for the same amount of data. It also shows a live collision and its knock-on effect climbing through CW, queue depth, RTT, and FLR:
+The screenshot above is a real capture from a 6-VR-user, 3-link MLO run (`MLO80-80-320`: two 80MHz links plus one 320MHz link) with EDCA active. Link 2's 320MHz channel is four times wider than links 0/1, so its transmissions finish noticeably faster for the same amount of data.
 
 | # | Panel | What it shows |
 | :-: | :--- | :--- |
@@ -164,7 +173,7 @@ Before running, opening `p_xrun.sh` is recommended for adjusting the arrays and 
 ### 3. Adaptive Bitrate (ABR) Configuration
 | Variable | Description |
 | :--- | :--- |
-| `ABR_ENABLED` | Selects the ABR algorithm: `0` (CBR), `1` (NeSt-VR), `2` (EveREst), `4` (GCC), `5` (NADA). |
+| `ABR_ENABLED` | Selects the ABR algorithm: `0` (CBR), `1` (NeSt-VR), `2` (EveREst), `4` (GCC), `5` (NADA), `8` (Emulated Bandwidth Oracle), `9` (ALVR Adaptive). |
 | `T_ABR` | Interval (in seconds) between ABR updates or RL step actions (e.g., `1.0`). |
 | `nest_profiles` | Specific configuration tuning profiles for the NeSt-VR algorithm. |
 
@@ -179,7 +188,7 @@ Before running, opening `p_xrun.sh` is recommended for adjusting the arrays and 
 ### 5. Emulated Network Effects
 | Variable | Description |
 | :--- | :--- |
-| `EMU_TEST_TYPE` | Injects synthetic network anomalies: `"BW"` (Bandwidth limit), `"JI"` (Jitter), `"PL"` (Packet Loss), `"RANDOM"`, or `"STD"` (Standard/None). |
+| `EMU_TEST_TYPE` | Injects synthetic network anomalies: `"BW"` (Bandwidth limit), `"JI"` (Jitter), `"PL"` (Packet Loss), `"RANDOM"` (Randomly placed emulated periods), `"MARKOV"` (Markov Chain based Emulated BW patterns) or `"STD"` (Standard/None). |
 
 ### Running the Simulator
 A feature of how the repository has been structured ( Renaming the original asynchronix `examples` to `orig_examples` and using the `examples` folder just for SiESTA-VR), the simulator can technically be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, it is more encouraged to opt for execution from a bash script that iterates over input argument combinations.  
@@ -207,6 +216,6 @@ After a simulation is finished, the frame IDs logged for each user on a simulate
 
 **Before running it:** `results_scenarios_folder` at the top of `main()` in `vmaf_av1_hevc.rs` is a hardcoded absolute path — point it at your own results directory before building, there is no CLI flag for it. A live preview window (decoded frame side-by-side with the reference) opens automatically whenever a `DISPLAY` is available, so it will pop up on a desktop but stay silent on a headless SLURM node.
 
-**How reference/distorted frames get synchronized:** the script re-decodes both the original reference video and the simulated/decoded stream, reading back a small burned-in frame-ID digit overlay from the corner of each decoded frame (`DigitReader`, via `OCR_X/Y/W/H` in `vmaf_av1_hevc.rs`) to line the two streams up frame-for-frame. To build the loss trace, it takes every frame ID from `0` to the reference's last frame and marks any ID *not* present in the evaluated `XR_stats_0` file as lost (frame `0` is always force-kept so the decoder gets its sequence headers) — this is the actual mechanism behind the "'lose' the frames" note above, it isn't something you need to hand-roll. A `FrameSyncManager` handles minor out-of-order arrival (`MAX_DRIFT_GAP`) and gives up waiting on a frame that never shows up after `FORCE_DROP_TIMEOUT` (12s by default).
+**How reference/distorted frames get synchronized:** the script re-decodes both the original reference video and the simulated/decoded stream, reading back a small burned-in frame-ID digit overlay from the corner of each decoded frame (`DigitReader`, via `OCR_X/Y/W/H` in `vmaf_av1_hevc.rs`) to line the two streams up frame-for-frame. To build the loss trace, it takes every frame ID from `0` to the reference's last frame and marks any ID *not* present in the evaluated `XR_stats_0` file as lost (frame `0` is always force-kept so the decoder gets its sequence headers). A `FrameSyncManager` handles minor out-of-order arrival (`MAX_DRIFT_GAP`) and gives up waiting on a frame that never shows up after `FORCE_DROP_TIMEOUT` (12s by default).
 
-The method used for the results presented in the paper only considers a scenario with ideal conditions with a single user, and tests every scenario folder found inside the path set by the `results_scenarios_folder` string in the main function. Running the script results in `VMAF_metrics_{loss,bitrate}_{trace_idx}.csv` files being logged on each scenario folder — `loss` for single-encoder runs (the paper's use case), `bitrate` when comparing two independently encoded streams — containing one row per frame with `frame_number`, `timestamp_ms`, `vmaf`, `psnr`, and `ssim`. It should be noted that VMAF is computationally expensive, and evaluation with this method can take multiple hours if the evaluated folder contains many scenarios or simulation times are long. Concurrency is capped by a few constants near the top of the file — `MAX_CONCURRENT_VMAF_SCENARIOS` (scenario folders processed at once, default `1`) and `MAX_PARALLEL_VMAF` (simultaneous VMAF computations across all scenarios, default `20`) — worth raising on a beefier machine, or lowering if you're fighting memory pressure from decoding many streams at once.
+The method used for the results presented in the paper only considers a scenario with ideal conditions with a single user, and tests every scenario folder found inside the path set by the `results_scenarios_folder` string in the main function. Running the script results in `VMAF_metrics_{loss,bitrate}_{trace_idx}.csv` files being logged on each scenario folder — `loss` for single-encoder runs (the paper's use case), `bitrate` when comparing two independently encoded streams — containing one row per frame with `frame_number`, `timestamp_ms`, `vmaf`, `psnr`, and `ssim`. It should be noted that VMAF is computationally expensive, and evaluation with this method can take multiple hours if the evaluated folder contains many scenarios or simulation times are long. Concurrency is capped by a few constants near the top of the file — `MAX_CONCURRENT_VMAF_SCENARIOS` (scenario folders processed at once, default `1`) and `MAX_PARALLEL_VMAF` (simultaneous VMAF computations across all scenarios, default `20`). These should be tuned to your particular machine. 
