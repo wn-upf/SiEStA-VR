@@ -8,9 +8,9 @@
 
 **Why it's useful:** Cloud VR has tight latency/throughput requirements that are expensive and slow to test at scale on real networks — you'd need multiple headsets, APs, and controlled interference to sweep even a handful of scenarios. SiESTA-VR runs those sweeps in software, in parallel, on a laptop or an HPC cluster, while still modeling the physical and MAC layer in enough detail (EDCA contention, A-MPDU aggregation, MLO link scheduling) that the results are representative of real Wi-Fi behavior.
 
-**What it generates:** every run produces per-user QoE telemetry (frame delay, RTT, jitter, frame/shard loss, throughput), MAC-layer traces (per-MPDU transmission, collisions, contention windows), ABR bitrate-decision logs, and head-mobility traces — as CSV or Parquet — plus, optionally, a live per-user GUI of the decoded video and a scrubbable post-simulation visualizer of channel activity and ABR behavior. See [Simulation Outputs](#simulation-outputs) below for the full breakdown. 
+**What it generates:** every run produces per-user telemetry (frame delay, RTT, jitter, frame/shard loss, throughput), MAC-layer traces (per-MPDU transmission, collisions, contention windows), ABR bitrate-decision logs, and head-mobility traces, logged as CSV or Parquet files.  Optionally, a live per-user GUI of the decoded video and a post-simulation visualizer of channel activity and ABR behavior can be shown. See [Simulation Outputs](#simulation-outputs) below for the full breakdown. 
 
-Future extensions to this framework will integrate python RL libraries (SB3, RLlib), in order to train decision-making agents to optimize network parameters, application parameters, or both.   
+Future extensions to this framework will integrate python RL libraries (SB3, RLlib), in order to train decision-making agents to optimize network parameters, application parameters, or both; during actual simulation time.   
 The simulation engine is built on a fork of the asynchronous [**NeXosim**](https://github.com/asynchronics/nexosim) library in Rust, adapted for networking simulation.
 
 ---
@@ -125,13 +125,13 @@ The screenshot above is a real capture from a 6-VR-user, 3-link MLO run (`MLO80-
 | 5 | LINK 2 (320MHz) | Same, for the 320MHz link — same kind of activity, but a channel four times wider than links 0/1, so transmissions finish faster for the same amount of data. |
 | 6 | Collision | Two or more contenders transmitted at once on LINK 1 and both frames were lost. |
 | 7, 8 | Per-STA/AC contention rows | Per-flow contention/backoff state (AIFS + CW) feeding the transmissions above, split into left/right columns here because the panel is link-filtered. |
-| 9 | CW panel | Contention window over time — the visible bump lines up with the collision at 6. |
-| 10 | QUEUES panel | MAC transmit-queue depth over time — draining a backlog built up before the collision. |
+| 9 | CW panel | Contention window over time, per link, EDCA access category and STA. |
+| 10 | QUEUES panel | MAC transmit-queue depth over time, per EDCA access category and STA. |
 | 11 | ABR legend | One entry per VR session: source IP, color, and active ABR mode. |
-| 12 | Live readout table | Per-session bitrate/RTT/FLR snapshot at the current scrub time. |
-| 13 | Bitrate strip | Each session's ABR-selected bitrate over time. |
-| 14 | Throughput strips | Peak/Instant achieved throughput over time — the spike is the retransmission burst right after the collision. |
-| 15 | RTT strip | Round-trip time per session over time, based on the Video Frame RTT (VF-RTT) metric. |
+| 12 | Live readout table | Per-session bitrate/RTT/FLR snapshot at the time the cursor is placed on. |
+| 13 | Bitrate graph | Each session's ABR-selected bitrate over time. |
+| 14 | Throughput graphs | Peak/Instant achieved throughput over time. Peak represents the throughput during the frame burst, instant represents the average throughput in the period between frames.|
+| 15 | RTT strip | Network latency per session over time, based on the Video Frame RTT (VF-RTT) metric. |
 | 16 | Frame-Loss Ratio strip | Per-session frame-loss ratio over time. |
 | 17 | STA POSITIONS | Top-down mini-map, AP centered, current position and trajectory of each VR STA. |
 
