@@ -43,14 +43,16 @@ use regex::Regex;
 use std::result::Result::Ok;
 use std::vec;
 use tokio::task::JoinSet;
-use std::time:: {Instant}; 
+use std::time:: {Instant};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use arrow::array::Array;
 
 const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 1; 
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
-pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.4; 
-pub const BOUNDED_CHANNEL_SIZE: usize = 150; // channel depth for VMAF crossbeam
+pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.1; 
+pub const BOUNDED_CHANNEL_SIZE: usize = 50; // channel depth for VMAF crossbeam
 
-const MAX_PARALLEL_VMAF: usize = 20; 
+const MAX_PARALLEL_VMAF: usize = 10; 
 
 // Tunables
 const MAX_DRIFT_GAP: u32 = 40; // Allow small out-of-order arrival before dropping
@@ -760,7 +762,7 @@ impl MetricsLogger {
                     "[0:v]format=yuv420p[dist];\
                     [1:v]format=yuv420p[ref];\
                     [dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=2:\
-                    feature='name=psnr':feature='name=float_ssim'",
+                    feature=name=psnr|name=float_ssim",
                     vmaf_json.display()
                 ),
 
@@ -783,6 +785,7 @@ impl MetricsLogger {
         // pooled_metrics now includes:
         //  • vmaf.mean
         //  • float_ssim.mean
+        //  • psnr_y.mean (libvmaf reports PSNR per plane, not as a bare "psnr" key)
         // println!("METRICS: \n{j}");
 
         let vmaf_score = j["pooled_metrics"]["vmaf"]["mean"].as_f64().unwrap_or(0.0);
@@ -791,22 +794,27 @@ impl MetricsLogger {
             .as_f64()
             .unwrap_or(0.0);
 
+        let psnr_score = j["pooled_metrics"]["psnr_y"]["mean"]
+            .as_f64()
+            .unwrap_or(0.0);
+
         // ─────────── log & emit ───────────
         print_green!(
-            "Task {} - T:{:.3} [{}] | Frame {} : VMAF {:.2}, SSIM {:.4}",
-            self.task_id, 
+            "Task {} - T:{:.3} [{}] | Frame {} : VMAF {:.2}, SSIM {:.4}, PSNR {:.2}",
+            self.task_id,
             timestamp_ms,
             ip_client,
             frame_number,
             vmaf_score,
-            ssim_score
+            ssim_score,
+            psnr_score
         );
 
         let fm = FrameMetrics {
             frame_number,
             timestamp_ms,
             vmaf: vmaf_score,
-            psnr: 0.0,
+            psnr: psnr_score,
             ssim: ssim_score,
         };
         self.log_metrics(&fm).unwrap();
@@ -1188,6 +1196,127 @@ fn make_reference_reader_task(
 }
 
 
+/// Reads a frame trace (CSV or Parquet, dispatched by extension) and returns
+/// the parsed (frame_id, timestamp) pairs in file order.
+fn read_trace_ids_and_timestamps(trace_path: &Path) -> Result<(Vec<u32>, Vec<f64>)> {
+    match trace_path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("parquet") => read_trace_parquet(trace_path),
+        _ => read_trace_csv(trace_path),
+    }
+}
+
+fn read_trace_csv(trace_path: &Path) -> Result<(Vec<u32>, Vec<f64>)> {
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(trace_path)?;
+
+    // Get header indices dynamically
+    let headers = rdr.headers()?.clone();
+    let idx_frame = headers.iter().position(|h| h.to_lowercase().contains("frame") || h.to_lowercase() == "id")
+        .ok_or_else(|| anyhow::anyhow!("Could not find 'Frame' or 'id' column in CSV"))?;
+
+    // Try to find timestamp column, fallback to index 0 or 1 if not found
+    let idx_ts = headers.iter().position(|h| h.to_lowercase().contains("time") || h.to_lowercase().contains("ts"))
+        .unwrap_or(0); // Fallback to 0 if unknown
+
+    println!(">> CSV Columns mapped: FrameID at col {}, Timestamp at col {}", idx_frame, idx_ts);
+
+    let mut raw_ids = Vec::new();
+    let mut raw_ts = Vec::new();
+
+    for (i, result) in rdr.records().enumerate() {
+        let rec = result?;
+
+        let id_str = rec.get(idx_frame).unwrap_or("").trim();
+        let ts_str = rec.get(idx_ts).unwrap_or("").trim();
+
+        if id_str.is_empty() { continue; }
+
+        // Robust parsing: Handle "1.0" as 1 if necessary
+        let parsed_id = id_str.parse::<f64>().map(|f| f as u32)
+            .or_else(|_| id_str.parse::<u32>());
+
+        match parsed_id {
+            Ok(id) => {
+                let ts = ts_str.parse::<f64>().unwrap_or(0.0);
+                raw_ids.push(id);
+                raw_ts.push(ts);
+            },
+            Err(e) => {
+                if i < 5 {
+                    eprintln!("Skipping row {}: Cannot parse ID '{}' as number. Error: {}", i, id_str, e);
+                }
+            }
+        }
+    }
+
+    Ok((raw_ids, raw_ts))
+}
+
+/// Reads an `XR_stats_*.parquet` trace written by `alvr_statistics.rs`'s `ParquetSink`
+/// (columns: `frame_index: UInt64`, `timestamp: Float64`, among others).
+fn read_trace_parquet(trace_path: &Path) -> Result<(Vec<u32>, Vec<f64>)> {
+    let file = File::open(trace_path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let schema = builder.schema().clone();
+
+    let idx_frame = schema.fields().iter().position(|f| {
+        let n = f.name().to_lowercase();
+        n.contains("frame") || n == "id"
+    }).ok_or_else(|| anyhow::anyhow!("Could not find 'frame' or 'id' column in Parquet schema"))?;
+
+    let idx_ts = schema.fields().iter().position(|f| {
+        let n = f.name().to_lowercase();
+        n.contains("time") || n.contains("ts")
+    }).unwrap_or(0);
+
+    println!(">> Parquet Columns mapped: FrameID at col {}, Timestamp at col {}", idx_frame, idx_ts);
+
+    let reader = builder.build()?;
+
+    let mut raw_ids = Vec::new();
+    let mut raw_ts = Vec::new();
+
+    for batch_result in reader {
+        let batch = batch_result?;
+
+        let id_col = batch.column(idx_frame);
+        let ts_col = batch.column(idx_ts);
+
+        for row in 0..batch.num_rows() {
+            if id_col.is_null(row) { continue; }
+
+            let id = parquet_cell_as_f64(id_col, row).map(|f| f as u32);
+            let Some(id) = id else { continue; };
+
+            let ts = if ts_col.is_null(row) { 0.0 } else { parquet_cell_as_f64(ts_col, row).unwrap_or(0.0) };
+
+            raw_ids.push(id);
+            raw_ts.push(ts);
+        }
+    }
+
+    Ok((raw_ids, raw_ts))
+}
+
+/// Best-effort numeric extraction from an Arrow column cell, covering the
+/// integer/float types used across the XR/tracking/bitrate Parquet schemas.
+fn parquet_cell_as_f64(col: &arrow::array::ArrayRef, row: usize) -> Option<f64> {
+    use arrow::array::*;
+    use arrow::datatypes::DataType;
+
+    match col.data_type() {
+        DataType::Float64 => Some(col.as_any().downcast_ref::<Float64Array>()?.value(row)),
+        DataType::Float32 => Some(col.as_any().downcast_ref::<Float32Array>()?.value(row) as f64),
+        DataType::UInt64  => Some(col.as_any().downcast_ref::<UInt64Array>()?.value(row) as f64),
+        DataType::UInt32  => Some(col.as_any().downcast_ref::<UInt32Array>()?.value(row) as f64),
+        DataType::UInt16  => Some(col.as_any().downcast_ref::<UInt16Array>()?.value(row) as f64),
+        DataType::UInt8   => Some(col.as_any().downcast_ref::<UInt8Array>()?.value(row) as f64),
+        DataType::Int64   => Some(col.as_any().downcast_ref::<Int64Array>()?.value(row) as f64),
+        DataType::Int32   => Some(col.as_any().downcast_ref::<Int32Array>()?.value(row) as f64),
+        DataType::Utf8 => col.as_any().downcast_ref::<StringArray>()?.value(row).trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 pub async fn process_trace_vs_original(
     trace_csv: PathBuf, 
     ip: IpAddr, 
@@ -1219,7 +1348,7 @@ pub async fn process_trace_vs_original(
     // 2. Setup Metrics Logger
     // Extract trace index for naming
     let file_name = trace_csv.file_name().unwrap().to_string_lossy();
-    let caps = Regex::new(r"XR_stats_(\d+)\.csv$")?.captures(&file_name).expect("filename mismatch");
+    let caps = Regex::new(r"XR_stats_(\d+)\.(?:csv|parquet)$")?.captures(&file_name).expect("filename mismatch");
     let trace_idx: usize = caps[1].parse()?;
     
     let metric = MetricsLogger::new_for_trace( parent_results_path ,&scenario, trace_idx, false, task_id)?;
@@ -1241,56 +1370,14 @@ pub async fn process_trace_vs_original(
         .expect("GoP value missing in scenario string")?;
 
 
-    // Read CSV Trace
-    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(&trace_csv)?;
-    
-    // Get header indices dynamically
-    let headers = rdr.headers()?.clone();
-    let idx_frame = headers.iter().position(|h| h.to_lowercase().contains("frame") || h.to_lowercase() == "id")
-        .ok_or_else(|| anyhow::anyhow!("Could not find 'Frame' or 'id' column in CSV"))?;
-    
-    // Try to find timestamp column, fallback to index 0 or 1 if not found
-    let idx_ts = headers.iter().position(|h| h.to_lowercase().contains("time") || h.to_lowercase().contains("ts"))
-        .unwrap_or(0); // Fallback to 0 if unknown
-
-    println!(">> CSV Columns mapped: FrameID at col {}, Timestamp at col {}", idx_frame, idx_ts);
-
-    let mut raw_ids = Vec::new();
-    let mut raw_ts = Vec::new();
-    
+    // Read Trace (CSV or Parquet)
     // Hardcoded defaults since XR_stats might not have them in row 1
-    let offset_video = 20.0; 
+    let offset_video = 20.0;
 
-    for (i, result) in rdr.records().enumerate() {
-        let rec = result?;
-        
-        // Debug first row if it fails
-        let id_str = rec.get(idx_frame).unwrap_or("").trim();
-        let ts_str = rec.get(idx_ts).unwrap_or("").trim();
+    let (raw_ids, raw_ts) = read_trace_ids_and_timestamps(&trace_csv)?;
 
-        if id_str.is_empty() { continue; }
-
-        // Robust parsing: Handle "1.0" as 1 if necessary
-        let parsed_id = id_str.parse::<f64>().map(|f| f as u32)
-            .or_else(|_| id_str.parse::<u32>());
-
-        match parsed_id {
-            Ok(id) => {
-                let ts = ts_str.parse::<f64>().unwrap_or(0.0);
-                raw_ids.push(id);
-                raw_ts.push(ts);
-            },
-            Err(e) => {
-                // This print will tell you EXACTLY what is failing
-                if i < 5 { // Only print first few errors
-                    eprintln!("Skipping row {}: Cannot parse ID '{}' as number. Error: {}", i, id_str, e);
-                }
-            }
-        }
-    }
-    
     if raw_ids.is_empty() {
-        return Err(anyhow::anyhow!("No valid frames found in CSV after parsing. Check column mapping."));
+        return Err(anyhow::anyhow!("No valid frames found in trace after parsing. Check column mapping."));
     }
     
     // Create trace lookup
@@ -1377,7 +1464,12 @@ pub async fn process_trace_vs_original(
     let mut window: Option<SendWindow> = if use_gui {
         Some(SendWindow::new(
             &format!("VMAF: {} vs Orig", scenario),
-            sw * 2 + 10, sh, WindowOptions::default(),
+            sw * 2 + 10, sh,
+            WindowOptions {
+                resize: true,
+                scale_mode: minifb::ScaleMode::AspectRatioStretch,
+                ..WindowOptions::default()
+            },
         )?)
     } else {
         None
@@ -1583,12 +1675,11 @@ impl SendWindow {
 }
 
 
-
 #[tokio::main]
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
     // let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_d1.5m_allbitrate_allfps_1seed"; 
-    let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/new_res"; 
+    let results_scenarios_folder = "/home/ferran/Desktop/SiEStA-VR/Results_quicktest_"; 
 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
@@ -1643,34 +1734,49 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
         // (e.g. not on a headless SLURM node).
         let use_gui = std::env::var("DISPLAY").is_ok();
 
-        // Find CSV within folder
-        let csv_entries = fs::read_dir(&path).expect("Read subdir failed");
-        for file in csv_entries.flatten() {
+        // Find trace files (CSV or Parquet) within folder.
+        // Prefer CSV over Parquet when both exist for the same trace, since
+        // it's cheaper to read and was the original format.
+        let trace_entries = fs::read_dir(&path).expect("Read subdir failed");
+        let mut trace_candidate: Option<PathBuf> = None;
+        for file in trace_entries.flatten() {
             let p = file.path();
-            if p.extension().map_or(false, |ext| ext == "csv") {
-                let fname = p.file_name().unwrap().to_string_lossy().into_owned();
-                
-                // Only process specific trace files
-                if fname.starts_with("XR_stats_0") {
-                    
-                    let parent_results = p.parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "Unknown".to_string());
+            let is_csv = p.extension().map_or(false, |ext| ext == "csv");
+            let is_parquet = p.extension().map_or(false, |ext| ext == "parquet");
+            if !is_csv && !is_parquet { continue; }
 
-                    // Push job struct to vector
-                    tasks.push((
-                        p, // trace_csv path
-                        dummy_ip,
-                        codec_enum,
-                        fps.unwrap(),
-                        video_name.clone().unwrap(),
-                        use_gui,
-                        parent_results
-                    ));
+            let fname = p.file_name().unwrap().to_string_lossy().into_owned();
+
+            // Only process specific trace files
+            if !fname.starts_with("XR_stats_0") { continue; }
+
+            match &trace_candidate {
+                None => trace_candidate = Some(p),
+                Some(existing) if existing.extension().map_or(false, |e| e == "parquet") && is_csv => {
+                    // Upgrade a previously found parquet candidate to CSV
+                    trace_candidate = Some(p);
                 }
+                _ => {}
             }
+        }
+
+        if let Some(p) = trace_candidate {
+            let parent_results = p.parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            // Push job struct to vector
+            tasks.push((
+                p, // trace_csv path
+                dummy_ip,
+                codec_enum,
+                fps.unwrap(),
+                video_name.clone().unwrap(),
+                use_gui,
+                parent_results
+            ));
         }
     }
 

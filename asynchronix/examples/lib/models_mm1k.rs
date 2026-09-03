@@ -35,7 +35,7 @@ use crate::lib::ParquetQueue;
 
 
 use crate::lib::{
-    airtime_ampdu, alvr_stream_socket::parse_shard_data, collision_delay, exponential, ac_prio,
+    airtime_ampdu, padded_mpdu_bits, alvr_stream_socket::parse_shard_data, collision_delay, exponential, ac_prio,
     perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
     WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
     P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO, VISUALIZER_QUEUES_ENABLED, 
@@ -3241,9 +3241,13 @@ impl QueueModule {
             let p_tx = self.p_tx; // f64 is Copy
 
             let entry = self.sta_stats_cache.entry(key).or_insert_with(|| {
+                // All packets modeled here are length_packet_bits-sized, so padding once and
+                // scaling by count is exact (no averaging-before-padding involved).
+                let padded_bits_one = padded_mpdu_bits(length_packet_bits as f64);
+
                 // Calculate transmission delay for a single packet
                 let resultz = airtime_ampdu(
-                    length_packet_bits as f64,
+                    padded_bits_one,
                     1,
                     coords_queue,
                     sta_src_coords,
@@ -3256,7 +3260,7 @@ impl QueueModule {
                 let mut high = self.packs_per_ampdu as i32;
                 let mut optimal_n_packets = 0;
                 let mut resultz_full_ampdu = airtime_ampdu(
-                    length_packet_bits as f64 * high as f64,
+                    padded_bits_one * high as f64,
                     high,
                     coords_queue,
                     sta_src_coords,
@@ -3267,7 +3271,7 @@ impl QueueModule {
                 while low <= high {
                     let mid = (low + high) / 2;
                     let test_resultz = airtime_ampdu(
-                        length_packet_bits as f64 * mid as f64,
+                        padded_bits_one * mid as f64,
                         mid,
                         coords_queue,
                         sta_src_coords,
@@ -3520,7 +3524,9 @@ impl QueueModule {
         let (sta_id, ac, link_id) = *mac_key;
         let channel_width = self.link_channel_widths.get(&link_id).copied().unwrap();
         let packet_bits = first_packet.length_packet_bits as f64;
-        let total_bits = packet_bits * n_mpdus as f64;
+        // All n_mpdus packets are modeled as first_packet-sized here, so per-packet padding
+        // and padding-the-average coincide; use the shared helper for consistency.
+        let padded_bits_sum = padded_mpdu_bits(packet_bits) * n_mpdus as f64;
         let is_ul = first_packet.sta_src_id > first_packet.sta_dest_id;
 
         // Use the same logic as build_new_ampdu to get coords
@@ -3536,7 +3542,7 @@ impl QueueModule {
         };
 
         let airtime_secs = airtime_ampdu(
-            total_bits,
+            padded_bits_sum,
             n_mpdus as i32,
             src_coords,
             dest_coords,
@@ -3840,10 +3846,15 @@ impl QueueModule {
                 let new_total_length =
                     self.aux_ampdu_serviced.total_length + current_packet.length_packet_bits;
                 let new_size = self.aux_ampdu_serviced.size + 1;
+                // Pad this MPDU's own payload before adding it to the running sum: padding
+                // must happen per-packet (not on the aggregate average), since the trailing
+                // fragment of a video frame is typically smaller than preceding MTU-sized ones.
+                let new_padded_bits_sum = self.aux_ampdu_serviced.padded_bits_sum
+                    + padded_mpdu_bits(current_packet.length_packet_bits as f64);
 
                 if is_ul {
                     let ampdu_airtime_mcs = airtime_ampdu(
-                        new_total_length as f64,
+                        new_padded_bits_sum,
                         new_size,
                         current_packet.sta_src_coords.clone(),
                         self.coords_queue,
@@ -3859,7 +3870,7 @@ impl QueueModule {
                         .unwrap_or_else(|| panic!("no coordinates for STA {}", current_packet.sta_dest_id))
                         .clone();
                     let ampdu_airtime_mcs = airtime_ampdu(
-                        new_total_length as f64,
+                        new_padded_bits_sum,
                         new_size,
                         self.coords_queue,
                         dest_coords,
@@ -3901,6 +3912,7 @@ impl QueueModule {
 
                 self.aux_ampdu_serviced.mpdu_packets.push(cloned_packet);
                 self.aux_ampdu_serviced.total_length = new_total_length;
+                self.aux_ampdu_serviced.padded_bits_sum = new_padded_bits_sum;
                 self.aux_ampdu_serviced.size = new_size;
                 last_service_duration = Duration::from_secs_f64(resultz);
                 taken += 1;

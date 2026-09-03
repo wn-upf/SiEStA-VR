@@ -33,9 +33,22 @@ pub fn path_loss(d: f64) -> f64 {
     54.12 + 10.0 * gamma * (d).log10() + 5.25 * 0.1467 * d
 }
 
+// Network Stack Overhead per MPDU: LLC/SNAP (8B) + IPv4 (20B) + UDP (8B) = 36 Bytes (288 bits)
+pub const NET_STACK_OVERHEAD_BITS: f64 = 288.0;
+// MAC header: FC, EHT control, Addresses, FCS, QoS control, etc.
+pub const MAC_H_SIZE_BITS: f64 = 288.0;
+
+/// Pads a single MPDU's payload up to the nearest 32-bit boundary. Must be applied per-MPDU
+/// before summing across the A-MPDU: n * ceil(mean(L_i)/32) != sum(ceil(L_i/32)) in general.
+#[inline(always)]
+pub fn padded_mpdu_bits(app_payload_bits: f64) -> f64 {
+    let mpdu_length_bits = app_payload_bits + NET_STACK_OVERHEAD_BITS + MAC_H_SIZE_BITS;
+    (mpdu_length_bits / 32.0).ceil() * 32.0
+}
+
 #[inline]
 pub fn airtime_ampdu(
-    total_bits_transmitted_app: f64,
+    padded_payload_bits_sum: f64,
     n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
@@ -113,25 +126,18 @@ pub fn airtime_ampdu(
     };
 
     let ORate: f64 = SU_spatial_streams * bits_symbol as f64 * coding_rate * Subcarriers as f64;
-    let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0; // 1 bit symbol * 1/2 CR 
-    let app_payload_per_mpdu = total_bits_transmitted_app / n_mpdus as f64; 
-    
-    // 2. Network Stack Overhead: LLC/SNAP (8B) + IPv4 (20B) + UDP (8B) = 36 Bytes (288 bits)
-    let L_avg = app_payload_per_mpdu + 288.0; // added protocol headers per-MPDU
-    // let L: f64 = total_bits_transmitted / n_mpdus as f64; // TODO: Check if it's correct to have a size as f32 (in reality not, but as avg model? )
+    let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0; // 1 bit symbol * 1/2 CR
 
     let SF = 16.0;
     let TB = 18.0;
     let MD = 32.0;
-    let MAC_H_size = 288.0;
 
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY;
-    
-    let mpdu_length_bits = L_avg + MAC_H_size; // Payload + MAC Header
-    let padded_mpdu_size = (mpdu_length_bits / 32.0).ceil() * 32.0 ; // Round up to 32-bit boundary for padding
-    
-    let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
+
+    // padded_payload_bits_sum = sum_i ceil((L_i + overhead)/32)*32, each MPDU padded
+    // individually then summed, NOT n_mpdus * ceil(mean(L_i)/32).
+    let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * MD + padded_payload_bits_sum + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
     
     let ba_base_bytes = 24.0; // Frame Control, Dur, RA, TA, BA Ctrl, Seq Ctrl, FCS
     let ba_bitmap_bytes = if n_mpdus <= 64 {
@@ -165,18 +171,23 @@ pub struct Coords {
 
 fn main() {
 
-    let n_mpdus = 64; 
-    let total_bits_transmitted = 1500 *8 * n_mpdus; 
+    let n_mpdus = 64;
+    let packet_bits = 1500 * 8;
+    let total_bits_transmitted = packet_bits * n_mpdus;
+    // Each MPDU padded individually, then summed (all packets same size here, so this
+    // equals padded_mpdu_bits(packet_bits) * n_mpdus, but it's the general pattern to use
+    // when packet sizes vary, e.g. the trailing fragment of a video frame).
+    let padded_bits_sum = padded_mpdu_bits(packet_bits as f64) * n_mpdus as f64;
 
-    let coords_src = Coords{x:0.0,y: 0.0,z: 0.0 }; 
-    let coords_dest = Coords {x: 2.5, y: 0.0, z:0.0}; 
+    let coords_src = Coords{x:0.0,y: 0.0,z: 0.0 };
+    let coords_dest = Coords {x: 2.5, y: 0.0, z:0.0};
 
     let _p_tx_orig = 20; // dBm
-    let channel_width = 80;  
+    let channel_width = 80;
 
-    let (phy_time, mcs, T_data) = airtime_ampdu(total_bits_transmitted as f64 , n_mpdus, coords_src, coords_dest, _p_tx_orig as f64, channel_width); 
+    let (phy_time, mcs, T_data) = airtime_ampdu(padded_bits_sum, n_mpdus, coords_src, coords_dest, _p_tx_orig as f64, channel_width);
 
 
-    println!("The airtime for {:.0} packets ({:.0} bits) is {:.5} s ({:.5} microseconds) at MCS{:.0}.\n Total PHY Time: {:.4} microseconds", n_mpdus, total_bits_transmitted, T_data, T_data * 1e6, mcs, phy_time * 1e6); 
+    println!("The airtime for {:.0} packets ({:.0} bits) is {:.5} s ({:.5} microseconds) at MCS{:.0}.\n Total PHY Time: {:.4} microseconds", n_mpdus, total_bits_transmitted, T_data, T_data * 1e6, mcs, phy_time * 1e6);
 
 }

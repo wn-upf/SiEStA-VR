@@ -3030,6 +3030,7 @@ pub type WindowKey = (i32, u8); // (STA_ID, link_id)
 pub struct AmpduPacket {
     pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
     pub total_length: usize,           // Total length of aggregated packets
+    pub padded_bits_sum: f64, // Running sum of per-MPDU padded sizes (see padded_mpdu_bits)
     pub sta_src_id: i32,
     pub sta_dest_id: i32, // ID for the destination STA
     pub size: i32,
@@ -3045,6 +3046,7 @@ impl AmpduPacket {
         AmpduPacket {
             mpdu_packets: Vec::new(), // Initialize an empty vector for MPDU packets
             total_length: 0,          // Initialize total length to 0
+            padded_bits_sum: 0.0,
             sta_src_id: -1,
             sta_dest_id: -1, // Initialize STA_ID to -1 (assuming -1 indicates uninitialized)
 
@@ -3090,6 +3092,7 @@ impl AmpduPacket {
         self.mpdu_packets.clear(); // Clear the vector of MPDU packets
                                    // self.mpdu_packets.reserve(MAX_AMPDU_SIZE as usize);
         self.total_length = 0; // Reset total length
+        self.padded_bits_sum = 0.0; // Reset padded-bits accumulator
         self.size = 0; // Reset size
         self.sta_dest_id = -1; // Reset STA_ID (assuming -1 is an uninitialized value)
         self.coordinates = Coords {
@@ -3159,9 +3162,24 @@ pub fn collision_delay() -> f32 {
     T_collision as f32
 }
 
+// Network Stack Overhead per MPDU: LLC/SNAP (8B) + IPv4 (20B) + UDP (8B) = 36 Bytes (288 bits)
+pub const NET_STACK_OVERHEAD_BITS: f64 = 288.0;
+// MAC header: FC, EHT control, Addresses, FCS, QoS control, etc.
+pub const MAC_H_SIZE_BITS: f64 = 288.0;
+
+/// Pads a single MPDU's payload (app bits + network stack overhead + MAC header) up to the
+/// nearest 32-bit boundary. Must be applied per-MPDU *before* summing across the A-MPDU,
+/// since `n * ceil(mean(L_i) / 32) != sum(ceil(L_i / 32))` in general (e.g. the trailing,
+/// smaller fragment of a video frame among otherwise MTU-sized fragments).
+#[inline(always)]
+pub fn padded_mpdu_bits(app_payload_bits: f64) -> f64 {
+    let mpdu_length_bits = app_payload_bits + NET_STACK_OVERHEAD_BITS + MAC_H_SIZE_BITS;
+    (mpdu_length_bits / 32.0).ceil() * 32.0
+}
+
 #[inline]
 pub fn airtime_ampdu(
-    total_bits_transmitted_app: f64,
+    padded_payload_bits_sum: f64,
     n_mpdus: i32,
     coords_src: Coords,
     coords_dest: Coords,
@@ -3244,24 +3262,16 @@ pub fn airtime_ampdu(
     // let OBasicRate: f64 = 1.0 / 2.0 * 1.0 * 48.0; // 6 Mbps conservative rate
     let OBasicRate: f64 = 1.0 / 2.0 * 4.0 * 48.0; // evaluates to 96.0 bits/symbol, 4 bit symbol (16-QAM) * 1/2 CR * 48 subcarriers
 
-    let app_payload_per_mpdu = total_bits_transmitted_app / n_mpdus as f64; 
-    
-    // 2. Network Stack Overhead: LLC/SNAP (8B) + IPv4 (20B) + UDP (8B) = 36 Bytes (288 bits)
-    let L_avg = app_payload_per_mpdu + 288.0; // added protocol headers per-MPDU
-    // let L: f64 = total_bits_transmitted / n_mpdus as f64; // TODO: Check if it's correct to have a size as f32 (in reality not, but as avg model? )
-
     let SF = 16.0;
     let TB = 18.0;
     let MD = 32.0;
-    let MAC_H_size = 288.0; // FC, EHT control, Addresses, FCS, QoS control, etc. overhead in bits.  
 
     let T_RTS: f64 = LEGACY_PHY_DURATION + ((SF + 160.0 + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY; // legacy symbol time is 4E-6
     let T_CTS: f64 = LEGACY_PHY_DURATION + ((SF + 112.0 + TB) / OBasicRate).ceil() * SYMBOL_TIME_LEGACY;
-    
-    let mpdu_length_bits = L_avg + MAC_H_size; // Payload + MAC Header
-    let padded_mpdu_size = (mpdu_length_bits / 32.0).ceil() * 32.0 ; // Round up to 32-bit boundary for padding
-    
-    let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * (MD + padded_mpdu_size) + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
+
+    // padded_payload_bits_sum = sum_i ceil((L_i + overhead)/32)*32, i.e. each MPDU padded
+    // individually and then summed, NOT n_mpdus * ceil(mean(L_i)/32) — see padded_mpdu_bits().
+    let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * MD + padded_payload_bits_sum + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
 
     // pub const EHT_PHY_DURATION: f64 = 76E-6;    // 802.11be Preamble    // L-STF      :   8.00 us
     //                                                                 // L-LTF      :   8.00 us
@@ -3290,7 +3300,7 @@ pub fn airtime_ampdu(
     // let rts_cts_overhead_time: f64 = T_RTS + SIFS + T_CTS + SIFS;                            // ONLY FOR DEBUG
     // let _rts_cts_overhead_percent = (rts_cts_overhead_time / phy_time) * 100.0;              // ONLY FOR DEBUG
     // print_dblue!("[AMPDU airtime = {:.3} ms] Bits: {} Channel Width: {:?} MHz, O_rate: {:.2}, eff_Pt={}, Pr: {:.3}\n\t\t| distance = {:.3} |  PathLoss = {:.3} | RTS/CTS Overhead: {:.1} % |"
-    //              ,phy_time * 1000.0, total_bits_transmitted_app,  channel_width, ORate, effPt, Pr, distance, PL, _rts_cts_overhead_percent,);
+    //              ,phy_time * 1000.0, padded_payload_bits_sum,  channel_width, ORate, effPt, Pr, distance, PL, _rts_cts_overhead_percent,);
     (phy_time, _mcs_val as u8)
 }
 
