@@ -294,6 +294,17 @@ impl ChunkedAv1Encoder {
         } else {
             exact_offset
         };
+        // Clamp this chunk's read length so it never straddles the loop point:
+        // reading across the wrap resets the source PTS mid-stream, which the
+        // muxer rejects as non-monotonic DTS. A small safety margin (a couple of
+        // frame durations) is subtracted because ffmpeg can roll over into the
+        // next loop iteration slightly before the exact end-of-file timestamp.
+        let loop_safety_margin = (2.0 / self.framerate as f64).max(0.02);
+        let chunk_duration_clamped = if self.video_duration > 0.0 {
+            self.chunk_duration.min((self.video_duration - seek_offset - loop_safety_margin).max(0.05))
+        } else {
+            self.chunk_duration
+        };
 
         let frame_duration_ms = 1000.0 / self.framerate;
         let bufsize_ms = frame_duration_ms.max(20.0); // Force at least 20ms for AV1: The maximum buffer size must be between [20, 10000]
@@ -412,7 +423,7 @@ impl ChunkedAv1Encoder {
             // .hwaccel("cuda")
             // .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
-            .args(&["-t", &self.chunk_duration.to_string()])
+            .args(&["-t", &chunk_duration_clamped.to_string()]) // Clamped to avoid straddling the loop point
             // .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)]) // Use const or hardcode
             .args(&["-threads", "8"])
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
@@ -620,6 +631,17 @@ impl ChunkedSoftwareHevcEncoder {
         } else {
             exact_offset
         };
+        // Clamp this chunk's read length so it never straddles the loop point:
+        // reading across the wrap resets the source PTS mid-stream, which the
+        // muxer rejects as non-monotonic DTS. A small safety margin (a couple of
+        // frame durations) is subtracted because ffmpeg can roll over into the
+        // next loop iteration slightly before the exact end-of-file timestamp.
+        let loop_safety_margin = (2.0 / self.framerate as f64).max(0.02);
+        let chunk_duration_clamped = if self.video_duration > 0.0 {
+            self.chunk_duration.min((self.video_duration - seek_offset - loop_safety_margin).max(0.05))
+        } else {
+            self.chunk_duration
+        };
 
         // let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate;
         let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
@@ -746,7 +768,7 @@ impl ChunkedSoftwareHevcEncoder {
         command
             .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
             // .args(&["-ss", &self.current_offset.to_string()])
-            .args(&["-t", &self.chunk_duration.to_string()])
+            .args(&["-t", &chunk_duration_clamped.to_string()]) // Clamped to avoid straddling the loop point
             .args(&["-threads", "4"]) // Software encoding needs CPU threads
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .args(&["-stats_period", "8"])
@@ -1001,7 +1023,18 @@ impl ChunkedHevcEncoder {
         } else {
             exact_offset
         };
-        
+        // Clamp this chunk's read length so it never straddles the loop point:
+        // reading across the wrap resets the source PTS mid-stream, which the
+        // muxer rejects as non-monotonic DTS. A small safety margin (a couple of
+        // frame durations) is subtracted because ffmpeg can roll over into the
+        // next loop iteration slightly before the exact end-of-file timestamp.
+        let loop_safety_margin = (2.0 / self.framerate as f64).max(0.02);
+        let chunk_duration_clamped = if self.video_duration > 0.0 {
+            self.chunk_duration.min((self.video_duration - seek_offset - loop_safety_margin).max(0.05))
+        } else {
+            self.chunk_duration
+        };
+
         let bufsize_str = if self.vbv_perframe{
             let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
             format!("{:.0}k", bufsize_kbits)
@@ -1125,7 +1158,7 @@ impl ChunkedHevcEncoder {
                 .args(&["-analyzeduration", "200M"])
                 .args(&["-probesize", "200M"])
                 .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
-                .args(&["-t", &self.chunk_duration.to_string()])
+                .args(&["-t", &chunk_duration_clamped.to_string()]) // Clamped to avoid straddling the loop point
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "8"])
@@ -1157,7 +1190,7 @@ impl ChunkedHevcEncoder {
             command
                 .hwaccel("cuda")
                 .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
-                .args(&["-t", &self.chunk_duration.to_string()])
+                .args(&["-t", &chunk_duration_clamped.to_string()]) // Clamped to avoid straddling the loop point
                 // .args(&["-re"]) // read at realtime speed
                 .args(&["-analyzeduration", "100M"])
                 .args(&["-probesize", "100M"])
