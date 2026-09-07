@@ -87,7 +87,33 @@ pub const _SERVER_DISCONNECTED_MESSAGE: &str = "The streamer has disconnected.";
 pub const USE_HARDCODED_SIZES_VALIDATION: bool = false;
 // Define the path to your hardcoded CSV
 
+/// Probes a video file's duration (in seconds) via `ffprobe`.
+/// Used so chunk seek offsets can be wrapped modulo the real duration when
+/// looping a sample video with `-stream_loop -1` (ffmpeg only honors `-ss`
+/// within the first loop iteration, so offsets must be pre-wrapped in Rust).
+pub fn probe_video_duration_secs(input: &str) -> f64 {
+    let output = Command::new("ffprobe")
+        .args(&[
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input,
+        ])
+        .output();
 
+    match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        }
+        _ => {
+            eprintln!("Warning: ffprobe failed to get duration for '{}', looping may misbehave", input);
+            0.0
+        }
+    }
+}
 
 
 
@@ -162,6 +188,7 @@ pub struct ChunkedAv1Encoder {
     bitrate: String,
     chunk_duration: f64,
     current_offset: f64,
+    video_duration: f64, // real duration of `input`, used to wrap seeks when looping
     // Adapted to Vec<u8> to match ChunkedHevcEncoder's interface for easy integration
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
@@ -197,6 +224,7 @@ impl ChunkedAv1Encoder {
     ) -> Self {
         println!("Initializing ChunkedAv1Encoder");
         let (frame_tx, frame_rx) = bounded(1000);
+        let video_duration = probe_video_duration_secs(input);
 
         Self {
             input: input.to_string(),
@@ -205,6 +233,7 @@ impl ChunkedAv1Encoder {
             bitrate: bitrate.to_string(),
             chunk_duration,
             current_offset: offset_video,
+            video_duration,
             frame_tx,
             frame_rx,
             frame_queue: VecDeque::new(),
@@ -256,6 +285,15 @@ impl ChunkedAv1Encoder {
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
         // let exact_offset = start_frame_idx as f64 / self.framerate as f64;
 
+        // `exact_offset`/`start_frame_idx` stay monotonic (they drive the burned-in
+        // OCR frame counter, which must match the reference reader's absolute frame
+        // count). But ffmpeg's `-ss` only seeks within the first `-stream_loop`
+        // iteration, so the actual seek position must be wrapped into video bounds.
+        let seek_offset = if self.video_duration > 0.0 {
+            exact_offset % self.video_duration
+        } else {
+            exact_offset
+        };
 
         let frame_duration_ms = 1000.0 / self.framerate;
         let bufsize_ms = frame_duration_ms.max(20.0); // Force at least 20ms for AV1: The maximum buffer size must be between [20, 10000]
@@ -373,7 +411,7 @@ impl ChunkedAv1Encoder {
         let mut child = command
             // .hwaccel("cuda")
             // .args(&["-ss", &self.current_offset.to_string()])
-            .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
+            .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
             .args(&["-t", &self.chunk_duration.to_string()])
             // .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)]) // Use const or hardcode
             .args(&["-threads", "8"])
@@ -499,10 +537,11 @@ pub struct ChunkedSoftwareHevcEncoder {
     width: u32,
     height: u32,
     bitrate: String,
-    framerate: f32, 
+    framerate: f32,
 
     chunk_duration: f64,
     current_offset: f64,
+    video_duration: f64, // real duration of `input`, used to wrap seeks when looping
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
 
@@ -535,15 +574,17 @@ impl ChunkedSoftwareHevcEncoder {
     ) -> Self {
         println!("Initializing ChunkedSoftwareHevcEncoder (libx265)");
         let (frame_tx, frame_rx) = bounded(1000);
+        let video_duration = probe_video_duration_secs(input);
 
         Self {
             input: input.to_string(),
             width,
             height,
             bitrate: bitrate.to_string(),
-            framerate, 
+            framerate,
             chunk_duration,
             current_offset: offset_video,
+            video_duration,
             frame_tx,
             frame_rx,
             frame_queue: VecDeque::new(),
@@ -574,6 +615,11 @@ impl ChunkedSoftwareHevcEncoder {
         let frames_per_chunk = (self.framerate * self.chunk_duration as f32).round() as usize;
         let exact_offset = self.current_offset;
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
+        let seek_offset = if self.video_duration > 0.0 {
+            exact_offset % self.video_duration
+        } else {
+            exact_offset
+        };
 
         // let bufsize_kbits = (bitrate_mbps * 1000.0) / self.framerate;
         let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
@@ -698,7 +744,7 @@ impl ChunkedSoftwareHevcEncoder {
 
         // Common arguments for both modes
         command
-            .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
+            .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
             // .args(&["-ss", &self.current_offset.to_string()])
             .args(&["-t", &self.chunk_duration.to_string()])
             .args(&["-threads", "4"]) // Software encoding needs CPU threads
@@ -862,9 +908,10 @@ pub struct ChunkedHevcEncoder {
     width: u32,
     height: u32,
     bitrate: String,
-    framerate: f32, 
+    framerate: f32,
     chunk_duration: f64,
     current_offset: f64,
+    video_duration: f64, // real duration of `input`, used to wrap seeks when looping
     frame_tx: Sender<Vec<u8>>,
     frame_rx: Receiver<Vec<u8>>,
 
@@ -873,9 +920,9 @@ pub struct ChunkedHevcEncoder {
     encoder_str: String,
     gop_size: usize,
     intra_refresh: bool,
-    chunk_index: usize, 
-    use_foveation: bool, 
-    vbv_perframe: bool, 
+    chunk_index: usize,
+    use_foveation: bool,
+    vbv_perframe: bool,
 }
 #[allow(unused)]
 impl ChunkedHevcEncoder {
@@ -896,15 +943,17 @@ impl ChunkedHevcEncoder {
     ) -> Self {
         println!("Initializing chunkedhevcencoder");
         let (frame_tx, frame_rx) = bounded(1000);
+        let video_duration = probe_video_duration_secs(input);
 
         Self {
             input: input.to_string(),
             width,
             height,
             bitrate: bitrate.to_string(),
-            framerate, 
+            framerate,
             chunk_duration,
             current_offset: offset_video,
+            video_duration,
             frame_tx,
             frame_rx,
             frame_queue: VecDeque::new(),
@@ -947,6 +996,11 @@ impl ChunkedHevcEncoder {
 
         let exact_offset: f64 = self.current_offset;
         let start_frame_idx = (exact_offset * self.framerate as f64).round() as usize;
+        let seek_offset = if self.video_duration > 0.0 {
+            exact_offset % self.video_duration
+        } else {
+            exact_offset
+        };
         
         let bufsize_str = if self.vbv_perframe{
             let bufsize_kbits = (  VBV_SETTING_RELAXATION_MULTIPLIER * bitrate_mbps * 1000.0) / self.framerate; // Calculate single-frame VBV buffer size to limit max frame size, as in 'How to model Cloud VR' paper by Korneev et al.
@@ -1070,7 +1124,7 @@ impl ChunkedHevcEncoder {
                 .hwaccel("cuda")
                 .args(&["-analyzeduration", "200M"])
                 .args(&["-probesize", "200M"])
-                .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
+                .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
                 .args(&["-t", &self.chunk_duration.to_string()])
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
@@ -1102,7 +1156,7 @@ impl ChunkedHevcEncoder {
         } else {
             command
                 .hwaccel("cuda")
-                .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
+                .args(&["-ss", &format!("{:.6}", seek_offset)]) // Use high precision; wrapped into video bounds for looping
                 .args(&["-t", &self.chunk_duration.to_string()])
                 // .args(&["-re"]) // read at realtime speed
                 .args(&["-analyzeduration", "100M"])

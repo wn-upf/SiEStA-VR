@@ -6,7 +6,7 @@ use std::{path::Path, time::Duration};
 use tai_time::TaiTime;
 use tokio::{sync::Semaphore};
 mod lib;
-use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedHevcEncoder, ChunkedEncoder, ChunkedSoftwareHevcEncoder, VideoCodec};
+use crate::lib::alvr_stream_socket::{ChunkedAv1Encoder, ChunkedHevcEncoder, ChunkedEncoder, ChunkedSoftwareHevcEncoder, VideoCodec, probe_video_duration_secs};
 // bring your types into scope (adjust these paths to your project)
 use crate::lib::{DEBUG_PRINT_ENABLED, models_XR::{HEIGHT_ENCODER, SCALE_FACTOR_FFMPEG_WINDOW, WIDTH_ENCODER, HevcDecoder, Av1Decoder, VideoDecoder}, render_text,};
 use std::fs;
@@ -1189,10 +1189,21 @@ fn make_reference_reader_task(
             start_frame_idx
         );
 
+        // ffmpeg's `-ss` (before `-i`) only seeks within the first `-stream_loop`
+        // iteration, so the seek position must be pre-wrapped into video bounds
+        // (start_frame_idx above stays unwrapped/monotonic to match the encoder's
+        // burned-in OCR frame counter).
+        let video_duration = probe_video_duration_secs(&video_path);
+        let seek_offset = if video_duration > 0.0 {
+            start_offset % video_duration
+        } else {
+            start_offset
+        };
 
         let mut child = Command::new("ffmpeg")
             .args(&[
-                "-ss", &format!("{:.6}", start_offset), 
+                "-ss", &format!("{:.6}", seek_offset),
+                "-stream_loop", "-1", // Loop the sample video indefinitely
                 "-i", &video_path,
                 "-vf", &filter_str,
                 "-f", "rawvideo",
