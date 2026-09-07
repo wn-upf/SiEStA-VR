@@ -47,7 +47,7 @@ use std::time:: {Instant};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use arrow::array::Array;
 
-const RESULTS_SCENARIOS_FOLDER: &str = "/home/ferran/Desktop/SiEStA-VR/Results_quicktest_";
+const RESULTS_SCENARIOS_FOLDER: &str = "/home/ferran/Desktop/SiEStA-VR/Results_psnrvmaf_";
 const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 1; 
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
 pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.1; 

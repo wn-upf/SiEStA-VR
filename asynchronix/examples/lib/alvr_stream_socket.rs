@@ -376,11 +376,12 @@ impl ChunkedAv1Encoder {
             .args(&["-ss", &format!("{:.6}", exact_offset)]) // Use high precision
             .args(&["-t", &self.chunk_duration.to_string()])
             // .args(&["-threads", &format!("{}", NUM_PARALLEL_THREADS_ENCODE)]) // Use const or hardcode
-            .args(&["-threads", "8"]) 
+            .args(&["-threads", "8"])
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
+            .args(&["-stream_loop", "-1"]) // Loop the sample video indefinitely
             .input(&self.input)
             .args(&[
-                    "-vf", &filter_complex_foveation, 
+                    "-vf", &filter_complex_foveation,
                 ])
             .args(&["-c:v", "libsvtav1"]) // Using SVT-AV1
             .args(&["-preset", "9"])      // High speed preset for RTC
@@ -703,9 +704,10 @@ impl ChunkedSoftwareHevcEncoder {
             .args(&["-threads", "4"]) // Software encoding needs CPU threads
             .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
             .args(&["-stats_period", "8"])
+            .args(&["-stream_loop", "-1"]) // Loop the sample video indefinitely
             .input(&self.input)
             .args(&[
-                    "-vf", &filter_complex_foveation , 
+                    "-vf", &filter_complex_foveation ,
                 ])
             .args(&["-c:v", "libx265"]) // SW Encoding
             .args(&["-preset", "ultrafast"]) // Crucial for realtime SW encoding
@@ -1074,10 +1076,11 @@ impl ChunkedHevcEncoder {
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "8"])
                 // .args(&["-re"]) // read at real-time speed
+                .args(&["-stream_loop", "-1"]) // Loop the sample video indefinitely
                 .input(&self.input)
                 .args(&[
-                    "-filter_complex", &filter_complex_foveation, 
-                ]) 
+                    "-filter_complex", &filter_complex_foveation,
+                ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"])
                 .args(&["-fps_mode", "passthrough"])
@@ -1107,9 +1110,10 @@ impl ChunkedHevcEncoder {
                 .args(&["-threads", "2"])
                 .args(&["-hide_banner", "-nostats", "-loglevel", "error"])
                 .args(&["-stats_period", "5"])
-                .input(&self.input)              
+                .args(&["-stream_loop", "-1"]) // Loop the sample video indefinitely
+                .input(&self.input)
                 .args(&[
-                    "-filter_complex", &filter_complex_foveation, 
+                    "-filter_complex", &filter_complex_foveation,
                 ])
                 .args(&["-c:v", "hevc_nvenc"])
                 .args(&["-preset", "fast"]) // TODO : llhq is preferrable but deprecated on some of the HPC GPUs.
