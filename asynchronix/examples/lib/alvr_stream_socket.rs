@@ -1522,7 +1522,7 @@ struct RecvState {
     packet_cursor: usize, // counts also the prefix bytes
     overwritten_data_backup: Option<[u8; SHARD_PREFIX_SIZE]>,
     should_discard: bool,
-    frame_first_shard_deadline: Option<TaiTime<0>>,
+    frame_deadline: Option<TaiTime<0>>,
 }
 
 #[derive(Clone)]
@@ -2031,6 +2031,15 @@ impl StreamSocket {
                 }
             } // if ID ==VIDEO END
 
+            // Deadline is anchored to when the *server generated the frame* (`tx_r_instant`,
+            // stamped once per frame in `StreamSender::send` from the same TaiTime<0> epoch),
+            // not to when this shard happened to arrive here. Using arrival time would let
+            // network/queueing delay on the first shard silently push the deadline out,
+            // giving a frame that already limped in late even more budget than an earlier
+            // arrival would get.
+            let frame_gen_instant = TaiTime::<0>::EPOCH
+                .checked_add(Duration::from_secs_f32(tx_r_instant.max(0.0)));
+
             self.shard_recv_state.insert(RecvState {
                 shard_length,
                 stream_id,
@@ -2040,14 +2049,9 @@ impl StreamSocket {
                 packet_cursor: 0,
                 overwritten_data_backup: None,
                 should_discard: false,
-                frame_first_shard_deadline: None,
-                // tx_r_instant,
+                frame_deadline: frame_gen_instant.and_then(|t| t.checked_add(DEADLINE_PACKETS_S)),
             })
         };
-
-        if shard_recv_state_mut.frame_first_shard_deadline.is_none() {
-            shard_recv_state_mut.frame_first_shard_deadline = now.checked_add(DEADLINE_PACKETS_S);
-        }
 
         let Some(components) = self
             .stream_recv_components
@@ -2060,7 +2064,7 @@ impl StreamSocket {
             return try_again();
         };
 
-        // print_prettyy!( DebugColor::Orange, "{:.9} [DBG Socket RX {}] F: {}, S:{:2.0}/{:2.0} |deadline_current: {:?}|in_progress_packets: {:?}| indices {:?}| " ,format_elapsed!(now),ip_client ,shard_recv_state_mut.packet_index, shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1 ,format_elapsed!(shard_recv_state_mut.frame_first_shard_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys());
+        // print_prettyy!( DebugColor::Orange, "{:.9} [DBG Socket RX {}] F: {}, S:{:2.0}/{:2.0} |deadline_current: {:?}|in_progress_packets: {:?}| indices {:?}| " ,format_elapsed!(now),ip_client ,shard_recv_state_mut.packet_index, shard_recv_state_mut.shard_index, shard_recv_state_mut.shards_count - 1 ,format_elapsed!(shard_recv_state_mut.frame_deadline.unwrap()), components.in_progress_packets.len(), components.in_progress_packets.keys());
 
         let in_progress_packet = if shard_recv_state_mut.should_discard {
             &mut components.discarded_shards_sink
@@ -2126,7 +2130,7 @@ impl StreamSocket {
                     received_shard_indices: HashSet::with_capacity(
                         shard_recv_state_mut.shards_count,
                     ),
-                    deadline: shard_recv_state_mut.frame_first_shard_deadline,
+                    deadline: shard_recv_state_mut.frame_deadline,
                     num_shards_expected: shard_recv_state_mut.shards_count,
                     id_frame: shard_recv_state_mut.packet_index,
                 },

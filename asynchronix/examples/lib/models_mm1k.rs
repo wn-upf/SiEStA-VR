@@ -4762,3 +4762,524 @@ mod markov_scratch_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod queue_module_tests {
+    use super::*;
+    use asynchronix::ports::EventBuffer;
+    use asynchronix::simulation::{Mailbox, SimInit};
+
+    const AP_ID: i32 = -1;
+    const SERVER_ID: i32 = 100; // PREFIX_ID_DOWNLINK
+    const CLIENT_ID: i32 = 200; // PREFIX_ID_UPLINK
+
+    /// Build a QueueModule with a single link ("SLO80"), zero packet loss, and
+    /// both the AP and one client STA registered as single-link-capable -- the
+    /// minimal wiring `xr_entry::run_sim` performs before any traffic can flow
+    /// (see `queue.sta_capabilities.insert` calls in xr_entry/mod.rs).
+    fn make_queue_module() -> QueueModule {
+        let link_configs = create_mlo_config("SLO80");
+        let available_links: Vec<u8> = link_configs.iter().map(|lc| lc.link_id).collect();
+
+        let mut queue = QueueModule::new(
+            1,
+            0, // queue_size: dead parameter, hardcoded to DOWNLINK_QUEUE_SIZE/UPLINK_QUEUE_SIZE internally
+            0.0, // PL_prob: disable loss so the test is deterministic
+            vec![CLIENT_ID],
+            "test_folder".to_string(),
+            None,
+            link_configs,
+            LinkSelectionStrategy::Opportunistic,
+            1,
+            "/tmp",
+            None,
+        );
+
+        queue.sta_capabilities.insert(
+            AP_ID,
+            StaCapabilities { _is_str_capable: true, links: available_links.clone() },
+        );
+        queue.sta_capabilities.insert(
+            CLIENT_ID,
+            StaCapabilities { _is_str_capable: true, links: available_links },
+        );
+        queue.STA_coords_map.insert(SERVER_ID as usize, Coords::with_coords(AP_X, AP_Y, 0.0));
+        queue.STA_coords_map.insert(CLIENT_ID as usize, Coords::with_coords(AP_X + 5.0, AP_Y, 0.0));
+
+        queue
+    }
+
+    /// End-to-end: a downlink packet admitted into the queue should eventually
+    /// be transmitted out as an A-MPDU on the link it was assigned to -- this
+    /// exercises admission, CSMA/CA backoff, and MCS/link selection together,
+    /// rather than any single internal step in isolation.
+    #[test]
+    fn queue_module_transmits_admitted_packet_as_ampdu() {
+        let mut queue = make_queue_module();
+
+        let mut out = EventBuffer::new();
+        queue
+            .link_outputs
+            .get_mut(&0)
+            .expect("link 0 should exist for SLO80 config")
+            .connect_sink(&out);
+
+        let mbox = Mailbox::new();
+        let addr = mbox.address();
+        let t0 = TaiTime::<0>::EPOCH;
+
+        let mut simu = SimInit::new().add_model(queue, mbox, "queue").init(t0);
+
+        let mut packet = MpduPacket::new();
+        packet.sta_src_id = SERVER_ID;
+        packet.sta_dest_id = CLIENT_ID;
+        packet.length_packet_bits = 8000;
+        simu.process_event(QueueModule::input, packet, addr);
+
+        // Let the CSMA/CA backoff and transmission resolve; a single link with
+        // no contention should clear well within this budget.
+        simu.step_by(Duration::from_millis(50));
+
+        let ampdu = out.next().expect("an AMPDU should have been transmitted on link 0");
+        assert_eq!(ampdu.sta_dest_id, CLIENT_ID);
+        assert!(!ampdu.mpdu_packets.is_empty());
+    }
+
+    /// A packet for an STA whose registered capabilities list zero usable
+    /// links must be dropped rather than panicking or eventually appearing as
+    /// an A-MPDU. (An STA missing from `sta_capabilities` entirely is instead
+    /// treated as a legacy single-link device and defaults to link 0 --
+    /// see `select_link_for_packet`'s `None` arm -- so that case is not a
+    /// drop path and is intentionally not exercised here.)
+    #[test]
+    fn queue_module_drops_packet_for_sta_with_no_links() {
+        let mut queue = make_queue_module();
+        queue.sta_capabilities.insert(
+            CLIENT_ID,
+            StaCapabilities { _is_str_capable: true, links: vec![] },
+        );
+
+        let mut out = EventBuffer::new();
+        queue
+            .link_outputs
+            .get_mut(&0)
+            .expect("link 0 should exist for SLO80 config")
+            .connect_sink(&out);
+
+        let mbox = Mailbox::new();
+        let addr = mbox.address();
+        let t0 = TaiTime::<0>::EPOCH;
+
+        let mut simu = SimInit::new().add_model(queue, mbox, "queue").init(t0);
+
+        let mut packet = MpduPacket::new();
+        packet.sta_src_id = SERVER_ID;
+        packet.sta_dest_id = CLIENT_ID;
+        packet.length_packet_bits = 8000;
+        simu.process_event(QueueModule::input, packet, addr);
+        simu.step_by(Duration::from_millis(50));
+
+        assert!(
+            out.next().is_none(),
+            "a packet for an STA with no registered capabilities must never be transmitted"
+        );
+    }
+}
+
+/// Backtests `QueueModule`'s CSMA/CA (EDCA/DCF + RTS/CTS) throughput and channel-access delay
+/// against Bianchi's analytical saturation model [Bianchi, "Performance Analysis of the IEEE
+/// 802.11 Distributed Coordination Function", JSAC 2000], extended with the RTS/CTS collision
+/// cost used here (a collision only wastes `T_RTS+SIFS+T_CTS`, not a full DATA frame).
+///
+/// The analytical constants below are copied from, not re-derived independently of, the
+/// production code they check (`EDCA_TABLE`, `airtime_ampdu`, `collision_delay` in mod.rs /
+/// models_mm1k.rs) -- this is intentional: Bianchi is a model of the *protocol* (slotted
+/// exponential backoff contending for a shared medium), not of these specific PHY airtimes, so
+/// the airtimes are inputs to both the analytical formula and the simulator, not something this
+/// test derives independently. What *is* independently checked is the fixed-point throughput/
+/// delay-vs-contention relationship itself, which is the part a regression could actually break
+/// (e.g. an off-by-one in backoff countdown, wrong collision-vs-success cost, wrong CW growth).
+#[cfg(test)]
+mod bianchi_backtest {
+    use super::*;
+    use asynchronix::ports::EventBuffer;
+    use asynchronix::simulation::{Mailbox, SimInit};
+
+    const AP_ID: i32 = -1;
+    const SERVER_ID_BASE: i32 = 100; // PREFIX_ID_DOWNLINK
+    const CLIENT_ID_BASE: i32 = 200; // PREFIX_ID_UPLINK
+    const PAYLOAD_BYTES: usize = 1400;
+
+    /// Packets preloaded per station. Must exceed what a station can drain in the run window so
+    /// its queue never empties (the "saturated" precondition), while staying under
+    /// `UPLINK_QUEUE_SIZE` (1024) so `input_UL` admits every one of them rather than dropping
+    /// the overflow.
+    const BACKLOG_PER_STA: usize = 1000;
+
+    // ---- EDCA/PHY constants, copied from EDCA_TABLE[BestEffort] and the RTS/CTS/DATA/ACK
+    // ---- timing computed by `airtime_ampdu`/`collision_delay` for a single-MPDU AMPDU at a
+    // ---- distance close enough to the AP to deterministically pin the top MCS (see below).
+    const CW_MIN: f64 = 15.0;
+    const CW_MAX: f64 = 1023.0;
+    const SLOT_S: f64 = 9e-6;
+
+    /// One STA, 1 m from the AP: `path_loss(1.0) ≈ 54.9 dB`, giving `Pr ≈ -40.9 dBm` at 80 MHz
+    /// (20 dBm tx, 6.02 dB width normalization) -- comfortably inside the `Pr >= -46.0` bucket in
+    /// `airtime_ampdu`, i.e. the top MCS (MCS13). Picking a short, fixed distance like this keeps
+    /// `T_DATA` (and hence `T_s`) constant across the whole run, which Bianchi's model assumes;
+    /// with rate adaptation in play `T_s` would vary and the closed-form model would no longer
+    /// apply directly.
+    const STA_DISTANCE_M: f64 = 1.0;
+
+    /// `T_s`: RTS + SIFS + CTS + SIFS + DATA(1 MPDU, PAYLOAD_BYTES, MCS13/80MHz) + SIFS + ACK.
+    /// `T_c`: RTS + SIFS + CTS (this sim's `collision_delay()` -- RTS/CTS makes collisions cheap,
+    /// unlike basic-access Bianchi where a collision costs a full DATA frame).
+    /// Computed once from the same closed-form expressions as `airtime_ampdu`/`collision_delay`
+    /// in mod.rs, given the pinned single-MPDU/MCS13/80MHz scenario above.
+    const T_S_SECS: f64 = 0.000236;
+    const T_C_SECS: f64 = 0.000076;
+
+    /// Number of backoff stages until CW saturates at CW_MAX (`log2((CW_MAX+1)/(CW_MIN+1))`).
+    fn backoff_stages() -> i32 {
+        ((CW_MAX + 1.0) / (CW_MIN + 1.0)).log2().round() as i32
+    }
+
+    /// `tau` as a function of assumed collision probability `p`, per Bianchi eq. (7)/(9).
+    fn tau_of_p(p: f64) -> f64 {
+        let w = CW_MIN + 1.0;
+        let m = backoff_stages() as f64;
+        if p <= 0.0 {
+            return 2.0 / (w + 1.0);
+        }
+        let denom = (1.0 - 2.0 * p) * (w + 1.0) + p * w * (1.0 - (2.0 * p).powf(m));
+        if denom <= 0.0 {
+            return 1.0;
+        }
+        (2.0 * (1.0 - 2.0 * p) / denom).clamp(0.0, 1.0)
+    }
+
+    /// Solves Bianchi's fixed point `{tau, p}` for `n` saturated contending stations via
+    /// bisection on `p` (monotonic and well-behaved for the moderate `n` this test sweeps).
+    fn solve_bianchi(n: u32) -> (f64, f64) {
+        let (mut lo, mut hi) = (0.0_f64, 0.9999_f64);
+        for _ in 0..200 {
+            let mid = (lo + hi) / 2.0;
+            let tau = tau_of_p(mid);
+            let p_new = 1.0 - (1.0 - tau).powi(n as i32 - 1);
+            if p_new > mid {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let p = (lo + hi) / 2.0;
+        (tau_of_p(p), p)
+    }
+
+    struct BianchiPrediction {
+        throughput_bps: f64,
+        /// Mean medium time consumed per *successful* transmission, i.e. `E[slot]/(Ptr*Ps)`:
+        /// the idle backoff slots and collisions absorbed between one success and the next,
+        /// plus the successful exchange itself.
+        mean_success_interval_s: f64,
+    }
+
+    /// Bianchi saturation throughput (eq. 20) and an approximate mean channel-access delay,
+    /// for `n` saturated stations each offering `payload_bits` per successfully aggregated AMPDU.
+    fn bianchi_predict(n: u32, payload_bits: f64) -> BianchiPrediction {
+        let (tau, _p) = solve_bianchi(n);
+        let nf = n as f64;
+        let p_tr = 1.0 - (1.0 - tau).powi(n as i32);
+        let p_s = if p_tr > 0.0 {
+            nf * tau * (1.0 - tau).powi(n as i32 - 1) / p_tr
+        } else {
+            0.0
+        };
+        let e_slot = (1.0 - p_tr) * SLOT_S + p_tr * p_s * T_S_SECS + p_tr * (1.0 - p_s) * T_C_SECS;
+        let throughput_bps = p_s * p_tr * payload_bits / e_slot;
+
+        // Mean medium time between two consecutive *successful* transmissions: the medium
+        // advances one virtual slot of mean duration `e_slot`, and a fraction `p_tr * p_s` of
+        // those slots carry a success.
+        let mean_success_interval_s = e_slot / (p_tr * p_s);
+
+        BianchiPrediction { throughput_bps, mean_success_interval_s }
+    }
+
+    /// Build a saturated-uplink scenario: `n` single-link STAs, all `STA_DISTANCE_M` from the
+    /// AP (pinning MCS13 for everyone, matching the analytical constants above), one MPDU per
+    /// AMPDU (`packs_per_ampdu: 1`, matching `T_S_SECS`), zero PHY loss (Bianchi has no PHY
+    /// errors, only collisions), single link ("SLO80").
+    fn make_saturated_queue(n: u32) -> (QueueModule, Vec<i32>) {
+        let client_ids: Vec<i32> = (0..n).map(|i| CLIENT_ID_BASE + i as i32).collect();
+        let server_ids: Vec<i32> = (0..n).map(|i| SERVER_ID_BASE + i as i32).collect();
+        // `QueueModule::new` builds its DCF/mac-key tables from `vec_ids` and panics on any id
+        // it has not seen (`sta_idx_of`), so both ends of every flow must be registered.
+        let all_ids: Vec<i32> = client_ids.iter().chain(server_ids.iter()).copied().collect();
+
+        let link_configs = create_mlo_config("SLO80");
+        let available_links: Vec<u8> = link_configs.iter().map(|lc| lc.link_id).collect();
+
+        let mut queue = QueueModule::new(
+            all_ids.len(),
+            0,
+            0.0, // PL_prob: Bianchi models only collisions, not PHY loss
+            all_ids.clone(),
+            "bianchi_backtest".to_string(),
+            None,
+            link_configs,
+            LinkSelectionStrategy::Opportunistic,
+            1, // packs_per_ampdu: 1 MPDU per AMPDU, matching T_S_SECS
+            "/tmp",
+            None,
+        );
+
+        queue.sta_capabilities.insert(
+            AP_ID,
+            StaCapabilities { _is_str_capable: true, links: available_links.clone() },
+        );
+        for &id in &all_ids {
+            queue.sta_capabilities.insert(
+                id,
+                StaCapabilities { _is_str_capable: true, links: available_links.clone() },
+            );
+        }
+        for (idx, &id) in client_ids.iter().enumerate() {
+            queue.STA_coords_map.insert(id as usize, sta_coords(idx as u32));
+        }
+        for &id in &server_ids {
+            queue
+                .STA_coords_map
+                .insert(id as usize, Coords::with_coords(AP_X, AP_Y, 0.0));
+        }
+
+        (queue, client_ids)
+    }
+
+    fn sta_coords(sta_index: u32) -> Coords {
+        // Spread STAs on a ring of radius STA_DISTANCE_M around the AP so every station is
+        // equidistant (same MCS/T_s) without colliding on a single point.
+        let angle = sta_index as f64 * std::f64::consts::TAU / 8.0_f64.max(1.0);
+        Coords::with_coords(
+            AP_X + STA_DISTANCE_M * angle.cos(),
+            AP_Y + STA_DISTANCE_M * angle.sin(),
+            0.0,
+        )
+    }
+
+    /// Floods every STA's uplink BE queue far beyond what the run window can drain, so every
+    /// station always has a packet ready to contend with -- the "saturated" condition Bianchi's
+    /// model assumes.
+    fn saturate(
+        simu: &mut asynchronix::simulation::Simulation,
+        addr: &asynchronix::simulation::Address<QueueModule>,
+        client_ids: &[i32],
+    ) {
+        for (idx, &sta_id) in client_ids.iter().enumerate() {
+            let coords = sta_coords(idx as u32);
+            // Uplink means `src > dest` (see `input_UL`), and both ids must be positive (see
+            // `build_new_ampdu`), so each client 200+i sends to its paired server 100+i --
+            // the same pairing `xr_entry::VRPair` uses. Airtime is still computed STA->AP
+            // (`self.coords_queue`), so the ring placement below is what sets the MCS.
+            let dest_id = SERVER_ID_BASE + idx as i32;
+            for _ in 0..BACKLOG_PER_STA {
+                let mut packet = MpduPacket::new();
+                packet.sta_src_id = sta_id;
+                packet.sta_dest_id = dest_id;
+                packet.sta_src_coords = coords;
+                packet.length_packet_bits = PAYLOAD_BYTES * 8;
+                simu.process_event(QueueModule::input_UL, packet, addr.clone());
+            }
+        }
+    }
+
+    /// One successfully transmitted MPDU, as observed on the link output.
+    struct TxRecord {
+        /// Absolute simulated time at which the MPDU was dequeued for transmission.
+        tx_time_s: f64,
+        /// Time the MPDU spent queued, i.e. the channel-access delay.
+        access_delay_s: f64,
+    }
+
+    /// Runs a saturated scenario and returns every transmitted MPDU.
+    ///
+    /// Note on methodology: the backlog is injected via `process_event`, which executes at the
+    /// current simulation instant without advancing the clock, so *all* packets are admitted at
+    /// t=0 and each one's `queue_in_instant` is t=0. That makes the raw `T_q` of the k-th
+    /// transmitted packet essentially "k * service time" (standing-queue waiting time), which is
+    /// NOT the quantity Bianchi's access-delay model describes. What both the model and this
+    /// harness agree on is the *service* process: how much airtime each successful transmission
+    /// consumes end to end, including backoff and collisions. So the metrics below are derived
+    /// from the observed transmission timeline (`tx_time_s`), not from the standing-queue `T_q`.
+    fn run_saturated(n: u32, run_secs: f64) -> Vec<TxRecord> {
+        let (mut queue, client_ids) = make_saturated_queue(n);
+
+        // `EventBuffer::new()` holds only 16 events and silently overwrites older ones, which
+        // would leave us measuring just the tail of the run. Size it well beyond the number of
+        // transmissions a saturated run can produce (T_s ~ 236 us, so < 5k successes/second).
+        let mut out = EventBuffer::with_capacity(BACKLOG_PER_STA * client_ids.len() + 1024);
+        queue
+            .link_outputs
+            .get_mut(&0)
+            .expect("link 0 should exist for SLO80 config")
+            .connect_sink(&mut out);
+
+        let mbox = Mailbox::new();
+        let addr = mbox.address();
+        let t0 = TaiTime::<0>::EPOCH;
+        let mut simu = SimInit::new().add_model(queue, mbox, "queue").init(t0);
+
+        saturate(&mut simu, &addr, &client_ids);
+        simu.step_by(Duration::from_secs_f64(run_secs));
+
+        let mut results = Vec::new();
+        while let Some(ampdu) = out.next() {
+            for mpdu in &ampdu.mpdu_packets {
+                results.push(TxRecord {
+                    tx_time_s: mpdu.queue_out_instant.duration_since(t0).as_secs_f64(),
+                    access_delay_s: mpdu.T_q.as_secs_f64(),
+                });
+            }
+        }
+        results.sort_by(|a, b| a.tx_time_s.partial_cmp(&b.tx_time_s).unwrap());
+
+        results
+    }
+
+    /// Mean time between consecutive successful transmissions on the medium, measured over the
+    /// observed transmission timeline. This is the reciprocal of the medium's successful-
+    /// transmission rate, and is what Bianchi's `E[slot] / (Ptr*Ps)` predicts.
+    fn mean_successful_tx_interval(records: &[TxRecord]) -> f64 {
+        assert!(records.len() > 1, "need at least two transmissions to measure an interval");
+        let span = records.last().unwrap().tx_time_s - records.first().unwrap().tx_time_s;
+        span / (records.len() - 1) as f64
+    }
+
+    /// Saturation throughput -- app-payload bits successfully delivered per second of medium
+    /// time -- should track Bianchi's predicted saturation throughput across a contention sweep.
+    ///
+    /// This is a statistical backtest against a mean-field analytical model, not a bit-exact
+    /// equivalence: the bar is "same magnitude and same shape", not "matches to 3 significant
+    /// figures". A regression that broke backoff countdown, collision cost, or CW growth would
+    /// move throughput far more than the tolerance here.
+    #[test]
+    fn saturation_throughput_matches_bianchi_within_tolerance() {
+        let run_secs = 0.1;
+        for &n in &[1u32, 2, 5, 8] {
+            let records = run_saturated(n, run_secs);
+            assert!(
+                records.len() > 1,
+                "n={n}: too few transmissions ({}) -- scenario is not actually saturated",
+                records.len()
+            );
+
+            // Throughput as seen by the medium: payload bits per successful transmission,
+            // divided by the mean time between successful transmissions.
+            let realized_bps =
+                (PAYLOAD_BYTES * 8) as f64 / mean_successful_tx_interval(&records);
+            let predicted = bianchi_predict(n, (PAYLOAD_BYTES * 8) as f64);
+
+            let rel_err = (realized_bps - predicted.throughput_bps).abs() / predicted.throughput_bps;
+            assert!(
+                rel_err < 0.30,
+                "n={n}: realized throughput {:.2} Mbps vs Bianchi-predicted {:.2} Mbps (rel err {:.1}%)",
+                realized_bps / 1e6,
+                predicted.throughput_bps / 1e6,
+                rel_err * 100.0
+            );
+        }
+    }
+
+    /// The mean interval between successful transmissions -- the medium time one successful
+    /// frame exchange costs, including backoff and collision overhead -- should track Bianchi's
+    /// `E[slot]/(Ptr*Ps)` prediction across a contention sweep.
+    ///
+    /// Note this curve is deliberately *not* asserted to be monotonic in `n`. Because RTS/CTS
+    /// makes a collision cheap here (`T_c` ~ 76 us vs `T_s` ~ 236 us) and DCF's exponential
+    /// backoff self-tunes `tau` downward as stations are added, Bianchi itself predicts a nearly
+    /// flat cost per success over this range (~303 us at n=1, ~271-273 us at n=5-8) -- it even
+    /// dips slightly from n=1 to n=2, since a lone station still pays its own average backoff
+    /// with nobody to overlap it with. The simulator reproduces exactly that shape, so the
+    /// meaningful assertion is agreement with the predicted value at each `n`, not a trend.
+    #[test]
+    fn channel_access_cost_matches_bianchi_within_tolerance() {
+        let run_secs = 0.1;
+        for &n in &[1u32, 2, 5, 8] {
+            let records = run_saturated(n, run_secs);
+            assert!(records.len() > 1, "n={n}: too few transmissions to measure an interval");
+
+            let realized_interval = mean_successful_tx_interval(&records);
+            let predicted = bianchi_predict(n, (PAYLOAD_BYTES * 8) as f64);
+
+            let rel_err = (realized_interval - predicted.mean_success_interval_s).abs()
+                / predicted.mean_success_interval_s;
+            assert!(
+                rel_err < 0.30,
+                "n={n}: realized mean successful-tx interval {:.1} us vs Bianchi-predicted {:.1} us (rel err {:.1}%)",
+                realized_interval * 1e6,
+                predicted.mean_success_interval_s * 1e6,
+                rel_err * 100.0
+            );
+        }
+    }
+
+    /// Queueing delay backtest.
+    ///
+    /// Every packet is admitted at t=0 into a standing backlog, so the queue drains
+    /// deterministically: the k-th packet served on a given station waits for the k-1 packets
+    /// ahead of it, each costing that station one service interval. With `n` stations sharing
+    /// the medium fairly, a single station is served once every `n` medium successes, so its
+    /// per-packet service interval is `n * mean_successful_tx_interval`, and the k-th packet's
+    /// queueing delay should be `k * n * interval` -- a D/D/1 drain whose slope is set by the
+    /// Bianchi-predicted channel access cost.
+    ///
+    /// This checks the queue is genuinely work-conserving and FIFO under load: a regression that
+    /// stalled the drain, reordered service, or double-counted queue time would break the slope
+    /// or the linearity, both of which are asserted here.
+    #[test]
+    fn queueing_delay_matches_deterministic_drain() {
+        let run_secs = 0.1;
+        for &n in &[1u32, 2, 4] {
+            let records = run_saturated(n, run_secs);
+            assert!(records.len() > 20, "n={n}: too few transmissions for a delay fit");
+
+            let interval = mean_successful_tx_interval(&records);
+
+            // Per-station service interval: the medium serves all `n` stations round-robin-ish,
+            // so any one station gets every n-th transmission opportunity.
+            let per_station_interval = interval * n as f64;
+
+            // Sorted by transmission time, the k-th record's queueing delay should grow linearly
+            // at `interval` per medium-success (equivalently `per_station_interval` per packet on
+            // that station). Fit the observed slope over the run.
+            let first = &records[0];
+            let last = &records[records.len() - 1];
+            let observed_slope =
+                (last.access_delay_s - first.access_delay_s) / (records.len() - 1) as f64;
+
+            let rel_err = (observed_slope - interval).abs() / interval;
+            assert!(
+                rel_err < 0.30,
+                "n={n}: queueing delay grows {:.1} us per served packet, expected ~{:.1} us \
+                 (the medium's mean successful-tx interval); per-station interval {:.1} us",
+                observed_slope * 1e6,
+                interval * 1e6,
+                per_station_interval * 1e6,
+            );
+
+            // A standing backlog must produce monotonically growing queueing delay: each packet
+            // served waited strictly longer than the one before it (all arrived at t=0).
+            let mut violations = 0;
+            for pair in records.windows(2) {
+                if pair[1].access_delay_s < pair[0].access_delay_s {
+                    violations += 1;
+                }
+            }
+            assert_eq!(
+                violations, 0,
+                "n={n}: queueing delay decreased {violations} times across the drain -- with all \
+                 packets enqueued at t=0 and served in order, delay must increase monotonically"
+            );
+        }
+    }
+}

@@ -58,6 +58,32 @@ jobs:
       - name: Run cargo test
         run: cargo test --all-features
 
+  xr-sim-tests:
+    name: XR_sim model tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cargo test` (used by the `test` job above) only *builds* examples; it
+      # does not run the #[cfg(test)] modules living inside examples/lib/*.rs
+      # (XRServer/XRClient/STA_extended/QueueModule). `--example XR_sim` runs
+      # those explicitly, since they're only reachable through that binary's
+      # `mod lib;` declaration.
+      #
+      # RUSTFLAGS is cleared for this job only: the workflow-level `-Dwarnings`
+      # is aimed at the upstream asynchronix library, whereas the simulator
+      # examples currently carry a number of pre-existing warnings (unused
+      # imports/constants) that would fail the build before any test could run.
+      # Drop this override once those are cleaned up.
+      - name: Run XR_sim model tests
+        run: cargo test --example XR_sim
+        env:
+          RUSTFLAGS: ""
+
   loom-dry-run:
     name: Loom dry run
     runs-on: ubuntu-latest

@@ -74,6 +74,24 @@ const OCR_Y: usize = 10;
 const OCR_W: usize = 58; // Measure this in a screenshot if needed!
 const OCR_H: usize = 96;
 
+// The frame-ID box is drawn (see `alvr_stream_socket.rs`, `drawtext` filter) at
+// x=10,y=10 with fontsize=96 and boxborderw=30, so the actual black box painted on
+// screen extends a bit beyond the raw OCR_* glyph-reading rectangle above. This is
+// the margin excluded from VMAF/PSNR/SSIM when VMAF_CROP_ID_BOX=1, cropping the
+// top-left corner strip out of both the reference and distorted frame before
+// scoring so the burned-in ID box cannot influence the metrics.
+const ID_BOX_MARGIN_X: usize = OCR_X + OCR_W + 30; // + boxborderw
+const ID_BOX_MARGIN_Y: usize = OCR_Y + OCR_H + 30; // + boxborderw
+
+/// Whether to crop the burned-in frame-ID box out of both frames before computing
+/// VMAF/PSNR/SSIM. Toggle at runtime with `VMAF_CROP_ID_BOX=1` (no rebuild needed),
+/// e.g. to A/B the metrics with vs. without the box excluded.
+static CROP_ID_BOX_FOR_VMAF: Lazy<bool> = Lazy::new(|| {
+    std::env::var("VMAF_CROP_ID_BOX")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
+
 // Add this struct to handle the recognition
 
 
@@ -758,13 +776,7 @@ impl MetricsLogger {
 
                 // do all conversions + metrics in one filter_complex
                 "-filter_complex",
-                &format!(
-                    "[0:v]format=yuv420p[dist];\
-                    [1:v]format=yuv420p[ref];\
-                    [dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=2:\
-                    feature=name=psnr|name=float_ssim",
-                    vmaf_json.display()
-                ),
+                &build_vmaf_filter_complex(&vmaf_json),
 
                 // only a single frame
                 "-frames:v", "1",
@@ -830,6 +842,33 @@ impl MetricsLogger {
 
         Ok(())
     }
+}
+
+/// Builds the ffmpeg `-filter_complex` graph for the single-frame VMAF/PSNR/SSIM
+/// call. When `CROP_ID_BOX_FOR_VMAF` is set, both the distorted and reference
+/// frames are cropped to exclude the burned-in frame-ID box (top-left corner)
+/// before scoring, so the box itself cannot influence the metrics.
+fn build_vmaf_filter_complex(vmaf_json: &std::path::Path) -> String {
+    let (dist_pre, ref_pre) = if *CROP_ID_BOX_FOR_VMAF {
+        // Crop out the top ID_BOX_MARGIN_Y rows and left ID_BOX_MARGIN_X columns,
+        // where the "MODIFIED"/"REFERENCE" box lives, from both streams equally.
+        let crop = format!(
+            "crop=iw-{mx}:ih-{my}:{mx}:{my},",
+            mx = ID_BOX_MARGIN_X,
+            my = ID_BOX_MARGIN_Y
+        );
+        (crop.clone(), crop)
+    } else {
+        (String::new(), String::new())
+    };
+
+    format!(
+        "[0:v]{dist_pre}format=yuv420p[dist];\
+        [1:v]{ref_pre}format=yuv420p[ref];\
+        [dist][ref]libvmaf=model=version=vmaf_4k_v0.6.1:log_fmt=json:log_path={}:n_threads=2:\
+        feature=name=psnr|name=float_ssim",
+        vmaf_json.display()
+    )
 }
 
 fn rgb_to_u32(src: &[u8]) -> Vec<u32> {
