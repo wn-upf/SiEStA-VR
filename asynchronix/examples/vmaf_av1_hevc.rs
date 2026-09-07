@@ -47,6 +47,7 @@ use std::time:: {Instant};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use arrow::array::Array;
 
+const RESULTS_SCENARIOS_FOLDER: &str = "/home/ferran/Desktop/SiEStA-VR/Results_quicktest_";
 const MAX_CONCURRENT_VMAF_SCENARIOS: usize = 1; 
 pub const MAX_BITRATE_REFERENCE_MBPS: f32 = 100.0; 
 pub const WINDOW_SCALE_MULTIPLIER: f64 = 0.1; 
@@ -1718,7 +1719,7 @@ impl SendWindow {
 pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENARIOS
 
     // let results_scenarios_folder = "/home/boris/Desktop/Rust_MG1/asynchronix/Results_d1.5m_allbitrate_allfps_1seed"; 
-    let results_scenarios_folder = "/home/ferran/Desktop/SiEStA-VR/Results_quicktest_"; 
+    let results_scenarios_folder: &str = RESULTS_SCENARIOS_FOLDER;
 
     let dummy_ip = "127.0.0.1".parse().unwrap();
 
@@ -1800,11 +1801,15 @@ pub async fn main() { // parallel run, num_workers == MAX_CONCURRENT_VMAF_SCENAR
         }
 
         if let Some(p) = trace_candidate {
-            let parent_results = p.parent()
+            let mut parent_results = p.parent()
                 .and_then(|p| p.parent())
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "Unknown".to_string());
+
+            // Keep the two VMAF_CROP_ID_BOX A/B runs from overwriting each other's
+            // CSVs: same input scenario folder, separate output folder per setting.
+            parent_results.push_str(if *CROP_ID_BOX_FOR_VMAF { "_nobox" } else { "_withbox" });
 
             // Push job struct to vector
             tasks.push((
