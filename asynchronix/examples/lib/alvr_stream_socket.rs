@@ -58,7 +58,7 @@ pub const ALVR_ORIGINAL_SOCKETRX_BEHAVIOR: bool = false; // TODO: Bring this fro
 pub const MAX_HISTORY_SIZE: usize = 256; // shorter term averages
                                         // pub const INITIAL_FRAMERATE_FPS: f32 = 90.0;
 
-pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(30);
+pub const DEADLINE_PACKETS_S: Duration = Duration::from_millis(60);
 pub const MAX_DEADLINE_IN_STATS: usize = 10;
 pub const OFFSET_VIDEO: f64 = 95.0;
 
@@ -2018,6 +2018,55 @@ impl StreamSocket {
         }
     }
 
+    // Sweeps every stream's in_progress_packets for expired deadlines, independent of
+    // whether a shard was just received. `recv` only reaches this logic as a side effect of
+    // RX activity on one stream, so a fully stalled stream (no shards arriving at all) would
+    // otherwise never have its stuck frames flagged lost or their buffers recycled. Call this
+    // periodically (e.g. once per vsync) so deadline expiry keeps working through a stall.
+    pub fn sweep_expired_deadlines(&mut self, now: TaiTime<0>) {
+        Self::sweep_expired_deadlines_in(
+            &mut self.stream_recv_components,
+            &mut self.lost_shards_deadline_map,
+            now,
+        );
+    }
+
+    // Split out of `sweep_expired_deadlines` so callers already holding a mutable borrow of
+    // `self.shard_recv_state` (i.e. `recv`, mid-shard) can still run the sweep via disjoint
+    // field borrows instead of `&mut self`.
+    fn sweep_expired_deadlines_in(
+        stream_recv_components: &mut HashMap<u16, StreamRecvComponents>,
+        lost_shards_deadline_map: &mut HashMap<u32, usize>,
+        now: TaiTime<0>,
+    ) {
+        for components in stream_recv_components.values_mut() {
+            let mut expired_keys = Vec::new();
+
+            for (id, shard) in components.in_progress_packets.iter_mut() {
+                if let Some(deadline) = shard.deadline {
+                    if deadline <= now {
+                        let expected_shards = shard.num_shards_expected;
+                        let shards_arrived = shard.received_shard_indices.len();
+                        let shards_lost = expected_shards - shards_arrived;
+
+                        lost_shards_deadline_map.insert(shard.id_frame, shards_lost);
+
+                        expired_keys.push(*id);
+                    }
+                }
+            }
+
+            for key in expired_keys {
+                if let Some(packet) = components.in_progress_packets.remove(&key) {
+                    if !packet.buffer.is_empty() {
+                        let empty_buffer = Vec::with_capacity(packet.buffer.capacity());
+                        components.used_buffer_sender.send(empty_buffer).ok();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
         let cap = self.lost_shards_deadline_map.len();
         let mut vec_keys = Vec::with_capacity(cap);
@@ -2438,41 +2487,19 @@ impl StreamSocket {
                 }
             }
         } // if len == shard_count END
-          // Initialize a counter to track the total loss
-        let mut total_loss = 0;
 
-        // Create a vector to store the keys of expired packets (to remove them later)
-        let mut expired_keys = Vec::new();
-
-        // Iterate through in_progress_packets to identify expired packets
-        // In the deadline check section:
-        for (id, shard) in components.in_progress_packets.iter_mut() {
-            if let Some(deadline) = shard.deadline {
-                if deadline <= now {
-                    let expected_shards = shard.num_shards_expected;
-                    let shards_arrived = shard.received_shard_indices.len();
-                    let shards_lost = expected_shards - shards_arrived;
-
-                    // Store stats
-                    self.lost_shards_deadline_map
-                        .insert(shard.id_frame, shards_lost);
-
-                    // Mark for removal
-                    expired_keys.push(*id);
-                }
-            }
-        }
-
-        // Remove expired packets and cleanup
-        for key in expired_keys {
-            if let Some(packet) = components.in_progress_packets.remove(&key) {
-                // Return the buffer to the pool if possible
-                if !packet.buffer.is_empty() {
-                    let empty_buffer = Vec::with_capacity(packet.buffer.capacity());
-                    components.used_buffer_sender.send(empty_buffer).ok();
-                }
-            }
-        }
+        // Opportunistic sweep piggybacked on this RX event; `vsync` also calls
+        // `sweep_expired_deadlines` on a fixed period so expiry still fires when a stream
+        // goes fully silent and no more shards arrive to trigger this path.
+        Self::sweep_expired_deadlines_in(
+            &mut self.stream_recv_components,
+            &mut self.lost_shards_deadline_map,
+            now,
+        );
+        let components = self
+            .stream_recv_components
+            .get_mut(&shard_recv_state_mut.stream_id)
+            .unwrap();
 
         if ALVR_ORIGINAL_SOCKETRX_BEHAVIOR {
             // Keep only shards with later packet index (using wrapping logic)

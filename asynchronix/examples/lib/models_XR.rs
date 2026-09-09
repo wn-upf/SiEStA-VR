@@ -6525,6 +6525,23 @@ impl XRClient {
         async move {
             let now = context.scheduler.time();
             let T_vsync = self.t_vsync; // cached field, not recomputed every frame
+
+            // 0. Deadline sweep (runs every vsync regardless of RX activity).
+            // StreamSocket::recv only evaluates in_progress_packets' deadlines as a side
+            // effect of an incoming shard, so a frame stuck waiting on shards that never
+            // arrive (full stream stall) would otherwise never be flagged lost or have its
+            // buffer recycled. Piggybacking on vsync's unconditional self-reschedule gives
+            // the deadline check a guaranteed periodic tick independent of network activity.
+            if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
+                ssocket.sweep_expired_deadlines(now);
+                let (frames_lost, shards_lost) =
+                    StreamSocket::flush_shards_lost_deadline(&mut ssocket);
+
+                if !frames_lost.is_empty() {
+                    self.report_frame_lost(frames_lost, shards_lost, context);
+                }
+            }
+
             // 1. Setup Timing & Dimensions
             let window_width = (WIDTH_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
             let window_height = (HEIGHT_ENCODER as f64 * SCALE_FACTOR_FFMPEG_WINDOW) as usize;
