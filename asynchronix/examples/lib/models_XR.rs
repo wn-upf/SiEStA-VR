@@ -1926,7 +1926,9 @@ impl BitrateManager {
             last_update_instant: TaiTime::EPOCH,
 
             frame_index: 0,
-            frame_interval_average: SlidingWindowAverage::new(0.0, max_history_size),
+            // seeded with one nominal frame period, like `frame_interarrival_average` on the receive side: a 0 s seed read the
+            // send rate n / (n - 1) too high over a session's first n frames and pushed NeSt-VR's NFR under its threshold
+            frame_interval_average: SlidingWindowAverage::new(1.0 / initial_framerate, max_history_size),
             // encoder_latency_average: SlidingWindowAverage::new(0.0, max_history_size), // Unused in this simulator.
             // network_latency_average: SlidingWindowAverage::new(0.0, max_history_size),
             bitrate_average_mbps: SlidingWindowAverage::new(seed_bitrate_mbps, max_history_size),
@@ -2093,6 +2095,11 @@ impl BitrateManager {
         if self.last_frame_instant != TaiTime::EPOCH {
             let dur = now.duration_since(self.last_frame_instant).as_secs_f32();
             self.frame_interval_average.submit_sample(dur);
+        } else if self.last_stats_received == TaiTime::EPOCH {
+            // The session's first frame starts the stats timer (`check_stats_timeout`), as NeSt-VR's server starts it
+            // when it builds its BitrateManager at connection. Without this, a session whose frames all miss the
+            // client deadline sends no stats, and NeSt-VR never backs off from its seed bitrate.
+            self.last_stats_received = now;
         }
         self.last_frame_instant = now;
     }
@@ -2248,12 +2255,9 @@ impl BitrateManager {
         };
         let timeout = frame_interval * STATS_TIMEOUT_FRAME_MULTIPLIER;
 
-        // `last_stats_received` is seeded to `TaiTime::EPOCH` at construction/reset as a "no
-        // stats received yet" sentinel, not a real arrival time. Diffing `now` (already several
-        // seconds past EPOCH once a session actually starts) against that sentinel would blow
-        // past `timeout` on the very first call and step the seeded max-ladder bitrate down
-        // before a single client_stats packet has arrived. Skip the timeout check entirely until
-        // the first real stats packet lands and sets a real timestamp here.
+        // `last_stats_received` is `TaiTime::EPOCH` from construction/reset until the session's
+        // first encoded frame (`report_encoded_frame_server`) starts the timer; diffing `now`
+        // against EPOCH would step the seeded bitrate down before the session has sent anything.
         if self.last_stats_received == TaiTime::EPOCH {
             return;
         }
@@ -2293,10 +2297,33 @@ impl BitrateManager {
         }
     }
 
-    pub fn one_pass_abr(&mut self, now: TaiTime<0>, ) -> f32 {
-        if matches!(self.bitrate_mode, BitrateMode::NestVr { .. } ) {
+    /// Called on every frame before the ABR tick: NeSt-VR's stats timeout, which ALVR's server runs on every frame
+    /// (`get_encoder_params`); NeSt-VR's rate rule still waits for its update interval. Returns the target (bit/s).
+    pub fn stats_timeout_per_frame(&mut self, now: TaiTime<0>) -> f32 {
+        if matches!(self.bitrate_mode, BitrateMode::NestVr { .. }) {
             self.check_stats_timeout(now);
         }
+        self.last_target_bitrate_bps
+    }
+
+    /// NeSt-VR's capacity estimate (bit/s): the mean peak throughput (frame bytes / frame_span) of the frames in the window.
+    /// A frame whose shards all arrive in one A-MPDU has frame_span 0 here (one delivery instant) and a sample of 0. On a
+    /// real link those shards reach the app microseconds apart: a sample of at least the PHY rate, and from about a tenth
+    /// of such frames on they alone lift the mean above NeSt-VR's 100 Mb/s top. So a window holding one sets no limit (an
+    /// approximation: with under ~1 % of them, at 80-90 Mb/s, the real cap could still bind). Counted as 0, they pulled the
+    /// cap and the bitrate to the floor, since below ~50 Mb/s most frames fit in one A-MPDU, and the frames split across
+    /// two A-MPDUs, a frame period apart, measure little more than the session's own bitrate. An empty window (after a
+    /// session reset) sets no limit either. (Backport of main f603e19.)
+    fn nestvr_capacity_bps(&self) -> f32 {
+        let w = &self.peak_throughput_average;
+        if w.history_buffer_len() == 0 || w.get_history_iter().any(|&s| s <= 0.0) {
+            f32::INFINITY
+        } else {
+            f32::max(w.get_average(), 1e-9)
+        }
+    }
+
+    pub fn one_pass_abr(&mut self, now: TaiTime<0>, ) -> f32 {
 
         const TIME_WARMUP_ABR: u64 = 8;
 
@@ -2519,8 +2546,7 @@ impl BitrateManager {
                     let nfr_avg = fps_rx_avg / fps_tx_avg;
                     let rtt_avg_ms = self.rtt_average.get_average() * 1000.0;
 
-                    let estimated_capacity_bps =
-                        f32::max(self.peak_throughput_average.get_average(), 1e-9);
+                    let estimated_capacity_bps = self.nestvr_capacity_bps();
 
                     let mut bitrate_bps: f32 = self.last_target_bitrate_bps;
 
@@ -4413,6 +4439,8 @@ impl XRServer {
                 // print_red!("Duration of ABR {:.4}", duration_abr.as_secs_f32());
 
                 let count = get_counter().fetch_add(1, Ordering::Relaxed);
+
+                self.bitrate_manager.stats_timeout_per_frame(now);
 
                 if !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::EVeREst{ .. }) || // One pass every BITRATE_UPDATE_INTERVAL
                     !matches!(self.bitrate_manager.bitrate_mode , BitrateMode::GCCPort{ .. }) || !matches!(self.bitrate_manager.bitrate_mode, BitrateMode::FovOptixPort{..})
