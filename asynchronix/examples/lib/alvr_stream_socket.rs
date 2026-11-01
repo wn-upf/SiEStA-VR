@@ -1719,7 +1719,11 @@ pub enum DropProbability {
 #[derive(Debug)]
 #[allow(unused)]
 pub enum ConnectionError {
-    TryAgain(anyhow::Error),
+    /// "Nothing yet, poll again": pure control flow, discarded by every caller. Deliberately NOT an
+    /// `anyhow::Error`: `anyhow` captures a full stack backtrace on construction when
+    /// `RUST_BACKTRACE=1` (which `run_sim` sets), and an empty-channel poll happens ~once per
+    /// received shard -- hundreds of thousands of backtrace captures per simulated minute.
+    TryAgain(&'static str),
     Other(anyhow::Error),
 }
 #[allow(unused)]
@@ -1736,7 +1740,7 @@ impl<T> AnyhowToCon<T> for Result<T, anyhow::Error> {
 pub type ConResult<T = ()> = Result<T, ConnectionError>;
 
 pub fn try_again<T>() -> ConResult<T> {
-    Err(ConnectionError::TryAgain(anyhow!("Try again")))
+    Err(ConnectionError::TryAgain("try again"))
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SocketProtocol {
@@ -3392,7 +3396,7 @@ impl<T> HandleTryAgain<T> for io::Result<T> {
     fn handle_try_again(self) -> ConResult<T> {
         self.map_err(|e| {
             if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock {
-                ConnectionError::TryAgain(e.into())
+                ConnectionError::TryAgain("io timed out / would block")
             } else {
                 ConnectionError::Other(e.into())
             }
@@ -3403,7 +3407,7 @@ impl<T> HandleTryAgain<T> for io::Result<T> {
 impl<T> HandleTryAgain<T> for std::result::Result<T, RecvTimeoutError> {
     fn handle_try_again(self) -> ConResult<T> {
         self.map_err(|e| match e {
-            RecvTimeoutError::Timeout => ConnectionError::TryAgain(e.into()),
+            RecvTimeoutError::Timeout => ConnectionError::TryAgain("recv timeout"),
             RecvTimeoutError::Disconnected => ConnectionError::Other(e.into()),
         })
     }
@@ -3412,7 +3416,7 @@ impl<T> HandleTryAgain<T> for std::result::Result<T, RecvTimeoutError> {
 impl<T> HandleTryAgain<T> for std::result::Result<T, TryRecvError> {
     fn handle_try_again(self) -> ConResult<T> {
         self.map_err(|e| match e {
-            TryRecvError::Empty => ConnectionError::TryAgain(e.into()),
+            TryRecvError::Empty => ConnectionError::TryAgain("channel empty"),
             TryRecvError::Disconnected => ConnectionError::Other(e.into()),
         })
     }
