@@ -31,6 +31,57 @@ pub type DetHasher = std::hash::BuildHasherDefault<std::hash::DefaultHasher>;
 pub type DetHashMap<K, V> = std::collections::HashMap<K, V, DetHasher>;
 pub type DetHashSet<K> = std::collections::HashSet<K, DetHasher>;
 
+/// Cheap multiply-rotate hasher (the rustc-hash 2 algorithm) for maps that are only ever *looked up*
+/// (`get` / `get_mut` / `entry` / `contains` / `insert`), or iterated only in order-independent ways (`any`, a
+/// sum, a reverse lookup of a unique value): their results cannot depend on the hasher, and SipHash is a
+/// visible share of the MAC's per-TXOP time. A map whose iteration order can reach the results must stay a
+/// [`DetHashMap`]. (Ported from SiEStA-VR main b26efbf.)
+#[derive(Clone, Copy, Default)]
+pub struct FastHasher {
+    hash: u64,
+}
+
+impl FastHasher {
+    const K: u64 = 0xf135_7aea_2e62_a9c5;
+    #[inline(always)]
+    fn add(&mut self, w: u64) {
+        self.hash = self.hash.wrapping_add(w).wrapping_mul(Self::K);
+    }
+}
+
+impl std::hash::Hasher for FastHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut b = [0u8; 8];
+            b[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(b) ^ ((rest.len() as u64) << 56));
+        }
+    }
+    #[inline] fn write_u8(&mut self, i: u8) { self.add(i as u64) }
+    #[inline] fn write_u16(&mut self, i: u16) { self.add(i as u64) }
+    #[inline] fn write_u32(&mut self, i: u32) { self.add(i as u64) }
+    #[inline] fn write_u64(&mut self, i: u64) { self.add(i) }
+    #[inline] fn write_usize(&mut self, i: usize) { self.add(i as u64) }
+    #[inline] fn write_i8(&mut self, i: i8) { self.add(i as u8 as u64) }
+    #[inline] fn write_i16(&mut self, i: i16) { self.add(i as u16 as u64) }
+    #[inline] fn write_i32(&mut self, i: i32) { self.add(i as u32 as u64) }
+    #[inline] fn write_i64(&mut self, i: i64) { self.add(i as u64) }
+    #[inline] fn write_isize(&mut self, i: isize) { self.add(i as usize as u64) }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash.rotate_left(26)
+    }
+}
+
+pub type FastHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
+pub type FastHashSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FastHasher>>;
+
 /// Seed used until [`set_global_seed`] is called (runs are deterministic by default).
 pub const DEFAULT_SEED: u64 = 0x5157_3D57_A5EE_D001;
 

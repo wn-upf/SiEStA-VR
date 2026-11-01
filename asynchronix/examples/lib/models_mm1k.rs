@@ -2483,7 +2483,7 @@ pub struct QueueModule {
     pub aux_ampdu_serviced: AmpduPacket,
 
     // pub packet_being_served: bool,
-    pub link_is_transmitting: HashMap<u8, bool>,
+    pub link_is_transmitting: crate::lib::sim_rng::FastHashMap<u8, bool>,
 
     pub blocked_packet_counter: usize,
     pub arrived_packet_counter: usize,
@@ -2500,7 +2500,7 @@ pub struct QueueModule {
 
     pub STA_coords_grid: Vec<Coords>,
 
-    pub STA_coords_map: HashMap<usize, Coords>,
+    pub STA_coords_map: crate::lib::sim_rng::FastHashMap<usize, Coords>,
 
     pub cumulative_stats_queue: Arc<Mutex<QueueStats>>,
 
@@ -2510,7 +2510,7 @@ pub struct QueueModule {
     pub array_stas_stats: Arc<Mutex<HashMap<usize, perStaLockStats>>>,
 
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
-    pub sta_stats_cache: HashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization
+    pub sta_stats_cache: crate::lib::sim_rng::FastHashMap<(i32, i32), StaRateInfo>, // for caching per-sta stats, performance optimization
     pub PL_probability: f64,
 
     // pub queue_network_emulator: QueueMechanism,
@@ -2519,14 +2519,14 @@ pub struct QueueModule {
 
     // pub shared_medium: Medium,
     pub link_mediums: HashMap<u8, Medium>, // State for each link (key=link_id)
-    pub link_channel_widths: HashMap<u8, usize>, // Store channel width per link
-    pub sta_capabilities: HashMap<i32, StaCapabilities>, // (key=sta_id)
-    pub link_queue_depths: HashMap<u8, usize>, // Holds packets assigned to each link with MLO: Required for optimization to stop iterating O(n) over queue
+    pub link_channel_widths: crate::lib::sim_rng::FastHashMap<u8, usize>, // Store channel width per link
+    pub sta_capabilities: crate::lib::sim_rng::FastHashMap<i32, StaCapabilities>, // (key=sta_id)
+    pub link_queue_depths: crate::lib::sim_rng::FastHashMap<u8, usize>, // Holds packets assigned to each link with MLO: Required for optimization to stop iterating O(n) over queue
     // pub mac_queue_depths: HashMap<MacKey, usize>, // Holds every EDCA_AC/STA_ID queue sizes for logging. 
     // pub mac_queue_depths: Vec<usize>, // flat, no mutex needed if single-threaded DES, indexed by mac_key_index
     // pub array_dcf_values: Arc<Mutex<HashMap<MacKey, DcfStats>>>,
     pub dcf_values: Vec<DcfStats>,  // flat, no mutex needed if single-threaded DES
-    pub mac_key_index: HashMap<MacKey, usize>,  // built once at init, never mutated
+    pub mac_key_index: crate::lib::sim_rng::FastHashMap<MacKey, usize>,  // built once at init, never mutated
     pub num_links: usize, 
 
 
@@ -2535,7 +2535,7 @@ pub struct QueueModule {
     pub window_metrics_mcs_util: Arc<Mutex<HashMap<WindowKey, WindowMetrics>>>, //  K: STA_ID, V: Metrics on temporal window, Arc<Mutex<>> for accessibility
     pub output_metrics: Output<WindowMetricReport>, // Just to report MCS and utilization in real time, for each STA.
     pub viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
-    pub active_mac_key_counts: HashMap<(i32, EdcaAc), usize>,
+    pub active_mac_key_counts: crate::lib::sim_rng::FastHashMap<(i32, EdcaAc), usize>,
 
     pub slot_tick_pending: bool,
 }
@@ -2563,7 +2563,7 @@ impl QueueModule {
 
         let total_entries = (num_stas + 1) * num_links * 4;     // index = sta_idx * (num_links * 4 ACs) + link_idx * 4 ACs + ac_idx
         let mut dcf_values: Vec<DcfStats> = Vec::with_capacity(total_entries);
-        let mut mac_key_index: HashMap<MacKey, usize> = HashMap::with_capacity_and_hasher(total_entries, Default::default());
+        let mut mac_key_index: crate::lib::sim_rng::FastHashMap<MacKey, usize> = crate::lib::sim_rng::FastHashMap::with_capacity_and_hasher(total_entries, Default::default());
 
 
         // let mut mac_queue_depths = vec![0usize; total_entries];
@@ -2632,10 +2632,10 @@ impl QueueModule {
         // Initialize link mediums
         let mut link_mediums = HashMap::default();
         let mut link_outputs = HashMap::default();
-        let mut link_channel_widths = HashMap::default();
-        let mut link_queue_depths = HashMap::default(); // <-- ADD THIS
+        let mut link_channel_widths = crate::lib::sim_rng::FastHashMap::default();
+        let mut link_queue_depths = crate::lib::sim_rng::FastHashMap::default(); // <-- ADD THIS
 
-        let mut being_served = HashMap::default();
+        let mut being_served = crate::lib::sim_rng::FastHashMap::default();
 
         for link_config in &link_configs {
             link_queue_depths.insert(link_config.link_id, 0usize); // ← add this
@@ -2670,7 +2670,7 @@ impl QueueModule {
             coords_queue: Coords::with_coords(AP_X, AP_Y, 0.0), // To test.
             p_tx: P_TX,
             STA_coords_grid: Vec::new(),
-            STA_coords_map: HashMap::default(),
+            STA_coords_map: crate::lib::sim_rng::FastHashMap::default(),
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
             // array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),
@@ -2678,7 +2678,7 @@ impl QueueModule {
             mac_key_index, 
             num_links, 
 
-            sta_stats_cache: HashMap::default(),
+            sta_stats_cache: crate::lib::sim_rng::FastHashMap::default(),
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
             PL_probability: PL_prob,
@@ -2688,14 +2688,14 @@ impl QueueModule {
             link_queue_depths,
             // mac_queue_depths,
             // mac_queue_depths: HashMap::default(), 
-            sta_capabilities: HashMap::default(),
+            sta_capabilities: crate::lib::sim_rng::FastHashMap::default(),
             mlo_linkselection_strat,
             packs_per_ampdu,
 
             window_metrics_mcs_util: Arc::new(Mutex::new(windows_vec)),
             output_metrics: Output::default(),
             viz_tx, 
-            active_mac_key_counts: HashMap::default(), 
+            active_mac_key_counts: crate::lib::sim_rng::FastHashMap::default(), 
             slot_tick_pending: false,
         }
     }
@@ -3578,7 +3578,7 @@ impl QueueModule {
     }
 
     #[inline]
-    fn select_next_sta(&self) -> &HashMap<(i32, i32), StaRateInfo> {
+    fn select_next_sta(&self) -> &crate::lib::sim_rng::FastHashMap<(i32, i32), StaRateInfo> {
         // The entire slow loop is gone, O(1) lookup.
 
         &self.sta_stats_cache
