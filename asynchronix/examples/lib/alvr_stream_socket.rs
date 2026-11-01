@@ -1328,6 +1328,13 @@ impl ChunkedHevcEncoder {
 
 pub trait SocketWriter: Send {
     fn send(&mut self, buffer: &[u8]) -> Result<()>;
+
+    /// `send` for a payload the caller already holds as a shared `Arc<[u8]>` (packets in the
+    /// network carry one): an `Arc` channel writer forwards it with a refcount bump instead of
+    /// copying the bytes. Default: plain `send` (same bytes).
+    fn send_shared(&mut self, buffer: Arc<[u8]>) -> Result<()> {
+        self.send(&buffer)
+    }
 }
 
 // Trait used to abstract different socket (or other input/output) implementations. The funtionality
@@ -1339,11 +1346,61 @@ pub trait SocketReader: Send {
     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize>;
 
     fn peek(&self, buffer: &mut [u8]) -> ConResult<usize>;
+
+    /// Next whole message as a shared buffer, or `Ok(None)` when nothing is queued (exactly where
+    /// `recv` returns `Ok(0)`). Lets a reader that already holds `Arc<[u8]>` messages hand them
+    /// over without the copy through a caller scratch buffer. Default: via `recv`.
+    fn recv_shared(&mut self) -> ConResult<Option<Arc<[u8]>>> {
+        let mut buf = vec![0u8; MAX_PACKET_SIZE_RECV];
+        let n = self.recv(&mut buf)?;
+        Ok(if n == 0 { None } else { Some(Arc::from(&buf[..n])) })
+    }
+}
+
+/// A packet payload of exactly `len` bytes from a received message: the message itself when it
+/// already has that length (the normal case -- no copy), otherwise its first `len` bytes
+/// (zero-padded if the message is shorter, which a well-formed shard never is).
+pub fn exact_len_payload(data: Arc<[u8]>, len: usize) -> Arc<[u8]> {
+    if data.len() == len {
+        data
+    } else if data.len() > len {
+        Arc::from(&data[..len])
+    } else {
+        let mut v = data.to_vec();
+        v.resize(len, 0);
+        Arc::from(v)
+    }
+}
+
+/// Payload types a `BufferedReceiver` can carry.
+pub trait SharedPayload: AsRef<[u8]> + Send {
+    fn into_shared(self) -> Arc<[u8]>;
+}
+impl SharedPayload for Vec<u8> {
+    fn into_shared(self) -> Arc<[u8]> { Arc::from(self) }
+}
+impl SharedPayload for Arc<[u8]> {
+    fn into_shared(self) -> Arc<[u8]> { self }
 }
 
 impl SocketWriter for Sender<Vec<u8>> {
     fn send(&mut self, buffer: &[u8]) -> Result<()> {
         Sender::send(self, buffer.to_vec()).unwrap();
+        Ok(())
+    }
+}
+
+/// The in-process app<->network channel: messages are `Arc<[u8]>`, so a packet already held as
+/// `Arc<[u8]>` crosses it without a copy (`send_shared`), and the drain side takes ownership of
+/// the same allocation (`recv_shared`).
+impl SocketWriter for Sender<Arc<[u8]>> {
+    fn send(&mut self, buffer: &[u8]) -> Result<()> {
+        Sender::send(self, Arc::from(buffer)).unwrap();
+        Ok(())
+    }
+
+    fn send_shared(&mut self, buffer: Arc<[u8]>) -> Result<()> {
+        Sender::send(self, buffer).unwrap();
         Ok(())
     }
 }
@@ -1363,13 +1420,13 @@ impl<T> BufferedReceiver<T> {
     }
 }
 
-impl SocketReader for BufferedReceiver<Vec<u8>> {
+impl<T: SharedPayload> SocketReader for BufferedReceiver<T> {
     fn recv(&mut self, buffer: &mut [u8]) -> ConResult<usize> {
         // First check if we have data in the buffer
         if let Some(data) = self.buffer.take() {
-            let data_len = data.len();
+            let data_len = data.as_ref().len();
             if data_len <= buffer.len() {
-                buffer[..data_len].copy_from_slice(&data);
+                buffer[..data_len].copy_from_slice(data.as_ref());
                 Ok(data_len)
             } else {
                 // Put the data back in the buffer since it didn't fit
@@ -1380,9 +1437,9 @@ impl SocketReader for BufferedReceiver<Vec<u8>> {
             // If no buffered data, try to receive new data
             match self.receiver.try_recv() {
                 Ok(data) => {
-                    let data_len = data.len();
+                    let data_len = data.as_ref().len();
                     if data_len <= buffer.len() {
-                        buffer[..data_len].copy_from_slice(&data);
+                        buffer[..data_len].copy_from_slice(data.as_ref());
                         Ok(data_len)
                     } else {
                         Err(ConnectionError::Other(anyhow!("Buffer too small")))
@@ -1414,9 +1471,9 @@ impl SocketReader for BufferedReceiver<Vec<u8>> {
 
         // Now we either had data in the buffer or just received it
         if let Some(ref data) = *buffer_guard {
-            let data_len = data.len();
+            let data_len = data.as_ref().len();
             if data_len <= buffer.len() {
-                buffer[..data_len].copy_from_slice(data);
+                buffer[..data_len].copy_from_slice(data.as_ref());
                 Ok(data_len)
             } else {
                 Err(ConnectionError::Other(anyhow!("Buffer too small")))
@@ -1424,6 +1481,17 @@ impl SocketReader for BufferedReceiver<Vec<u8>> {
         } else {
             // This should never happen due to the logic above
             Ok(0)
+        }
+    }
+
+    fn recv_shared(&mut self) -> ConResult<Option<Arc<[u8]>>> {
+        if let Some(data) = self.buffer.take() {
+            return Ok(Some(data.into_shared()));
+        }
+        match self.receiver.try_recv() {
+            Ok(data) => Ok(Some(data.into_shared())),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(ConnectionError::Other(anyhow!("Channel disconnected"))),
         }
     }
 }
@@ -2577,7 +2645,7 @@ impl StreamSocket {
 pub enum StreamSocketBuilder {
     // Tcp(TcpListener),
     // Udp(UdpSocket),
-    Channel(Sender<Vec<u8>>, BufferedReceiver<Vec<u8>>),
+    Channel(Sender<Arc<[u8]>>, BufferedReceiver<Arc<[u8]>>),
 }
 
 #[allow(unused)]
@@ -2741,7 +2809,7 @@ impl StreamSocketBuilder {
                 //     (Box::new(send_socket), Box::new(receive_socket))
                 // }
                 SocketProtocol::Channel => {
-                    let (sender, receiver) = buffered_channel();
+                    let (sender, receiver) = buffered_channel::<Arc<[u8]>>();
                     (Box::new(sender), Box::new(receiver))
                 }
             };

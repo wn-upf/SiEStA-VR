@@ -4062,7 +4062,7 @@ impl XRServer {
                         self.nada_timer_report(&buffer, now); // XRSIM_NADA_FIX=2: the client's 100 ms report
                     }
                     if let Some(sock) = self.tracking_app_receiver.clone() {
-                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let sender = sock.network_app_interface.lock().unwrap().send_shared(buffer.clone());
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
 
@@ -4146,7 +4146,7 @@ impl XRServer {
                 }
                 STATISTICS => {
                     if let Some(sock) = self.statistics_app_receiver.clone() {
-                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let sender = sock.network_app_interface.lock().unwrap().send_shared(buffer);
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                         println!("TODO THE REST!!");
@@ -4200,22 +4200,17 @@ impl XRServer {
             while !stop {
                 let bytes_received = {
                     let mut guard = receiver.lock().unwrap();
-                    guard.recv(&mut buffer)
+                    guard.recv_shared()
                 };
 
                 match bytes_received {
-                    Ok(bytes_received) => {
-                        if bytes_received == 0 {
-                            // If no data is received, stop the loop
-                            // println!(
-                            //     "{}",
-                            //     DebugColor::DarkGreen.to_color_fn()(String::from(
-                            //         "No new data received, stopping."
-                            //     ))
-                            // );
+                    Ok(received) => {
+                        // `Ok(None)` is exactly where `recv` returned `Ok(0)`: nothing queued.
+                        let Some(data) = received else {
                             stop = true;
                             break;
-                        } else {
+                        };
+                        {
                             // println!("{}", DebugColor::DarkGreen.to_color_fn()(String::from("Parsed from connection output:")));
                             if let Ok((
                                 packet_length_bytes,
@@ -4224,7 +4219,7 @@ impl XRServer {
                                 shards_count,
                                 shard_index,
                                 tx_r_instant,
-                            )) = parse_shard_data(&buffer[..100])
+                            )) = parse_shard_data(&data[..data.len().min(100)])
                             {
                                 let str_id = match stream_id {
                                     0 => "Tracking",
@@ -4250,7 +4245,7 @@ impl XRServer {
                                     tx_instant: tx_r_instant,
                                     frame_losses: None, 
                                 };
-                                packet.data_inner = buffer[..packet_length_bytes as usize].into();
+                                packet.data_inner = crate::lib::alvr_stream_socket::exact_len_payload(data.clone(), packet_length_bytes as usize);
 
                                 if packet.header_alvr.shard_index == 0 {
                                     debug_print!(
@@ -5915,22 +5910,17 @@ impl XRClient {
             while !stop {
                 let bytes_received = {
                     let mut guard = receiver.lock().unwrap();
-                    guard.recv(&mut buffer)
+                    guard.recv_shared()
                 };
 
                 match bytes_received {
-                    Ok(bytes_received) => {
-                        if bytes_received == 0 {
-                            // If no data is received, stop the loop
-                            // println!(
-                            //     "{}",
-                            //     DebugColor::DarkGreen.to_color_fn()(String::from(
-                            //         "No new data received, stopping."
-                            //     ))
-                            // );
+                    Ok(received) => {
+                        // `Ok(None)` is exactly where `recv` returned `Ok(0)`: nothing queued.
+                        let Some(data) = received else {
                             stop = true;
                             break;
-                        } else {
+                        };
+                        {
                             // println!("{}", DebugColor::DarkGreen.to_color_fn()(String::from("Parsed from connection output:")));
                             if let Ok((
                                 packet_length_bytes,
@@ -5939,7 +5929,7 @@ impl XRClient {
                                 shards_count,
                                 shard_index,
                                 tx_r_instant,
-                            )) = parse_shard_data(&buffer[..100])
+                            )) = parse_shard_data(&data[..data.len().min(100)])
                             {
                                 let str_id = match stream_id {
                                     0 => "Tracking",
@@ -5978,7 +5968,7 @@ impl XRClient {
                                     tx_instant: tx_r_instant,
                                     frame_losses: None, 
                                 };
-                                packet.data_inner = buffer[..packet_length_bytes as usize].into();
+                                packet.data_inner = crate::lib::alvr_stream_socket::exact_len_payload(data.clone(), packet_length_bytes as usize);
                                 packet.length_packet_bits = packet_length_bytes as usize * 8  + 100 * 8; // convert length (bytes) to bits + ALVR App header (100 bytes);
 
                                 if !self.edca_be_mode {
@@ -6923,7 +6913,7 @@ impl XRClient {
             match header.stream_id.clone() {
                 HAPTICS => {
                     if let Some(sock) = self.input_app_haptics.clone() {
-                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let sender = sock.network_app_interface.lock().unwrap().send_shared(buffer);
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                         println!("receiver: {:?}", receiver);
@@ -6932,7 +6922,7 @@ impl XRClient {
 
                 AUDIO => {
                     if let Some(sock) = self.input_app_audio.clone() {
-                        let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let sender = sock.network_app_interface.lock().unwrap().send_shared(buffer);
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
                         let receiver = sock.inner.lock().unwrap().recv(&mut new_buffer);
                         // println!("receiver: {:?}", receiver);
@@ -6944,7 +6934,7 @@ impl XRClient {
                 VIDEO => {
                     if let Some(sock) = self.input_app_video.clone() {
                         // println!("app lock");
-                        let _sender = sock.network_app_interface.lock().unwrap().send(&buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
+                        let _sender = sock.network_app_interface.lock().unwrap().send_shared(buffer); // We send the packet from network to the application, where it needs to be now read and passed to the application!
 
                         if let Some(logger) = &self.parquet_shard_rx {
                             logger.update_stats(
@@ -6974,7 +6964,7 @@ impl XRClient {
                 FOVOPTIX_BW_PROBE => {
                     // println!("Client: RECEIVED PROBE!");
                     if let Some(sock) = self.input_app_bw_probe.clone() {
-                        let _sender = sock.network_app_interface.lock().unwrap().send(&buffer);
+                        let _sender = sock.network_app_interface.lock().unwrap().send_shared(buffer);
 
                         if let Some(mut ssocket) = self.streamsocket_clone.as_mut() {
                             let _resulllt = StreamSocket::recv(
