@@ -3467,6 +3467,14 @@ impl Drop for ParquetBitrate {
 
 const BATCH_SIZE_SHARD_RX: usize = 512;
 
+/// `XRSIM_NO_PKTLOG=1`: no per-shard log (`SHARD_RX_stats*.parquet`); every other file is written as usual. Off by
+/// default. The per-shard rows are most of the Parquet cost and of the memory that grows with a run, but the paper's
+/// deadline analysis (frame loss at a deadline) reads them.
+pub fn no_pktlog() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("XRSIM_NO_PKTLOG").map_or(false, |v| v == "1"))
+}
+
 #[derive(Debug)]
 pub struct ShardRxRow {
     /// Formatted (nine decimals) by the writer thread, not per shard on the simulation thread.
@@ -5486,7 +5494,7 @@ impl XRClient {
             None
         };
 
-        let parquet_shard_rx = if crate::lib::SHARD_RX_PARQUET_LOGGING {
+        let parquet_shard_rx = if crate::lib::SHARD_RX_PARQUET_LOGGING && !no_pktlog() {
             let num_id = crate::lib::get_third_octet(server_ip).unwrap_or(0);
             match ParquetShardRx::new(name_folder, num_id, results_path) {
                 Ok(logger) => Some(logger),
