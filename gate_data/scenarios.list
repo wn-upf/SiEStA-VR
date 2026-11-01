@@ -1,0 +1,37 @@
+# Byte-exactness gate scenarios (scripts/byteexact_gate.sh).
+# One scenario per line: <name> [ENV=value ...] [key=value ...]
+# Keys override the paper's command line (p_xrun.sh order; defaults in byteexact_gate.sh):
+#   stop dist br pl nxr nbg rate isul test video fps seed abr rwalk mlo policy ampdu codec det delay
+# ABR codes: 0 CBR, 1 NeSt-VR, 2 EVeREst, 4 GCC, 5 NADA, 9 ALVR Adaptive.
+# Single link (SLO80), 1 and 4 users, every ABR of the paper.
+slo1_cbr      nxr=1 abr=0
+slo1_nest     nxr=1 abr=1
+slo1_everest  nxr=1 abr=2
+slo1_gcc      nxr=1 abr=4
+slo1_nada     nxr=1 abr=5
+slo1_adapt    nxr=1 abr=9
+slo4_cbr      nxr=4 abr=0
+slo4_nest     nxr=4 abr=1
+slo4_everest  nxr=4 abr=2
+slo4_gcc      nxr=4 abr=4
+slo4_nada     nxr=4 abr=5
+slo4_adapt    nxr=4 abr=9
+# The paper's revision runs NADA with the receiver fix.
+slo4_nadafix  XRSIM_NADA_FIX=2 nxr=4 abr=5
+# MLO (two 80 MHz links, opportunistic link choice unless policy= says otherwise).
+mlo8_cbr      nxr=8 abr=0 mlo=MLO80-80
+mlo8_nest     nxr=8 abr=1 mlo=MLO80-80
+mlo4_everest  nxr=4 abr=2 mlo=MLO80-80
+mlo4_nada     nxr=4 abr=5 mlo=MLO80-80
+mlo4_adapt_pf nxr=4 abr=9 mlo=MLO80-80 policy=0
+mlo4_cbr_lyap nxr=4 abr=0 mlo=MLO80-80 policy=2
+# Random walk (random start positions, 5 m/s walk).
+rwk8_mlo_cbr  nxr=8 abr=0 mlo=MLO80-80 rwalk=1
+rwk4_mlo_nest nxr=4 abr=1 mlo=MLO80-80 rwalk=1
+rwk4_slo_nada nxr=4 abr=5 rwalk=1
+# Features outside the paper's sweeps that the speed-ups touch.
+slo2_bg_dlul  nxr=2 abr=0 nbg=3 isul=2 rate=500
+slo2_fib      nxr=2 abr=1 det=1
+slo2_random   nxr=2 abr=1 test=RANDOM
+slo2_markov   nxr=2 abr=4 test=MARKOV
+slo2_nodelay  nxr=2 abr=0 delay=0

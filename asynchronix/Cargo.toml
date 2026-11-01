@@ -140,7 +140,4 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "integration"
 path = "tests/tests.rs"
 
-[profile.release]
-lto = true              # Link-time optimization
-codegen-units = 1       # Better optimization
-opt-level = 3           # Maximum optimization
+# Build profiles live in the workspace's Cargo.toml (cargo ignores a member package's [profile.*] sections).

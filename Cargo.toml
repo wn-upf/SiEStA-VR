@@ -1,3 +1,12 @@
 [workspace]
 members = ["asynchronix"]
 resolver = "2"
+
+# `cargo build --release` is the quick everyday build (local).
+# `cargo build --profile optimized --example XR_sim` is the full-speed build for expensive HPC runs; its binary is in
+# target/optimized/examples/. Fat LTO and one codegen unit: same output as --release, a few percent faster, about twice
+# the build time.
+[profile.optimized]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
