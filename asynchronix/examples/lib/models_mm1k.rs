@@ -4011,7 +4011,7 @@ impl QueueModule {
             );
         }
 
-        self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets;
+        self.aux_ampdu_serviced.mpdu_packets = new_ampdu_packets.into();
 
         // ========== Remove successfully transmitted packets from queue ==========
         // ── Pop aggregated packets from their deques ─────────────────────────────────

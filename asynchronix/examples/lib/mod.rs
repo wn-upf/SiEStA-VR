@@ -3065,9 +3065,74 @@ impl MpduPacket {
 pub type MacKey = (i32, EdcaAc, u8); // e.g. (AP/STA_ID, EDCA_AC, link_id)); last u8 for MLO link ID
 pub type WindowKey = (i32, u8); // (STA_ID, link_id)
 
+/// The MPDUs of an A-MPDU, shared behind an `Arc`: an A-MPDU is broadcast to every STA model and only its
+/// destination reads the MPDUs, so cloning the `AmpduPacket` (once per receiver, plus the TXOP's own copy) must not
+/// deep-copy a few hundred `MpduPacket`s each time. Reads go through `Deref<Target = Vec<MpduPacket>>`; a mutation
+/// copies on write (`Arc::make_mut`); consuming it by value moves the Vec out when this is the last holder.
+/// Ported from rlgames-simperf e44b1aed.
+#[derive(Debug, Clone, Default)]
+pub struct MpduList(Arc<Vec<MpduPacket>>);
+
+impl MpduList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// The MPDUs as an owned Vec: moved out when this is the last holder, else cloned.
+    pub fn into_vec(self) -> Vec<MpduPacket> {
+        Arc::try_unwrap(self.0).unwrap_or_else(|shared| (*shared).clone())
+    }
+    /// Empties the list without copying a shared Vec first.
+    pub fn clear(&mut self) {
+        match Arc::get_mut(&mut self.0) {
+            Some(v) => v.clear(),
+            None => self.0 = Arc::new(Vec::new()),
+        }
+    }
+}
+impl std::ops::Deref for MpduList {
+    type Target = Vec<MpduPacket>;
+    #[inline]
+    fn deref(&self) -> &Vec<MpduPacket> {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for MpduList {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<MpduPacket> {
+        Arc::make_mut(&mut self.0)
+    }
+}
+impl From<Vec<MpduPacket>> for MpduList {
+    fn from(v: Vec<MpduPacket>) -> Self {
+        MpduList(Arc::new(v))
+    }
+}
+impl FromIterator<MpduPacket> for MpduList {
+    fn from_iter<I: IntoIterator<Item = MpduPacket>>(iter: I) -> Self {
+        MpduList(Arc::new(iter.into_iter().collect()))
+    }
+}
+impl IntoIterator for MpduList {
+    type Item = MpduPacket;
+    type IntoIter = std::vec::IntoIter<MpduPacket>;
+    fn into_iter(self) -> Self::IntoIter {
+        match Arc::try_unwrap(self.0) {
+            Ok(v) => v.into_iter(),
+            Err(shared) => (*shared).clone().into_iter(),
+        }
+    }
+}
+impl<'a> IntoIterator for &'a MpduList {
+    type Item = &'a MpduPacket;
+    type IntoIter = std::slice::Iter<'a, MpduPacket>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AmpduPacket {
-    pub mpdu_packets: Vec<MpduPacket>, // Container for MPDU packets
+    pub mpdu_packets: MpduList, // Container for MPDU packets
     pub total_length: usize,           // Total length of aggregated packets
     pub padded_bits_sum: f64, // Running sum of per-MPDU padded sizes (see padded_mpdu_bits)
     pub sta_src_id: i32,
@@ -3083,7 +3148,7 @@ pub struct AmpduPacket {
 impl AmpduPacket {
     pub fn new() -> Self {
         AmpduPacket {
-            mpdu_packets: Vec::new(), // Initialize an empty vector for MPDU packets
+            mpdu_packets: MpduList::new(), // Initialize an empty vector for MPDU packets
             total_length: 0,          // Initialize total length to 0
             padded_bits_sum: 0.0,
             sta_src_id: -1,

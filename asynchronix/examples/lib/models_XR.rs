@@ -7667,7 +7667,7 @@ impl STA_extended {
             // make sure we ignore packets not corresponding to STA: the batch is the whole AMPDU,
             // in order (its Vec is taken over as is)
             self.received_packet_counter += ampdu_packet.mpdu_packets.len();
-            packet_batch = ampdu_packet.mpdu_packets;
+            packet_batch = ampdu_packet.mpdu_packets.into_vec();
         }
         if !packet_batch.is_empty() {
             let frame = TimedFrame {
@@ -7932,7 +7932,7 @@ mod xr_model_tests {
         // AMPDU addressed to this STA: should be forwarded.
         let mut mine = AmpduPacket::new();
         mine.sta_dest_id = my_id;
-        mine.mpdu_packets = vec![MpduPacket::new(), MpduPacket::new()];
+        mine.mpdu_packets = vec![MpduPacket::new(), MpduPacket::new()].into();
         simu.process_event(STA_extended::input_wireless, mine, addr.clone());
         simu.step();
 
@@ -7943,7 +7943,7 @@ mod xr_model_tests {
         // AMPDU addressed to someone else: must be dropped, not forwarded.
         let mut not_mine = AmpduPacket::new();
         not_mine.sta_dest_id = my_id + 1;
-        not_mine.mpdu_packets = vec![MpduPacket::new()];
+        not_mine.mpdu_packets = vec![MpduPacket::new()].into();
         simu.process_event(STA_extended::input_wireless, not_mine, addr);
         simu.step();
 
