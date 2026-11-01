@@ -1486,12 +1486,15 @@ pub const WIFI_CLOUD_VR_TRANSITIONS: [[f64; 6]; 6] = [
 pub struct NetworkPatternEmulator {
     patterns: Vec<NetworkPattern>,
     ip_parent: IpAddr,
+    /// Stream of the run's seed owned by this emulator (event generation, drop / jitter draws); see `sim_rng`.
+    rng: crate::lib::sim_rng::SimRng,
 }
 impl NetworkPatternEmulator {
     pub fn new(ip_parent: IpAddr) -> Self {
         Self {
             patterns: Vec::new(),
             ip_parent,
+            rng: crate::lib::sim_rng::next_stream(&format!("NetworkPatternEmulator {ip_parent}")),
         }
     }
 
@@ -1543,7 +1546,7 @@ impl NetworkPatternEmulator {
 
         let mut current_time = overall_start; // This tracks the end of the last event
         let mut events_added = 0;
-        let mut rng = rand::thread_rng();
+        let mut rng = crate::lib::sim_rng::SimRng::new(rand::RngCore::next_u64(&mut self.rng));
         // --- End of new logic ---
 
         // Modified loop: Use a while loop to add "as many as possible"
@@ -1634,7 +1637,7 @@ impl NetworkPatternEmulator {
                     let normal_bw = Normal::new(mean_value, variance)
                         .unwrap_or_else(|_| Normal::new(mean_value, 0.1 * mean_value).unwrap());
 
-                    let z: f64 = normal_bw.sample(&mut rand::thread_rng()).max(15e6); // minimum 15 Mbps
+                    let z: f64 = normal_bw.sample(&mut rng).max(15e6); // minimum 15 Mbps
 
                     crate::print_dblue!(
                         "[{}] Bandwidth period: {:.5} -> {:.5} | sampled {:.2} Mbps",
@@ -1685,7 +1688,7 @@ impl NetworkPatternEmulator {
         initial_state: usize,
         viz_tx: Option<&crossbeam::channel::Sender<VizEvent>>,
     ) {
-        let mut rng = rand::thread_rng();
+        let mut rng = crate::lib::sim_rng::SimRng::new(rand::RngCore::next_u64(&mut self.rng));
         let mut current_state = initial_state;
         let mut current_time: TaiTime<0> = overall_start;
 
@@ -1776,8 +1779,7 @@ impl NetworkPatternEmulator {
                     if now < *valid_from || now > *valid_until {
                         continue;
                     }
-                    let mut rng = rand::thread_rng();
-                    let rand_value: f64 = rng.gen();
+                    let rand_value: f64 = self.rng.gen();
 
                     if rand_value < *drop_probability {
                         print_red!(
@@ -1804,7 +1806,7 @@ impl NetworkPatternEmulator {
                     if now < *valid_from || now > *valid_until {
                         continue;
                     }
-                    let mut rng = rand::thread_rng();
+                    let rng = &mut self.rng;
 
                     let random_component = match distribution_type {
                         JitterDistributionType::Gaussian => {
@@ -2073,6 +2075,8 @@ pub struct DcfStats {
     pub medium_free_since: TaiTime<0>, // NEW –
     pub backoff_frozen: bool,          // NEW
     pub edca_ac_str: String,
+    /// Back-off draws of this EDCAF (own stream of the run's seed, see `sim_rng`).
+    pub rng: crate::lib::sim_rng::SimRng,
     pub last_backoff_drawn_logs: u32, // Only for logging to CSV the 'drawn' BO value.
                                       // pub slot_timer_event,
 }
@@ -2091,7 +2095,13 @@ impl DcfStats {
             EdcaAc::BestEffort => "AC_BE",
         };
 
-        let drawn_randomly_bo = rand::thread_rng().gen_range(0..=p.cw_min);
+        let mut rng = crate::lib::sim_rng::stream(crate::lib::sim_rng::tag(&[
+            crate::lib::sim_rng::tag_str("edcaf"),
+            mac_key.0 as i64 as u64,
+            mac_key.1 as u64,
+            mac_key.2 as u64,
+        ]));
+        let drawn_randomly_bo = rng.gen_range(0..=p.cw_min);
 
         Self {
             mac_key, 
@@ -2102,13 +2112,14 @@ impl DcfStats {
             medium_free_since: TaiTime::EPOCH,
             backoff_frozen: false,
             edca_ac_str: edca_ac_str.to_string(),
+            rng,
             last_backoff_drawn_logs: drawn_randomly_bo,
         }
     }
 
     /// Draw a new random back-off inside the current CW.
     pub fn reload_backoff(&mut self) {
-        let randomly_drawn = rand::thread_rng().gen_range(0..=self.cw);
+        let randomly_drawn = self.rng.gen_range(0..=self.cw);
 
         self.backoff_counter = randomly_drawn.clone(); //this one 'ticks down'
         self.last_backoff_drawn_logs = randomly_drawn.clone(); // this one logs the drawn value for each tx.
@@ -2455,6 +2466,10 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
 // #[allow(unused)]
 // #[derive(Clone)]
 pub struct QueueModule {
+    /// The AP's per-MPDU loss draws: own stream of the run's seed, see `sim_rng`.
+    pub rng: crate::lib::sim_rng::SimRng,
+    /// The AP's MLO link-choice draws (own stream; drawn from `&self` link selection).
+    pub link_rng: std::cell::RefCell<crate::lib::sim_rng::SimRng>,
     // pub output_port_sta1: Output<AmpduPacket>,
     pub link_outputs: HashMap<u8, Output<AmpduPacket>>, // AP's Tx ports (key=link_id)
     // pub queue: VecDeque<MpduPacket>,
@@ -2632,6 +2647,8 @@ impl QueueModule {
         let parquet_metrics_network: Option<ParquetQueue> = if crate::lib::NETWORK_PARQUET_LOGGING{Some(ParquetQueue::new(&folder_dir, results_path).expect("?? PARQUETTYPE"))} else{None};
 
         Self {
+            rng: crate::lib::sim_rng::stream(crate::lib::sim_rng::tag_str("ap")),
+            link_rng: std::cell::RefCell::new(crate::lib::sim_rng::stream(crate::lib::sim_rng::tag_str("ap link choice"))),
             // queue: VecDeque::with_capacity(queue_size),
             // queue: Vec::with_capacity(queue_size),
             per_flow_queues: vec![VecDeque::new(); total_entries],
@@ -3123,7 +3140,7 @@ impl QueueModule {
         match (a_is_idle, b_is_idle) {
             (true, true) => {
                 // Both are idle: Choose one at random.
-                let chosen_link = if rand::thread_rng().gen_bool(0.5) {
+                let chosen_link = if self.link_rng.borrow_mut().gen_bool(0.5) {
                     link_a_id
                 } else {
                     link_b_id
@@ -3166,7 +3183,7 @@ impl QueueModule {
                 // );
                 // Some(link_a_id) // WHOOPSIE! Should be RANDOM.
 
-                let random_choice = if rand::thread_rng().gen_bool(0.5) {
+                let random_choice = if self.link_rng.borrow_mut().gen_bool(0.5) {
                     link_a_id
                 } else {
                     link_b_id
@@ -3934,7 +3951,7 @@ impl QueueModule {
 
         // ========== Simulate transmission errors (MAC-layer packet loss) ==========
         let mut new_ampdu_packets: Vec<MpduPacket> = Vec::new();
-        let mut rng = rand::thread_rng();
+        let rng = &mut self.rng;
         let mut failed_count = 0;
 
         for mut packet in self.aux_ampdu_serviced.mpdu_packets.drain(..) {

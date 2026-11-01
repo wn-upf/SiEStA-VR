@@ -135,6 +135,12 @@ pub(crate) use scheduler::{
 };
 pub use sim_init::SimInit;
 
+/// Whether the calling thread is running model code (an input or replier method, or `Model::init`)
+/// of a simulation, i.e. it is an executor worker or a thread inside `Simulation::step*`.
+pub fn in_model_context() -> bool {
+    crate::executor::SIMULATION_CONTEXT.map(|_| ()).is_some()
+}
+
 use std::error::Error;
 use std::fmt;
 use std::future::Future;

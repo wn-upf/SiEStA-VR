@@ -27,7 +27,6 @@ use asynchronix::time::MonotonicTime;
 // use rand::rngs::StdRng;
 use crate::lib::{models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer, }, EdcaAc, render_text, VISUALIZER_QUEUES_ENABLED, MacKey};
 use rand::seq::SliceRandom;
-use rand::thread_rng; //  SeedableRng};
 use rand::Rng;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr};
@@ -140,7 +139,7 @@ impl VRPair {
 
         match movement_mode {
             1 => {
-                let mut rng = thread_rng();
+                let mut rng = crate::lib::sim_rng::next_stream("random_room_coords");
                 client_coords = random_room_coords(&mut rng);
             }
             2 => {
@@ -332,7 +331,7 @@ fn truncated_exponential_seconds<R: Rng>(rng: &mut R, mean: f64, a: f64, b: f64)
 }
 
 fn generate_session_timeline_basic(sim_init_time: f64, stoptime: f64) -> Vec<(f64, f64)> {
-    let mut _rng = thread_rng();
+    let mut _rng = crate::lib::sim_rng::next_stream("session_timeline");
     let mut sessions = Vec::new();
 
     // exponentially distributed start offset between 1 and 5 seconds
@@ -531,6 +530,8 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     } = params;
 
     let start_sim_benchmark = std::time::Instant::now();
+    // Every random draw of the run derives from the command line's seed (lib/sim_rng.rs).
+    crate::lib::sim_rng::set_global_seed(seed);
     let sim_unique_string = format!("Simu_{} | {codec_input_arg}", sim_id);
     let test_distances_everest_bool = test_distances_everest != 0;
     let edca_be_bool = edca_be != 0;
@@ -712,7 +713,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         _ => ObservationConfig::ManualScaledV1,
     };
 
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::lib::sim_rng::next_stream("run_sim");
 
     for i in 0..n_xr {
         // Determine the distance based on the index

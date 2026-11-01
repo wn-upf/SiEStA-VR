@@ -3053,6 +3053,7 @@ impl<H: Serialize> StreamSender<H> {
         vbv_perframe: bool, 
         deterministic_frame_sizes_bool: bool, 
         latest_gazes: Vec<[Option<glam::Quat>; 2]>, 
+        run_seed: u64, // the run's seed (sim_rng): random trace start offsets
     ) -> Result<Buffer<H>> {
         let _id_frame_files_ref = id_frame + 1;
 
@@ -3077,7 +3078,11 @@ impl<H: Serialize> StreamSender<H> {
             if self.ffmpeg_encoder.is_none() {
                 // Create a new ChunkedHevcEncoder
                 let bitrate_cmd = format!("{:.0}M", current_bitrate_mbps);
-                let random_offset = rand::thread_rng().gen_range(1.0..OFFSET_VIDEO);
+                let random_offset = crate::lib::sim_rng::SimRng::for_seed(
+                    run_seed,
+                    crate::lib::sim_rng::tag(&[crate::lib::sim_rng::tag_str("ffmpeg offset"), crate::lib::sim_rng::tag_str(&ip.to_string())]),
+                )
+                .gen_range(1.0..OFFSET_VIDEO);
                 // let random_offset = OFFSET_VIDEO;
 
                 let third_octet = get_third_octet(ip).unwrap();
@@ -3291,7 +3296,7 @@ impl<H: Serialize> StreamSender<H> {
                 
                 let csv_path = format!("csv_framesizes/ALVR_session_framesizes_{}fps_100Mbps.csv", fps);
                 let hardcoded_table = Arc::new(
-                    HardcodedFrameTable::load(&csv_path).expect("Failed to load hardcoded CSV frame sizes")
+                    HardcodedFrameTable::load(&csv_path, run_seed).expect("Failed to load hardcoded CSV frame sizes")
                 );
                 let bytes = hardcoded_table.get_bytes(id_frame); 
                 crate::print_dblue!("ALVR VALIDATION MODE: Frame size: {}", bytes); 
@@ -3304,7 +3309,7 @@ impl<H: Serialize> StreamSender<H> {
                 let table = if let Some(t) = &self.emu_frame_table {
                     t.clone()
                 } else {
-                    let t = get_table(final_file, fps, self.codec_selection, vbv_perframe, intra_refresh, use_foveation)?;
+                    let t = get_table(final_file, fps, self.codec_selection, vbv_perframe, intra_refresh, use_foveation, run_seed)?;
                     self.emu_frame_table = Some(t.clone());
                     t
                 };
@@ -3678,11 +3683,13 @@ impl FrameSizeTable {
         vbv_perframe: bool, 
         intra_refresh_enabled: bool,
         use_foveation: bool, 
+        run_seed: u64,
     ) -> anyhow::Result<Self> {
-        let path = get_prefix_path(&format!(
+        let rel_path = format!(
             "csv_framesizes/{}_{}_{}fps_vbv{:.0}_IR{:.0}_foveated{:.0}.csv",
             codec_str, final_file, _fps, vbv_perframe as usize, intra_refresh_enabled as usize, use_foveation as usize, 
-        ));
+        );
+        let path = get_prefix_path(&rel_path);
         if !std::path::Path::new(&path).exists() {
             return Err(anyhow::anyhow!("Frame-size CSV not found: {}", path));
         }
@@ -3722,7 +3729,7 @@ impl FrameSizeTable {
             let middle_frame = num_frames / 2;
             // gen_range is exclusive of the upper bound: [0, middle_frame)
             if middle_frame > 0 {
-                rand::thread_rng().gen_range(0..middle_frame)
+                start_offset_draw(run_seed, &rel_path).gen_range(0..middle_frame)
             } else {
                 0 // Not enough frames to randomize (e.g., num_frames = 1)
             }
@@ -3750,8 +3757,19 @@ impl FrameSizeTable {
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 
-static TABLE_CACHE: Lazy<DashMap<(String, u32), Arc<FrameSizeTable>>> =
+/// Parsed frame-size tables, per (video, fps, run seed): the table's random start offset is drawn from the run's
+/// seed (every headset of a run shares it, as before), so a later run with another seed in the same process loads
+/// its own.
+static TABLE_CACHE: Lazy<DashMap<(String, u32, u64), Arc<FrameSizeTable>>> =
     Lazy::new(|| DashMap::new());
+
+/// Stream of a frame-size trace's start offset: the run's seed and the trace's path relative to the repo (sim_rng).
+fn start_offset_draw(run_seed: u64, path: &str) -> crate::lib::sim_rng::SimRng {
+    crate::lib::sim_rng::SimRng::for_seed(
+        run_seed,
+        crate::lib::sim_rng::tag(&[crate::lib::sim_rng::tag_str("frame table offset"), crate::lib::sim_rng::tag_str(path)]),
+    )
+}
 
 fn get_table(
     final_file: &str,
@@ -3760,16 +3778,17 @@ fn get_table(
     vbv_perframe: bool, 
     intra_refresh_enabled: bool,
     use_foveation: bool, 
+    run_seed: u64,
 
 ) -> anyhow::Result<Arc<FrameSizeTable>> {
-    if let Some(entry) = TABLE_CACHE.get(&(final_file.to_string(), fps)) {
+    if let Some(entry) = TABLE_CACHE.get(&(final_file.to_string(), fps, run_seed)) {
         return Ok(entry.clone());
     }
     let codec_str = format!("{}", codec_selection); // using Display trait to obtain String
                                                     // Double-checked load
 
-    let table = Arc::new(FrameSizeTable::load(final_file, fps, codec_str, vbv_perframe, intra_refresh_enabled, use_foveation, )?);
-    let key = (final_file.to_string(), fps);
+    let table = Arc::new(FrameSizeTable::load(final_file, fps, codec_str, vbv_perframe, intra_refresh_enabled, use_foveation, run_seed)?);
+    let key = (final_file.to_string(), fps, run_seed);
     let entry = TABLE_CACHE.entry(key).or_insert_with(|| table.clone());
     Ok(entry.clone())
 }
@@ -3830,7 +3849,7 @@ struct HardcodedFrameTable {
 }
 
 impl HardcodedFrameTable {
-    fn load(path: &str) -> anyhow::Result<Self> {
+    fn load(path: &str, run_seed: u64) -> anyhow::Result<Self> {
         // Assuming get_prefix_path is in your scope
         let actual_path = get_prefix_path(path);
         
@@ -3861,7 +3880,7 @@ impl HardcodedFrameTable {
         let start_offset = if num_frames > 1 {
             let middle_frame = num_frames / 2;
             if middle_frame > 0 {
-                rand::thread_rng().gen_range(0..middle_frame)
+                start_offset_draw(run_seed, path).gen_range(0..middle_frame)
             } else {
                 0
             }

@@ -1695,6 +1695,8 @@ pub struct BitrateManager {
     /// Real bandwidth-pattern trace of this pair's own emulated link — read by
     /// `BitrateMode::Oracle`.
     oracle_bandwidth_trace: Vec<NetworkPattern>,
+    /// NeSt-VR's random draws (own stream of the run's seed, see `sim_rng`).
+    rng: crate::lib::sim_rng::SimRng,
 }
 
 impl BitrateManager {
@@ -1983,6 +1985,7 @@ impl BitrateManager {
             abr_event_tx,
             ip_server,
             oracle_bandwidth_trace: network_effects.to_vec(),
+            rng: crate::lib::sim_rng::next_stream(&format!("BitrateManager {ip_server}")),
 
         }
     }
@@ -2497,7 +2500,7 @@ impl BitrateManager {
 
                     let profile_config = nest_vr_profile;
                     // Sample from uniform distribution
-                    let mut rng = rand::thread_rng();
+                    let rng = &mut self.rng;
                     let uniform_dist = Uniform::new(0.0, 1.0);
 
                     let r_rtt = rng.sample(uniform_dist);
@@ -3549,6 +3552,10 @@ struct TrackingLog {
 
 #[allow(unused)]
 pub struct XRServer {
+    /// The server's own random draws (frame-timing jitter): own stream of the run's seed, see `sim_rng`.
+    pub rng: crate::lib::sim_rng::SimRng,
+    /// The run this server was built in, for draws made later from model code (trace start offsets).
+    pub run_rng: crate::lib::sim_rng::RunRng,
     pub ip_self: IpAddr,
     pub ip_client: IpAddr,
     pub t_0: TaiTime<0>,
@@ -3641,7 +3648,7 @@ impl XRServer {
 
         if file_name_video.contains("randomVid") {
             let random_file_list = ["garp4k", "snow", "assemble", "cut_video", "furbo"];
-            let choice_random = random_file_list.iter().choose(&mut rand::thread_rng());
+            let choice_random = random_file_list.iter().choose(&mut crate::lib::sim_rng::next_stream("randomVid"));
             final_file = match choice_random {
                 Some(file) => file,
                 None => {
@@ -3694,6 +3701,8 @@ impl XRServer {
 
 
         Self {
+            rng: crate::lib::sim_rng::next_stream(&format!("XRServer {ip_self}")),
+            run_rng: crate::lib::sim_rng::current(),
             ip_self,
             ip_client,
             t_0: t0_sim,
@@ -4595,6 +4604,7 @@ impl XRServer {
                         self.vbv_perframe, 
                         self.deterministic_frame_sizes_bool, 
                         gaze_history, 
+                        self.run_rng.seed(),
                     )
                     .await
                     .unwrap();
@@ -4637,7 +4647,7 @@ impl XRServer {
                 let floor = 0.5 * ideal;
 
                 let time_until_next_frame = if FPS_RANDOMIZED_EPSILON_RENDERING_SERVER {
-                    let mut rng = rand::thread_rng();
+                    let rng = &mut self.rng;
                     
                     // Explicitly define the bounds as f32 or f64 to avoid inference issues
                     let low: f32 = -0.001;
@@ -7438,6 +7448,8 @@ pub struct STA_extended {
     pub t_0: TaiTime<0>,
     pub is_ul_bg: usize, // 3 modes: 0 -> DL only, 1 -> UL, 2 -> DL/UL
     pub random_seed: StdRng,
+    /// Random-walk draws (own stream of the run's seed, see `sim_rng`).
+    pub mobility_rng: crate::lib::sim_rng::SimRng,
     pub ap_coords: Coords, // used for BG DL traffic in TX
 
     pub movement_mode: usize, // 0: static (default distance) | 1: random walk test | 2: scripted radial distance test
@@ -7492,6 +7504,7 @@ impl STA_extended {
             is_bg_sta,
             is_ul_bg,
             random_seed,
+            mobility_rng: crate::lib::sim_rng::next_stream(&format!("STA_extended mobility {src}")),
             ap_coords,
             current_angle: 0.0,
             movement_mode,
@@ -7537,7 +7550,7 @@ impl STA_extended {
 
                     SCRIPTED_STEP_DT
                 } else if self.movement_mode == 1 {
-                    let mut rng = rand::thread_rng();
+                    let rng = &mut self.mobility_rng;
 
                     // 1. True Correlated Angle (Smooths the movement in all 360 degrees)
                     let random_offset = rng.gen_range(-std::f64::consts::PI/4.0..std::f64::consts::PI/4.0);
