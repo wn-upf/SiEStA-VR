@@ -1347,6 +1347,17 @@ pub trait SocketReader: Send {
 
     fn peek(&self, buffer: &mut [u8]) -> ConResult<usize>;
 
+    /// `peek` that copies only the first `prefix.len()` bytes of the next message and still returns its whole length
+    /// (0 when nothing is queued). A message longer than `max_len` is the error `peek` gives with a `max_len` buffer.
+    /// Reading a shard's header this way saves zeroing and filling a full-size buffer per shard. Default: via `peek`.
+    fn peek_prefix(&self, prefix: &mut [u8], max_len: usize) -> ConResult<usize> {
+        let mut buf = vec![0u8; max_len];
+        let n = self.peek(&mut buf)?;
+        let k = n.min(prefix.len());
+        prefix[..k].copy_from_slice(&buf[..k]);
+        Ok(n)
+    }
+
     /// Next whole message as a shared buffer, or `Ok(None)` when nothing is queued (exactly where
     /// `recv` returns `Ok(0)`). Lets a reader that already holds `Arc<[u8]>` messages hand them
     /// over without the copy through a caller scratch buffer. Default: via `recv`.
@@ -1451,6 +1462,25 @@ impl<T: SharedPayload> SocketReader for BufferedReceiver<T> {
                 }
             }
         }
+    }
+
+    fn peek_prefix(&self, prefix: &mut [u8], max_len: usize) -> ConResult<usize> {
+        let mut buffer_guard = self.buffer.borrow_mut();
+        if buffer_guard.is_none() {
+            match self.receiver.try_recv() {
+                Ok(data) => *buffer_guard = Some(data),
+                Err(TryRecvError::Empty) => return Ok(0),
+                Err(TryRecvError::Disconnected) => return Err(ConnectionError::Other(anyhow!("Channel disconnected"))),
+            }
+        }
+        let Some(ref data) = *buffer_guard else { return Ok(0) };
+        let data = data.as_ref();
+        if data.len() > max_len {
+            return Err(ConnectionError::Other(anyhow!("Buffer too small")));
+        }
+        let k = data.len().min(prefix.len());
+        prefix[..k].copy_from_slice(&data[..k]);
+        Ok(data.len())
     }
 
     fn peek(&self, buffer: &mut [u8]) -> ConResult<usize> {
@@ -2197,9 +2227,9 @@ impl StreamSocket {
         let shard_recv_state_mut = if let Some(state) = &mut self.shard_recv_state {
             state
         } else {
-            let mut bytes = [0; MAX_PACKET_SIZE_RECV];
-            // let count = self.receive_socket.lock().unwrap().recv(&mut bytes)?;
-            let count = arc_receiver.lock().unwrap().peek(&mut bytes).unwrap();
+            // only the shard prefix is read here; `count` is the whole shard's length, as with `peek`
+            let mut bytes = [0u8; SHARD_PREFIX_SIZE];
+            let count = arc_receiver.lock().unwrap().peek_prefix(&mut bytes, MAX_PACKET_SIZE_RECV).unwrap();
             // println!("DEBBG -> BYTES INSIDE PACKET {}", count);
             // println!("DEBBG -> Data inside packet{:?}", &bytes[0..100]);
 
@@ -3039,6 +3069,13 @@ pub struct StreamSender<H> {
 
 #[allow(unused)]
 impl<H> StreamSender<H> {
+    /// Takes over the emulation-effects CSV marker of `other` (a clone that created or found the file).
+    pub fn adopt_emu_csv_marker(&mut self, other: &Self) {
+        if self.csv_trace.path.as_os_str().is_empty() {
+            self.csv_trace.path = other.csv_trace.path.clone();
+        }
+    }
+
     pub fn get_shards_count(&self) -> usize {
         self.shards_count
     }

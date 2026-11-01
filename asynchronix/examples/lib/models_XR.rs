@@ -258,6 +258,9 @@ fn get_counter() -> &'static AtomicUsize {
     PRINT_COUNTER.get_or_init(|| AtomicUsize::new(0))
 }
 
+#[cfg(test)]
+mod keyframe_tests; // models_XR/keyframe_tests.rs: the memchr scan against the byte-by-byte one
+
 pub fn is_keyframe(frame: &[u8], codec_type: VideoCodec) -> bool {
     if frame.len() < 3 {
         return false;
@@ -265,23 +268,21 @@ pub fn is_keyframe(frame: &[u8], codec_type: VideoCodec) -> bool {
 
     match codec_type {
         VideoCodec::HEVC => {
-            // ... (Your existing HEVC logic) ...
-            for i in 0..frame.len().saturating_sub(5) {
-                if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
-                    || (frame[i] == 0
-                        && frame[i + 1] == 0
-                        && frame[i + 2] == 0
-                        && frame[i + 3] == 1)
-                {
-                    let start_code_len = if frame[i + 2] == 0 { 4 } else { 3 };
-                    let nal_header_pos = i + start_code_len;
-
-                    if nal_header_pos < frame.len() {
-                        let nal_header = frame[nal_header_pos];
-                        let nal_type = (nal_header >> 1) & 0x3F;
-                        if (16..=21).contains(&nal_type) {
-                            return true;
-                        }
+            // An IRAP NAL unit (types 16-21) after a start code, 00 00 01 or 00 00 00 01, that begins before
+            // len - 5. A 4-byte start code at i holds the 3-byte one at i + 1 with the same NAL header, so every
+            // start code is a 00 00 01 at some p: it counts when p < len - 5, or when the zero before it begins
+            // the 4-byte form there (p - 1 < len - 5). memchr's search replaces a byte-by-byte scan of the frame.
+            let lim = frame.len().saturating_sub(5);
+            for p in memchr::memmem::find_iter(frame, &[0u8, 0, 1]) {
+                if p >= lim && !(p >= 1 && p - 1 < lim && frame[p - 1] == 0) {
+                    if p >= lim + 1 {
+                        break;
+                    }
+                    continue;
+                }
+                if let Some(&nal_header) = frame.get(p + 3) {
+                    if (16..=21).contains(&((nal_header >> 1) & 0x3F)) {
+                        return true;
                     }
                 }
             }
@@ -4646,8 +4647,13 @@ impl XRServer {
                     )
                     .await
                     .unwrap();
+                // the emulation-effects CSV now exists: keep that on the sender this frame was cloned from, or every
+                // frame tries to create the file again and reopens it (two open() calls per frame)
+                if let Some(orig) = self.video_app_sender.as_mut() {
+                    orig.adopt_emu_csv_marker(&send_socket);
+                }
 
-                if let Some(encoder_init) = send_socket.clone().ffmpeg_encoder {
+                if let Some(encoder_init) = send_socket.ffmpeg_encoder.clone() {
                     self.video_app_sender.as_mut().unwrap().ffmpeg_encoder = Some(encoder_init);
                     // println!("ENCODER INITIALIZED");
                 }
