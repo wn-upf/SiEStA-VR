@@ -51,6 +51,32 @@ pub const EHT_PHY_DURATION: f64 = 76E-6;    // 802.11be Preamble    // L-STF    
                                                                     // EHT-SIG    :   8.00 us
                                                                     // EHT-STF    :   4.00 us
                                                                     // EHT-LTF    :  32.00 us
+/// EHT preamble duration (s): `EHT_PHY_DURATION` (76 us, two 4x EHT-LTFs, Nss=2) unless `XRSIM_EHT_PHY_US=<us>` is set
+/// (60 for Nss=1: one EHT-LTF of 12.8 + 3.2 us x 1 instead of two). Read once per process.
+pub fn eht_phy_duration() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("XRSIM_EHT_PHY_US") {
+        Ok(s) => {
+            let us: f64 = s.trim().parse().unwrap_or_else(|_| panic!("XRSIM_EHT_PHY_US={s:?} is not a number of microseconds"));
+            assert!(us > 0.0 && us < 1000.0, "XRSIM_EHT_PHY_US={us} out of range");
+            us / 1e6
+        }
+        Err(_) => EHT_PHY_DURATION,
+    })
+}
+
+/// SU spatial streams in the PHY-rate formula: 2 unless `XRSIM_SU_NSS=<n>` is set (the paper's validation link has 1).
+pub fn su_spatial_streams() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("XRSIM_SU_NSS") {
+        Ok(s) => {
+            let n: u32 = s.trim().parse().unwrap_or_else(|_| panic!("XRSIM_SU_NSS={s:?} is not a stream count"));
+            assert!((1..=8).contains(&n), "XRSIM_SU_NSS={n} out of range 1..=8");
+            n as f64
+        }
+        Err(_) => 2.0,
+    })
+}
 pub const SLOT: f64 = 9E-6;
 pub const SIFS: f64 = 16E-6;
 
@@ -3201,7 +3227,7 @@ pub fn airtime_ampdu(
     let effPt: f64 = p_tx_cheated;
 
 
-    let SU_spatial_streams = 2.0;
+    let SU_spatial_streams = su_spatial_streams(); // 2 unless XRSIM_SU_NSS is set
 
 
     let distance = calculate_distance(
@@ -3273,7 +3299,7 @@ pub fn airtime_ampdu(
 
     // padded_payload_bits_sum = sum_i ceil((L_i + overhead)/32)*32, i.e. each MPDU padded
     // individually and then summed, NOT n_mpdus * ceil(mean(L_i)/32) — see padded_mpdu_bits().
-    let T_DATA: f64 = EHT_PHY_DURATION + ((SF + n_mpdus as f64 * MD + padded_payload_bits_sum + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
+    let T_DATA: f64 = eht_phy_duration() + ((SF + n_mpdus as f64 * MD + padded_payload_bits_sum + TB) / ORate).ceil() * SYMBOL_TIME_11AX + PE_DURATION; // 802.11ax symbol time 4 times greates for 16E-6 s
 
     // pub const EHT_PHY_DURATION: f64 = 76E-6;    // 802.11be Preamble    // L-STF      :   8.00 us
     //                                                                 // L-LTF      :   8.00 us
