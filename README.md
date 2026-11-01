@@ -107,7 +107,7 @@ The simulator has a debug feature when setting `DEBUG_PRINT_ENABLED = True`, whe
 
 ### Post-Simulation Channel & ABR Visualizer
 
-Beyond the persisted CSV/Parquet files, SiESTA-VR can replay a simulation's medium activity and ABR decisions in an interactive `minifb` window once the run finishes, controlled by `VISUALIZER_QUEUES_ENABLED` in [`asynchronix/examples/lib/mod.rs`](asynchronix/examples/lib/mod.rs) (`true` by default).
+Beyond the persisted CSV/Parquet files, SiESTA-VR can replay a simulation's medium activity and ABR decisions in an interactive `minifb` window once the run finishes. It is off by default; set `XRSIM_VIZ=1` in the environment to record the events and open the viewer (e.g. `XRSIM_VIZ=1 ./target/release/examples/XR_sim <args>`). With it off, a run's outputs are those of a run without the viewer. Keep visualized runs short (5-20 s of simulated time): every event is held in memory.
 
 While the simulation runs, the queue model emits `VizEvent`s (per-link TXOP grabs, collisions, contending STAs, MCS, aggregated A-MPDU contents down to the ALVR stream/frame IDs carried in each transmission) and the XR server/client emit `AbrEvent`s (per-frame metrics and bitrate ladder updates). Both streams are collected in memory and, right after the simulation loop ends, handed to a scrubbable timeline viewer (`postsim_visualizers.rs`) that opens automatically.
 The unified window is split into a **channel view** (left) and an **ABR view** (right), sharing a common simulated-time cursor in yellow indicating the instant seen in both interactive windows. The time base of each view is independent, and can be zoomed in/out independently. 
@@ -134,6 +134,17 @@ The screenshot above is a real capture from a 6-VR-user, 3-link MLO run (`MLO80-
 | 15 | RTT strip | Network latency per session over time, based on the Video Frame RTT (VF-RTT) metric. |
 | 16 | Frame-Loss Ratio strip | Per-session frame-loss ratio over time. |
 | 17 | STA POSITIONS | Top-down mini-map, AP centered, current position and trajectory of each VR STA. |
+
+The screenshot shows an earlier layout of the same panels. The viewer now has a menu bar (File, View, Channel, ABR, Layout, Help) to show, hide, swap and resize the panels and reorder the ABR plots, a quick tour (`F1`) that walks through each part while zooming into real transmissions of the run, and a keyboard and mouse sheet (`H`). Hovering a transmission or a collision lights its queues and draws its arrows on the station map. Environment switches:
+
+| Variable | Effect |
+| :--- | :--- |
+| `XRSIM_VIZ=1` | Record the visualizer events and open the viewer after the run. |
+| `XRSIM_VIZ_VIEW=<t_s>,<span_ms>` | Open the channel view on `span_ms` around `t_s`. |
+| `XRSIM_VIZ_SCALE=1.5` or `<monitor>:1.5,...` | UI scale, for every monitor or per `xrandr` monitor name (`,` `.` and `U` change it live). |
+| `XRSIM_VIZ_TOUR=all` or `<step>` | Save a screenshot of every tour step (or one), then of each menu, the keyboard sheet and the About box, into `viz_screenshots/`. |
+| `XRSIM_VIZ_EXIT=1` | Close the viewer once its screenshots are saved (a check that leaves no window open). |
+| `XRSIM_VIZ_MAP_PNG=<dir>` | Open no window: save the station map at 8 instants of the run as PNGs. |
 
 ## 💻 Simulation Configuration & Execution
 

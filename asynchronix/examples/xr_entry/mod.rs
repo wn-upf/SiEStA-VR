@@ -25,7 +25,7 @@ use anyhow::Result;
 use asynchronix::simulation::{Mailbox, Scheduler, SimInit};
 use asynchronix::time::MonotonicTime;
 // use rand::rngs::StdRng;
-use crate::lib::{models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer, }, EdcaAc, render_text, VISUALIZER_QUEUES_ENABLED, MacKey};
+use crate::lib::{models_XR::{NestVrProfile, ObservationConfig, STA_extended, XRClient, XRServer, }, EdcaAc, render_text, visualizer_queues_enabled, MacKey};
 use rand::seq::SliceRandom;
 use rand::thread_rng; //  SeedableRng};
 use rand::Rng;
@@ -625,6 +625,9 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     let available_links: Vec<_> = link_configs.iter().map(|lc| lc.link_id).collect();
 
     let (viz_tx, viz_rx) = crossbeam::channel::unbounded::<VizEvent>();
+    // address of each station id (both ids of an XR pair or a background pair), for the viewer map's TXOP arrows (a Vec,
+    // not a HashMap: a HashMap made here would shift the hash keys of the maps made after it, and with them the run)
+    let mut viz_sta_ip: Vec<(i32, IpAddr)> = Vec::new();
     let (abr_tx, abr_rx) = crossbeam::channel::unbounded::<crate::lib::models_XR::AbrEvent>();
 
 
@@ -774,6 +777,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
         );
 
         // Common pushes for all users
+        viz_sta_ip.extend([(vr.sta_server.sta_id, vr.xr_server.ip_client), (vr.sta_client.sta_id, vr.xr_server.ip_client)]);
         xr_client_addresses.push(vr.mbox_xr_client.address());
         xr_server_addresses.push(vr.mbox_xr_server.address());
 
@@ -834,6 +838,7 @@ pub fn run_sim(params: SimParams) -> Result<()> {
             .STA_coords_map
             .insert(sta_id_ul as usize, bg_sta.sta_coordinates.clone());
 
+        viz_sta_ip.extend([(sta_id_dl, bg_ip_addr), (sta_id_ul, bg_ip_addr)]);
         bg_sta_models.push(bg_sta);
         all_sta_ids.push(sta_id_dl);
         all_sta_ids.push(sta_id_ul);
@@ -1204,17 +1209,18 @@ pub fn run_sim(params: SimParams) -> Result<()> {
     drop(viz_tx); 
 
 
-    if VISUALIZER_QUEUES_ENABLED {
+    if visualizer_queues_enabled() {
         let mut abr_events: Vec<crate::lib::models_XR::AbrEvent> = Vec::new();
         while let Ok(ev) = abr_rx.try_recv() {
             abr_events.push(ev);
         }
         println!("[ABR-VIZ] Collected {} ABR events.", abr_events.len());
 
-        let mut viz_events: Vec<VizEvent> = Vec::with_capacity(1024);
+        let mut mac_events: Vec<VizEvent> = Vec::with_capacity(1024);
         while let Ok(ev) = viz_rx.try_recv() {
-            viz_events.push(ev);
+            mac_events.push(ev);
         }
+        let viz_events = crate::lib::postsim_visualizers::viz_event::from_mac_all(mac_events);
             println!(
                 "[CHANNEL-VIZ] Collected {} events, spanning from [{:.6}, {:.6}] s of simulated time",
                 viz_events.len(),
@@ -1236,7 +1242,10 @@ pub fn run_sim(params: SimParams) -> Result<()> {
                 let sim_tag  = sim_unique_string.clone();
 
                 Some(std::thread::spawn(move || {
-                    run_unified_viewer(viz_idx, abr_idx, lc, sim_tag);
+                    crate::lib::postsim_visualizers::run_unified_viewer_multi(
+                        crate::lib::postsim_visualizers::obss::MultiBss::single(viz_idx, abr_idx, lc)
+                            .with_sta_ip(viz_sta_ip.into_iter().collect())
+                            .with_bg_dir(vec![is_ul_bg_traffic as u8]), sim_tag);
                 }))
             }
 
