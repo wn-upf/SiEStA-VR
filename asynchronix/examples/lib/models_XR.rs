@@ -3469,7 +3469,8 @@ const BATCH_SIZE_SHARD_RX: usize = 512;
 
 #[derive(Debug)]
 pub struct ShardRxRow {
-    pub rx_timestamp:  String,
+    /// Formatted (nine decimals) by the writer thread, not per shard on the simulation thread.
+    pub rx_timestamp:  TaiTime<0>,
     pub generation_time_s: f32,
     pub frame_index:   u32,
     pub shard_index:   u32,
@@ -3487,7 +3488,7 @@ fn shard_rx_schema() -> Arc<Schema> {
 }
 
 fn shard_rx_rows_to_batch(rows: &[ShardRxRow], schema: &Arc<Schema>) -> RecordBatch {
-    let rx_timestamp:      StringArray = rows.iter().map(|r| Some(r.rx_timestamp.as_str())).collect();
+    let rx_timestamp:      StringArray = rows.iter().map(|r| Some(crate::format_elapsed!(r.rx_timestamp))).collect();
     let generation_time_s: Float32Array = rows.iter().map(|r| r.generation_time_s).collect();
     let frame_index:       UInt32Array = rows.iter().map(|r| r.frame_index).collect();
     let shard_index:       UInt32Array = rows.iter().map(|r| r.shard_index).collect();
@@ -3564,7 +3565,7 @@ impl ParquetShardRx {
     ) {
         {
             self.tx.send(ShardRxRow {
-                rx_timestamp: format_elapsed!(now),
+                rx_timestamp: now,
                 generation_time_s,
                 frame_index,
                 shard_index,
