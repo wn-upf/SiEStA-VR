@@ -113,6 +113,12 @@ pub mod gcc_nada_estimator;
 pub mod nada_report;
 pub mod sim_rng;
 
+/// mimalloc as the global allocator of the simulator binaries, on by default (Cargo feature `mimalloc`; byte-identical
+/// outputs, faster, about twice the peak memory). `--no-default-features` builds with the system allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {
 //     Lazy::new(|| Mutex::new(None))

@@ -22,12 +22,18 @@ keywords = ["simulation", "discrete-event", "systems", "cyberphysical", "real-ti
 autotests = false
 
 [features]
+default = ["mimalloc"]
 # gRPC service.
 grpc = ["dep:bytes", "dep:ciborium", "dep:prost", "dep:prost-types", "dep:serde", "dep:tonic", "dep:tokio", "dep:tonic"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 
 # DEVELOPMENT ONLY: API-unstable public exports meant for external test/benchmarking.
 dev-hooks = []
+
+# SiEStA-VR: mimalloc as the global allocator of the simulator binaries (examples/lib/mod.rs), on by default. Outputs
+# are byte-identical; faster, at about twice the peak memory of a run. `--no-default-features` builds with the system
+# allocator.
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # Mandatory dependencies.
@@ -57,6 +63,7 @@ tokio = { version = "1.0", features = ["net", "rt-multi-thread"], optional = tru
 tonic = { version = "0.12", default-features = false, features=["codegen", "prost", "server"], optional = true }
 tracing = { version= "0.1.40", default-features = false, features=["std"], optional = true }
 tracing-subscriber = { version= "0.3.18", optional = true }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 xkbcommon = "0.8.0"
 ffmpeg-sidecar = "2.0.0"
 async-process = "2.3.0"
