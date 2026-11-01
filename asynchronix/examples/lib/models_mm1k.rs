@@ -3721,10 +3721,10 @@ impl QueueModule {
 
                 if CSV_PER_PACKET {
                     for u in drained {
-                        let alvr_header = u.alvr_header; 
-                        // CSV write outside the lock
-                        let row_ac = u.edca_ac.to_string();   // per-row, not per-AMPDU
+                        // CSV write outside the lock (row strings built only for an attached writer)
                         if let Some(metrics) = &self.csv_metrics_network{
+                            let alvr_header = u.alvr_header.clone();
+                            let row_ac = u.edca_ac.to_string();   // per-row, not per-AMPDU
                             metrics.update_stats(
                             u.now,
                             u.packet_id as usize,
@@ -3741,11 +3741,13 @@ impl QueueModule {
                             prev_cw_val as usize,
                             prev_retries,
                             prev_drawn_bo,
-                            row_ac.clone(),
-                            alvr_header.clone(), 
+                            row_ac,
+                            alvr_header, 
                         );
                         }
                         if let Some(parquet_metrics) = &self.parquet_metrics_network {
+                            let alvr_header = u.alvr_header;
+                            let row_ac = u.edca_ac.to_string();
                             parquet_metrics.update_stats(
                                 u.now,
                                 u.packet_id as usize,
@@ -3827,14 +3829,15 @@ impl QueueModule {
 
         let mut deque_sources: Vec<(usize, usize)> = Vec::new();
 
-        let mut taken_snapshot: Vec<(usize, MpduPacket)> = Vec::new();
+        // sized for the usual A-MPDU up front
+        let mut taken_snapshot: Vec<(usize, MpduPacket)> = Vec::with_capacity(self.packs_per_ampdu.min(64));
 
         let primary_idx = self.mac_key_index[&mac_key];
         let sta_id_for_deque: i32 = if is_ul { sta_src_id } else { -1 };
-        let mut source_deque_idxs: Vec<usize> = vec![primary_idx];
+        let mut source_deque_idxs: smallvec::SmallVec<[usize; 4]> = smallvec::smallvec![primary_idx];
 
         if STR_PLUS_MODE_MLO {
-            let mut other_links: Vec<u8> = self.link_mediums.keys().copied()
+            let mut other_links: smallvec::SmallVec<[u8; 4]> = self.link_mediums.keys().copied()
                 .filter(|&lid| lid != link_id)
                 .collect();
             other_links.sort_unstable();

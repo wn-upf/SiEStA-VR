@@ -7620,20 +7620,10 @@ impl STA_extended {
         let now: TaiTime<0> = context.scheduler.time();
         // println!("INPUT WIRELESS: STA{} received AMPDU from STA{}, dest: {}", self.sta_id, ampdu_packet.sta_src_id, ampdu_packet.sta_dest_id);
         if ampdu_packet.sta_dest_id == self.sta_id {
-            // make sure we ignore packets not corresponding to STA
-            for packet in ampdu_packet.mpdu_packets {
-                // iterate through whole AMPDU
-
-                // if packet.data_inner.len() >= 100 {
-                // debug_print!(
-                //     DebugColor::DarkRed,
-                //     "[DBG NET_IN -> APP_OUT] : XR Packet received: ",
-                //     // format_elapsed!(now.duration_since(self.t_0)),
-                // );
-
-                self.received_packet_counter += 1;
-                packet_batch.push(packet);
-            }
+            // make sure we ignore packets not corresponding to STA: the batch is the whole AMPDU,
+            // in order (its Vec is taken over as is)
+            self.received_packet_counter += ampdu_packet.mpdu_packets.len();
+            packet_batch = ampdu_packet.mpdu_packets;
         }
         if !packet_batch.is_empty() {
             let frame = TimedFrame {
