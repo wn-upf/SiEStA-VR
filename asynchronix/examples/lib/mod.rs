@@ -84,6 +84,7 @@ pub mod taitime_serde;
 
 pub mod fovoptix;
 pub mod gcc_nada_estimator;
+pub mod nada_report;
 
 // pub type OptLazy<T> = Lazy<Mutex<Option<T>>>;
 // pub const fn lazy_mut_none<T>() -> OptLazy<T> {

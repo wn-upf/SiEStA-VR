@@ -3657,7 +3657,11 @@ impl XRServer {
         let history_interval = t_update_abr;
 
         let nada_sender = if abr_enabled == 5 {
-            Some(Arc::new(Mutex::new(NadaSender::new(t0_sim))))
+            Some(Arc::new(Mutex::new(if nada_level() >= 2 {
+                NadaSender::new_at(t0_sim, initial_bitrate_mbps as f64 * 1e6) // XRSIM_NADA_FIX=2: the run's initial bitrate
+            } else {
+                NadaSender::new(t0_sim)
+            })))
         } else {
             None
         };
@@ -3694,25 +3698,33 @@ impl XRServer {
             ip_client,
             t_0: t0_sim,
 
-            bitrate_manager: BitrateManager::new(
-                MAX_HISTORY_SIZE,
-                frame_rate,
-                initial_bitrate_mbps,
-                abr_enabled,
-                nest_vr_profile,
-                t_end_simu,
-                ip_self,
-                sim_unique_string,
-                frame_rate,
-                obs_config,
-                t_update_abr,
-                reward_mode,
-                results_path_name,
-                name_folder,
-                num_id_stats,
-                abr_event_tx,   // ← add one parameter
-                effects,
-            ),
+            bitrate_manager: {
+                let mut b = BitrateManager::new(
+                    MAX_HISTORY_SIZE,
+                    frame_rate,
+                    initial_bitrate_mbps,
+                    abr_enabled,
+                    nest_vr_profile,
+                    t_end_simu,
+                    ip_self,
+                    sim_unique_string,
+                    frame_rate,
+                    obs_config,
+                    t_update_abr,
+                    reward_mode,
+                    results_path_name,
+                    name_folder,
+                    num_id_stats,
+                    abr_event_tx,   // ← add one parameter
+                    effects,
+                );
+                if abr_enabled == 5 && nada_level() >= 2 {
+                    // XRSIM_NADA_FIX=2: until NADA's first report, the run's initial bitrate (within NADA's bounds), not RMAX
+                    b.last_nada_target_bitrate_mbps = Some((initial_bitrate_mbps as f64 * 1e6)
+                        .clamp(RMCAT_CC_DEFAULT_RMIN as f64, RMCAT_CC_DEFAULT_RMAX as f64) / 1e6);
+                }
+                b
+            },
 
             video_app_sender: None,
             audio_app_sender: None,
@@ -3944,6 +3956,20 @@ impl XRServer {
             }
         }
     }
+    /// `XRSIM_NADA_FIX=2`: the NADA report a tracking packet carries after its `Tracking` (`nada_report`), fed to NADA's
+    /// sender as the frame statistics' reports are at levels 0-1.
+    fn nada_timer_report(&mut self, buf: &[u8], now: TaiTime<0>) {
+        let Ok(track) = self.decode_tracking_from_bytes(buf) else { return };
+        let Ok(len) = bincode::serialized_size(&track) else { return };
+        let Some(r) = buf.get(SHARD_PREFIX_SIZE + len as usize..).and_then(crate::lib::nada_report::NadaTimerReport::decode) else { return };
+        let report = NADAFeedbackReport::new(r.rmode, r.xcurr, r.recv, r.d_queue, r.d_tilde, r.plr);
+        if let Some(nada) = self.nada_sender.as_mut() {
+            let mut guard = nada.lock().unwrap();
+            guard.update_on_timer_feedback(now, report, self.fps as f64);
+            self.bitrate_manager.last_nada_target_bitrate_mbps = Some(guard.get_target_bitrate() as f64 / 1024.0 / 1024.0);
+        }
+    }
+
     fn decode_tracking_from_bytes(&self, buf: &[u8]) -> Result<Tracking> {
         anyhow::ensure!(buf.len() >= SHARD_PREFIX_SIZE, "buffer too small");
 
@@ -4023,6 +4049,9 @@ impl XRServer {
                     // );
                 }
                 TRACKING => {
+                    if self.nada_sender.is_some() && nada_level() >= 2 {
+                        self.nada_timer_report(&buffer, now); // XRSIM_NADA_FIX=2: the client's 100 ms report
+                    }
                     if let Some(sock) = self.tracking_app_receiver.clone() {
                         let sender = sock.network_app_interface.lock().unwrap().send(&buffer);
                         let mut new_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE_RECV];
@@ -5803,7 +5832,21 @@ impl XRClient {
                 if let Some(mut sender) = self.output_app_tracking_sender.clone() {
                     let arc_inner_app_receiver = sender.app_network_interface.clone();
 
-                    let send_result = sender.send_header_tracking(&track, now);
+                    // XRSIM_NADA_FIX=2: NADA's report every 100 ms of the session clock rides in this packet
+                    let nada_report = match (nada_level() >= 2, self.nada_receiver.as_ref()) {
+                        (true, Some(n)) => {
+                            let mut n = n.lock().unwrap();
+                            let now_us = now.duration_since(TaiTime::EPOCH).as_micros() as i64;
+                            n.timer_report(now_us, self.framerate as f64).map(|(rmode, xcurr, recv, plr, d_tilde, d_queue)| {
+                                crate::lib::nada_report::NadaTimerReport { seq: n.report_seq, xcurr, rmode, recv, plr, d_tilde, d_queue }
+                            })
+                        }
+                        _ => None,
+                    };
+                    let send_result = match nada_report {
+                        Some(r) => sender.send_header_tracking_with(&track, now, &r.encode()),
+                        None => sender.send_header_tracking(&track, now),
+                    };
                     let buffer: Vec<u8> = vec![0; CAPACITY_RX_BUFFER];
 
                     XRClient::read_app_send_network_interface(
@@ -6210,6 +6253,14 @@ impl XRClient {
                         let mut counter = 0;
                         (frames_lost, shards_lost) =
                             StreamSocket::flush_shards_lost_deadline(&mut ssocket);
+                        if nada_fix() {
+                            // NADA's loss ratio: the shards the deadline dropped, of those the frames expected
+                            let expected = ssocket.flush_shards_expected_deadline();
+                            if let Some(n) = self.nada_receiver.as_ref() {
+                                let now_us = now.duration_since(TaiTime::EPOCH).as_micros() as i64;
+                                n.lock().unwrap().record_lost_shards(shards_lost.iter().sum(), expected, now_us);
+                            }
+                        }
 
                         if !frames_lost.is_empty() {
                             // println!(
@@ -6381,10 +6432,25 @@ impl XRClient {
                         let micros_send_ts = (frame_send_timestamp * 1_000_000.0).round() as i64;
                         let micros_rcv_ts = (frame_recv_timestamp * 1_000_000.0).round() as i64;
 
-                        nada_receiver.compute_oneway_delay(micros_send_ts, micros_rcv_ts); //inputs as micros
-                        nada_receiver.update_receive_loss_rate(size);
+                        if nada_fix() {
+                            // the frame's own one-way delay (last shard's arrival - first shard's send stamp, session
+                            // clock), and its shards as packets; the published port's inputs below
+                            if let Some(owd_us) = data.get_nada_owd_us() {
+                                nada_receiver.compute_oneway_delay(0, owd_us);
+                            }
+                            if nada_level() >= 2 {
+                                // level 2: the frame joins the report timer's interval (the tracking path reports)
+                                nada_receiver.accumulate_frame(size, data.get_shards_in_frame());
+                            } else {
+                                let now_us = now.duration_since(TaiTime::EPOCH).as_micros() as i64;
+                                nada_receiver.update_receive_loss_rate_shards(size, data.get_shards_in_frame(), now_us);
+                            }
+                        } else {
+                            nada_receiver.compute_oneway_delay(micros_send_ts, micros_rcv_ts); //inputs as micros
+                            nada_receiver.update_receive_loss_rate(size);
+                        }
                         let is_feedback_on =
-                            nada_receiver.time_to_report_feedback(now, false, false);
+                            nada_level() < 2 && nada_receiver.time_to_report_feedback(now, false, false);
 
                         //if there is a feedback to report
                         if is_feedback_on {
@@ -6564,6 +6630,14 @@ impl XRClient {
                 ssocket.sweep_expired_deadlines(now);
                 let (frames_lost, shards_lost) =
                     StreamSocket::flush_shards_lost_deadline(&mut ssocket);
+                if nada_fix() {
+                    // as in the video path: main's port skips this drain, so its loss ratio misses the frames swept here
+                    let expected = ssocket.flush_shards_expected_deadline();
+                    if let Some(n) = self.nada_receiver.as_ref() {
+                        let now_us = now.duration_since(TaiTime::EPOCH).as_micros() as i64;
+                        n.lock().unwrap().record_lost_shards(shards_lost.iter().sum(), expected, now_us);
+                    }
+                }
 
                 if !frames_lost.is_empty() {
                     self.report_frame_lost(frames_lost, shards_lost, context);

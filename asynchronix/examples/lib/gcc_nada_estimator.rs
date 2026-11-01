@@ -1194,6 +1194,8 @@ pub const NADA_PARAM_QEPS_US: i64 = 10_000; //in Nano second
 pub const NADA_PARAM_QTH: i64 = 50; //Delay threshold for non-linear warping | 50ms
 pub const NADA_PARAM_QMAX: i64 = 400; //Delay upper bound for non-linear warping| 400ms
 pub const NADA_PARAM_DLOSS: i64 = 10; //1_000; //Delay penalty for loss  | 1.0s
+/// RFC 8698's loss penalty (1 s, in ms), `XRSIM_NADA_FIX=2` only (`time_to_report_feedback_rfc`).
+pub const NADA_PARAM_DLOSS_RFC_MS: f64 = 1000.0;
 pub const NADA_PARAM_DMARK: i64 = 200; //Delay penalty for ECN marking | 200ms
 
 pub const NADA_PARAM_GAMMA_MAX: f64 = 0.5; //Upper bound on rate increase ratio for accelerated ramp-up | 50%
@@ -1273,6 +1275,20 @@ pub struct NadaSender {
     pub p_loss: f64,  //Estimated packet loss ratio
 }
 impl NadaSender {
+    /// `XRSIM_NADA_FIX=2`: starting at `rate_bps` (the run's initial bitrate, clamped to [RMIN, RMAX]) instead of RMAX.
+    pub fn new_at(now: TaiTime<0>, rate_bps: f64) -> Self {
+        let r = (rate_bps as i64).clamp(RMCAT_CC_DEFAULT_RMIN, RMCAT_CC_DEFAULT_RMAX);
+        Self { r_ref: r, r_recv: r, r_vin: r, r_send: r, prev_r_vin: r, prev_r_send: r, ..Self::new(now) }
+    }
+
+    /// `XRSIM_NADA_FIX=2`: a report of the client's 100 ms timer (`xr_protocol::nada_report`), which echoes no send stamp:
+    /// the round trip it adds is the current average, so it moves the rate and not the RTT estimate.
+    pub fn update_on_timer_feedback(&mut self, now: TaiTime<0>, feedback_report: NADAFeedbackReport, video_fps: f64) {
+        let t = now.duration_since(TaiTime::EPOCH).as_micros() as i64;
+        let rtt = self.rtt_history.get_average() as i64;
+        self.update_on_receive_feedback(now, t - rtt, feedback_report, video_fps);
+    }
+
     pub fn new(now: TaiTime<0>) -> Self {
         Self {
             r_ref: NADA_INITIAL_RATE,
@@ -1512,6 +1528,17 @@ pub struct NadaReceiver {
     total_num_packets: u32,
     total_packets_lost: u32,
     pub receive_rate_timer: Instant,
+    /// `XRSIM_NADA_FIX` >= 1: the receive-rate window's start on the session clock (us), instead of `receive_rate_timer`
+    /// (the wall clock, which in a pure simulation ties the window to the machine's speed); and the last loss (level 2).
+    pub rate_window_t0_us: i64,
+    pub last_loss_us: Option<i64>,
+    /// `XRSIM_NADA_FIX=2`: the report timer's interval (frames completed and loss records in it), whether a frame was ever
+    /// completed, the last one's shards (the size of a frame that never arrives), and the reports sent.
+    pub iv_frames: u32,
+    pub iv_losses: u32,
+    pub seen_frame: bool,
+    pub last_shards: u32,
+    pub report_seq: u32,
 }
 
 impl NadaReceiver {
@@ -1537,6 +1564,13 @@ impl NadaReceiver {
             total_num_packets: 0,
             total_packets_lost: 0,
             receive_rate_timer: Instant::now(),
+            rate_window_t0_us: 0,
+            last_loss_us: None,
+            iv_frames: 0,
+            iv_losses: 0,
+            seen_frame: false,
+            last_shards: 0,
+            report_seq: 0,
         }
     }
 
@@ -1656,9 +1690,85 @@ impl NadaReceiver {
         }
     }
 
+    /// `XRSIM_NADA_FIX` (client_rules::nada_fix): the shards of the frames the client's deadline dropped since the last call
+    /// (`lost` of `expected`), counted into this observation window's loss ratio (the published port counts none).
+    /// `now_us`: the session clock (level 2's "recent loss").
+    pub fn record_lost_shards(&mut self, lost: usize, expected: usize, now_us: i64) {
+        self.total_packets_lost += lost as u32;
+        self.total_num_packets += expected as u32;
+        if lost > 0 {
+            self.last_loss_us = Some(now_us);
+        }
+        self.iv_losses += 1;
+    }
+
+    /// `XRSIM_NADA_FIX=2`: a completed frame's bytes and shards into the report timer's interval (its delay sample is
+    /// `compute_oneway_delay`'s); the report is `timer_report`'s.
+    pub fn accumulate_frame(&mut self, received_bytes: usize, shards: u32) {
+        self.total_received_bytes += received_bytes + std::mem::size_of::<Duration>() + std::mem::size_of::<i64>();
+        self.total_num_packets += shards;
+        self.iv_frames += 1;
+        self.seen_frame = true;
+        self.last_shards = shards;
+    }
+
+    /// `XRSIM_NADA_FIX=2`: the client's report every DELTA (100 ms) of the session clock (`now_us`), whether or not a frame
+    /// completed (RFC 8698 5.2): the receive rate and the loss ratio of the interval since the last report (an interval
+    /// with nothing received at all, after the first frame, counts the frames due in it at `fps` as lost, at the last
+    /// frame's size in shards), then `time_to_report_feedback_rfc`'s signal. None while a report is not due.
+    pub fn timer_report(&mut self, now_us: i64, fps: f64) -> Option<(i8, f64, i64, f64, f64, i64)> {
+        if (now_us - self.t_last) / 1000 <= NADA_PARAM_DELTA {
+            return None;
+        }
+        let interval_us = now_us - self.t_last;
+        if self.iv_frames == 0 && self.iv_losses == 0 && self.seen_frame {
+            let due = (interval_us as f64 * fps / 1e6).floor() as u32;
+            if due > 0 {
+                self.total_packets_lost += due * self.last_shards;
+                self.total_num_packets += due * self.last_shards;
+                self.last_loss_us = Some(now_us);
+            }
+        }
+        self.r_recv = ((self.total_received_bytes * 8) as f64 / (interval_us as f64 / 1e6)).round() as i64;
+        let p_inst = if self.total_num_packets > 0 {
+            self.total_packets_lost as f64 / self.total_num_packets as f64
+        } else {
+            0.0
+        };
+        self.p_loss = NADA_PARAM_ALPHA * p_inst + (1.0 - NADA_PARAM_ALPHA) * self.p_loss;
+        self.total_received_bytes = 0;
+        self.total_packets_lost = 0;
+        self.total_num_packets = 0;
+        self.iv_frames = 0;
+        self.iv_losses = 0;
+        let had_packet_loss = self.last_loss_us.map_or(false, |t| now_us - t < NADA_PARAM_LOGWIN * 1000);
+        let d_queue_ms = self.d_queue_history.get_average() as f64 / 1000.0;
+        self.d_tilde = if had_packet_loss { warp_rfc(d_queue_ms) } else { d_queue_ms };
+        self.x_curr = self.d_tilde + self.p_mark * NADA_PARAM_DMARK as f64 + self.p_loss * NADA_PARAM_DLOSS_RFC_MS;
+        self.determine_rate_adaptation_mode(had_packet_loss);
+        self.t_last = now_us;
+        self.report_seq += 1;
+        let rmode = match self.rmode {
+            RateUpdateMode::AcceleratedRampUp => 0,
+            _ => 1,
+        };
+        Some((rmode, self.x_curr, self.r_recv, self.p_loss, self.d_tilde, self.d_queue))
+    }
+
+    /// `XRSIM_NADA_FIX`: as `update_receive_loss_rate`, with the frame's shards as its packets (so the loss ratio is
+    /// missing shards over expected shards, with `record_lost_shards`) and the window on the session clock (`now_us`).
+    pub fn update_receive_loss_rate_shards(&mut self, received_bytes: usize, shards: u32, now_us: i64) {
+        self.update_receive(received_bytes, shards, Some(now_us));
+    }
+
     pub fn update_receive_loss_rate(&mut self, received_bytes: usize) {
         let total_num_packets = (received_bytes as f32 / 1500.0).ceil() as u32;
-        let num_packets_lost = 0; // ......OK?
+        self.update_receive(received_bytes, total_num_packets, None);
+    }
+
+    /// `session_us`: None = the window on the wall clock (as published), Some = on the session clock.
+    fn update_receive(&mut self, received_bytes: usize, total_num_packets: u32, session_us: Option<i64>) {
+        let num_packets_lost = 0; // ......OK? (XRSIM_NADA_FIX: record_lost_shards counts the deadline's losses)
                                   // received bytes in nal + size of header (VideoPacketHeader)
         let size_of_timestamp = std::mem::size_of::<Duration>();
         let size_of_send_timestamp = std::mem::size_of::<i64>();
@@ -1668,8 +1778,11 @@ impl NadaReceiver {
         self.total_packets_lost += num_packets_lost; // Comment when replicating: THIS IS ALWAYS ZERO? So packets lost is useless as metric in this implementation??.
         self.total_num_packets += total_num_packets;
 
-        let elapsed = self.receive_rate_timer.elapsed();
-        if elapsed >= Duration::from_millis(NADA_PARAM_LOGWIN as u64) {
+        let window_over = match session_us {
+            None => self.receive_rate_timer.elapsed() >= Duration::from_millis(NADA_PARAM_LOGWIN as u64),
+            Some(t) => t - self.rate_window_t0_us >= NADA_PARAM_LOGWIN * 1000,
+        };
+        if window_over {
             /* 5.1.3.  Estimation of receiving rate (r_recv):
              * NADA maintains a recent observation window with time span of LOGWIN,
              * and simply divides the total size of packets arriving during that window */
@@ -1693,9 +1806,45 @@ impl NadaReceiver {
 
             //re-initialize
             self.total_received_bytes = 0;
-            self.receive_rate_timer = Instant::now();
+            match session_us {
+                None => self.receive_rate_timer = Instant::now(),
+                Some(t) => self.rate_window_t0_us = t,
+            }
             self.total_packets_lost = 0;
             self.total_num_packets = 0;
         }
     }
+}
+
+/// RFC 8698 (4.2) non-linear warping of the queuing delay under loss, in ms: d below QTH unchanged, QTH * ((QMAX - d) /
+/// (QMAX - QTH))^4 up to QMAX, 0 beyond (`XRSIM_NADA_FIX=2`; the published `compute_d_tilde` compares microseconds with
+/// these millisecond thresholds and uses QTH - d).
+pub fn warp_rfc(d_queue_ms: f64) -> f64 {
+    let (qth, qmax) = (NADA_PARAM_QTH as f64, NADA_PARAM_QMAX as f64);
+    if d_queue_ms < qth {
+        d_queue_ms
+    } else if d_queue_ms < qmax {
+        qth * ((qmax - d_queue_ms) / (qmax - qth)).powi(4)
+    } else {
+        0.0
+    }
+}
+
+/// NADA's receiver level, `XRSIM_NADA_FIX` (backported from main's client_rules.rs for the paper's revision): 0 (default)
+/// as published (a send-stamp gap as the delay, no loss), 1 the frame's real one-way delay, the deadline's shard loss and
+/// the receive-rate window on the session clock, 2 = 1 + RFC 8698's loss handling, a report every 100 ms in a tracking
+/// packet (`nada_report`) and the sender starting at the run's initial bitrate.
+pub fn nada_level() -> u8 {
+    static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| match std::env::var("XRSIM_NADA_FIX").as_deref() {
+        Ok("") | Ok("0") | Err(_) => 0,
+        Ok("1") => 1,
+        Ok("2") => 2,
+        Ok(v) => panic!("XRSIM_NADA_FIX={v}: 0 (default, as published), 1 (real delay and loss) or 2 (1 + RFC 8698 loss handling)"),
+    })
+}
+
+/// Level 1 or more (`nada_level`).
+pub fn nada_fix() -> bool {
+    nada_level() >= 1
 }

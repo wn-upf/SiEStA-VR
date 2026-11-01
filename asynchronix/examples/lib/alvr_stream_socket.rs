@@ -1641,6 +1641,10 @@ struct ReconstructedPacket {
 
     tx_instant_packet: f32, // used for NADA ABR in XRClient connection loop
     rx_instant_packet: f32,
+    /// `XRSIM_NADA_FIX`: the frame's one-way delay in us (its last shard's arrival minus its first shard's send stamp, on
+    /// the session clock both ends share), when its first shard's stamp is known; and its shards.
+    nada_owd_us: Option<i64>,
+    shards_in_frame: u32,
 }
 
 impl fmt::Debug for ReconstructedPacket {
@@ -1787,9 +1791,18 @@ pub struct ReceiverData<H> {
     // tx_instant_first_shard: TaiTime<0>,
     tx_instant_packet: f32,
     rx_instant_packet: f32,
+    nada_owd_us: Option<i64>,
+    shards_in_frame: u32,
 }
 #[allow(unused)]
 impl<H> ReceiverData<H> {
+    /// `XRSIM_NADA_FIX`: the frame's one-way delay (us) and its shards (`ReconstructedPacket`).
+    pub fn get_nada_owd_us(&self) -> Option<i64> {
+        self.nada_owd_us
+    }
+    pub fn get_shards_in_frame(&self) -> u32 {
+        self.shards_in_frame
+    }
     pub fn get_buffer(&self) -> Vec<u8> {
         if let Some(buf) = self.buffer.clone() {
             buf
@@ -1920,6 +1933,8 @@ pub struct StreamSocket {
     highest_rx_frame_index: i32,
 
     pub lost_shards_deadline_map: HashMap<u32, usize>, // key: frame_id, val: shard loss
+    /// `XRSIM_NADA_FIX` only: the same frames' expected shards (NADA's loss ratio; `flush_shards_expected_deadline`).
+    pub lost_shards_expected_map: HashMap<u32, usize>,
     pub video_chunk_duration: f32,
 }
 #[allow(unused)]
@@ -2027,6 +2042,7 @@ impl StreamSocket {
         Self::sweep_expired_deadlines_in(
             &mut self.stream_recv_components,
             &mut self.lost_shards_deadline_map,
+            &mut self.lost_shards_expected_map,
             now,
         );
     }
@@ -2037,6 +2053,7 @@ impl StreamSocket {
     fn sweep_expired_deadlines_in(
         stream_recv_components: &mut HashMap<u16, StreamRecvComponents>,
         lost_shards_deadline_map: &mut HashMap<u32, usize>,
+        lost_shards_expected_map: &mut HashMap<u32, usize>,
         now: TaiTime<0>,
     ) {
         for components in stream_recv_components.values_mut() {
@@ -2050,6 +2067,9 @@ impl StreamSocket {
                         let shards_lost = expected_shards - shards_arrived;
 
                         lost_shards_deadline_map.insert(shard.id_frame, shards_lost);
+                        if crate::lib::gcc_nada_estimator::nada_fix() {
+                            lost_shards_expected_map.insert(shard.id_frame, expected_shards);
+                        }
 
                         expired_keys.push(*id);
                     }
@@ -2065,6 +2085,11 @@ impl StreamSocket {
                 }
             }
         }
+    }
+
+    /// `XRSIM_NADA_FIX`: the expected shards of the frames `flush_shards_lost_deadline` gives (call them together).
+    pub fn flush_shards_expected_deadline(&mut self) -> usize {
+        self.lost_shards_expected_map.drain().map(|(_, n)| n).sum()
     }
 
     pub fn flush_shards_lost_deadline(&mut self) -> (Vec<u32>, Vec<usize>) {
@@ -2348,6 +2373,7 @@ impl StreamSocket {
 
         let mut all_bytes_in_frame: u32 = 0;
         let mut all_bytes_in_frame_app: u32 = 0;
+        let mut nada_owd_us: Option<i64> = None;
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
@@ -2368,6 +2394,11 @@ impl StreamSocket {
                     let max_time = values.iter().map(|shard| shard.rx_instant).max().unwrap();
 
                     frame_span = max_time.duration_since(min_time).as_secs_f32();
+                    if let Some(first) = inner_map.get(&0) {
+                        // XRSIM_NADA_FIX: the sender stamps tx_r_instant from the session's start (TaiTime::EPOCH here)
+                        nada_owd_us = Some(max_time.duration_since(TaiTime::EPOCH).as_micros() as i64
+                            - (first.tx_r_instant as f64 * 1e6).round() as i64);
+                    }
 
                     if self.prev_frame_rx_instant == TaiTime::EPOCH {
                         frame_interarrival = Duration::ZERO.as_secs_f32(); // prevent very high values at begginning of simulation.
@@ -2446,6 +2477,8 @@ impl StreamSocket {
 
                 tx_instant_packet: self.kalman.last_tx_time, // used for NADA ABR in XRClient connection loop
                 rx_instant_packet: self.kalman.last_rx_time, // used for NADA ABR in XRClient connection loop
+                nada_owd_us,
+                shards_in_frame: shard_recv_state_mut.shards_count as u32,
                 filtered_ow_delay: self.kalman.m_current,
                 rx_bytes: self.rx_bytes,
                 bytes_in_frame: all_bytes_in_frame,
@@ -2494,6 +2527,7 @@ impl StreamSocket {
         Self::sweep_expired_deadlines_in(
             &mut self.stream_recv_components,
             &mut self.lost_shards_deadline_map,
+            &mut self.lost_shards_expected_map,
             now,
         );
         let components = self
@@ -2521,6 +2555,9 @@ impl StreamSocket {
                 let shards_lost =
                     editprog.num_shards_expected - editprog.received_shard_indices.len();
                 self.lost_shards_deadline_map.insert(idx, shards_lost);
+                if crate::lib::gcc_nada_estimator::nada_fix() {
+                    self.lost_shards_expected_map.insert(idx, editprog.num_shards_expected);
+                }
                 // Recycle buffer
                 components.used_buffer_sender.send(packet.buffer).ok();
             }
@@ -2564,6 +2601,7 @@ impl StreamSocketBuilder {
                     highest_rx_shard_index: -1,
                     highest_rx_frame_index: -1,
                     lost_shards_deadline_map: HashMap::new(),
+                    lost_shards_expected_map: HashMap::new(),
                     video_chunk_duration,
                 }
             }
@@ -2658,6 +2696,7 @@ impl StreamSocketBuilder {
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
             lost_shards_deadline_map: HashMap::new(),
+            lost_shards_expected_map: HashMap::new(),
             video_chunk_duration,
         })
     }
@@ -2730,6 +2769,7 @@ impl StreamSocketBuilder {
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
             lost_shards_deadline_map: HashMap::new(),
+            lost_shards_expected_map: HashMap::new(),
             video_chunk_duration,
         })
     }
@@ -2854,6 +2894,8 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
 
             tx_instant_packet: packet.tx_instant_packet,
             rx_instant_packet: packet.rx_instant_packet,
+            nada_owd_us: packet.nada_owd_us,
+            shards_in_frame: packet.shards_in_frame,
         })
     }
 }
@@ -3322,6 +3364,16 @@ impl<H: Serialize> StreamSender<H> {
     }
     pub fn send_header_tracking(&mut self, header: &H, now: TaiTime<0>) -> Result<()> {
         let buffer = self.get_buffer_tracking(header, now).unwrap();
+        self.send(buffer, now)
+    }
+
+    /// `XRSIM_NADA_FIX=2`: as `send_header_tracking`, with `extra` (a NADA report, `nada_report`) right after the header;
+    /// this build's tracking packet has no padding, so the packet is `extra.len()` bytes longer.
+    pub fn send_header_tracking_with(&mut self, header: &H, now: TaiTime<0>, extra: &[u8]) -> Result<()> {
+        let mut buffer = self.get_buffer_tracking(header, now).unwrap();
+        let start = buffer.hidden_offset;
+        buffer.inner[start..start + extra.len()].copy_from_slice(extra);
+        buffer.hidden_offset += extra.len();
         self.send(buffer, now)
     }
 }
