@@ -91,6 +91,18 @@ impl Executor {
             Self::MtExecutor(executor) => executor.run(),
         }
     }
+
+    /// `spawn_and_forget(future)` then `run()`; the single-threaded executor polls the future in place first (see
+    /// `st_executor::Executor::run_first`).
+    pub(crate) fn run_first(&mut self, future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>) {
+        match self {
+            Self::StExecutor(executor) => executor.run_first(future),
+            Self::MtExecutor(executor) => {
+                executor.spawn_and_forget(future);
+                executor.run();
+            }
+        }
+    }
 }
 
 #[cfg(all(test, not(asynchronix_loom)))]

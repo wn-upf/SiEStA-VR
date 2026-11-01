@@ -103,6 +103,31 @@ impl Executor {
         queue.push(runnable);
     }
 
+    /// Same as spawning `future` with `spawn_and_forget` and calling `run`, without a task when the future completes on
+    /// its first poll (a lone scheduled event sending to a model): the work queue is LIFO, so a task spawned now would
+    /// be the first one run, and polling the future in place first leaves the order of everything after it unchanged.
+    /// A future that does not complete at once is spawned as usual.
+    pub(crate) fn run_first(&mut self, mut future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>) {
+        SIMULATION_CONTEXT.set(&self.simulation_context, || {
+            ACTIVE_TASKS.set(&self.active_tasks, || {
+                EXECUTOR_CONTEXT.set(&self.context, || {
+                    let waker = noop_waker();
+                    let mut cx = std::task::Context::from_waker(&waker);
+                    if future.as_mut().poll(&mut cx).is_pending() {
+                        self.spawn_and_forget(future);
+                    }
+                    loop {
+                        let task = match self.context.queue.borrow_mut().pop() {
+                            Some(task) => task,
+                            None => break,
+                        };
+                        task.run();
+                    }
+                })
+            })
+        });
+    }
+
     /// Execute spawned tasks, blocking until all futures have completed or
     /// until the executor reaches a deadlock.
     pub(crate) fn run(&mut self) {
@@ -225,6 +250,15 @@ impl<T: Future> Drop for CancellableFuture<T> {
             }
         });
     }
+}
+
+/// A waker that does nothing, for `run_first`'s in-place poll: a future that registers it and returns `Pending` is then
+/// spawned, and its task's first poll registers the task's own waker.
+fn noop_waker() -> std::task::Waker {
+    use std::task::{RawWaker, RawWakerVTable};
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+    // SAFETY: the vtable's functions ignore the data pointer.
+    unsafe { std::task::Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
 }
 
 /// Schedules a `Runnable` from within a worker thread.

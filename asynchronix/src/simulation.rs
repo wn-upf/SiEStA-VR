@@ -199,6 +199,8 @@ pub struct Simulation {
     scheduler_queue: Arc<Mutex<SchedulerQueue>>,
     time: AtomicTime,
     clock: Box<dyn Clock>,
+    /// A step holding a single action polls it in place (`Executor::run_first`); `XRSIM_ENGINE_INLINE=0` spawns it.
+    inline_lone_actions: bool,
 }
 
 impl Simulation {
@@ -214,6 +216,7 @@ impl Simulation {
             scheduler_queue,
             time,
             clock,
+            inline_lone_actions: std::env::var("XRSIM_ENGINE_INLINE").map_or(true, |v| v.trim() != "0"),
         }
     }
 
@@ -388,10 +391,19 @@ impl Simulation {
         let mut scheduler_queue = self.scheduler_queue.lock().unwrap();
         let mut current_key = peek_next_key(&mut scheduler_queue)?;
         self.time.write(current_key.0);
+        let mut first = true;
 
         loop {
             let action = pull_next_action(&mut scheduler_queue);
             let mut next_key = peek_next_key(&mut scheduler_queue);
+            // The only action at this time: polled in place rather than through a task (`Executor::run_first`).
+            if first && next_key.map_or(true, |k| k.0 > current_key.0) && self.inline_lone_actions {
+                drop(scheduler_queue);
+                self.clock.synchronize(current_key.0);
+                self.executor.run_first(action.into_future());
+                return Some(current_key.0);
+            }
+            first = false;
             if next_key != Some(current_key) {
                 // Since there are no other actions targeting the same mailbox
                 // and the same time, the action is spawned immediately.
