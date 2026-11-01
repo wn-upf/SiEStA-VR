@@ -4006,9 +4006,16 @@ impl QueueModule {
                 // DL queue (-1, ac, link_id) is shared across all destination STAs.
                 // Packets for other destinations may be interleaved between the ones we
                 // just aggregated, so we remove exactly the packets that entered taken_snapshot.
-                let taken_ids: HashSet<usize> = taken_snapshot
+                // Keyed by (src, dest, packet_id): every source numbers its packets from 0, so a bare
+                // packet_id also matched other stations' queued packets, which then vanished unsent while
+                // their flow's `packet_count` kept counting them; once a flow had 8192 such phantoms, the
+                // overflow check dropped all of its new packets (the "dead stream"). `XRSIM_DL_ID_LEGACY=1`
+                // restores the old key (the paper build's behaviour).
+                let legacy = dl_packet_id_legacy();
+                let id_key = |p: &MpduPacket| if legacy { (0, 0, p.packet_id) } else { (p.sta_src_id, p.sta_dest_id, p.packet_id) };
+                let taken_ids: HashSet<(i32, i32, usize)> = taken_snapshot
                     .iter()
-                    .map(|(_, p)| p.packet_id)
+                    .map(|(_, p)| id_key(p))
                     .collect();
                 let involved_deques: HashSet<usize> = taken_snapshot
                     .iter()
@@ -4016,7 +4023,7 @@ impl QueueModule {
                     .collect();
                 for deq_idx in involved_deques {
                     self.per_flow_queues[deq_idx]
-                        .retain(|p| !taken_ids.contains(&p.packet_id));
+                        .retain(|p| !taken_ids.contains(&id_key(p)));
                 }
             }
 
@@ -4582,6 +4589,16 @@ impl QueueModule {
 }
 
 impl Model for QueueModule {}
+
+#[cfg(test)]
+mod dl_id_collision_tests;
+
+/// `XRSIM_DL_ID_LEGACY=1`: remove a sent DL packet from the shared AP deque by its packet_id alone, as the paper build
+/// did (it also removed other stations' packets that had the same id). Off by default.
+fn dl_packet_id_legacy() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| matches!(std::env::var("XRSIM_DL_ID_LEGACY").as_deref(), Ok("1")))
+}
 
 #[derive(Clone, Default)]
 #[allow(unused)]
