@@ -3099,6 +3099,8 @@ impl<H> StreamSender<H> {
             }
         }
         self.shards_count = shards_count;
+        // Recycled by the next get_buffer_emu / get_buffer_tracking (this list used to only
+        // grow: every frame's buffer was kept alive for the whole run).
         self.used_buffers.push(buffer.inner);
 
         Ok(())
@@ -3146,7 +3148,8 @@ impl<H: Serialize> StreamSender<H> {
 
 
         let input_path = get_prefix_path(&format!("video_samples_vmaf/{}", file_with_fps));
-        let mut buffer: Vec<u8> = Vec::new();
+        // An empty buffer, reusing the allocation of an already-sent frame when there is one.
+        let mut buffer: Vec<u8> = self.used_buffers.pop().map(|mut b| { b.clear(); b }).unwrap_or_default();
 
         if USE_FFMPEG_DEMO {
             if self.ffmpeg_encoder.is_none() {
@@ -3424,7 +3427,10 @@ impl<H: Serialize> StreamSender<H> {
     }
 
     pub fn get_buffer_tracking(&mut self, header: &H, _now: TaiTime<0>) -> Result<Buffer<H>> {
-        let mut buffer = vec![0; 1000];
+        // 1000 zero bytes, reusing the allocation of an already-sent buffer when there is one.
+        let mut buffer = self.used_buffers.pop().unwrap_or_default();
+        buffer.clear();
+        buffer.resize(1000, 0);
         let header_size = bincode::serialized_size(header)? as usize;
         let hidden_offset = SHARD_PREFIX_SIZE + header_size;
 

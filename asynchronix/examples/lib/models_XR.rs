@@ -4615,10 +4615,12 @@ impl XRServer {
                     map_clone.insert(key, value);
                 });
 
-                let payload = buffer_emu.inner.clone();
-                buffer_emu
-                    .get_range_mut(0, payload.len())
-                    .copy_from_slice(&payload);
+                // The frame bytes go to the payload start (after the hidden prefix): grow by the
+                // prefix, then shift in place -- same bytes as copying a clone of `inner` there.
+                let payload_len = buffer_emu.inner.len();
+                let hidden_offset = buffer_emu.hidden_offset;
+                buffer_emu.get_range_mut(0, payload_len);
+                buffer_emu.inner.copy_within(0..payload_len, hidden_offset);
 
                 let arc_receiver: Arc<Mutex<Box<dyn SocketReader>>> =
                     send_socket.app_network_interface.clone();
