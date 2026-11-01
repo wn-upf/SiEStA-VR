@@ -224,7 +224,12 @@ macro_rules! format_elapsed {
     ($elapsed:expr) => {{
         let total_seconds =
             $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
-        format!("{:.9}", total_seconds)
+        // Identical text to `format!("{:.9}", total_seconds)`, but with the capacity up front:
+        // `format!` of a lone `{}` starts at capacity 0, so the String allocs (8 B) and then
+        // reallocs (16 B) -- two allocator calls per timestamp, ~once per packet in the logs.
+        let mut s = String::with_capacity(24);
+        { use std::fmt::Write as _; write!(s, "{:.9}", total_seconds).unwrap(); }
+        s
     }};
 }
 
@@ -2158,7 +2163,12 @@ macro_rules! format_timestamp {
     ($elapsed:expr) => {{
         let total_seconds =
             $elapsed.as_secs() as f64 + ($elapsed.subsec_nanos() as f64 / 1_000_000_000.0);
-        format!("{:.9}", total_seconds)
+        // Identical text to `format!("{:.9}", total_seconds)`, but with the capacity up front:
+        // `format!` of a lone `{}` starts at capacity 0, so the String allocs (8 B) and then
+        // reallocs (16 B) -- two allocator calls per timestamp, ~once per packet in the logs.
+        let mut s = String::with_capacity(24);
+        { use std::fmt::Write as _; write!(s, "{:.9}", total_seconds).unwrap(); }
+        s
     }};
 }
 
