@@ -11,7 +11,7 @@ use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender,
 use ffmpeg_sidecar::command::FfmpegCommand;
 use rand::Rng;
 use rayon::result;
-use std::collections::HashMap;
+use crate::lib::sim_rng::DetHashMap as HashMap;
 #[allow(unused)]
 use std::io::BufRead;
 use std::io::BufReader;
@@ -26,9 +26,10 @@ use crate::lib::models_XR::SHARD_PREFIX_SIZE;
 use crate::lib::models_XR::{XRDevice, HEIGHT_ENCODER, WIDTH_ENCODER};
 use std::cell::{Cell, RefCell};
 use std::fmt::{self, Debug};
+use crate::lib::sim_rng::DetHashSet as HashSet;
 use std::{
     cmp::Ordering,
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     io,
     marker::PhantomData,
     mem,
@@ -1688,7 +1689,7 @@ pub struct FrameTracker {
 impl FrameTracker {
     pub fn new() -> Self {
         FrameTracker {
-            map: HashMap::new(),
+            map: HashMap::default(),
             queue: VecDeque::new(),
             max_size: 1000,
         }
@@ -1970,7 +1971,7 @@ impl StreamSocket {
             codec_selection,
             results_path: results_path.to_string(), 
             emu_frame_table: None, 
-            // col_cache: HashMap::new(),
+            // col_cache: HashMap::default(),
         }
     }
 
@@ -2006,11 +2007,11 @@ impl StreamSocket {
                 used_buffer_sender: used_buffer_sender.clone(),
                 used_buffer_receiver,
                 packet_queue: packet_sender,
-                in_progress_packets: HashMap::new(),
+                in_progress_packets: HashMap::default(),
                 discarded_shards_sink: InProgressPacket {
                     buffer: vec![],
                     buffer_length: 0,
-                    received_shard_indices: HashSet::new(),
+                    received_shard_indices: HashSet::default(),
                     deadline: None,
                     num_shards_expected: 0,
                     id_frame: 0,
@@ -2168,7 +2169,7 @@ impl StreamSocket {
                     rx_bytes_app: (shard_length - SHARD_PREFIX_SIZE) as u32,
                 };
 
-                let shards_map = self.map_rx.entry(packet_index).or_insert(HashMap::new());
+                let shards_map = self.map_rx.entry(packet_index).or_insert(HashMap::default());
 
                 if shards_map.contains_key(&shard_index) {
                     self.duplicated_shard_counter += 1;
@@ -2292,8 +2293,9 @@ impl StreamSocket {
                 InProgressPacket {
                     buffer,
                     buffer_length: 0,
-                    received_shard_indices: HashSet::with_capacity(
+                    received_shard_indices: HashSet::with_capacity_and_hasher(
                         shard_recv_state_mut.shards_count,
+                        Default::default(),
                     ),
                     deadline: shard_recv_state_mut.frame_deadline,
                     num_shards_expected: shard_recv_state_mut.shards_count,
@@ -2585,10 +2587,10 @@ impl StreamSocketBuilder {
                     receive_socket: Arc::new(Mutex::new(Box::new(receiver))),
                     // Initialize remaining fields as needed
                     shard_recv_state: None,
-                    stream_recv_components: HashMap::new(),
+                    stream_recv_components: HashMap::default(),
                     transport_protocol: SocketProtocol::Channel,
                     // Initialize other fields based on your requirements
-                    map_rx: HashMap::new(),
+                    map_rx: HashMap::default(),
                     rx_bytes: 0,
                     prev_shard_tx_r_instant: None,
                     prev_shard_rx_instant: None,
@@ -2600,8 +2602,8 @@ impl StreamSocketBuilder {
                     duplicated_shard_counter: 0,
                     highest_rx_shard_index: -1,
                     highest_rx_frame_index: -1,
-                    lost_shards_deadline_map: HashMap::new(),
-                    lost_shards_expected_map: HashMap::new(),
+                    lost_shards_deadline_map: HashMap::default(),
+                    lost_shards_expected_map: HashMap::default(),
                     video_chunk_duration,
                 }
             }
@@ -2675,10 +2677,10 @@ impl StreamSocketBuilder {
             send_socket: Arc::new(Mutex::new(send_socket)),
             receive_socket: Arc::new(Mutex::new(receive_socket)),
             shard_recv_state: None,
-            stream_recv_components: HashMap::new(),
+            stream_recv_components: HashMap::default(),
 
             transport_protocol: protocol,
-            map_rx: HashMap::new(),
+            map_rx: HashMap::default(),
             rx_bytes: 0,
 
             prev_shard_tx_r_instant: None,
@@ -2695,8 +2697,8 @@ impl StreamSocketBuilder {
 
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
-            lost_shards_deadline_map: HashMap::new(),
-            lost_shards_expected_map: HashMap::new(),
+            lost_shards_deadline_map: HashMap::default(),
+            lost_shards_expected_map: HashMap::default(),
             video_chunk_duration,
         })
     }
@@ -2747,11 +2749,11 @@ impl StreamSocketBuilder {
             send_socket: Arc::new(Mutex::new(send_socket)),
             receive_socket: Arc::new(Mutex::new(receive_socket)),
             shard_recv_state: None,
-            stream_recv_components: HashMap::new(),
+            stream_recv_components: HashMap::default(),
 
             transport_protocol: protocol,
 
-            map_rx: HashMap::new(),
+            map_rx: HashMap::default(),
             rx_bytes: 0,
 
             prev_shard_tx_r_instant: None,
@@ -2768,8 +2770,8 @@ impl StreamSocketBuilder {
 
             highest_rx_frame_index: -1,
             highest_rx_shard_index: -1,
-            lost_shards_deadline_map: HashMap::new(),
-            lost_shards_expected_map: HashMap::new(),
+            lost_shards_deadline_map: HashMap::default(),
+            lost_shards_expected_map: HashMap::default(),
             video_chunk_duration,
         })
     }

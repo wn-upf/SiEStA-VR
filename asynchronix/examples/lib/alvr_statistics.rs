@@ -14,8 +14,9 @@ use std::net::IpAddr;
 use std::path::Path;
 // use ::{warn, SlidingWindowAverage};
 use std::io::Read;
+use crate::lib::sim_rng::DetHashMap as HashMap;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     time::{Duration, Instant},
 };
 use tai_time::TaiTime;
@@ -421,7 +422,7 @@ impl StatisticsManager {
             packets_skipped_total: 0,
             packets_skipped_partial_sum: 0,
 
-            battery_gauges: HashMap::new(),
+            battery_gauges: HashMap::default(),
             steamvr_pipeline_latency: Duration::from_secs_f32(
                 steamvr_pipeline_frames * nominal_server_frame_interval.as_secs_f32(),
             ),
@@ -466,7 +467,7 @@ impl StatisticsManager {
             prev_highest_frame: 0,
 
             stats_history_buffer: VecDeque::new(),
-            map_frames_spf: HashMap::new(),
+            map_frames_spf: HashMap::default(),
 
             is_first_stats: true,
 

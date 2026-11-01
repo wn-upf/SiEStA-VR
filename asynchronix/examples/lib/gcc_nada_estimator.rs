@@ -4,8 +4,9 @@ use show_image::glam::f64;
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
+use crate::lib::sim_rng::DetHashMap as HashMap;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     f64::{INFINITY, NAN},
     time::{self, Duration, Instant},
 };

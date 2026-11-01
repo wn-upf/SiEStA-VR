@@ -77,7 +77,7 @@ use asynchronix::model::{Context, Model};
 use asynchronix::ports::Output;
 use dashmap::DashMap;
 use std::cmp::{self, max};
-use std::collections::HashMap;
+use crate::lib::sim_rng::DetHashMap as HashMap;
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::future::Future;
@@ -5516,11 +5516,11 @@ impl XRClient {
             cleanup_interval: std::time::Duration::from_secs(8), // Clea
 
             last_processed_frame_id: 0,
-            missing_frames_buffer: HashMap::new(),
+            missing_frames_buffer: HashMap::default(),
             last_displayed_frame_id: 0,
 
-            frame_pairs: HashMap::new(),
-            ref_max_pairs: HashMap::new(),
+            frame_pairs: HashMap::default(),
+            ref_max_pairs: HashMap::default(),
             last_displayed_pair_id: 0,
             last_keyframe_id: 0,
             name_folder: name_folder.to_string(),

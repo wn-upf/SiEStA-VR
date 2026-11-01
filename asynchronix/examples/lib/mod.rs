@@ -14,7 +14,7 @@ use crate::lib::models_mm1k::{STR_PLUS_MODE_MLO, AP_X, AP_Y};
 use colored::Colorize;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::lib::sim_rng::DetHashMap as HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;

@@ -13,7 +13,8 @@ use crossbeam::channel::{unbounded, Receiver, Sender};
 use rand::distributions::WeightedIndex;
 use rand::Rng;
 use std::cmp::{self, max};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+use crate::lib::sim_rng::DetHashMap as HashMap;
 use std::f64::consts::PI;
 use std::future::Future;
 use std::hash::Hash;
@@ -27,7 +28,7 @@ use std::time::{Duration, Instant};
 // use crate::lib::TESTS_RANDOM_PATTERNS;
 use crate::{debug_print, format_elapsed, taitime_to_f64, lib::t_secs, };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use crate::lib::sim_rng::DetHashSet as HashSet;
 use std::sync::{Arc, Mutex};
 use tai_time::TaiTime;
 use regex::Regex;
@@ -2554,15 +2555,15 @@ impl QueueModule {
         viz_tx: Option<crossbeam::channel::Sender<VizEvent>>,
     ) -> Self {
 
-        let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::new();
-        let mut windows_vec = HashMap::new();
+        let mut stats_vec: HashMap<usize, perStaLockStats> = HashMap::default();
+        let mut windows_vec = HashMap::default();
 
         let (stats_tx, stats_rx) = unbounded();
         let num_links = link_configs.len();
 
         let total_entries = (num_stas + 1) * num_links * 4;     // index = sta_idx * (num_links * 4 ACs) + link_idx * 4 ACs + ac_idx
         let mut dcf_values: Vec<DcfStats> = Vec::with_capacity(total_entries);
-        let mut mac_key_index: HashMap<MacKey, usize> = HashMap::with_capacity(total_entries);
+        let mut mac_key_index: HashMap<MacKey, usize> = HashMap::with_capacity_and_hasher(total_entries, Default::default());
 
 
         // let mut mac_queue_depths = vec![0usize; total_entries];
@@ -2629,12 +2630,12 @@ impl QueueModule {
         }
         
         // Initialize link mediums
-        let mut link_mediums = HashMap::new();
-        let mut link_outputs = HashMap::new();
-        let mut link_channel_widths = HashMap::new();
-        let mut link_queue_depths = HashMap::new(); // <-- ADD THIS
+        let mut link_mediums = HashMap::default();
+        let mut link_outputs = HashMap::default();
+        let mut link_channel_widths = HashMap::default();
+        let mut link_queue_depths = HashMap::default(); // <-- ADD THIS
 
-        let mut being_served = HashMap::new();
+        let mut being_served = HashMap::default();
 
         for link_config in &link_configs {
             link_queue_depths.insert(link_config.link_id, 0usize); // ← add this
@@ -2669,7 +2670,7 @@ impl QueueModule {
             coords_queue: Coords::with_coords(AP_X, AP_Y, 0.0), // To test.
             p_tx: P_TX,
             STA_coords_grid: Vec::new(),
-            STA_coords_map: HashMap::new(),
+            STA_coords_map: HashMap::default(),
             cumulative_stats_queue: Arc::new(Mutex::new(QueueStats::new())),
             array_stas_stats: Arc::new(Mutex::new(stats_vec)),
             // array_dcf_values: Arc::new(Mutex::new(dcf_stats_vec)),
@@ -2677,7 +2678,7 @@ impl QueueModule {
             mac_key_index, 
             num_links, 
 
-            sta_stats_cache: HashMap::new(),
+            sta_stats_cache: HashMap::default(),
             stats_tx: Some(stats_tx),
             stats_rx: Some(stats_rx),
             PL_probability: PL_prob,
@@ -2686,15 +2687,15 @@ impl QueueModule {
             link_channel_widths,
             link_queue_depths,
             // mac_queue_depths,
-            // mac_queue_depths: HashMap::new(), 
-            sta_capabilities: HashMap::new(),
+            // mac_queue_depths: HashMap::default(), 
+            sta_capabilities: HashMap::default(),
             mlo_linkselection_strat,
             packs_per_ampdu,
 
             window_metrics_mcs_util: Arc::new(Mutex::new(windows_vec)),
             output_metrics: Output::default(),
             viz_tx, 
-            active_mac_key_counts: HashMap::new(), 
+            active_mac_key_counts: HashMap::default(), 
             slot_tick_pending: false,
         }
     }
@@ -2800,7 +2801,7 @@ impl QueueModule {
         }
 
         // Precompute which MacKeys have packets (per link)
-        // let mut present_keys: HashSet<(i32, EdcaAc)> = HashSet::new();
+        // let mut present_keys: HashSet<(i32, EdcaAc)> = HashSet::default();
         // for p in self.queue.iter() {
         //     let is_ul = p.sta_src_id > p.sta_dest_id;
         //     let key = if is_ul {
@@ -2811,7 +2812,7 @@ impl QueueModule {
         //     present_keys.insert(key);
         // }
 
-        let mut ready_per_link: HashMap<u8, Vec<MacKey>> = HashMap::new();
+        let mut ready_per_link: HashMap<u8, Vec<MacKey>> = HashMap::default();
 
         // st is ALREADY a mutable reference (&mut DcfStats) thanks to this loop
         for st in &mut self.dcf_values {
@@ -2950,7 +2951,7 @@ impl QueueModule {
     fn resolve_virtual_collision(&mut self, mut ready: Vec<MacKey>) -> Vec<MacKey> {
         // Collisions when same STA has several ACs winning backoff
 
-        let mut winner = HashMap::<i32, MacKey>::new(); // sta_id → winning AC
+        let mut winner = HashMap::<i32, MacKey>::default(); // sta_id → winning AC
 
         ready.sort_by_key(|k| ac_prio(k.1));
         for key in ready {
@@ -3612,7 +3613,7 @@ impl QueueModule {
             let mac_key = AMPDU_sent.mac_key;
             
             // Reconstruct the per-deque depths at actual TXOP completion
-            let mut depth_by_key: HashMap<MacKey, usize> = HashMap::new();
+            let mut depth_by_key: HashMap<MacKey, usize> = HashMap::default();
             for packet in &AMPDU_sent.mpdu_packets {
                 let lid = packet.assigned_link_id.unwrap_or(mac_key.2);
                 let is_ul = packet.sta_src_id > packet.sta_dest_id;
@@ -4058,14 +4059,14 @@ impl QueueModule {
 
         // ── Push failed (PL) packets back to the front for retransmission ────────────
         // Build set of packet_ids that survived PL
-        let successful_ids: std::collections::HashSet<usize> = self
+        let successful_ids: crate::lib::sim_rng::DetHashSet<usize> = self
             .aux_ampdu_serviced.mpdu_packets
             .iter()
             .map(|p| p.packet_id)
             .collect();
 
         // Group failed packets by deque, preserving FIFO order
-        let mut failed_by_deque: HashMap<usize, Vec<MpduPacket>> = HashMap::new();
+        let mut failed_by_deque: HashMap<usize, Vec<MpduPacket>> = HashMap::default();
         for (deq_idx, pkt) in taken_snapshot {
             if !successful_ids.contains(&pkt.packet_id) {
                 failed_by_deque.entry(deq_idx).or_default().push(pkt);
@@ -4080,7 +4081,7 @@ impl QueueModule {
         }
 
         // ── Update link_queue_depths and active_mac_key_counts for successful packets ─
-        let mut packets_removed_by_key: HashMap<(i32, i32), usize> = HashMap::new();
+        let mut packets_removed_by_key: HashMap<(i32, i32), usize> = HashMap::default();
         for packet in &self.aux_ampdu_serviced.mpdu_packets {
             *packets_removed_by_key
                 .entry((packet.sta_src_id, packet.sta_dest_id))

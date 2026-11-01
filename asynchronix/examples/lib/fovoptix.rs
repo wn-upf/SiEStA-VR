@@ -1,6 +1,7 @@
 #![allow(warnings)] // some problems in this code guarantee warnings.
+use crate::lib::sim_rng::DetHashMap as HashMap;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     f64::{INFINITY, NAN},
     time::{self, Duration, Instant},
 };
