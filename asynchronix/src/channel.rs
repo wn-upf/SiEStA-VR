@@ -30,7 +30,14 @@ struct Inner<M> {
     sender_signal: Event,
     /// Current count of live senders.
     sender_count: AtomicUsize,
+    /// Creation-order identifier (see `channel_id`).
+    id: usize,
 }
+
+/// Next channel identifier. Mailboxes are created in a fixed order during model setup, so ordering the
+/// scheduler's same-time actions by this id (rather than by the channel's heap address, which moves with the
+/// allocator's state: CPU count, malloc arenas, threads started before setup) makes runs reproducible.
+static NEXT_CHANNEL_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl<M: 'static> Inner<M> {
     fn new(capacity: usize) -> Self {
@@ -39,6 +46,7 @@ impl<M: 'static> Inner<M> {
             receiver_signal: DiatomicWaker::new(),
             sender_signal: Event::new(),
             sender_count: AtomicUsize::new(0),
+            id: NEXT_CHANNEL_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 }
@@ -152,7 +160,7 @@ impl<M: Model> Receiver<M> {
     /// time, but an identifier may be reused after all handles to a channel
     /// have been dropped.
     pub(crate) fn channel_id(&self) -> ChannelId {
-        ChannelId(&*self.inner as *const Inner<M> as usize)
+        ChannelId(self.inner.id)
     }
 }
 
@@ -254,7 +262,7 @@ impl<M: Model> Sender<M> {
     /// time, but an identifier may be reused after all handles to a channel
     /// have been dropped.
     pub(crate) fn channel_id(&self) -> usize {
-        Arc::as_ptr(&self.inner) as usize
+        self.inner.id
     }
 }
 

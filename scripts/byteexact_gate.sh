@@ -9,7 +9,8 @@
 #
 # Scenarios: gate_data/scenarios.list (one per line: name, optional ENV=value, key=value overrides of the paper's
 # command line). Every scenario runs XR_sim with cwd = repo root (it reads csv_framesizes/ from there) and writes into
-# its own results folder; every file in it is hashed, cmp-equivalent (sha256 of the bytes).
+# its own results folder; every file in it is hashed, cmp-equivalent (sha256 of the bytes), and so is the MAC
+# summary table the run prints (the stdout's "| ... |" lines: blocking probability, queue and service times).
 #
 # Env:
 #   GATE_BIN    XR_sim binary (default: $CARGO_TARGET_DIR or <repo>/target, release/examples/XR_sim)
@@ -64,8 +65,9 @@ run_one() { # $1 = scenario, $2 = out dir, $3 = command prefix (may be empty) ->
         || { echo "RUN FAILED $name (log: $out/.stdout.log)" >&2; return 1; }
 }
 
-hash_dir() { # relative-path sha256 manifest of every file a run wrote
+hash_dir() { # relative-path sha256 manifest of every file a run wrote, plus the MAC summary table it prints
     (cd "$1/res" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum)
+    echo "$(grep '^|' "$1/.stdout.log" | sha256sum | cut -d' ' -f1)  ./stdout:mac_summary_table"
 }
 
 export -f run_one args_of hash_dir
