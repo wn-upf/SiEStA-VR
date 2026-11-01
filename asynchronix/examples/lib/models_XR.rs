@@ -3209,12 +3209,51 @@ fn tracking_rows_to_batch(rows: &[TrackingRow], schema: &Arc<Schema>) -> RecordB
     ]).expect("tracking schema/column mismatch")
 }
 
+/// Rows bound for a Parquet writer thread, handed over in chunks of `ROW_CHUNK`: one channel
+/// message (and at most one wake-up of the parked writer) per chunk instead of per row. The
+/// writer still consumes the rows one by one and in order, so its record batches -- and the
+/// file -- are unchanged. `close` sends the rows still pending and closes the channel.
+struct RowSender<T> {
+    tx:      Option<Sender<Vec<T>>>,
+    pending: Mutex<Vec<T>>,
+}
+
+const ROW_CHUNK: usize = 256;
+
+impl<T> RowSender<T> {
+    /// The channel, sized to hold as many rows as the old per-row `bounded(8192)` one.
+    fn channel() -> (Self, Receiver<Vec<T>>) {
+        let (tx, rx) = bounded::<Vec<T>>(8192 / ROW_CHUNK);
+        (Self { tx: Some(tx), pending: Mutex::new(Vec::with_capacity(ROW_CHUNK)) }, rx)
+    }
+
+    fn send(&self, row: T) {
+        let Some(tx) = &self.tx else { return };
+        let mut pending = self.pending.lock().unwrap();
+        pending.push(row);
+        if pending.len() >= ROW_CHUNK {
+            let chunk = std::mem::replace(&mut *pending, Vec::with_capacity(ROW_CHUNK));
+            drop(pending);
+            let _ = tx.send(chunk);
+        }
+    }
+
+    fn close(&mut self) {
+        let rest = std::mem::take(self.pending.get_mut().unwrap());
+        if let Some(tx) = self.tx.take() {
+            if !rest.is_empty() {
+                let _ = tx.send(rest);
+            }
+        }
+    }
+}
+
 /// NaN (from unwrap_or on missing Quat) becomes a proper Arrow null
 #[inline]
 fn to_opt(v: f32) -> Option<f32> {
     if v.is_nan() { None } else { Some(v) }
 }pub struct ParquetTracking {
-    tx:              Option<Sender<TrackingRow>>,
+    tx:              RowSender<TrackingRow>,
     handle:          Option<thread::JoinHandle<()>>,
     pub recent_gazes:    Arc<Mutex<VecDeque<[Option<Quat>; 2]>>>,
     pub max_window_size: usize,
@@ -3239,18 +3278,20 @@ impl ParquetTracking {
         let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-        let (tx, rx) = bounded::<TrackingRow>(8192);
+        let (tx, rx) = RowSender::<TrackingRow>::channel();
 
         // ← capture the handle instead of discarding it
         let handle = thread::spawn(move || {
             let mut writer = writer;
             let mut buf: Vec<TrackingRow> = Vec::with_capacity(BATCH_SIZE_TRACKING);
-            while let Ok(row) = rx.recv() {
-                buf.push(row);
-                if buf.len() >= BATCH_SIZE_TRACKING {
-                    let batch = tracking_rows_to_batch(&buf, &schema);
-                    if writer.write(&batch).is_err() { break; }
-                    buf.clear();
+            'rows: while let Ok(rows) = rx.recv() {
+                for row in rows {
+                    buf.push(row);
+                    if buf.len() >= BATCH_SIZE_TRACKING {
+                        let batch = tracking_rows_to_batch(&buf, &schema);
+                        if writer.write(&batch).is_err() { break 'rows; }
+                        buf.clear();
+                    }
                 }
             }
             if !buf.is_empty() {
@@ -3264,7 +3305,7 @@ impl ParquetTracking {
         let max_window_size = (expected_polling_rate * t_abr).ceil() as usize;
 
         Ok(Self {
-            tx:     Some(tx),   // ← wrap in Some
+            tx,
             handle: Some(handle), // ← store the handle
             recent_gazes: Arc::new(Mutex::new(VecDeque::with_capacity(max_window_size))),
             max_window_size,
@@ -3294,9 +3335,8 @@ impl ParquetTracking {
             .map(|q| (q.x, q.y, q.z, q.w))
             .unwrap_or((f32::NAN, f32::NAN, f32::NAN, f32::NAN));
 
-        // ← send through Option
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(TrackingRow {
+        {
+            self.tx.send(TrackingRow {
                 timestamp:       format_elapsed!(now),
                 device_id,
                 pos_x:           pos[0],
@@ -3316,7 +3356,7 @@ impl ParquetTracking {
 
 impl Drop for ParquetTracking {
     fn drop(&mut self) {
-        drop(self.tx.take());
+        self.tx.close();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -3351,7 +3391,7 @@ fn bitrate_rows_to_batch(rows: &[BitrateRow], schema: &Arc<Schema>) -> RecordBat
 }
 
 pub struct ParquetBitrate {
-    tx:     Option<Sender<BitrateRow>>,
+    tx:     RowSender<BitrateRow>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -3372,17 +3412,19 @@ impl ParquetBitrate {
         let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-        let (tx, rx) = bounded::<BitrateRow>(8192);
+        let (tx, rx) = RowSender::<BitrateRow>::channel();
 
         let handle = thread::spawn(move || {
             let mut writer = writer;
             let mut buf: Vec<BitrateRow> = Vec::with_capacity(BATCH_SIZE_BITRATE);
-            while let Ok(row) = rx.recv() {
-                buf.push(row);
-                if buf.len() >= BATCH_SIZE_BITRATE {
-                    let batch = bitrate_rows_to_batch(&buf, &schema);
-                    if writer.write(&batch).is_err() { break; }
-                    buf.clear();
+            'rows: while let Ok(rows) = rx.recv() {
+                for row in rows {
+                    buf.push(row);
+                    if buf.len() >= BATCH_SIZE_BITRATE {
+                        let batch = bitrate_rows_to_batch(&buf, &schema);
+                        if writer.write(&batch).is_err() { break 'rows; }
+                        buf.clear();
+                    }
                 }
             }
             if !buf.is_empty() {
@@ -3393,7 +3435,7 @@ impl ParquetBitrate {
         });
 
         Ok(Self {
-            tx:     Some(tx),
+            tx,
             handle: Some(handle),
         })
     }
@@ -3404,8 +3446,8 @@ impl ParquetBitrate {
         frame_index:  u64,
         bitrate_mbps: f32,
     ) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(BitrateRow {
+        {
+            self.tx.send(BitrateRow {
                 timestamp: format_elapsed!(now),
                 frame_index,
                 bitrate_mbps,
@@ -3416,7 +3458,7 @@ impl ParquetBitrate {
 
 impl Drop for ParquetBitrate {
     fn drop(&mut self) {
-        drop(self.tx.take());
+        self.tx.close();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -3463,7 +3505,7 @@ fn shard_rx_rows_to_batch(rows: &[ShardRxRow], schema: &Arc<Schema>) -> RecordBa
 /// frame_index makes it possible to identify exactly which frames were discarded
 /// incomplete by the client (i.e. never accumulated all their expected shards).
 pub struct ParquetShardRx {
-    tx:     Option<Sender<ShardRxRow>>,
+    tx:     RowSender<ShardRxRow>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -3484,17 +3526,19 @@ impl ParquetShardRx {
         let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-        let (tx, rx) = bounded::<ShardRxRow>(8192);
+        let (tx, rx) = RowSender::<ShardRxRow>::channel();
 
         let handle = thread::spawn(move || {
             let mut writer = writer;
             let mut buf: Vec<ShardRxRow> = Vec::with_capacity(BATCH_SIZE_SHARD_RX);
-            while let Ok(row) = rx.recv() {
-                buf.push(row);
-                if buf.len() >= BATCH_SIZE_SHARD_RX {
-                    let batch = shard_rx_rows_to_batch(&buf, &schema);
-                    if writer.write(&batch).is_err() { break; }
-                    buf.clear();
+            'rows: while let Ok(rows) = rx.recv() {
+                for row in rows {
+                    buf.push(row);
+                    if buf.len() >= BATCH_SIZE_SHARD_RX {
+                        let batch = shard_rx_rows_to_batch(&buf, &schema);
+                        if writer.write(&batch).is_err() { break 'rows; }
+                        buf.clear();
+                    }
                 }
             }
             if !buf.is_empty() {
@@ -3505,7 +3549,7 @@ impl ParquetShardRx {
         });
 
         Ok(Self {
-            tx:     Some(tx),
+            tx,
             handle: Some(handle),
         })
     }
@@ -3518,8 +3562,8 @@ impl ParquetShardRx {
         shard_index:      u32,
         shards_expected:  u32,
     ) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(ShardRxRow {
+        {
+            self.tx.send(ShardRxRow {
                 rx_timestamp: format_elapsed!(now),
                 generation_time_s,
                 frame_index,
@@ -3532,7 +3576,7 @@ impl ParquetShardRx {
 
 impl Drop for ParquetShardRx {
     fn drop(&mut self) {
-        drop(self.tx.take());
+        self.tx.close();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
