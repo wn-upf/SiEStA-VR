@@ -47,7 +47,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::thread::yield_now;
 use std::thread_local;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
@@ -7681,7 +7680,8 @@ impl STA_extended {
             // Send the batch to the app socket in one go
             // self.to_app_socket.send(packet_batch).await;
         }
-        yield_now();
+        // (was `std::thread::yield_now()`: one sched_yield syscall per AMPDU per STA; the executor is single-threaded and
+        // the OS yield never influenced event order. Ported from rlgames-simperf 794e4fa3.)
     }
     pub async fn to_app_socket_send(&mut self, frame: TimedFrame) {
         self.to_app_socket.send(frame).await;
