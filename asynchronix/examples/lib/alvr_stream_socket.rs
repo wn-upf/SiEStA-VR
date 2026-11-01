@@ -3366,7 +3366,7 @@ impl<H: Serialize> StreamSender<H> {
             let fps = framerate.round() as u32;
 
             if deterministic_frame_sizes_bool{
-                buffer = generate_fibonacci_video_payload(current_bitrate_mbps, framerate);
+                fill_fibonacci_video_payload(&mut buffer, current_bitrate_mbps, framerate);
             }
             else{
                 let bytes_this_frame = if USE_HARDCODED_SIZES_VALIDATION {
@@ -3891,23 +3891,43 @@ fn fibonacci_payload_exact(size: usize) -> Vec<u8> {
     v
 }
 
+/// Period of the Fibonacci sequence mod 256 (Pisano period pi(256) = 384).
+const FIB_MOD256_PERIOD: usize = 384;
+/// One period of the Fibonacci sequence mod 256, starting 0, 1, 1, 2, ...
+const FIB_MOD256: [u8; FIB_MOD256_PERIOD] = {
+    let mut t = [0u8; FIB_MOD256_PERIOD];
+    let (mut a, mut b) = (0u8, 1u8);
+    let mut i = 0;
+    while i < FIB_MOD256_PERIOD {
+        t[i] = a;
+        let next = a.wrapping_add(b);
+        a = b;
+        b = next;
+        i += 1;
+    }
+    t
+};
+
 #[allow(unused)]
 pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32, fps: f32, ) -> Vec<u8> {
+    let mut buffer_inner = Vec::new();
+    fill_fibonacci_video_payload(&mut buffer_inner, current_bitrate_mbps, fps);
+    buffer_inner
+}
+
+/// `generate_fibonacci_video_payload` into an existing buffer (its contents are replaced, its
+/// allocation reused). The bytes are the Fibonacci sequence mod 256, written a whole period
+/// at a time instead of one wrapping add + push per byte -- identical output.
+pub fn fill_fibonacci_video_payload(buffer_inner: &mut Vec<u8>, current_bitrate_mbps: f32, fps: f32) {
     // Calculate the payload size based on bitrate, very simplified linear relationship of bitrate/frame_size based on ALVR test for 90 FPS, assume for other FPS the relationship mantains. 
     let no_bytes_based_bitrate = ((1416.97 * current_bitrate_mbps + -810.06) * 90.0/fps) as usize ;
 
-    // Initialize a vector to hold the Fibonacci sequence
-    let mut buffer_inner = Vec::with_capacity(no_bytes_based_bitrate);
-
-    // Generate the Fibonacci sequence
-    let mut a: u8 = 0;
-    let mut b: u8 = 1;
-
-    for _ in 0..no_bytes_based_bitrate {
-        buffer_inner.push(a); // Add the current value to the payload
-        let next = a.wrapping_add(b); // Use wrapping_add to prevent overflow
-        a = b;
-        b = next;
+    buffer_inner.clear();
+    buffer_inner.reserve(no_bytes_based_bitrate);
+    while buffer_inner.len() < no_bytes_based_bitrate {
+        // every chunk starts at a multiple of the period, so it starts at FIB_MOD256[0]
+        let take = (no_bytes_based_bitrate - buffer_inner.len()).min(FIB_MOD256_PERIOD);
+        buffer_inner.extend_from_slice(&FIB_MOD256[..take]);
     }
     let miin: usize = usize::min(buffer_inner.len(), 50);
     print_pretty!(
@@ -3917,8 +3937,31 @@ pub fn generate_fibonacci_video_payload(current_bitrate_mbps: f32, fps: f32, ) -
         buffer_inner.len() / 1024,
         &buffer_inner[..miin]
     );
+}
 
-    buffer_inner
+#[cfg(test)]
+mod fibonacci_payload_tests {
+    use super::*;
+
+    /// The period-at-a-time fill must reproduce the original byte-at-a-time recurrence exactly.
+    #[test]
+    fn fibonacci_payload_matches_bytewise_recurrence() {
+        for &(mbps, fps) in &[(40.0f32, 90.0f32), (0.3, 90.0), (0.9, 60.0), (1.0, 120.0), (7.77, 90.0), (100.0, 60.0)] {
+            let n = ((1416.97 * mbps + -810.06) * 90.0 / fps) as usize;
+            let mut expected = Vec::with_capacity(n);
+            let (mut a, mut b) = (0u8, 1u8);
+            for _ in 0..n {
+                expected.push(a);
+                let next = a.wrapping_add(b);
+                a = b;
+                b = next;
+            }
+            assert_eq!(generate_fibonacci_video_payload(mbps, fps), expected, "mbps={mbps} fps={fps}");
+            let mut reused = vec![9u8; 3 * n + 5];
+            fill_fibonacci_video_payload(&mut reused, mbps, fps);
+            assert_eq!(reused, expected, "reused buffer, mbps={mbps} fps={fps}");
+        }
+    }
 }
 
 /////// ALT code to use table based on real ALVR frame size distribution at 100 Mbps /////////
