@@ -141,7 +141,12 @@ pub const SHARD_RX_PARQUET_LOGGING: bool = true; // Log Parquet per XR client, o
 
 
 
-pub const VISUALIZER_QUEUES_ENABLED: bool = false; // Set to true to enable visualizer events for queue states
+/// Visualizer events (channel lanes, queues, backoff, ABR) and the post-simulation viewer window. Off unless the
+/// environment variable `XRSIM_VIZ` is set to anything but `0` (read once). Off, the run is the same as without the viewer.
+pub fn visualizer_queues_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("XRSIM_VIZ").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
 pub const USE_FFMPEG_DEMO: bool = false;
 
 #[macro_export]

@@ -39,7 +39,7 @@ use crate::lib::{
     airtime_ampdu, padded_mpdu_bits, alvr_stream_socket::parse_shard_data, collision_delay, exponential, ac_prio,
     perStaLockStats, AmpduPacket, Coords, CsvType, CumulativeStats, DebugColor, MacKey, MpduPacket,
     WindowKey, DEBUG_PRINT_ENABLED, DEFAULT_TMAX_AGG, DOWNLINK_QUEUE_SIZE, NUMBER_OF_RANDOM_EVENTS,
-    P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO, VISUALIZER_QUEUES_ENABLED, 
+    P_TX, UPLINK_QUEUE_SIZE, DEBUG_EDCA, DEBUG_MLO, visualizer_queues_enabled, 
 };
 
 use rand::SeedableRng;
@@ -1727,7 +1727,7 @@ impl NetworkPatternEmulator {
                 seg_end,
             ));
 
-            if VISUALIZER_QUEUES_ENABLED {
+            if visualizer_queues_enabled() {
                 if let Some(tx) = viz_tx {
                     let _ = tx.try_send(VizEvent::BandwidthChange {
                         t: current_time.duration_since(TaiTime::EPOCH).as_secs_f64(),
@@ -2723,7 +2723,7 @@ impl QueueModule {
 
     #[inline]
     fn emit_visualization_event(&self, ev: VizEvent) {
-        if !VISUALIZER_QUEUES_ENABLED{return;}
+        if !visualizer_queues_enabled(){return;}
         else{
             if let Some(tx) = &self.viz_tx {
             let _ = tx.try_send(ev);  // never block the sim
@@ -2889,7 +2889,7 @@ impl QueueModule {
                 // Borrow-checker note: we can't call `&self` methods here because `st` holds &mut.
                 // Push directly through the sender.
                     if let Some(tx) = &self.viz_tx {
-                        if VISUALIZER_QUEUES_ENABLED{
+                        if visualizer_queues_enabled(){
                             let _ = tx.try_send(VizEvent::BackoffSnap {
                                 t: t_secs(now),
                                 mac_key: key,
@@ -3386,7 +3386,7 @@ impl QueueModule {
                             .entry((-1i32, pkt.edca_ac))            // ← matches tick_backoff logic
                             .or_insert(0) += 1;
 
-                        if VISUALIZER_QUEUES_ENABLED {
+                        if visualizer_queues_enabled() {
                             self.emit_visualization_event(VizEvent::QueueDepth {
                                 t: t_secs(now),
                                 mac_key: mac_key_dl,
@@ -3467,7 +3467,7 @@ impl QueueModule {
                             link_id,
                             new_depth
                         );
-                        if VISUALIZER_QUEUES_ENABLED {
+                        if visualizer_queues_enabled() {
                             self.emit_visualization_event(VizEvent::QueueDepth {
                                 t: t_secs(now),
                                 mac_key: mac_key_ul,
@@ -3609,7 +3609,7 @@ impl QueueModule {
 
         self.link_is_transmitting.insert(link_id, false);
 
-        if VISUALIZER_QUEUES_ENABLED {
+        if visualizer_queues_enabled() {
             let mac_key = AMPDU_sent.mac_key;
             
             // Reconstruct the per-deque depths at actual TXOP completion
@@ -4041,7 +4041,7 @@ impl QueueModule {
                 }
             }
 
-        if VISUALIZER_QUEUES_ENABLED {
+        if visualizer_queues_enabled() {
             for (deq_idx, _count) in &deque_sources {
                 // Reverse-lookup: find the MacKey for this deq_idx
                 if let Some((&correct_key, _)) = self.mac_key_index.iter()
@@ -4311,7 +4311,7 @@ impl QueueModule {
                     if let Some(medium) = self.link_mediums.get_mut(&link_id) {
                         medium.occupy_collision(now, now + T_col_dur);
                         
-                        if VISUALIZER_QUEUES_ENABLED {
+                        if visualizer_queues_enabled() {
                             self.emit_visualization_event(VizEvent::Collision {
                                 t: t_secs(now),
                                 end: t_secs(now + T_col_dur),
@@ -4361,7 +4361,7 @@ impl QueueModule {
                         let st = self.dcf(key);
 
                         if let Some(tx) = &self.viz_tx {
-                            if VISUALIZER_QUEUES_ENABLED{
+                            if visualizer_queues_enabled(){
                                 let _ = tx.try_send(VizEvent::BackoffSnap {
                                     t: t_secs(now),
                                     mac_key: *key,
@@ -4528,7 +4528,7 @@ impl QueueModule {
                         .into_iter()
                         .collect();
 
-                    if VISUALIZER_QUEUES_ENABLED {
+                    if visualizer_queues_enabled() {
                         self.emit_visualization_event(VizEvent::TxopStart {
                             t: t_secs(now),
                             end: t_secs(now + ampdu_airtime),
