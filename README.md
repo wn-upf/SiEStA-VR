@@ -15,6 +15,30 @@ The simulation engine is built on a fork of the asynchronous [**NeXosim**](https
 
 ---
 
+## 📄 Paper build
+
+The results of the paper *SiEStA-VR: A Cross-Layer Simulation Environment for Virtual Reality Streaming over Wi-Fi 7* (revised version, November 2026) were produced with commit [`1639365`](https://github.com/wn-upf/SiEStA-VR/commit/1639365), which is also the tip of the [`pub-release`](https://github.com/wn-upf/SiEStA-VR/tree/pub-release) branch. Since November 2026 `main` contains it. Compared with the earlier `main` ([`29249dc`](https://github.com/wn-upf/SiEStA-VR/commit/29249dc), used for the paper's first version), it adds:
+
+* **Downlink queue fix.** The AP removed each transmitted packet from its shared downlink queue by packet number only. Since every server numbers its packets from zero, packets of other users with the same number were removed too, while still counted as queued, and under load a user's video could stop for the rest of the run. Packets are now identified by source, destination and number (`XRSIM_DL_ID_LEGACY=1` restores the old behaviour).
+* **NeSt-VR fixes.** A frame delivered in a single A-MPDU no longer counts as zero capacity, and the statistics timeout is checked on every frame and starts with the session's first frame.
+* **Deterministic runs.** Every random draw comes from the run's seed, the models' hash maps use a fixed hasher, and simultaneous events run in a fixed order, so the same build, configuration and seed reproduce a run's outputs byte for byte. `scripts/byteexact_gate.sh` checks this against the manifests in `gate_data/`.
+* **Speed.** 1.5-3.5x faster than the earlier `main` with byte-identical outputs (mimalloc allocator, fewer copies and allocations per A-MPDU). `XRSIM_NO_PKTLOG=1` skips the per-shard log.
+* **Post-simulation viewer.** Off by default; `XRSIM_VIZ=1` records the events and opens it after the run.
+* **Validation switches.** `XRSIM_SU_NSS` (spatial streams, default 2), `XRSIM_EHT_PHY_US` (EHT preamble duration, default 76 us), and `XRSIM_CLIENT_DEADLINE_MS` / `XRSIM_CLIENT_DEADLINE_ANCHOR` (the client's frame deadline). The emulated link's 1 Gb/s NIC cap now paces packets instead of dropping those held more than 12 ms (`XRSIM_NIC_CAP_LIMIT_LEGACY=1` restores the old behaviour).
+* An optional NADA receiver fix (`XRSIM_NADA_FIX=1`), off by default and not used in the paper.
+
+To reproduce the paper's results:
+
+```bash
+git checkout 1639365   # or: git checkout pub-release
+cargo build --release --example XR_sim
+```
+
+* **ABR benchmark, SLO vs. MLO and mobility experiments:** default settings, seeds 1-60 per configuration.
+* **Validation against the ALVR testbed:** `XRSIM_SU_NSS=1 XRSIM_EHT_PHY_US=60 XRSIM_CLIENT_DEADLINE_MS=1000`, seeds 1-10.
+
+---
+
 ## 🚀 Key Features
 
 * **High-Fidelity VR Modeling:** Mimics the bidirectional traffic and logic of real Cloud VR sessions (e.g., ALVR), moving beyond generic traffic generators.
