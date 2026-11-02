@@ -112,6 +112,8 @@ pub mod fovoptix;
 pub mod gcc_nada_estimator;
 pub mod nada_report;
 pub mod sim_rng;
+pub mod emu_nic_cap;
+pub mod client_deadline;
 
 /// mimalloc as the global allocator of the simulator binaries, on by default (Cargo feature `mimalloc`; byte-identical
 /// outputs, faster, about twice the peak memory). `--no-default-features` builds with the system allocator.

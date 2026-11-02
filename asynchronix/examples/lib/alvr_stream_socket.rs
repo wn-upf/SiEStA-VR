@@ -2317,7 +2317,7 @@ impl StreamSocket {
                 packet_cursor: 0,
                 overwritten_data_backup: None,
                 should_discard: false,
-                frame_deadline: frame_gen_instant.and_then(|t| t.checked_add(DEADLINE_PACKETS_S)),
+                frame_deadline: frame_gen_instant.and_then(|t| t.checked_add(crate::lib::client_deadline::deadline())),
             })
         };
 
@@ -2399,7 +2399,11 @@ impl StreamSocket {
                         shard_recv_state_mut.shards_count,
                         Default::default(),
                     ),
-                    deadline: shard_recv_state_mut.frame_deadline,
+                    deadline: if crate::lib::client_deadline::anchor_first() { // XRSIM_CLIENT_DEADLINE_ANCHOR=first
+                        now.checked_add(crate::lib::client_deadline::deadline())
+                    } else {
+                        shard_recv_state_mut.frame_deadline
+                    },
                     num_shards_expected: shard_recv_state_mut.shards_count,
                     id_frame: shard_recv_state_mut.packet_index,
                 },

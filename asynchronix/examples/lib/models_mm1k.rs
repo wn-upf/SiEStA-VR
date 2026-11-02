@@ -957,13 +957,15 @@ impl EmulatedLink {
             let valid_until = now
                 .checked_add(Duration::from_secs_f64(sim_duration_secs.max(1.0)))
                 .unwrap_or(now);
-            link.queue_mechanism.network_emulator.add_pattern(NetworkPattern::new_bandwidth_with_burst_ms(
+            let mut nic_cap = NetworkPattern::new_bandwidth_with_burst_ms(
                 bw as f64,
                 bw as f64,
                 now,
                 valid_until,
                 NIC_CAP_BURST_MS,
-            ));
+            );
+            crate::lib::emu_nic_cap::make_pacing_only(&mut nic_cap);
+            link.queue_mechanism.network_emulator.add_pattern(nic_cap);
         }
         link
     }

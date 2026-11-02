@@ -201,6 +201,14 @@ Before running, opening `p_xrun.sh` is recommended for adjusting the arrays and 
 | :--- | :--- |
 | `EMU_TEST_TYPE` | Injects synthetic network anomalies: `"BW"` (Bandwidth limit), `"JI"` (Jitter), `"PL"` (Packet Loss), `"RANDOM"` (Randomly placed emulated periods), `"MARKOV"` (Markov Chain based Emulated BW patterns) or `"STD"` (Standard/None). |
 
+Environment switches for these tests (all off by default):
+
+| Variable | Description |
+| :--- | :--- |
+| `XRSIM_CLIENT_DEADLINE_MS=<ms>` | The client's frame deadline (default 60 ms after the frame's generation): a later frame is lost and sends no statistics. ALVR's own client has none, so for a comparison with an ALVR testbed under a bandwidth cap use a large value (e.g. `1000`). |
+| `XRSIM_CLIENT_DEADLINE_ANCHOR=first` | Count the deadline from the frame's first shard at the client instead of its generation. |
+| `XRSIM_NIC_CAP_LIMIT_LEGACY=1` | Restore the 12 ms drop limit of the emulated link's 1 Gb/s NIC cap (dropped nearly every packet under 10±10 ms jitter). |
+
 ### Running the Simulator
 A feature of how the repository has been structured ( Renaming the original asynchronix `examples` to `orig_examples` and using the `examples` folder just for SiESTA-VR), the simulator can technically be called via `cargo run --release --example XR_sim [<arg0><arg1>...]` but due to the amount of configuration parameters, it is more encouraged to opt for execution from a bash script that iterates over input argument combinations.  
 **On any computer with the required dependencies:**
