@@ -136,39 +136,63 @@ Beyond the persisted CSV/Parquet files, SiESTA-VR can replay a simulation's medi
 While the simulation runs, the queue model emits `VizEvent`s (per-link TXOP grabs, collisions, contending STAs, MCS, aggregated A-MPDU contents down to the ALVR stream/frame IDs carried in each transmission) and the XR server/client emit `AbrEvent`s (per-frame metrics and bitrate ladder updates). Both streams are collected in memory and, right after the simulation loop ends, handed to a scrubbable timeline viewer (`postsim_visualizers.rs`) that opens automatically.
 The unified window is split into a **channel view** (left) and an **ABR view** (right), sharing a common simulated-time cursor in yellow indicating the instant seen in both interactive windows. The time base of each view is independent, and can be zoomed in/out independently. 
 
-![Post-simulation channel & ABR visualizer](assets/Siesta_visualizer_annotated.png)
+![Post-simulation channel & ABR visualizer](assets/viz_readme/overview.png)
 
-The screenshot above is a real capture from a 6-VR-user, 3-link MLO run (`MLO80-80-320`: two 80MHz links plus one 320MHz link) with EDCA active. Link 2's 320MHz channel is four times wider than links 0/1, so its transmissions finish noticeably faster for the same amount of data.
+A capture of a 20 s run with 6 VR users (NeSt-VR) over MLO with two 80 MHz links and one 320 MHz link (`MLO80-80-320`) and EDCA, with the cursor at 11.085 s: the channel side shows the 1.6 ms around a collision, the ABR side the whole run. LINK 2's channel is four times wider than LINK 0's and LINK 1's, so the same data takes less airtime there.
 
-| # | Panel | What it shows |
+| # | Part | What it shows |
 | :-: | :--- | :--- |
-| 1 | Top HUD | Channel (`CH:`) and ABR scrub position/zoom span, key bindings. |
-| 2 | Transport controls | Play/pause, reset, and the replay-speed slider (~9µs-33ms of sim-time per real second). |
-| 3 | LINK 0 (80MHz) | Transmission events on this link: UL/DL direction, application stream involved, number of MPDUs aggregated, MCS. |
-| 4 | LINK 1 (80MHz) | Same, for the second 80MHz link. |
-| 5 | LINK 2 (320MHz) | Same, for the 320MHz link — same kind of activity, but a channel four times wider than links 0/1, so transmissions finish faster for the same amount of data. |
-| 6 | Collision | Two or more contenders transmitted at once on LINK 1 and both frames were lost. |
-| 7, 8 | Per-STA/AC contention rows | Per-flow contention/backoff state (AIFS + CW) feeding the transmissions above, split into left/right columns here because the panel is link-filtered. |
-| 9 | CW panel | Contention window over time, per link, EDCA access category and STA. |
-| 10 | QUEUES panel | MAC transmit-queue depth over time, per EDCA access category and STA. |
-| 11 | ABR legend | One entry per VR session: source IP, color, and active ABR mode. |
-| 12 | Live readout table | Per-session bitrate/RTT/FLR snapshot at the time the cursor is placed on. |
-| 13 | Bitrate graph | Each session's ABR-selected bitrate over time. |
-| 14 | Throughput graphs | Peak/Instant achieved throughput over time. Peak represents the throughput during the frame burst, instant represents the average throughput in the period between frames.|
-| 15 | RTT strip | Network latency per session over time, based on the Video Frame RTT (VF-RTT) metric. |
-| 16 | Frame-Loss Ratio strip | Per-session frame-loss ratio over time. |
-| 17 | STA POSITIONS | Top-down mini-map, AP centered, current position and trajectory of each VR STA. |
+| 1 | Menu bar | File, View, Channel, ABR, Layout, Help: show, hide, swap and resize the panels, reorder the ABR plots, the quick tour (`F1`) and the keyboard and mouse sheet (`H`). The right end reads each side's time window. |
+| 2 | Playback bar | `PLAY` (`Space`), `REWIND`, the replay speed (simulated time per real second, 1 us/s to 1 s/s) and the cursor's time. |
+| 3 | Link lanes | One lane per link. Each box is a TXOP, coloured by access category and labelled sender -> receiver, MCS, frames and MPDUs. |
+| 4 | Overhead overlay (`O`) | Each TXOP split into its parts: the holder's AIFS and backoff, RTS, CTS, preamble, data, BlockAck (close-up below). |
+| 5 | Collision | Red stripes: two or more queues reached zero in the same slot and sent at once; their RTS, SIFS and CTS are lost. |
+| 6 | Cursor | The instant that the backoff counters, the readout and the station map show. A right click places it. |
+| 7 | Backoff counters (`B`: CW history) | A table at the cursor instant, not a timeline: one row per station and link, one column per AC; slots left/CW, the AIFS mark, `*` frozen. |
+| 8 | Queues (`Q` style, `W` one scale, `I` arrivals) | MAC queue depth over time, per station and AC. |
+| 9 | ABR legend | One entry per video server: address, colour and ABR. |
+| 10 | Readout | Each session's bitrate, RTT and frame-loss ratio at the cursor. |
+| 11 | Station map | Headsets and other stations around the AP at the cursor, with their trails; the TXOP on air as arrows. |
+| 12 | Bitrate | Each session's ABR-selected bitrate over time (in this run NeSt-VR keeps every session at 100 Mb/s, the line at the top). |
+| 13 | Throughput | Peak (during the frame burst) and instant (average between frames) throughput. |
+| 14 | RTT | Network latency per session, from the Video Frame RTT (VF-RTT). |
+| 15 | Frame-loss ratio | Per-session frame-loss ratio over time. |
+| 16 | Time axes | Each side's own time axis: the wheel zooms, a drag pans, `ZOOM` and `RESET` at each side's top right. |
 
-The screenshot shows an earlier layout of the same panels. The viewer now has a menu bar (File, View, Channel, ABR, Layout, Help) to show, hide, swap and resize the panels and reorder the ABR plots, a quick tour (`F1`) that walks through each part while zooming into real transmissions of the run, and a keyboard and mouse sheet (`H`). Hovering a transmission or a collision lights its queues and draws its arrows on the station map. `O` (Channel > AIFS, backoff and preamble; on by default) splits each TXOP in the link lanes into its parts: the holder's `AIFS` and backoff countdown before it (`BO n`, a tick per 9 us slot; the cursor turns it into a countdown), then `RTS`, `CTS`, the PHY preamble (`L-PHY`, `EHT-PHY`), the data and the BlockAck (`BA`), with the SIFS gaps between them. The parts come from the same timings as the MAC's airtime, and the countdown from the MAC's own slot ticks. Environment switches:
+**Up close**, numbered as above (same run):
+
+*4. One TXOP, part by part* (LINK 1, the AP sends 2 MPDUs of video to s200 at MCS 8):
+
+![One TXOP with its overhead labelled](assets/viz_readme/txop.png)
+
+1 AIFS (SIFS plus AIFSN slots: 34 us for video) · 2 backoff slots counted (`BO 3`, a tick per 9 us slot; the MAC counts on a slot tick that need not line up with the end of AIFS, so the first slot can be drawn shorter) · 3 RTS · 4 SIFS (16 us, three of them) · 5 CTS · 6 L-PHY (legacy preamble) · 7 EHT-PHY (rest of the EHT preamble) · 8 data symbols · 9 BlockAck. The parts come from the same timings as the MAC's airtime, the countdown from the MAC's own slot ticks.
+
+*5. A collision* (LINK 0: s204's voice queue and the AP's video queue reached zero in the same slot):
+
+![A collision on LINK 0](assets/viz_readme/collision.png)
+
+*3. Several links at once (MLO)*: each link contends on its own, so TXOPs on LINK 0 and LINK 1 overlap in time:
+
+![Two MLO links busy at once](assets/viz_readme/mlo.png)
+
+*4, 6, 7. A backoff countdown and the counters at the cursor*: the cursor (6) is in the second of 4 slots that s204's voice queue counts on LINK 0 (4: `BO 4 (3 left)`); the grid (7) gives every queue's counter at that instant: s204 L0 `3/7` is counting, most others are frozen (`*`), and the queues of LINK 1, idle again, light the AIFS mark in their colour:
+
+![Backoff countdown and the backoff counters](assets/viz_readme/backoff.png)
+
+The figures are made by `python3 scripts/viz_readme_figs.py` (needs a release build of `XR_sim` and Pillow). It runs `XR_sim 20.0 12000.0 5.0 100.0 0.1 6 0 5000 0 STD snow_short 90.0 0 1.5 1 30 1 0 1 1 1 0 1 1 0 1.0 MLO80-80-320 0 1 64 HEVC <results dir> 0 0 1` with the viewer on, picks the instants from the run's events (`XRSIM_VIZ_EVENTS`: a TXOP with 3-8 backoff slots right after AIFS and 30-120 us of data, a collision of two contenders, the quick tour's MLO and backoff examples), captures each view (`XRSIM_VIZ_VIEW`, `XRSIM_VIZ_SHOT`, `XRSIM_VIZ_EXIT`, `XRSIM_VIZ_SCALE=1.25`) and draws the numbered markers.
+
+The quick tour (`F1`) walks through the same parts while zooming into real transmissions of the run. Hovering a transmission or a collision lights its queues and draws its arrows on the station map. Hovering a transmission or a collision lights its queues and draws its arrows on the station map. `O` (Channel > AIFS, backoff and preamble; on by default) splits each TXOP in the link lanes into its parts: the holder's `AIFS` and backoff countdown before it (`BO n`, a tick per 9 us slot; the cursor turns it into a countdown), then `RTS`, `CTS`, the PHY preamble (`L-PHY`, `EHT-PHY`), the data and the BlockAck (`BA`), with the SIFS gaps between them. The parts come from the same timings as the MAC's airtime, and the countdown from the MAC's own slot ticks. Environment switches:
 
 | Variable | Effect |
 | :--- | :--- |
 | `XRSIM_VIZ=1` | Record the visualizer events and open the viewer after the run. |
-| `XRSIM_VIZ_VIEW=<t_s>,<span_ms>` | Open the channel view on `span_ms` around `t_s`. |
+| `XRSIM_VIZ_VIEW=<t_s>,<span_ms>[,<cursor_s>]` | Open the channel view on `span_ms` around `t_s`, with both cursors at `cursor_s` (default `t_s`). |
 | `XRSIM_VIZ_SCALE=1.5` or `<monitor>:1.5,...` | UI scale, for every monitor or per `xrandr` monitor name (`,` `.` and `U` change it live). |
 | `XRSIM_VIZ_TOUR=all` or `<step>` | Save a screenshot of every tour step (or one), then of each menu, the keyboard sheet and the About box, into `viz_screenshots/`. |
 | `XRSIM_VIZ_EXIT=1` | Close the viewer once its screenshots are saved (a check that leaves no window open). |
 | `XRSIM_VIZ_MAP_PNG=<dir>` | Open no window: save the station map at 8 instants of the run as PNGs. |
+| `XRSIM_VIZ_SHOT=<prefix>` | Save the first frame as `<prefix>.png` and where it drew each part as `<prefix>.json` (for `scripts/viz_readme_figs.py`). |
+| `XRSIM_VIZ_EVENTS=<path>` | Save the run's TXOPs (with their parts and channel access), collisions and the quick tour's examples as JSON. |
 
 ## 💻 Simulation Configuration & Execution
 

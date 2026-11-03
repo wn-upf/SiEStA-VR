@@ -9,6 +9,7 @@ use crate::lib::{render_text, ac_prio,} ;
 
 pub mod viz_event; // postsim_visualizers/viz_event.rs: the viewer's events, built from the MAC's
 mod txop_parts; // postsim_visualizers/txop_parts.rs: RTS, CTS, preamble, data and BlockAck of an SU TXOP
+mod shot_export; // postsim_visualizers/shot_export.rs: XRSIM_VIZ_SHOT / XRSIM_VIZ_EVENTS, for scripts/viz_readme_figs.py
 pub mod obss; // postsim_visualizers/obss.rs: the station map (named after the multi-BSS viewer it comes from)
 pub mod panel_resize; // postsim_visualizers/panel_resize.rs: drag the backoff and queue panels' top edges
 pub mod sidebar_resize; // postsim_visualizers/sidebar_resize.rs: drag the ABR sidebar's edge and the station map's top
@@ -37,11 +38,15 @@ fn sanitize_filename(s: &str) -> String {
         .collect()
 }
 
-/// `XRSIM_VIZ_VIEW=center_s,span_ms`: the starting channel view of the unified viewer (and so of its screenshot).
-fn viz_view_override() -> Option<(f64, f64)> {
+/// `XRSIM_VIZ_VIEW=center_s,span_ms[,cursor_s]`: the starting channel view of the unified viewer (and so of its
+/// screenshot); the cursor goes to the centre unless given.
+fn viz_view_override() -> Option<(f64, f64, f64)> {
     let v = std::env::var("XRSIM_VIZ_VIEW").ok()?;
-    let (c, w) = v.split_once(',')?;
-    Some((c.trim().parse().ok()?, w.trim().parse::<f64>().ok()? * 1e-3))
+    let mut it = v.split(',').map(str::trim);
+    let c: f64 = it.next()?.parse().ok()?;
+    let w = it.next()?.parse::<f64>().ok()? * 1e-3;
+    let cur = it.next().and_then(|x| x.parse().ok()).unwrap_or(c);
+    Some((c, w, cur))
 }
 
 /// `XRSIM_VIZ_HOVER=link,t_s`: with the mouse outside the link lanes, act as if it were over the TXOP of `link` running at
@@ -3775,7 +3780,7 @@ impl UnifiedState {
             ch_view: ViewState {
                 center_t:      viz_view_override().map_or((viz_idx.t_min  + viz_idx.t_max)  * 0.5, |v| v.0),
                 span_t:        viz_view_override().map_or(ch_full, |v| v.1),
-                cursor_t:      viz_view_override().map_or(viz_idx.t_min, |v| v.0),
+                cursor_t:      viz_view_override().map_or(viz_idx.t_min, |v| v.2),
                 paused:        false,
                 selected_link: None,
                 row_scroll:    0,
@@ -3796,7 +3801,8 @@ impl UnifiedState {
             abr_view: AbrViewState {
                 center_t:   (abr_idx.t_min + abr_idx.t_max) * 0.5,
                 span_t:     abr_full,
-                cursor_t:   abr_idx.t_min,
+                // with `XRSIM_VIZ_VIEW`, the cursors start together (they are synced)
+                cursor_t:   viz_view_override().map_or(abr_idx.t_min, |v| v.2),
                 mouse_drag: None,
             },
 
@@ -4939,6 +4945,7 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
     // transmissions of the run for the tour to zoom into, and the view to put back after it (channel centre, span
     // and cursor, ABR cursor, overhead shown, playing)
     let examples = tour_examples::find(&mb.views[active].idx);
+    shot_export::dump_events(&mb.views[active].idx, &examples);
     #[derive(Clone, Copy)]
     struct TourSaved { center: f64, span: f64, cursor: f64, abr_cursor: f64, overhead: bool, playing: bool, bo_grid: bool, q_mode: u8, show_cw: bool }
     let mut tour_saved: Option<TourSaved> = None;
@@ -5587,6 +5594,18 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
             cw: (sides.ch_w > 0 && show_cw).then(|| (sides.ch_x0, cw_panel_y.saturating_sub(2), sides.ch_w, cw_h + 4)),
             example: example_rect,
         };
+        let shot_layout = shot_export::wanted().then(|| shot_export::Layout {
+            w, h, panel_x: ch_x0 + ch_panel_lx, panel_w: ch_panel_w,
+            view: (state.ch_view.center_t, state.ch_view.span_t, state.ch_view.cursor_t),
+            lanes: lanes.iter().map(|&(y, lh, l)| (l, y, lh)).collect(),
+            regions: vec![("menu", Some(r.menu)), ("controls", Some(r.controls)), ("lanes", r.lanes), ("bottom", r.bottom),
+                          ("cw", r.cw), ("abr_plots", r.abr_plots), ("legend", r.legend), ("map", r.map),
+                          ("time_axis", Some(r.time_axis)),
+                          ("queues", (show_q && sides.ch_w > 0).then(|| (ch_x0, q_y, sides.ch_w, q_h)))],
+            abr_strips: strip_geom.names.iter().enumerate()
+                .map(|(i, n)| (n.clone(), (abr_panel_x, content_top + PANEL_PAD + i * abr_strip_h, abr_panel_w, abr_strip_h)))
+                .collect(),
+        });
         menu.draw_menu(&mut buf, w, &window, &menu_list);
         if help.is_open() {
             let about = [
@@ -5630,6 +5649,9 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
 
         if !screenshot_taken {
             save_screenshot(&buf, w, h, &sim_tag, "unified");
+            if let Some(l) = &shot_layout {
+                shot_export::save(&buf, l);
+            }
             screenshot_taken = true;
         }
         if exit_after_shots && tour_shots.is_none() {
