@@ -1,13 +1,15 @@
 //! Real transmissions of the run for the quick tour to zoom into: one of each kind the run has (single-user downlink and
-//! uplink, a collision, two links busy at once). Each is taken from the second half of the run when it has one, where the
+//! uplink, a backoff countdown, a collision, two links busy at once). Each is taken from the second half of the run when it has one, where the
 //! sessions are past their start.
 
-use super::{access_window, is_uplink, leg_user, VizEvent, VizIndex};
+use super::{access_window, backoff_at, is_uplink, leg_user, MacKey, VizEvent, VizIndex};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     SuDl,
     SuUl,
+    /// A queue's AIFS and backoff countdown before its TXOP, while others count too.
+    Backoff,
     Collision,
     Mlo,
 }
@@ -25,7 +27,7 @@ pub struct Example {
     /// at the cursor.
     pub txop: Option<(u8, f64)>,
     pub coll: Option<(u8, f64)>,
-    /// Cursor positions the step steps through, one every `ANIM_STEP` s, over and over (none of this build's examples).
+    /// Cursor positions the step steps through, one every `ANIM_STEP` s, over and over (the backoff countdown).
     pub anim: Vec<f64>,
 }
 
@@ -47,7 +49,8 @@ impl Example {
     /// range, with the cursor on it.
     pub fn view(&self, t_min: f64, t_max: f64) -> (f64, f64, f64) {
         let full = (t_max - t_min).max(1e-9);
-        let (factor, least) = (3.0, MIN_SPAN);
+        // the countdown fills the window, so each 9 us slot is wide
+        let (factor, least) = if self.kind == Kind::Backoff { (1.3, 40e-6) } else { (3.0, MIN_SPAN) };
         let span = ((self.t1 - self.t0) * factor).max(least).min(full);
         let mid = 0.5 * (self.t0 + self.t1);
         let center = mid.clamp(t_min + span * 0.5, (t_max - span * 0.5).max(t_min + span * 0.5));
@@ -108,6 +111,10 @@ pub fn find(idx: &VizIndex) -> Vec<Example> {
         }
     }
 
+    if let Some(e) = backoff_example(idx, &links, mid) {
+        out.push(e);
+    }
+
     // a collision
     let mut coll: Option<(u8, f64, f64, String)> = None;
     'coll: for &l in &links {
@@ -144,6 +151,61 @@ pub fn find(idx: &VizIndex) -> Vec<Example> {
     out
 }
 
+/// How many TXOPs the backoff example looks at for one where other queues were still counting.
+const BACKOFF_SCAN: usize = 400;
+
+/// A countdown worth stepping through: a TXOP won after AIFS and 3 to 15 backoff slots counted to its start, preferably
+/// while other queues of the link were still counting (they freeze when it starts).
+fn backoff_example(idx: &VizIndex, links: &[u8], mid: f64) -> Option<Example> {
+    let mut fallback: Option<Example> = None;
+    for &l in links {
+        let gs = &idx.txop_groups_by_link[&l];
+        let mut keys: Vec<MacKey> = idx.backoff_by_key.keys().copied().filter(|k| k.2 == l).collect();
+        keys.sort_by_key(|k| (k.0, crate::lib::ac_prio(k.1)));
+        for i in from_mid(gs.len(), |i| gs[i].t, mid).take(BACKOFF_SCAN) {
+            let g = &gs[i];
+            let Some(&e) = g.legs.first() else { continue };
+            let Some((a0, a1, b0, b1, slots)) = access_window(&idx.all[e], g.t) else { continue };
+            // the countdown right after AIFS, as in the step's text (not one that waited for frames to send)
+            if !(3..=15).contains(&slots) || (g.t - b1).abs() > 1e-6 || a1 <= a0 || b0 < a1 - 1e-9 || b0 > a1 + crate::lib::SLOT {
+                continue;
+            }
+            // the queues still counting when it starts, by station: "the AP (Video, BestEffort)"
+            let mut counting: Vec<(i32, Vec<String>)> = Vec::new();
+            for k in keys.iter().filter(|k| **k != g.holder && backoff_at(idx, k, b1 - 1e-7).is_some_and(|b| b.0 > 0 && !b.2)) {
+                match counting.iter_mut().find(|c| c.0 == k.0) {
+                    Some(c) => c.1.push(format!("{:?}", k.1)),
+                    None => counting.push((k.0, vec![format!("{:?}", k.1)])),
+                }
+            }
+            counting.sort_by_key(|c| (c.0 >= 0, c.0));
+            let others: Vec<String> = counting.iter().map(|(sta, acs)| format!("{} ({})", who(*sta), acs.join(", "))).collect();
+            // the cursor: in AIFS twice, then once in each slot, then on the TXOP for a while
+            let slot = crate::lib::SLOT;
+            let mut anim = vec![a0 + 0.5e-6, 0.5 * (a0 + a1)];
+            anim.extend((0..slots).rev().map(|k| b1 - k as f64 * slot - 0.5e-6));
+            anim.extend([g.t + 2e-6; 4]);
+            let mut detail = format!("This one: {} ({:?}) counts {} slots after AIFS and sends.", who(g.holder.0), g.holder.1, slots);
+            if !others.is_empty() {
+                let shown: Vec<String> = others.iter().take(3).cloned().collect();
+                let list = shown.join(", ");
+                // a sentence of its own: "The AP (..)" with a capital (a station's name keeps its own)
+                let list = match list.strip_prefix("the ") { Some(rest) => format!("The {rest}"), None => list };
+                detail += &format!(" {}{} {} still counting and freeze{}.", list,
+                                   if others.len() > 3 { " and others" } else { "" },
+                                   if others.len() == 1 { "was" } else { "were" }, if others.len() == 1 { "s" } else { "" });
+            }
+            let ex = Example { kind: Kind::Backoff, lanes: (l, l), t0: a0, t1: g.t + (g.end - g.t).min(30e-6), detail,
+                               txop: Some((l, g.t)), anim, ..Default::default() };
+            if !others.is_empty() {
+                return Some(ex);
+            }
+            fallback.get_or_insert(ex);
+        }
+    }
+    fallback
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,12 +223,15 @@ mod tests {
 
     #[test]
     fn animation_steps_and_holds() {
-        let ex = Example { kind: Kind::SuDl, t0: 1.0, t1: 1.0001, anim: vec![1.0, 2.0, 3.0], ..Default::default() };
+        let ex = Example { kind: Kind::Backoff, t0: 1.0, t1: 1.0001, anim: vec![1.0, 2.0, 3.0], ..Default::default() };
         assert_eq!(ex.cursor_at(0.0), Some(1.0));
         assert_eq!(ex.cursor_at(ANIM_STEP * 1.5), Some(2.0));
         assert_eq!(ex.cursor_at(ANIM_STEP * 3.2), Some(1.0), "it starts over");
         assert_eq!(ex.cursor_at(f64::NAN), None);
         assert_eq!(Example::default().cursor_at(1.0), None);
+        // the countdown's window is narrow: slots stay wide
+        let (_, s, _) = ex.view(0.0, 10.0);
+        assert!(s < 200e-6, "{s}");
     }
 
     #[test]

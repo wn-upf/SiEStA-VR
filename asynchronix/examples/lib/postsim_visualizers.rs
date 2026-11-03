@@ -8,6 +8,7 @@ use crate::lib::models_XR::AbrEvent;
 use crate::lib::{render_text, ac_prio,} ;
 
 pub mod viz_event; // postsim_visualizers/viz_event.rs: the viewer's events, built from the MAC's
+mod txop_parts; // postsim_visualizers/txop_parts.rs: RTS, CTS, preamble, data and BlockAck of an SU TXOP
 pub mod obss; // postsim_visualizers/obss.rs: the station map (named after the multi-BSS viewer it comes from)
 pub mod panel_resize; // postsim_visualizers/panel_resize.rs: drag the backoff and queue panels' top edges
 pub mod sidebar_resize; // postsim_visualizers/sidebar_resize.rs: drag the ABR sidebar's edge and the station map's top
@@ -1974,9 +1975,8 @@ fn render_link_lane(
                 let first = g.legs.first().and_then(|&e| match &idx.all[e] { VizEvent::TxopStart { .. } => Some(&idx.all[e]), _ => None });
                 if let Some(VizEvent::TxopStart { ppdu_t0, ppdu_t1, preamble_s, ctrl_tx_s, ctrl_rx_s, resp_s, .. }) = first {
                     // Channel access: AIFS from when the medium was free for the holder, then the slots it counted in this
-                    // idle period, up to where its counter reached zero. That is the TXOP start when it was contending
-                    // for it; earlier when the countdown ran out with nothing to send (post-backoff), and the time from
-                    // there to the TXOP is idle air, as is the time before AIFS.
+                    // idle period, up to where its counter reached zero, at the TXOP start (`access_window`). The time
+                    // outside them is idle air.
                     if let Some((aifs_start, aifs_end, bo_start, bo_end, slots)) = first.and_then(|e| access_window(e, g.t)) {
                         let hc = key_color(g.holder);
                         let (xs, xa, xb, xt) = (cx(aifs_start), cx(aifs_end), cx(bo_start), cx(bo_end));
@@ -1990,11 +1990,12 @@ fn render_link_lane(
                         fill_rect_clip(buf, stride, aifs_c, top, xa, top + 6, dc(hc));
                         fill_rect_clip(buf, stride, xb, top, bo_c, top + 6, faded(bo_col));
                         fill_rect_clip(buf, stride, bo_c, top, xt, top + 6, dc(bo_col));
-                        // one tick per back-off slot, when the slots are wide enough to tell apart
+                        // one tick per back-off slot, when the slots are wide enough to tell apart (counted back from
+                        // zero: the slots end at the MAC's decrements, and only the first may be cut short by AIFS)
                         let slot_px = crate::lib::SLOT / view.span_t * panel_w as f64;
                         if slot_px >= 3.0 {
                             for k in 1..slots {
-                                let x = x_of(bo_start + k as f64 * crate::lib::SLOT, view, panel_x, panel_w);
+                                let x = x_of(bo_end - k as f64 * crate::lib::SLOT, view, panel_x, panel_w);
                                 if x > xb && x < xt {
                                     fill_rect_clip(buf, stride, x, top, x + 1, top + 6, dc(0x101018));
                                 }
@@ -2129,7 +2130,7 @@ fn leg_tooltip_lines(g: &TxopGroup, ev: usize, idx: &VizIndex) -> Vec<String> {
         lines.push(f);
     }
     if let VizEvent::TxopStart { preamble_s, idle_since, aifs_s, .. } = &idx.all[ev] {
-        // (only what the MAC reported: this build reports no preamble, control frames or channel-access window)
+        // (only what is known: the parts are zero for a TXOP whose airtime does not hold this MAC's exchange)
         let mut o = if *preamble_s > 0.0 { format!("preamble {:.0} us", preamble_s * 1e6) } else { String::new() };
         if let VizEvent::TxopStart { ctrl_tx_s, ctrl_rx_s, resp_s, .. } = &idx.all[ev] {
             if *ctrl_tx_s > 0.0 { o += &format!(";  RTS {:.0} us  CTS {:.0} us", ctrl_tx_s * 1e6, ctrl_rx_s * 1e6); }
@@ -3456,6 +3457,7 @@ fn handle_input(window: &Window, view: &mut ViewState, idx: &VizIndex, panel_w: 
     if window.is_key_pressed(Key::Home,  minifb::KeyRepeat::No) { view.center_t = idx.t_min + view.span_t * 0.5; }
     if window.is_key_pressed(Key::End,   minifb::KeyRepeat::No) { view.center_t = idx.t_max - view.span_t * 0.5; }
     if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) { view.paused = !view.paused; }
+    if window.is_key_pressed(Key::O, minifb::KeyRepeat::No) { view.show_overhead = !view.show_overhead; }
     if window.is_key_pressed(Key::Q, minifb::KeyRepeat::No) { view.q_mode = (view.q_mode + 1) % 4; }
     if window.is_key_pressed(Key::W, minifb::KeyRepeat::No) { view.q_shared = !view.q_shared; }
     if window.is_key_pressed(Key::B, minifb::KeyRepeat::No) { view.show_bo_matrix = !view.show_bo_matrix; }
@@ -4291,6 +4293,7 @@ fn handle_unified_input(
             || window.is_key_pressed(Key::NumPadMinus, minifb::KeyRepeat::Yes) { v.span_t *= 1.25; }
             if window.is_key_pressed(Key::Home, minifb::KeyRepeat::No) { v.center_t = ch_idx.t_min + v.span_t * 0.5; }
             if window.is_key_pressed(Key::End,  minifb::KeyRepeat::No) { v.center_t = ch_idx.t_max - v.span_t * 0.5; }
+            if window.is_key_pressed(Key::O, minifb::KeyRepeat::No) { v.show_overhead = !v.show_overhead; }
             if window.is_key_pressed(Key::Q, minifb::KeyRepeat::No) { v.q_mode = (v.q_mode + 1) % 4; }
             if window.is_key_pressed(Key::W, minifb::KeyRepeat::No) { v.q_shared = !v.q_shared; }
             if window.is_key_pressed(Key::B, minifb::KeyRepeat::No) { v.show_bo_matrix = !v.show_bo_matrix; }
@@ -5070,8 +5073,14 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
             (v.center_t, v.span_t) = (center, span);
             v.cursor_t = ex.cursor_at(started.elapsed().as_secs_f64()).unwrap_or(mid);
             v.show_overhead = true;
-            // the panels the viewer had before the tour
-            (v.show_bo_matrix, v.q_mode, prefs.show_cw) = (saved.bo_grid, saved.q_mode, saved.show_cw);
+            // the countdown shows the backoff grid; the other steps the panels the viewer had before the tour
+            if ex.kind == tour_examples::Kind::Backoff {
+                v.show_bo_matrix = true;
+                v.q_mode = v.q_mode.max(1);
+                prefs.show_cw = true;
+            } else {
+                (v.show_bo_matrix, v.q_mode, prefs.show_cw) = (saved.bo_grid, saved.q_mode, saved.show_cw);
+            }
             state.playing = false;
         } else if let Some(sv) = tour_saved.take() {
             let v = &mut state.ch_view;
@@ -5631,19 +5640,20 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
 
 
 /// The holder's channel access before a TXOP starting at `t_txop`, from its first `TxopStart`: (AIFS start, AIFS end,
-/// countdown start, countdown end, slots counted). The countdown ends at the TXOP when the holder was contending for it,
-/// earlier when it ran out with nothing to send (post-backoff): the holder then waited at zero until a frame arrived. It
-/// starts at the end of AIFS, or later when the holder drew again while the medium stayed idle (a win with nothing to
-/// send). The lane shows the time outside AIFS and the countdown as idle air.
+/// countdown start, countdown end, slots counted). In this MAC the countdown ends at the TXOP (the holder contends in the
+/// slot tick its counter reaches zero) and is the last unbroken run of the holder's decrements in the idle period: it
+/// starts at the end of AIFS, or later when the holder had no frames to send at first (its queue counts only with frames)
+/// or drew again while the medium stayed idle. The lane shows the time outside AIFS and the countdown as idle air.
 fn access_window(ev: &VizEvent, t_txop: f64) -> Option<(f64, f64, f64, f64, i64)> {
-    let VizEvent::TxopStart { idle_since, aifs_s, bo_drawn, bo_origin, bo_start, bo_zero_at, .. } = ev else { return None };
+    let VizEvent::TxopStart { idle_since, aifs_s, bo_drawn, bo_origin, bo_start, bo_zero_at, bo_slots, .. } = ev else { return None };
     if *idle_since < 0.0 || *idle_since >= t_txop {
         return None;
     }
     if *bo_zero_at >= 0.0 && *bo_start >= *bo_origin && *bo_origin >= *idle_since && *bo_origin <= t_txop {
         let end = bo_zero_at.clamp(*bo_origin, t_txop);
         let start = bo_start.min(end);
-        let slots = ((end - start) / crate::lib::SLOT).round() as i64;
+        // the MAC's own count when it reports one (its first slot may begin before AIFS ends, so is drawn shorter)
+        let slots = if *bo_slots >= 0 { *bo_slots as i64 } else { ((end - start) / crate::lib::SLOT).round() as i64 };
         return Some((bo_origin - aifs_s, *bo_origin, start, end, slots));
     }
     // no zero instant recorded: assume the countdown ran right up to the TXOP
@@ -5653,41 +5663,37 @@ fn access_window(ev: &VizEvent, t_txop: f64) -> Option<(f64, f64, f64, f64, i64)
     Some(((bo_start - aifs_s).max(*idle_since), bo_start, bo_start, t_txop, slots))
 }
 
-/// Back-off state of `key` at time `t`, reconstructed from the sparse `BackoffSnap`s: the model credits idle slots lazily, so
-/// from the latest snapshot the counter drops one per slot time of every idle period after AIFS, up to `t`.
-/// Returns (counter, cw, frozen at the snapshot, medium_free_since).
+/// Back-off state of `key` at time `t`, from its `BackoffSnap`s. This MAC snapshots every change it makes on its slot tick
+/// (each decrement, each unfreeze) and the redraws after a TXOP or collision, so the counter is the latest snapshot's. It
+/// does not snapshot the freeze when the link goes busy: a TXOP or collision on the link since the snapshot means frozen,
+/// with the medium free again at its end (a queue with nothing to send stays frozen: the MAC only counts for queues
+/// with frames).
+/// Returns (counter, cw, frozen, medium_free_since).
 fn backoff_at(idx: &VizIndex, key: &MacKey, t: f64) -> Option<(u32, u32, bool, f64)> {
     let VizEvent::BackoffSnap { t: snap_t, counter: snap_counter, cw, frozen, medium_free_since, .. } =
         idx.backoff_by_key.get(key).and_then(|v| latest_at(v, &idx.all, t))? else { return None };
-    let aifs = aifs_secs_for_ac(key.1);
     let empty: Vec<TxopGroup> = Vec::new();
     let groups = idx.txop_groups_by_link.get(&key.2).unwrap_or(&empty);
-    // slots counted in an idle period that began at `i0`, up to `t`
-    let counted = |i0: f64, t: f64| if t > i0 + aifs { ((t - i0 - aifs) / crate::lib::SLOT).floor() as u32 } else { 0 };
-    let mut next = groups.partition_point(|g| g.end <= *snap_t);
-    // where the idle period the snapshot falls in began, and how much of it the snapshot already holds
-    let in_busy = groups.get(next).is_some_and(|g| g.t <= *snap_t);
-    let (mut idle_start, mut credited) = if in_busy {
-        let e = groups[next].end;
-        next += 1;
-        (e, 0)
-    } else {
-        let i0 = medium_free_since.max(if next > 0 { groups[next - 1].end } else { 0.0 });
-        (i0, if *frozen { 0 } else { counted(i0, *snap_t) })
-    };
-    let mut dec = 0u32;
-    loop {
-        let busy_at = groups.get(next).map_or(f64::INFINITY, |g| g.t);
-        let t_hi = t.min(busy_at);
-        if t_hi > idle_start {
-            dec += counted(idle_start, t_hi).saturating_sub(credited);
-        }
-        credited = 0;
-        if t <= busy_at { break; }
-        idle_start = groups[next].end;
-        next += 1;
+    // the last busy period on the link that began between the snapshot and `t`: (start, end)
+    let mut busy: Option<(f64, f64)> = None;
+    let gi = groups.partition_point(|g| g.t <= t);
+    if let Some(g) = gi.checked_sub(1).map(|i| &groups[i]).filter(|g| g.t >= *snap_t) {
+        busy = Some((g.t, g.end));
     }
-    let mut counter = snap_counter.saturating_sub(dec);
+    if let Some(cs) = idx.collisions_by_link.get(&key.2) {
+        let ci = cs.partition_point(|&i| event_t(&idx.all[i]) <= t);
+        if let Some(&c) = ci.checked_sub(1).map(|i| &cs[i]) {
+            let (c0, c1) = (event_t(&idx.all[c]), event_end(&idx.all[c]));
+            if c0 >= *snap_t && busy.map_or(true, |b| c0 > b.0) {
+                busy = Some((c0, c1));
+            }
+        }
+    }
+    let (frozen, medium_free_since) = match busy {
+        Some((_, end)) => (true, end),
+        None => (*frozen, *medium_free_since),
+    };
+    let mut counter = *snap_counter;
     // Inside the access window drawn in the link lane for the TXOP this queue is about to win (AIFS, then the slots it
     // drew), show that same countdown, so the lane and this table always agree.
     let gi = groups.partition_point(|g| g.t <= t);
@@ -5698,7 +5704,7 @@ fn backoff_at(idx: &VizIndex, key: &MacKey, t: f64) -> Option<(u32, u32, bool, f
             }
         }
     }
-    Some((counter, *cw, *frozen, *medium_free_since))
+    Some((counter, *cw, frozen, medium_free_since))
 }
 
 /// One backoff cell at (x, y, w, h): AIFS pill (amber while the AIFS runs), the counter as a bar of the current CW (blue;

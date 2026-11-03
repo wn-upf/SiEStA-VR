@@ -159,7 +159,7 @@ The screenshot above is a real capture from a 6-VR-user, 3-link MLO run (`MLO80-
 | 16 | Frame-Loss Ratio strip | Per-session frame-loss ratio over time. |
 | 17 | STA POSITIONS | Top-down mini-map, AP centered, current position and trajectory of each VR STA. |
 
-The screenshot shows an earlier layout of the same panels. The viewer now has a menu bar (File, View, Channel, ABR, Layout, Help) to show, hide, swap and resize the panels and reorder the ABR plots, a quick tour (`F1`) that walks through each part while zooming into real transmissions of the run, and a keyboard and mouse sheet (`H`). Hovering a transmission or a collision lights its queues and draws its arrows on the station map. Environment switches:
+The screenshot shows an earlier layout of the same panels. The viewer now has a menu bar (File, View, Channel, ABR, Layout, Help) to show, hide, swap and resize the panels and reorder the ABR plots, a quick tour (`F1`) that walks through each part while zooming into real transmissions of the run, and a keyboard and mouse sheet (`H`). Hovering a transmission or a collision lights its queues and draws its arrows on the station map. `O` (Channel > AIFS, backoff and preamble; on by default) splits each TXOP in the link lanes into its parts: the holder's `AIFS` and backoff countdown before it (`BO n`, a tick per 9 us slot; the cursor turns it into a countdown), then `RTS`, `CTS`, the PHY preamble (`L-PHY`, `EHT-PHY`), the data and the BlockAck (`BA`), with the SIFS gaps between them. The parts come from the same timings as the MAC's airtime, and the countdown from the MAC's own slot ticks. Environment switches:
 
 | Variable | Effect |
 | :--- | :--- |

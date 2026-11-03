@@ -45,6 +45,7 @@ pub enum Cmd {
     UiLarger,
     UiSmaller,
     UiDefault,
+    Overhead,
     CwPanel,
     BoGrid,
     QPanel,
@@ -78,6 +79,8 @@ const Q_STYLES: [&str; 4] = ["Lines, with station rows", "One strip per queue", 
 pub fn build(state: &UnifiedState, prefs: &Prefs, strips: &StripOrder, f: &Facts) -> Vec<Menu<Cmd>> {
     let v = &state.ch_view;
     let mut channel = vec![
+        Item::header("Lanes"),
+        Item::check("AIFS, backoff and preamble", "O", v.show_overhead, Cmd::Overhead),
         Item::header("Backoff panel"),
         Item::check("Backoff panel", "", prefs.show_cw, Cmd::CwPanel),
         Item::check("Counter grid instead of CW", "B", v.show_bo_matrix, Cmd::BoGrid).enabled(prefs.show_cw && v.q_mode != 0),
@@ -205,6 +208,7 @@ pub fn apply(cmd: Cmd, t: Targets) -> After {
         Cmd::UiLarger => t.ui.menu_step(true),
         Cmd::UiSmaller => t.ui.menu_step(false),
         Cmd::UiDefault => t.ui.menu_default(),
+        Cmd::Overhead => v.show_overhead = !v.show_overhead,
         Cmd::CwPanel => t.prefs.show_cw = !t.prefs.show_cw,
         Cmd::BoGrid => v.show_bo_matrix = !v.show_bo_matrix,
         Cmd::QPanel => t.prefs.show_q = !t.prefs.show_q,

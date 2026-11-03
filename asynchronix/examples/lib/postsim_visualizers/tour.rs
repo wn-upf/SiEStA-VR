@@ -80,13 +80,25 @@ const LANES: &str = "One lane per link; time runs left to right. Each box is an 
     - {ff0000} frame-loss notice   {ff3344} collision (stripes)\n\
     Hover any box for its sender, MCS, frames and timing. The next steps zoom into examples from this run.";
 
-const SU_DL: &str = "The AP sends one A-MPDU to one headset over the whole channel. The box spans the TXOP, from the \
-    moment the AP takes the medium to the end of the exchange.\n\
+const SU_DL: &str = "The AP sends one A-MPDU to one headset over the whole channel. From left to right (with `O` on):\n\
+    - `AIFS` (the bright bar on top), then the backoff slots counted (`BO n`, dimmer)\n\
+    - `RTS` and `CTS` in slate (every exchange of this MAC is protected)\n\
+    - the preamble: {ffc83c} `L-PHY`, then {f4f4ff} `EHT-PHY`\n\
+    - the data in the AC's colour, then the BlockAck (`BA`)\n\
     The label reads AC, sender -> receiver (a negative `STA` id is an AP) and MCS, then the frames and MPDUs. On the \
     station map an arrow runs from the AP to the receiver.";
 
-const SU_UL: &str = "A headset wins the channel itself, after its own AIFS and backoff, and sends one A-MPDU to the AP. The \
-    colour is still the AC, with {ffb74d} amber for best effort uplink. On the station map the arrow points at the AP.";
+const SU_UL: &str = "A headset wins the channel itself, after its own AIFS and backoff, and sends one A-MPDU to the AP. It \
+    has the same parts as downlink; the colour is still the AC, with {ffb74d} amber for best effort uplink. On the station \
+    map the arrow points at the AP.";
+
+const BACKOFF: &str = "Before sending, a queue waits for the channel to be idle for `AIFS` (SIFS plus AIFSN slots), then \
+    counts down a backoff drawn at random from 0 to CW, one per idle 9 us slot. The cursor steps one slot at a time:\n\
+    - in the lane: `AIFS` is the bright bar, the backoff the dim one with a tick per slot, `BO n (k left)` the count\n\
+    - in the `BACKOFF` grid: each queue's counter/CW at the cursor; its bar shrinks as it counts\n\
+    At 0 the queue sends. The others stop counting until the channel is idle again (`*` frozen); two queues reaching 0 \
+    in the same slot collide. This MAC checks the channel on a 9 us tick that need not line up with the end of AIFS: \
+    the first slot runs from the end of AIFS to the next tick, so it is drawn shorter.";
 
 const COLLISION: &str = "Two or more stations' backoff reached zero in the same slot and they sent at once.\n\
     - {ff3344} red stripes cover the airtime lost\n\
@@ -154,6 +166,7 @@ fn steps(r: &Regions, ex: &[Example]) -> Vec<Step> {
     };
     example_step(&mut v, Kind::SuDl, "Single-user downlink", SU_DL.into(), Some(map));
     example_step(&mut v, Kind::SuUl, "Single-user uplink", SU_UL.into(), Some(map));
+    example_step(&mut v, Kind::Backoff, "Backoff, slot by slot", BACKOFF.into(), Some(Spot::Part(|r| r.cw)));
     example_step(&mut v, Kind::Collision, "Collision", COLLISION.into(), Some(map));
     example_step(&mut v, Kind::Mlo, "Several links (MLO)", MLO.into(), None);
     for (title, body, f) in [
@@ -314,6 +327,7 @@ const KEYS: &[(&str, &str)] = &[
     ("S", "keep both cursors together"),
     ("Z", "box zoom (right click out, double-click all)"),
     ("", "CHANNEL"),
+    ("O", "AIFS, backoff and preamble"),
     ("Q", "queue style"),
     ("W", "one scale for all queues"),
     ("B", "backoff grid / CW history"),
@@ -635,7 +649,7 @@ mod tests {
         }
     }
 
-    const KINDS: [Kind; 4] = [Kind::SuDl, Kind::SuUl, Kind::Collision, Kind::Mlo];
+    const KINDS: [Kind; 5] = [Kind::SuDl, Kind::SuUl, Kind::Backoff, Kind::Collision, Kind::Mlo];
 
     fn examples() -> Vec<Example> {
         KINDS.iter().map(|&kind| Example {
@@ -647,7 +661,7 @@ mod tests {
     fn steps_skip_parts_not_on_screen() {
         let all = steps(&regions(true), &examples());
         let none = steps(&regions(false), &[]);
-        // three parts (ABR plots, legend, map) and four examples come and go
+        // three parts (ABR plots, legend, map) and five examples come and go
         assert_eq!(all.len(), none.len() + 3 + KINDS.len());
         for s in &none {
             assert!(!["ABR plots", "Legend and readout", "Station map", "Collision"].contains(&s.title));

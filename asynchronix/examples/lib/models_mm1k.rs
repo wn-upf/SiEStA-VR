@@ -2082,6 +2082,8 @@ pub struct DcfStats {
     pub rng: crate::lib::sim_rng::SimRng,
     pub last_backoff_drawn_logs: u32, // Only for logging to CSV the 'drawn' BO value.
                                       // pub slot_timer_event,
+    /// Viz only (`XRSIM_VIZ=1`): where the current draw counted down (models_mm1k/viz_access.rs).
+    pub viz_bo: viz_access::VizCountdown,
 }
 
 pub const MAX_RETRIES_MAC: u8 = 10;
@@ -2117,6 +2119,7 @@ impl DcfStats {
             edca_ac_str: edca_ac_str.to_string(),
             rng,
             last_backoff_drawn_logs: drawn_randomly_bo,
+            viz_bo: Default::default(),
         }
     }
 
@@ -2126,6 +2129,7 @@ impl DcfStats {
 
         self.backoff_counter = randomly_drawn.clone(); //this one 'ticks down'
         self.last_backoff_drawn_logs = randomly_drawn.clone(); // this one logs the drawn value for each tx.
+        self.viz_bo.reset();
     }
 
     /// Call after a **successful** transmission.
@@ -2429,6 +2433,10 @@ pub enum VizEvent { // Visualization events for the medium state, emitted for lo
         alvr_frame_ids: Vec<u32>,  // Added
         alvr_frame_losses: Option<Vec<u32>>, 
         
+        /// MPDUs aggregated (the airtime's count; `ampdu_packets` leaves out the ones lost on air).
+        mpdus_built: u16,
+        /// The holder's AIFS and backoff before this TXOP.
+        access: viz_access::VizAccess,
     },
     /// Collision interval on this link.
     Collision {
@@ -2878,6 +2886,7 @@ impl QueueModule {
                     st.backoff_counter - 1
                 );
                 st.backoff_counter -= 1;
+                if visualizer_queues_enabled() { st.viz_bo.on_decrement(now, st.medium_free_since, Duration::from_micros(SLOT_TIME_US)); }
             }
             // Check if ready
             if st.backoff_counter == 0 && !st.backoff_frozen {
@@ -3688,6 +3697,7 @@ impl QueueModule {
             // Return the extracted data
             Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str))
         }; 
+        self.viz_backoff_snap(&mac_key, now);
 
         
         if let Some((prev_retries, prev_cw_val, prev_drawn_bo, ac_str)) = dcf_data {
@@ -4492,6 +4502,7 @@ impl QueueModule {
                         None => {
                             let st = self.dcf_mut(&winner_key);
                             st.on_success(st.param.cw_min);
+                            self.viz_backoff_snap(&winner_key, now);
                             continue;
                         }
                     }
@@ -4512,6 +4523,7 @@ impl QueueModule {
                     // Reset backoff for this MAC to try again
                     let st = self.dcf_mut(&winner_key); 
                     st.on_failure(); // Increase CW and redraw backoff
+                    self.viz_backoff_snap(&winner_key, now);
 
                     // schedule next tick to allow backoff countdown (no deadlock)
                     self.schedule_tick(context); 
@@ -4549,6 +4561,12 @@ impl QueueModule {
                             alvr_frame_ids: unique_ids, 
                             alvr_stream_ids: unique_stream_ids,
                             alvr_frame_losses: first_packet.header_alvr.frame_losses, 
+                            mpdus_built: ampdu_to_send.size as u16,
+                            access: {
+                                let st = self.dcf(&winner_key);
+                                st.viz_bo.window(st.medium_free_since, aifs(st.param),
+                                                 Duration::from_micros(SLOT_TIME_US), st.last_backoff_drawn_logs)
+                            },
                         });
                     }
                 }
@@ -4615,6 +4633,7 @@ impl Model for QueueModule {}
 
 #[cfg(test)]
 mod dl_id_collision_tests;
+pub mod viz_access; // models_mm1k/viz_access.rs: viz only, the TXOP holder's AIFS and backoff countdown
 
 /// `XRSIM_DL_ID_LEGACY=1`: remove a sent DL packet from the shared AP deque by its packet_id alone, as the paper build
 /// did (it also removed other stations' packets that had the same id). Off by default.

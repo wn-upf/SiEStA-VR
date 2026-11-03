@@ -1,14 +1,17 @@
 //! The viewer's own copy of the MAC's visualisation events (`models_mm1k::VizEvent`), built from them when the viewer
 //! opens (`from_mac`). The MAC of this build reports a TXOP's start and end, holder, destination, MCS and A-MPDU contents,
-//! collisions, back-off snapshots, queue depths and bandwidth-pattern changes. The viewer's other fields stay at their
-//! "unknown" value, which every panel already handles: no channel-access window before a TXOP (`idle_since < 0`), no
-//! PPDU split into preamble and data symbols (`ppdu_t1 <= ppdu_t0`: the whole TXOP is drawn as one block), no per-MPDU
-//! queue arrivals in the tooltip (the queue panel takes the arrivals from the queue depths instead).
+//! the holder's AIFS and backoff countdown before it (`models_mm1k/viz_access.rs`), collisions, back-off snapshots, queue
+//! depths and bandwidth-pattern changes. Every TXOP is the same SU exchange (RTS, CTS, preamble, data, BlockAck, with SIFS
+//! between), so its parts are derived here from its airtime and MPDU count (`txop_parts.rs`). The per-MPDU queue arrivals
+//! stay at their "unknown" value (empty), which every panel handles: the queue panel takes the arrivals from the queue
+//! depths instead.
 
 use std::net::IpAddr;
 
 use crate::lib::models_mm1k::VizEvent as MacVizEvent;
 use crate::lib::MacKey;
+
+use super::txop_parts::SuParts;
 
 #[derive(Clone, Debug)]
 pub enum VizEvent {
@@ -44,6 +47,8 @@ pub enum VizEvent {
         bo_origin: f64,
         bo_start: f64,
         bo_zero_at: f64,
+        /// Slots counted from `bo_start` to `bo_zero_at` (`-1`: not reported, the viewer counts the slot times).
+        bo_slots: i32,
         /// When each MPDU entered its MAC queue (empty: not reported).
         mpdu_arrivals: Vec<f64>,
     },
@@ -84,16 +89,27 @@ pub enum VizEvent {
 /// The viewer's event for one of the MAC's.
 pub fn from_mac(ev: MacVizEvent) -> VizEvent {
     match ev {
-        MacVizEvent::TxopStart { t, end, link_id, owner, dest_id, ampdu_packets, mcs, alvr_stream_ids, alvr_frame_ids, alvr_frame_losses } =>
+        MacVizEvent::TxopStart { t, end, link_id, owner, dest_id, ampdu_packets, mcs, alvr_stream_ids, alvr_frame_ids,
+                                 alvr_frame_losses, mpdus_built, access } => {
+            // the exchange's parts; a TXOP that cannot hold them stays one block
+            let (ppdu_t0, ppdu_t1, preamble_s, ctrl_tx_s, ctrl_rx_s, resp_s) = match SuParts::of(end - t, mpdus_built as u32) {
+                Some(p) => {
+                    let (d0, d1) = p.data_window(t, end);
+                    (d0, d1, p.preamble, p.rts, p.cts, p.block_ack)
+                }
+                None => (t, t, 0.0, 0.0, 0.0, 0.0),
+            };
             VizEvent::TxopStart {
                 t, end, link_id, owner, dest_id, ampdu_packets, mcs, alvr_stream_ids, alvr_frame_ids, alvr_frame_losses,
                 sender: owner,
-                ppdu_t0: t, ppdu_t1: t, preamble_s: 0.0,
-                idle_since: -1.0, aifs_s: 0.0,
-                ctrl_tx_s: 0.0, ctrl_rx_s: 0.0, resp_s: 0.0,
-                bo_drawn: 0, bo_origin: -1.0, bo_start: -1.0, bo_zero_at: -1.0,
+                ppdu_t0, ppdu_t1, preamble_s,
+                idle_since: access.idle_since, aifs_s: access.aifs_s,
+                ctrl_tx_s, ctrl_rx_s, resp_s,
+                bo_drawn: access.bo_drawn, bo_origin: access.bo_origin, bo_start: access.bo_start,
+                bo_zero_at: access.bo_zero_at, bo_slots: access.bo_slots,
                 mpdu_arrivals: Vec::new(),
-            },
+            }
+        }
         MacVizEvent::Collision { t, end, link_id, contenders } => VizEvent::Collision { t, end, link_id, contenders },
         MacVizEvent::BackoffSnap { t, mac_key, counter, cw, frozen, medium_free_since } =>
             VizEvent::BackoffSnap { t, mac_key, counter, cw, frozen, medium_free_since },
