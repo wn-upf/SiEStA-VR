@@ -381,9 +381,9 @@ fn hit_test_cw_legend(
     let my_u = my as usize;
     if view.q_mode != 0 && view.show_bo_matrix {
         let rows = bo_matrix_rows(view, idx);
-        let (shown, row_h) = strip_geometry(rows.len(), panel_h.saturating_sub(12), 13);
-        if my_u < panel_y + 12 { return None; }
-        let r = (my_u - panel_y - 12) / row_h;
+        let (shown, row_h) = strip_geometry(rows.len(), panel_h.saturating_sub(BO_GRID_HEAD_H), 13);
+        if my_u < panel_y + BO_GRID_HEAD_H { return None; }
+        let r = (my_u - panel_y - BO_GRID_HEAD_H) / row_h;
         if r >= shown { return None; }
         let (sta, link) = rows[r + view.cw_scroll.min(rows.len().saturating_sub(shown))];
         let mut h = ActiveHighlights { keys: HashSet::new(), txops: HashSet::new() };
@@ -4213,7 +4213,7 @@ fn handle_unified_input(
         let myu = my as usize;
         if scroll_y.abs() > 0.0 && in_labels && state.ch_view.q_mode != 0 && myu >= cw_y && myu < cw_y + cw_hh {
             let (n_rows, avail_h, min_row) = if state.ch_view.show_bo_matrix {
-                (bo_matrix_rows(&state.ch_view, ch_idx).len(), cw_hh.saturating_sub(12), 13)
+                (bo_matrix_rows(&state.ch_view, ch_idx).len(), cw_hh.saturating_sub(BO_GRID_HEAD_H), 13)
             } else {
                 (cw_strip_keys(&state.ch_view, ch_idx).0.len(), cw_hh, 14)
             };
@@ -5154,8 +5154,9 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
             // state themselves, so the backoff table is not drawn and they get its room
             let cap = content_bottom.saturating_sub(200 + 12 + rows_top_def + 4).clamp(48, 330);
             // sized by what it draws: the backoff grid (`B`) has a row per station and link, more than CW series
-            let rows = if state.ch_view.show_bo_matrix { bo_matrix_rows(&state.ch_view, &viz_idx).len() } else { viz_idx.cw_series.len() };
-            (rows * 14 + 18).clamp(48, cap)
+            let (rows, head) = if state.ch_view.show_bo_matrix { (bo_matrix_rows(&state.ch_view, &viz_idx).len(), BO_GRID_HEAD_H + 6) }
+                               else { (viz_idx.cw_series.len(), 18) };
+            (rows * 14 + head).clamp(48, cap)
         } else { CW_H };
         let bp_geom = panel_resize::Geometry {
             right: ch_panel_lx + ch_panel_w, bottom: content_bottom,
@@ -5421,10 +5422,16 @@ pub fn run_unified_viewer_multi(mb: obss::MultiBss, sim_tag: String) {
                 bottom_panels.draw(&mut buf, w, &window, &bp_geom, &bp);
             }
 
-            // Channel cursor line
+            // Channel cursor line; not through the backoff grid, a table of the counters at the cursor (not a timeline)
             let cx = x_of(state.ch_view.cursor_t, &state.ch_view, ch_panel_x, ch_panel_w);
             if cx >= ch_panel_x as i32 && cx < (ch_panel_x + ch_panel_w) as i32 {
-                draw_vline(&mut buf, w, cx, content_top as i32, content_bottom as i32, 0xffff66);
+                let grid = show_cw && state.ch_view.q_mode != 0 && state.ch_view.show_bo_matrix && cw_h > 0;
+                if grid {
+                    draw_vline(&mut buf, w, cx, content_top as i32, cw_panel_y as i32 - 3, 0xffff66);
+                    draw_vline(&mut buf, w, cx, (cw_panel_y + cw_h) as i32 + 2, content_bottom as i32, 0xffff66);
+                } else {
+                    draw_vline(&mut buf, w, cx, content_top as i32, content_bottom as i32, 0xffff66);
+                }
             }
 
             // Details of the A-MPDU under the mouse
@@ -5722,8 +5729,10 @@ fn draw_backoff_cell(buf: &mut [u32], stride: usize, x: usize, y: usize, w: usiz
     let bar_w = w.saturating_sub(9 + txt_w + 6).max(12);
     let bh = h.saturating_sub(5).max(4);
     let by = y + (h - bh) / 2;
-    let aifs_active = cursor < medium_free_since + aifs_secs_for_ac(key.1);
-    fill_rect(buf, stride, x, by, 6, bh, maybe_dim(if aifs_active { 0xffaa00 } else { 0x333344 }, dimmed));
+    // waiting out AIFS after the medium went idle (not while it is still busy: then `medium_free_since` is ahead), in
+    // the queue's colour, as its AIFS bar in the lane
+    let aifs_active = medium_free_since <= cursor && cursor < medium_free_since + aifs_secs_for_ac(key.1);
+    fill_rect(buf, stride, x, by, 6, bh, maybe_dim(if aifs_active { key_color(*key) } else { 0x333344 }, dimmed));
     fill_rect(buf, stride, bar_x, by, bar_w, bh, maybe_dim(0x222230, dimmed));
     let frac = (*counter as f64 / (*cw).max(1) as f64).clamp(0.0, 1.0);
     let fill_col = maybe_dim(if *frozen { 0x8860b0 } else { 0x44aaff }, dimmed);
@@ -5742,6 +5751,9 @@ fn draw_backoff_cell(buf: &mut [u32], stride: usize, x: usize, y: usize, w: usiz
     let t = format!("{}/{}{}", counter, cw, if *frozen { "*" } else { "" });
     render_text(buf, &t, bar_x + bar_w + 6, ty, stride, maybe_dim(0xf0f0ff, dimmed), 1.0);
 }
+
+/// Height of the backoff grid's header (title, column names, cell legend).
+const BO_GRID_HEAD_H: usize = 26;
 
 /// Rows of the backoff grid: every (station, link) that has an EDCA queue, AP first.
 fn bo_matrix_rows(view: &ViewState, idx: &VizIndex) -> Vec<(i32, u8)> {
@@ -5764,18 +5776,37 @@ fn render_backoff_matrix(
     let rows = bo_matrix_rows(view, idx);
     let mut acs: Vec<EdcaAc> = idx.mac_keys_sorted.iter().map(|k| k.1).collect::<HashSet<_>>().into_iter().collect();
     acs.sort_by_key(|a| std::cmp::Reverse(ac_prio(*a)));
-    let head_h = 12usize;
+    let head_h = BO_GRID_HEAD_H;
     let (shown, row_h) = strip_geometry(rows.len(), panel_h.saturating_sub(head_h), 13);
     let start = view.cw_scroll.min(rows.len().saturating_sub(shown));
     draw_row_scrollbar(buf, stride, panel_y + head_h, panel_h.saturating_sub(head_h), panel_x, rows.len(), shown, start);
     let col_w = panel_w / acs.len().max(1);
 
-    // header: the AC of each column and what the cells show
-    render_text(buf, "BACKOFF  [B] = CW history", 8, panel_y + 3, stride, 0xaab0c8, 1.0);
+    // header: a table at the cursor instant (its columns are ACs, not times), the AC of each column and what the cells
+    // show
+    render_text(buf, "BACKOFF COUNTERS  [B] CW history", 8, panel_y + 3, stride, 0xaab0c8, 1.0);
+    render_text(buf, &format!("at cursor t = {:.6} s", view.cursor_t), 8, panel_y + 15, stride, 0xffff66, 1.0);
+    fill_rect(buf, stride, panel_x, panel_y, panel_w, head_h.saturating_sub(1), 0x181826);
     for (c, ac) in acs.iter().enumerate() {
-        render_text(buf, ac.to_string().trim_start_matches("AC_"), panel_x + c * col_w + 6, panel_y + 3, stride, qkey_color(0, *ac), 1.0);
+        let title = format!("{}  slots left/CW", ac);
+        render_text(buf, &title, panel_x + c * col_w + 6, panel_y + 3, stride, ac_color(*ac), 1.0);
         let cx = panel_x + c * col_w;
-        for yy in panel_y..panel_y + panel_h { if yy * stride + cx < buf.len() { buf[yy * stride + cx] = 0x222233; } }
+        for yy in panel_y..panel_y + panel_h { if yy * stride + cx < buf.len() { buf[yy * stride + cx] = 0x333348; } }
+    }
+    // legend of a cell: the left mark (AIFS, in the queue's colour as in the lane), the counter bar, `*` frozen
+    let mut lx = panel_x + 6;
+    let ly = panel_y + 15;
+    for (k, text) in ["in AIFS", "counting", "* frozen (busy or AIFS)"].iter().enumerate() {
+        match k {
+            // the AIFS mark takes each queue's colour: a few of them
+            0 => for (i, ac) in [EdcaAc::Voice, EdcaAc::Video, EdcaAc::BestEffort].iter().enumerate() {
+                fill_rect(buf, stride, lx + 2 * i, ly, 2, 7, ac_color(*ac));
+            },
+            1 => fill_rect(buf, stride, lx, ly, 6, 7, 0x44aaff),
+            _ => fill_rect(buf, stride, lx, ly, 6, 7, 0x8860b0),
+        }
+        render_text(buf, text, lx + 9, ly, stride, 0x9aa0b8, 1.0);
+        lx += 9 + text_w(text, 1.0) as usize + 14;
     }
     for (r, &(sta, link)) in rows.iter().enumerate().skip(start).take(shown) {
         let y = panel_y + head_h + (r - start) * row_h;

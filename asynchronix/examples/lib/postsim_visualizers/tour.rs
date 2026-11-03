@@ -95,7 +95,9 @@ const SU_UL: &str = "A headset wins the channel itself, after its own AIFS and b
 const BACKOFF: &str = "Before sending, a queue waits for the channel to be idle for `AIFS` (SIFS plus AIFSN slots), then \
     counts down a backoff drawn at random from 0 to CW, one per idle 9 us slot. The cursor steps one slot at a time:\n\
     - in the lane: `AIFS` is the bright bar, the backoff the dim one with a tick per slot, `BO n (k left)` the count\n\
-    - in the `BACKOFF` grid: each queue's counter/CW at the cursor; its bar shrinks as it counts\n\
+    - in the `BACKOFF COUNTERS` grid below: a table of every queue at the cursor instant (rows are stations and links, \
+    columns ACs, not times): slots left/CW, its bar shrinking as it counts; the left mark lights in the queue's colour \
+    while it waits out AIFS\n\
     At 0 the queue sends. The others stop counting until the channel is idle again (`*` frozen); two queues reaching 0 \
     in the same slot collide. This MAC checks the channel on a 9 us tick that need not line up with the end of AIFS: \
     the first slot runs from the end of AIFS to the next tick, so it is drawn shorter.";
@@ -111,7 +113,7 @@ const MLO: &str = "With MLO the AP and the headsets are multi-link devices: each
     shows the rows of one link.";
 
 const BOTTOM: &str = "- `BACKOFF`: each EDCA queue's contention window over time. `B` swaps it for a grid of backoff \
-    counters (counter/CW, * frozen, amber = AIFS).\n\
+    counters at the cursor (slots left/CW, `*` frozen, the left mark lit while in AIFS).\n\
     - `QUEUES`: each queue's depth. `Q` changes the style (lines, strips, heatmap, stacked), `W` puts all on one \
     scale, `I` marks the arrivals.\n\
     Hover a TXOP and the queues in it light up. The wheel over the names scrolls the rows; drag the dotted grips to \
