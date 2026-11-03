@@ -145,7 +145,7 @@ A capture of a 20 s run with 6 VR users (NeSt-VR) over MLO with two 80 MHz links
 | 1 | Menu bar | File, View, Channel, ABR, Layout, Help: show, hide, swap and resize the panels, reorder the ABR plots, the quick tour (`F1`) and the keyboard and mouse sheet (`H`). The right end reads each side's time window. |
 | 2 | Playback bar | `PLAY` (`Space`), `REWIND`, the replay speed (simulated time per real second, 1 us/s to 1 s/s) and the cursor's time. |
 | 3 | Link lanes | One lane per link. Each box is a TXOP, coloured by access category and labelled sender -> receiver, MCS, frames and MPDUs. |
-| 4 | Overhead overlay (`O`) | Each TXOP split into its parts: the holder's AIFS and backoff, RTS, CTS, preamble, data, BlockAck (close-up below). |
+| 4 | Overhead overlay (`O`) | Each TXOP split into its parts: the holder's AIFS and backoff, RTS, CTS, preamble, data, BlockAck. |
 | 5 | Collision | Red stripes: two or more queues reached zero in the same slot and sent at once; their RTS, SIFS and CTS are lost. |
 | 6 | Cursor | The instant that the backoff counters, the readout and the station map show. A right click places it. |
 | 7 | Backoff counters (`B`: CW history) | A table at the cursor instant, not a timeline: one row per station and link, one column per AC; slots left/CW, the AIFS mark, `*` frozen. |
@@ -159,29 +159,9 @@ A capture of a 20 s run with 6 VR users (NeSt-VR) over MLO with two 80 MHz links
 | 15 | Frame-loss ratio | Per-session frame-loss ratio over time. |
 | 16 | Time axes | Each side's own time axis: the wheel zooms, a drag pans, `ZOOM` and `RESET` at each side's top right. |
 
-**Up close**, numbered as above (same run):
+The figure is made by `python3 scripts/viz_readme_figs.py` (needs a release build of `XR_sim` and Pillow) from the run `XR_sim 20.0 12000.0 5.0 100.0 0.1 6 0 5000 0 STD snow_short 90.0 0 1.5 1 30 1 0 1 1 1 0 1 1 0 1.0 MLO80-80-320 0 1 64 HEVC <results dir> 0 0 1`.
 
-*4. One TXOP, part by part* (LINK 1, the AP sends 2 MPDUs of video to s200 at MCS 8):
-
-![One TXOP with its overhead labelled](assets/viz_readme/txop.png)
-
-1 AIFS (SIFS plus AIFSN slots: 34 us for video) · 2 backoff slots counted (`BO 3`, a tick per 9 us slot; the MAC counts on a slot tick that need not line up with the end of AIFS, so the first slot can be drawn shorter) · 3 RTS · 4 SIFS (16 us, three of them) · 5 CTS · 6 L-PHY (legacy preamble) · 7 EHT-PHY (rest of the EHT preamble) · 8 data symbols · 9 BlockAck. The parts come from the same timings as the MAC's airtime, the countdown from the MAC's own slot ticks.
-
-*5. A collision* (LINK 0: s204's voice queue and the AP's video queue reached zero in the same slot):
-
-![A collision on LINK 0](assets/viz_readme/collision.png)
-
-*3. Several links at once (MLO)*: each link contends on its own, so TXOPs on LINK 0 and LINK 1 overlap in time:
-
-![Two MLO links busy at once](assets/viz_readme/mlo.png)
-
-*4, 6, 7. A backoff countdown and the counters at the cursor*: the cursor (6) is in the second of 4 slots that s204's voice queue counts on LINK 0 (4: `BO 4 (3 left)`); the grid (7) gives every queue's counter at that instant: s204 L0 `3/7` is counting, most others are frozen (`*`), and the queues of LINK 1, idle again, light the AIFS mark in their colour:
-
-![Backoff countdown and the backoff counters](assets/viz_readme/backoff.png)
-
-The figures are made by `python3 scripts/viz_readme_figs.py` (needs a release build of `XR_sim` and Pillow). It runs `XR_sim 20.0 12000.0 5.0 100.0 0.1 6 0 5000 0 STD snow_short 90.0 0 1.5 1 30 1 0 1 1 1 0 1 1 0 1.0 MLO80-80-320 0 1 64 HEVC <results dir> 0 0 1` with the viewer on, picks the instants from the run's events (`XRSIM_VIZ_EVENTS`: a TXOP with 3-8 backoff slots right after AIFS and 30-120 us of data, a collision of two contenders, the quick tour's MLO and backoff examples), captures each view (`XRSIM_VIZ_VIEW`, `XRSIM_VIZ_SHOT`, `XRSIM_VIZ_EXIT`, `XRSIM_VIZ_SCALE=1.25`) and draws the numbered markers.
-
-The quick tour (`F1`) walks through the same parts while zooming into real transmissions of the run. Hovering a transmission or a collision lights its queues and draws its arrows on the station map. Hovering a transmission or a collision lights its queues and draws its arrows on the station map. `O` (Channel > AIFS, backoff and preamble; on by default) splits each TXOP in the link lanes into its parts: the holder's `AIFS` and backoff countdown before it (`BO n`, a tick per 9 us slot; the cursor turns it into a countdown), then `RTS`, `CTS`, the PHY preamble (`L-PHY`, `EHT-PHY`), the data and the BlockAck (`BA`), with the SIFS gaps between them. The parts come from the same timings as the MAC's airtime, and the countdown from the MAC's own slot ticks. Environment switches:
+The quick tour (`F1`) walks through the same parts while zooming into real transmissions of the run. Hovering a transmission or a collision lights its queues and draws its arrows on the station map. `O` (Channel > AIFS, backoff and preamble; on by default) splits each TXOP in the link lanes into its parts: the holder's `AIFS` and backoff countdown before it (`BO n`, a tick per 9 us slot; the cursor turns it into a countdown), then `RTS`, `CTS`, the PHY preamble (`L-PHY`, `EHT-PHY`), the data and the BlockAck (`BA`), with the SIFS gaps between them. The parts come from the same timings as the MAC's airtime, and the countdown from the MAC's own slot ticks. Environment switches:
 
 | Variable | Effect |
 | :--- | :--- |

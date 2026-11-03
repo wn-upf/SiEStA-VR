@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Regenerates the README's figures of the post-simulation viewer (assets/viz_readme/*.png).
+"""Regenerates the README's figure of the post-simulation viewer (assets/viz_readme/overview.png).
 
     python3 scripts/viz_readme_figs.py [--bin target/release/examples/XR_sim] [--out assets/viz_readme]
 
-Needs a release build of XR_sim and Pillow. It runs the simulation below several times with the viewer on
-(XRSIM_VIZ=1): once to dump the run's TXOPs, collisions and the quick tour's examples (XRSIM_VIZ_EVENTS), then once per
-figure with the channel view set on an instant picked from them (XRSIM_VIZ_VIEW), saving the first frame and where the
-viewer drew each part (XRSIM_VIZ_SHOT) and closing the window (XRSIM_VIZ_EXIT). It then crops the frames and draws the
+Needs a release build of XR_sim and Pillow. It runs the simulation below twice with the viewer on
+(XRSIM_VIZ=1): once to dump the run's TXOPs, collisions and the quick tour's examples (XRSIM_VIZ_EVENTS), then once
+with the channel view set on an instant picked from them (XRSIM_VIZ_VIEW), saving the first frame and where the
+viewer drew each part (XRSIM_VIZ_SHOT) and closing the window (XRSIM_VIZ_EXIT). It then draws the
 numbered markers. With xvfb-run installed the windows open on a virtual display; otherwise each one flashes up and
-closes by itself. Same seed, same events: the instants are the same on every run.
+closes by itself. Same seed, same events: the instant is the same on every run.
 """
 
 import argparse
@@ -31,9 +31,7 @@ RUN_ARGS = ("20.0 12000.0 5.0 100.0 0.1 6 0 5000 0 STD snow_short 90.0 0 1.5 1 3
 # logical frame 1760 x 760 for the default 2200 x 950 window
 UI_SCALE = "1.25"
 
-SLOT = 9e-6
 SIFS = 16e-6
-LEGACY_PHY = 20e-6
 
 MARK_R = 11
 MARK_FILL = (214, 40, 80)
@@ -97,33 +95,10 @@ def save(img, path):
     print(f"{path}: {img.size[0]}x{img.size[1]}, {os.path.getsize(path) // 1024} KB")
 
 
-def with_band(img, scale, band):
-    """`img` scaled by `scale` (nearest, the viewer's pixel font stays sharp) under a dark band of `band` px."""
-    big = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
-    canvas = Image.new("RGB", (big.width, big.height + band), (13, 13, 18))
-    canvas.paste(big, (0, band))
-    return canvas
-
-
 # ── Picking the instants (as postsim_visualizers/tour_examples.rs does: from the middle of the run) ────────────────
 
 def from_mid(items, key, mid):
     return sorted(items, key=lambda e: (key(e) < mid, abs(key(e) - mid)))
-
-
-def pick_txop(ev):
-    """A TXOP whose every part is readable: AIFS, then 3 to 8 backoff slots counted right after it, a short data block.
-    On LINK 1: LINK 0's lane has the channel side's ZOOM and RESET buttons over its top right."""
-    mid = (ev["t_min"] + ev["t_max"]) / 2
-    for x in from_mid(ev["txops"], lambda e: e["t"], mid):
-        a = x["access"]
-        if not a or x["rts"] <= 0:
-            continue
-        (a0, a1), (b0, b1), slots = a["aifs"], a["bo"], a["slots"]
-        data = x["data"][1] - x["data"][0]
-        if 3 <= slots <= 8 and b0 <= a1 + SLOT and abs(b1 - x["t"]) < 1e-6 and 30e-6 <= data <= 120e-6 and x["link"] == 1:
-            return x
-    sys.exit("no TXOP with a readable countdown and data block")
 
 
 def pick_collision(ev):
@@ -139,17 +114,6 @@ def pick_collision(ev):
         if len(near) >= 2:
             return c
     sys.exit("no two-contender collision")
-
-
-def example(ev, kind):
-    e = next((e for e in ev["examples"] if e["kind"] == kind), None)
-    if e is None:
-        sys.exit(f"the run has no {kind} example")
-    return e
-
-
-def who(sta):
-    return "the AP" if sta < 0 else f"s{sta}"
 
 
 # ── The figures ───────────────────────────────────────────────────────────────
@@ -197,90 +161,6 @@ def fig_overview(binary, work, ev, coll, out):
     save(img, out / "overview.png")
 
 
-def fig_txop(binary, work, ev, x, out):
-    a = x["access"]
-    a0, end = a["aifs"][0], x["end"]
-    pad = 0.05 * (end - a0)
-    span = (end - a0) + 2 * pad
-    img, lay = shot(binary, work, "txop", (a0 + end) / 2, span, cursor=a0 - pad / 2)
-    ln = lane(lay, x["link"])
-    xa, xb = int(x_of(a0 - pad * 0.8, lay)), int(x_of(end + pad * 0.8, lay))
-    crop = img.crop((xa, ln["y"] - 2, xb, ln["y"] + ln["h"] + 2))
-    scale = 2
-    band = 40
-    fig = with_band(crop, scale, band)
-    d = ImageDraw.Draw(fig)
-    t, rts, cts, ba = x["t"], x["rts"], x["cts"], x["ba"]
-    d0, d1 = x["data"]
-    p0 = d0 - x["preamble"]
-    parts = [(1, a["aifs"][0], a["aifs"][1]), (2, a["bo"][0], a["bo"][1]), (3, t, t + rts), (4, t + rts, t + rts + SIFS),
-             (5, t + rts + SIFS, t + rts + SIFS + cts), (4, p0 - SIFS, p0), (6, p0, p0 + LEGACY_PHY), (7, p0 + LEGACY_PHY, d0),
-             (8, d0, d1), (4, d1, d1 + SIFS), (9, d1 + SIFS, d1 + SIFS + ba)]
-    for n, u0, u1 in parts:
-        cx = ((x_of(u0, lay) + x_of(u1, lay)) / 2 - xa) * scale
-        d.line((cx, band / 2 + MARK_R, cx, band + 4), fill=(255, 255, 255), width=2)
-        marker(d, cx, band / 2, n)
-    save(fig, out / "txop.png")
-    return {"slots": a["slots"], "drawn": a["drawn"], "mpdus": x["mpdus"], "mcs": x["mcs"], "sta": x["sta"],
-            "ac": x["ac"], "data_us": round((d1 - d0) * 1e6), "t": t}
-
-
-def fig_collision(binary, work, ev, c, out):
-    span = 0.45e-3
-    img, lay = shot(binary, work, "collision", (c["t"] + c["end"]) / 2, span, cursor=c["t"] - 0.4 * span)
-    lanes = lay["lanes"]
-    top, bottom = lanes[0]["y"] - 4, lanes[-1]["y"] + lanes[-1]["h"] + 4
-    crop = img.crop((0, top, lay["panel_x"] + lay["panel_w"] + 4, bottom))
-    band = 34
-    fig = with_band(crop, 1, band)
-    d = ImageDraw.Draw(fig)
-    cx = x_of((c["t"] + c["end"]) / 2, lay)
-    lc = lane(lay, c["link"])
-    d.line((cx, band / 2 + MARK_R, cx, band + lc["y"] - top + 4), fill=(255, 255, 255), width=2)
-    marker(d, cx, band / 2, 5)
-    save(fig, out / "collision.png")
-
-
-def fig_mlo(binary, work, ev, e, out):
-    span = max(3 * (e["t1"] - e["t0"]), 0.3e-3)
-    mid = (e["t0"] + e["t1"]) / 2
-    img, lay = shot(binary, work, "mlo", mid, span)
-    lanes = lay["lanes"]
-    top, bottom = lanes[0]["y"] - 4, lanes[-1]["y"] + lanes[-1]["h"] + 4
-    crop = img.crop((0, top, lay["panel_x"] + lay["panel_w"] + 4, bottom))
-    band = 34
-    fig = with_band(crop, 1, band)
-    d = ImageDraw.Draw(fig)
-    # the two TXOPs on air at once (the example spans both): a marker on each
-    for link in e["lanes"]:
-        on = [x for x in ev["txops"] if x["link"] == link and x["t"] < e["t1"] and x["end"] > e["t0"]]
-        x = max(on, key=lambda x: min(x["end"], e["t1"]) - max(x["t"], e["t0"]))
-        ln = lane(lay, link)
-        marker(d, x_of((x["t"] + x["end"]) / 2, lay), band + ln["y"] - top + ln["h"] / 2, 3)
-    save(fig, out / "mlo.png")
-
-
-def fig_backoff(binary, work, ev, e, out):
-    span = max(1.3 * (e["t1"] - e["t0"]), 40e-6)
-    anim = e["anim"]
-    # the cursor in the countdown's second slot (anim: twice in AIFS, once per slot, then on the TXOP)
-    slots = [t for t in anim[2:] if t < anim[-1] - 1e-6]
-    cursor = slots[1] if len(slots) >= 2 else (e["t0"] + e["t1"]) / 2
-    t_txop = anim[-1] - 2e-6 if anim else e["t1"]
-    img, lay = shot(binary, work, "backoff", (e["t0"] + e["t1"]) / 2, span, cursor=cursor)
-    reg = lay["regions"]
-    lanes = lay["lanes"]
-    top = lanes[0]["y"] - 4
-    cw = reg["cw"]
-    crop = img.crop((0, top, cw[0] + cw[2], cw[1] + cw[3]))
-    d = ImageDraw.Draw(crop)
-    ln = lane(lay, e["lanes"][0])
-    marker(d, x_of((e["t0"] + t_txop) / 2, lay), ln["y"] - top + ln["h"] - 12, 4)
-    marker(d, x_of(cursor, lay) + 14, lanes[-1]["y"] + lanes[-1]["h"] - top + 10, 6)
-    marker(d, cw[0] + cw[2] - 18, cw[1] - top + 12, 7)
-    save(crop, out / "backoff.png")
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     target = os.environ.get("CARGO_TARGET_DIR", str(ROOT / "target"))
@@ -297,13 +177,8 @@ def main():
         run_viewer(binary, {"XRSIM_VIZ_EVENTS": events}, work)
         with open(events) as f:
             ev = json.load(f)
-        txop, coll = pick_txop(ev), pick_collision(ev)
+        coll = pick_collision(ev)
         fig_overview(binary, work, ev, coll, out)
-        info = fig_txop(binary, work, ev, txop, out)
-        fig_collision(binary, work, ev, coll, out)
-        fig_mlo(binary, work, ev, example(ev, "Mlo"), out)
-        fig_backoff(binary, work, ev, example(ev, "Backoff"), out)
-    print("TXOP shown:", json.dumps(info))
     print("collision shown:", json.dumps({"t": coll["t"], "link": coll["link"], "contenders": coll["contenders"]}))
 
 
