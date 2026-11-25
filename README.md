@@ -269,8 +269,10 @@ After a simulation is finished, the frame IDs logged for each user on a simulate
 The method used for the results presented in the paper only considers a scenario with ideal conditions with a single user, and tests every scenario folder found inside the path set by the `results_scenarios_folder` string in the main function. Running the script results in `VMAF_metrics_{loss,bitrate}_{trace_idx}.csv` files being logged on each scenario folder — `loss` for single-encoder runs (the paper's use case), `bitrate` when comparing two independently encoded streams — containing one row per frame with `frame_number`, `timestamp_ms`, `vmaf`, `psnr`, and `ssim`. It should be noted that VMAF is computationally expensive, and evaluation with this method can take multiple hours if the evaluated folder contains many scenarios or simulation times are long. Concurrency is capped by a few constants near the top of the file — `MAX_CONCURRENT_VMAF_SCENARIOS` (scenario folders processed at once, default `1`) and `MAX_PARALLEL_VMAF` (simultaneous VMAF computations across all scenarios, default `20`). These should be tuned to your particular machine. 
 
 ## Acknowledgments
+This work has received support from:
+* Wi-XR PID2021-123995NB-I00 funded by MCIU/AEI and by "ERDF A way of making Europe”.
+* TRUE Wi-Fi PID2024-155470NB-I00 funded by MICIU/AEl/10.13039/50110 0011033 and by "ERDF A way of making Europe”.
+* REALM (GA 101298050, funded by the European Union).
 
-This work was supported by the Wi-XR (PID2021-123995NB-I00) and TRUE Wi-Fi (PID2024-155470NB-I00) projects, funded by
-MICIU/AEI and cofinanced by the European Union, and by the European Union under GA 101298050 (REALM).
 
 ![Funding acknowledgments: Wi-XR PID2021-123995NB-I00 and TRUE Wi-Fi PID2024-155470NB-I00 (Ministerio de Ciencia, Innovación y Universidades, cofinanciado por la Unión Europea, Agencia Estatal de Investigación); Funded by the European Union (GA 101298050 – REALM)](assets/ACKs_EU.png)
