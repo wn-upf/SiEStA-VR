@@ -1,0 +1,221 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2480" height="1200" viewBox="0 0 2480 1200" font-family="Liberation Sans, Arial, Helvetica, DejaVu Sans Condensed, sans-serif">
+<defs><marker id="h29abe2" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#29abe2"/></marker><marker id="hee1c25" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#ee1c25"/></marker><marker id="h1f3a68" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#1f3a68"/></marker><marker id="h8a8a8a" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#8a8a8a"/></marker><marker id="hed8b2f" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#ed8b2f"/></marker><marker id="h3f6b2a" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#3f6b2a"/></marker><marker id="h4a7fd0" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#4a7fd0"/></marker><marker id="h333" viewBox="0 0 5 5" markerWidth="3.4" markerHeight="3.4" refX="3.8" refY="2.5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L5,2.5 L0,5 z" fill="#333"/></marker></defs>
+<rect width="2480" height="1200" fill="#fff"/>
+<text x="30" y="100" font-size="68" font-weight="bold">VR Server <tspan font-style="italic">i</tspan></text>
+<text x="1395" y="100" font-size="68" font-weight="bold">VR Client <tspan font-style="italic">j</tspan></text>
+<text x="1160" y="100" font-size="52" font-weight="normal" font-style="italic" text-anchor="middle" fill="#000">Network model</text>
+<image x="432" y="28" width="128" height="88" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAG4AAABKCAYAAABaZmHbAAAFKUlEQVR4nO2dS6gcRRRAz8tEnyZEiL8XUTQ8CFFJ/GBQxLUYXLiJCxcqfnBhlCiusjC4FEEEceHChQsVBQUREUSXBkTxAy4UQYwf9GkMuoifJ8mbdlEzWHOnqru6q2u6ZvoeKGa6un59b/etT0/dAUVRFEVRFEVRFGWeWEpc/pnAYFSPXVcRmH/JSjvOX4hzdhpXOld5Mo+dz4evLlc9BTAETo0+W6dtxW0HdgP7gBuAi4BzgM2irk0V5fiEIfNJpYYwtMoZevJK5Y+V5kpbiM9xuf8Ca8AnwFHga+B4jXbOjAPACcwFaJgOG8DdpLdytXiC7gUzL+G5hjJunQfpXhjzFg43krRF7GO7E/gQ2CHijwGvAt9jTESB6VfKOmpfR191riuk7AoRPwAuAW4HrnDk3wV8k6Zp1Rxh+m66r6vGZMwdTMvpqS4b9LZozDtdNiZznmFSVl/GFFY1LC9jC3CeiHs+orxF5wNxvEpEV7U5oiFnAGeJuGOetFdh+sNtuCfSBMTZyIm5/O4TiKv8OthtkW0sgD+Bb4GvMH27zY/ieBnYOspTmxjFDUbBRgp5CXgaeCyinnnkJeAeJgdjUpEwLb9gYkylC6m4g/RPaQB3AYdEXNmqS23aVpzklsTl58xD4rjV6UyMqYTyvmKAseE2PwCfOfIXnu9Ycb70rnSutoX0fT5kva7PG4EVK48cuLkekk4GJ00qfQB4L6LOnDkAvGEdy8WGVt8StG0qq5SZ1QJrYkJkm00fZzckdf+ZO0mX6GKEW9ZnQKIXiAtGZ09cbgu/OeGa07ZG383ZLGn1JlfFdUvjp1AV1x5SlklH0Kq49pCDsawVp4MTPyGyyWYeV0WfFJ31E1e3cX1aOUlKSlOpSqomy1Fln8xiU7JR3JLnex8JuXEbLwvGrlWWxVWdX3SyHpzUpe9PoSQbU2mjSkpIjOJC9pP1mazfxyl+su3j1BSWk/RFcspRpS5gT5L17yrtxulPFybRF6lzQlLZquLSEfKbE53HZYhU3NyYyr4veSVl1qay8baiOUBem7Q4rY4qYzd91K14P/87evFtWKxTbtVGkbrmOnTj43gjo30tN3vK8h2H1OMlpeI2gL9F3CGm940tKusBabKZx0k+TVx+zryfsvDYJa+q3xI+C7wbUce88jNhTmg6M5VVqyN/YPaNPQo8DFwozlf1KSH9VJO+LBXHgVeAJ4HfO26Ll+3A50z67riy0xblzbVMO6nZ1rSwWFMZMuRVDK6pUGP5h5jKrcDlmLvDHgXtxPijstkPXECcQuWUYJN1PKsbQ+5JH7erIGwk6NqzfpMj3W2YffF2vnWMr5QTNdo7xS7gI9r3HqehPPyCcdbamLcyuIi+hu/KFFNmYy8FrivLrCTlMkoGe2WK2wBOt94cpQ6nmmQ6G+ME2n58+7Jc1QX3Mynrk5Qsypc9cf8AX4i4O2Nbp3jZK44/xu24LQiXZ9NrmhameNkN/MqknB+JKXAF48nULvAoxsmo0g7LwJtMPyAXxxb8uKPQlzF/BqHEsQN4gWn5VnraDVmJ2AK8Dtwq4teBezHeUNcx9rjq71J8f7lS9gLVPh8SX4XLo2xhfa/jcdbn5c+XbohZrVoG9mD8NK+ItGuYhY+/Kq4jiOsxLmi7npQuejgNXB2ok2D2Ab9lcHGLGk4SucxVxrnAixlc5KKF14Dza+ihMasY+/zTDC9u0cLaSIarNWUPtPuaZMCM3SI56ilwD4jsuIL2sOuz4/DED4mYVCsLwH/q5gf0uEW/kAAAAABJRU5ErkJggg=="/>
+<image x="1990" y="16" width="150" height="109" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAG4AAABQCAYAAAD4K0AmAAAG+klEQVR4nO2de4hVRRzHP3fdba+ur1XTSttemJZtZoVppkUl5pKZhdJDUwoq6aFRIkQPg/5Ik4gkTCmlLBRD8g9LDSoiix72ICKNqCittFy1l7WZe/vjdy977txz7j1nztzzuM4HDuycPTPznZlzzsyZ+c3vgsVisVgsFovFYjlKycQtwDDdgN5IuXJAB3AoVkVVohYaLgucCpwNXAmMAeqBw8D3wCZgG/AD8EtMGi0KrcAW5OmqdPwNTEWeSkuMtOGvwdRjFbbxYmM8eo1WOFZGL9lyHO6NsRD3PnsU8InL9VOiEGvp4i6KG+Cgz3g3Udp4lojoRWnl9w8Qf6US93LTAi3unEVxxa8OGH+4En+NUXUWT6ZSXPHnBIzfrMTfb1JclNTFLSAgJyjh7wLG/x343BFuDicnPtLWcL2V8J8B4x8B3jekJVbS1nBZJXxEI42gjZ1I0tZwdgifJ20NZ4KaaPyjseFqYUUkdQ1XH7eApJDkiugB9ERmS7oDLcDFVchnErAPGbT8BfyR/1tn4BMZSWq4PsAQ4HRkMXQccD7QWCZOYaU7DFuU8E7kk2E78DGwC9hDwhsyagYCE4FHgB0EX545RiPPZzTyWQPMAoZRI32kLiOB+cgrKsy62mkB821EzBfC5LkcmZxuCph3qmkFHiZYRb0DLABGA9OV/z0ZMP8zlfhfIk/9JGAZ8E0AXe8CY5H+t2bpD9xO5crYilSGF31d4kwIoOElJe6MMtc3A/f70LwZGOpTQ6popXz/9TLBCj7TJY3rgONx7/N6I6vgm13i+aUHcANiOeZVjokB0ks84/Au6GOUThr7oQn41iPNtcgK+Wzg5nwen3lce6FekRgPfOGR5iLNNBPFBNwLtwH5NgtDFvne0h1g3BMyf4DJHmk/biDtilRraDsSudNVpiAGqiCzNr2Qp64B728y5/mC3hwwAHiF0jW6SiwGVjjSKqTv55vwEHAAsZAGMfNbA1yvXDcPeCqgrtjpC3xF6Z04CHlSxgBzgeeQUZ3uUxPHcRjYiAxa2oDB+TLPd7l2jH4VxsODlBZiBDANGTXGXfmmj1uRwc9Cl/+lxvB2GKXib8O/mXiaj6uA35Rzi8NVpzem+7jVwJyAcdqRAoMUNgN05sNOfbkK6VTqq5z9YyFcuNZ5fZ0jHaemBuDEChq2ARcp5+pJ+DxnC/7uzHbku6tPPDJD0w2ZxVmHv/Iui0emf+6lciGmxaauOgxCRraVyp04+iEDjymUF74dvZn8tHAj5ct/C/LhHnRS3JMwfdxk4GnglArXbUNE63IBxRO5zv4nCIVK9Fr1/w/4GtirkTbAecgNWomlwEPIfr3IGYu/93uHVwI+WeAzH1NHe0i9U33msz5kPlrUAW/6FBgGtw0eURwDQ2jOAB/6zCdyK2rV/j4H3Ae8rpx7zUBeL7rkVe0jLINd0mwDHlDOzQ6TiU5fMQD41RFehJgevJoXWKAR+FdbWRej0b873b7pvL7zOoCPEIOhMNQh+xNGKHn2o/hVfCcyRtDChLFQJ7LU0qacN9FoIK+eNNEJLAGed5w7A/1Bjysm7CpzlFpivWcg3TTzthKeZToDEw2XofTJ9TMsrmUOKuFzTWdgypJZ7St/NpRuWulUwi2mM6iWCXqiJ1VjwLjhcdr2DljymBqcWMrjVkehltRMNFwtTx5Xk1A3vE7Dqf3XJQTzNXI00oh4+HMS+ZbmLLKDxTl9s0EJL4haVMJwm2f9SQkPj0PYXBdhtuG6qDRB/k/YDHT7uFUU+wuxBMPvfgdPdBuuAzF6XWo43VpnL2J3mpj5V9VH1qPxyokddenL+MKpqSdjnxIeZSjdtKJuZlEnnRNDE+YXJNPMHIrr4thY1ZQhg2xxcooNuyMnrXSjdD9golH9JK+LV05sqGb4if/dA7dvl6BboGqBjRTXwTWxqvHJPIpFHyBZvlSqzbWktK/vhczBOYUvp7yTGdMUNmhEvcXJbYfq9GplVo0dqeMQ62UnG5Fpsj2G82pG7PcHIB6JWhBrqp6IZfJ+4EfEW9Ae5A2w27CGBuRJW6ucf4MUOuu+g9K77wiyh8yEIejJiKsLHW9ESxCn3D1CaqhHZo9UFxw55Hd8UouX+fhOxBh0KLLVyk8fmEUMTccDT3ikG/TYBFyNLLf0pPLbJ4M09hDgMuAFj3R3E0HXUG2/VDMp7yJ+B+LwrJ1SA5sCjcgQ+wqz0or4APgUcbbtRXfEPrLc6+8t4FKDumJlEHIXmnhK3I5dwN35fNzIIou966uoIYfsBa9JJmK2orai5whthmEdid9xaoomxN1EB8Er6VngJEM6soibi/0aOtYSs/+uJPhebKDLQY1KDvEtcjgCHRmkP3X7/otSh8VisVgsFkv6+B99Fi8EEDMw4gAAAABJRU5ErkJggg=="/>
+<image x="790" y="38" width="120" height="78" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAF4AAAA9CAYAAAAkst6aAAAEfElEQVR4nO2cW6gVVRiAv30uXtGjQZKlPoiWyjEyizpGoHLS1AdD8SURDz54KZADEhWIdnkLikDIIlJBEUHfRHzxKVGfItCjIiEeAvFOohLmUY8Pv5u9Zp05M9P8a657Plgw67L/9f//zKz7bHDPeGAyMCYB2VnQgdgzOmtFhmMEsAG4AAwCJ4HlmWqkYxSwCbiE2PM7sCxTjXxoB3YjCtqhNzu1YjMC2EsB7FmNv5L1MDk71WKxkoTtadEKeM4rxvVD5BU1WemonrSYZsW3WPFubQWuHD/KuD4O/AYcMdKmO6onLSYY1yeAX4HDRtokbQWuHG9S80kbTKCetKghfvKzKzZJOL6smL5S34TK8dFx+ta6crzT17AZqJ74jKgcnxFpOb4MNziXbXwYRR5OJkLl+IwoQxNQSNJyfDXctKie+OhUSwYZURvmOhZJOr5szUthhpNlG8mY9jzVCqs613jkuqkxKdvTr6bqXOORmye+VZmfN0aG5LdrK3Dh+HHAIiP+GOl8zObldQf1pMULwGIj/oSh9rytrcSF43vx7rr3IUpeM9K6gVUO6kqDzUCXEf8Tcf5VI+0jYG2KOg1hKtBP47zJORo38y28Z1EuZ6Df/2U6cJOGzmdptOfz8NrzdxYK1nnfUuYNK/9zKz/vdOPVd46VvxFH9mibGrt3/8+KPw4pnzds/R5acfXEqY7r4WQRnupcUI3jM8K146sbGZE2xW9fAhZYaYuRg/wgN8Ee764A7ijqTJqFVrwbGanVecfK7wLOA/cS1MlT2ffAvwQfZW6WcBbYCrymcWoQrcBXOTA0z2FpXOcGsSsHhhUhbI7izKjj6s+A76y0fcAPNGZ6zUY7MBtZMllh5S1HvhNQYU/9HzB0htrsLMHro39wMFn82hI6XyuwpKzB66fVGmE14JAhTP36lJgxwDEavjqgETYFWVWsC/tYq13JMRfRLgQVDJtpduD9Au6KTq/S88i4DvxALWzm2hKhTNGZD0wEbiGTIb8R2lzgRaTT7AMGIshVda5z8XYY72qE5ZBteO3b6VNmnVXm5wB5PUY51dJImR0/Exka2xMgkw7glE+ZjmFkrjfK3A6qvJlXEwcQx5vYi11PkTUpm8KcJMsj/cgcxeRHK34f+arbZPfz9ESxm5qu4OKF5E3gC4JtexX4kvD/MOghYlMTRieyb1pmx7ukh4avbgUVDGtqHiCLYHVeVqlVfswTaIHNUZjjryMHeuqsiatRE9CG90Rdn1bgN3jb+U6twJJiDiUHkb8JU/GBJbAfmKUVWjKW4t0KfQKMDfpB1GntduBbK20HcAa4S3NuhLQi6zEfAp9aeZ8gw041k5B/Ksp6W60I4WBMHw/LBGB/DgzLc/gprnOj0AmczoGReQpHkXP1qWKfoH3Pp8ws4C+jzC+paRdOO7JUYNrg9y+xncjR7HqZXk2lLtbaL1nxHXjXPGpIBzTDSDvloF5XDAAXrbRevPOXNmQOM9VI+yNZtcJpAfYQ/bW8gYNviBwzE9nkiGrDNZQbHc8AhHLDsnQIMUwAAAAASUVORK5CYII="/>
+<rect x="30" y="130" width="530" height="1040" rx="0" fill="none" stroke="#000" stroke-width="5" />
+<rect x="1385" y="130" width="945" height="1040" rx="0" fill="none" stroke="#000" stroke-width="5" />
+<rect x="600" y="120" width="1170" height="1060" rx="0" fill="none" stroke="#1a1ad6" stroke-width="7" stroke-dasharray="34 20" />
+<rect x="60" y="300" width="170" height="100" rx="16" fill="#dce3f3" stroke="#000" stroke-width="3" />
+<text x="145" y="342" font-size="34" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Video</text>
+<text x="145" y="380" font-size="34" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Encoder</text>
+<text x="355" y="232" font-size="38" font-weight="normal" font-style="italic" text-anchor="middle" fill="#000">DL Streams</text>
+<rect x="268" y="250" width="190" height="232" rx="4" fill="#fbe3d6" stroke="#000" stroke-width="0" />
+<text x="280" y="295" font-size="34" font-weight="bold" font-style="normal" text-anchor="start" fill="#000">Video:</text>
+<text x="280" y="330" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">each FPS</text>
+<text x="280" y="392" font-size="34" font-weight="bold" font-style="normal" text-anchor="start" fill="#000">Audio:</text>
+<text x="280" y="428" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">every 10</text>
+<text x="280" y="460" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">ms</text>
+<polyline points="232,350 264,350" fill="none" stroke="#29abe2" stroke-width="7" stroke-linejoin="round" marker-end="url(#h29abe2)"/>
+<rect x="500" y="240" width="56" height="770" rx="8" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="543" y="625" font-size="46" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000" transform="rotate(-90 543 625)">ALVR sockets</text>
+<polyline points="460,330 496,330" fill="none" stroke="#29abe2" stroke-width="7" stroke-linejoin="round" marker-end="url(#h29abe2)"/>
+<polyline points="460,410 496,410" fill="none" stroke="#29abe2" stroke-width="7" stroke-linejoin="round" marker-end="url(#h29abe2)"/>
+<rect x="60" y="700" width="200" height="130" rx="16" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="160" y="744" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Bitrate</text>
+<text x="160" y="780" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Manager</text>
+<text x="160" y="816" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">(ABR)</text>
+<polyline points="160,698 160,404" fill="none" stroke="#4a7fd0" stroke-width="7" stroke-linejoin="round" stroke-dasharray="20 12" marker-end="url(#h4a7fd0)"/>
+<polyline points="498,760 264,760" fill="none" stroke="#ee1c25" stroke-width="7" stroke-linejoin="round" marker-end="url(#hee1c25)"/>
+<rect x="120" y="890" width="230" height="110" rx="16" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="235" y="940" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Application</text>
+<text x="235" y="976" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Logger</text>
+<polyline points="320,760 320,886" fill="none" stroke="#ee1c25" stroke-width="7" stroke-linejoin="round" marker-end="url(#hee1c25)"/>
+<polyline points="354,945 400,945" fill="none" stroke="#ed8b2f" stroke-width="7" stroke-linejoin="round" marker-end="url(#hed8b2f)"/>
+<image x="408" y="895" width="84" height="101" href="data:image/png;base64,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"/>
+<rect x="630" y="240" width="60" height="770" rx="8" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="675" y="625.0" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000" transform="rotate(-90 675 625.0)">Transport Network (Wired)</text>
+<polyline points="560,360 628,360" fill="none" stroke="#8a8a8a" stroke-width="7" stroke-linejoin="round" stroke-dasharray="10 12" marker-end="url(#h8a8a8a)"/>
+<polyline points="692,360 760,360" fill="none" stroke="#8a8a8a" stroke-width="7" stroke-linejoin="round" stroke-dasharray="10 12" marker-end="url(#h8a8a8a)"/>
+<polyline points="738,978 694,978" fill="none" stroke="#1f3a68" stroke-width="7" stroke-linejoin="round" marker-end="url(#h1f3a68)"/>
+<polyline points="628,978 562,978" fill="none" stroke="#1f3a68" stroke-width="7" stroke-linejoin="round" marker-end="url(#h1f3a68)"/>
+<rect x="740" y="160" width="365" height="865" rx="18" fill="#e4e4e4" stroke="#3d4650" stroke-width="4" />
+<text x="922" y="212" font-size="44" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">AP MAC</text>
+<text x="922" y="248" font-size="26" font-weight="normal" font-style="italic" text-anchor="middle" fill="#444">802.11be MLD</text>
+<text x="805" y="286" font-size="24" font-weight="normal" font-style="italic" text-anchor="middle" fill="#333">AC queues</text>
+<rect x="762" y="300" width="86" height="38" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="805" y="328" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="762" y="344" width="86" height="38" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="805" y="372" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="762" y="388" width="86" height="38" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="805" y="416" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="762" y="432" width="86" height="38" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="805" y="460" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<rect x="885" y="300" width="195" height="130" rx="12" fill="#fff" stroke="#1d5fa8" stroke-width="4" />
+<text x="982" y="345" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">MLO link</text>
+<text x="982" y="379" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">selection</text>
+<text x="982" y="415" font-size="22" font-weight="normal" font-style="italic" text-anchor="middle" fill="#1d5fa8">TID-to-link map</text>
+<polyline points="849,365 884,365" fill="none" stroke="#333" stroke-width="5" stroke-linejoin="round" marker-end="url(#h333)"/>
+<polyline points="982,432 982,470 772,470 772,850" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round"/>
+<polyline points="772,530 797,530" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round" marker-end="url(#h333)"/>
+<polyline points="772,680 797,680" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round" marker-end="url(#h333)"/>
+<polyline points="772,850 797,850" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round" marker-end="url(#h333)"/>
+<rect x="800" y="495" width="275" height="110" rx="10" fill="#fff" stroke="#1d5fa8" stroke-width="3" />
+<text x="937" y="520" font-size="24" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link 1 · EDCA/AC</text>
+<rect x="808" y="538" width="60" height="54" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="838" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="872" y="538" width="60" height="54" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="902" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="936" y="538" width="60" height="54" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="966" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1000" y="538" width="60" height="54" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1030" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<rect x="800" y="645" width="275" height="110" rx="10" fill="#fff" stroke="#1d5fa8" stroke-width="3" />
+<text x="937" y="670" font-size="24" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link 2 · EDCA/AC</text>
+<rect x="808" y="688" width="60" height="54" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="838" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="872" y="688" width="60" height="54" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="902" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="936" y="688" width="60" height="54" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="966" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1000" y="688" width="60" height="54" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1030" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<rect x="800" y="815" width="275" height="110" rx="10" fill="#fff" stroke="#1d5fa8" stroke-width="3" />
+<text x="937" y="840" font-size="24" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link N · EDCA/AC</text>
+<rect x="808" y="858" width="60" height="54" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="838" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="872" y="858" width="60" height="54" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="902" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="936" y="858" width="60" height="54" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="966" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1000" y="858" width="60" height="54" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1030" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<text x="937" y="797" font-size="44" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">⋮</text>
+<rect x="762" y="950" width="313" height="56" rx="10" fill="#fff" stroke="#3d4650" stroke-width="3" />
+<text x="918" y="987" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">RX · BA reorder (MLD)</text>
+<polyline points="1075,578 1092,578 1092,978 1076,978" fill="none" stroke="#1f3a68" stroke-width="4" stroke-linejoin="round" marker-end="url(#h1f3a68)"/>
+<polyline points="1075,728 1092,728" fill="none" stroke="#1f3a68" stroke-width="4" stroke-linejoin="round"/>
+<polyline points="1075,898 1092,898" fill="none" stroke="#1f3a68" stroke-width="4" stroke-linejoin="round"/>
+<rect x="1380" y="160" width="365" height="865" rx="18" fill="#e4e4e4" stroke="#3d4650" stroke-width="4" />
+<text x="1563" y="212" font-size="44" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">STA MAC</text>
+<text x="1563" y="248" font-size="26" font-weight="normal" font-style="italic" text-anchor="middle" fill="#444">802.11be MLD</text>
+<text x="1680" y="286" font-size="24" font-weight="normal" font-style="italic" text-anchor="middle" fill="#333">AC queues</text>
+<rect x="1637" y="300" width="86" height="38" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="1680" y="328" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="1637" y="344" width="86" height="38" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="1680" y="372" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="1637" y="388" width="86" height="38" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="1680" y="416" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1637" y="432" width="86" height="38" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1680" y="460" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<rect x="1405" y="300" width="195" height="130" rx="12" fill="#fff" stroke="#1d5fa8" stroke-width="4" />
+<text x="1503" y="345" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">MLO link</text>
+<text x="1503" y="379" font-size="30" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">selection</text>
+<text x="1503" y="415" font-size="22" font-weight="normal" font-style="italic" text-anchor="middle" fill="#1d5fa8">TID-to-link map</text>
+<polyline points="1636,365 1601,365" fill="none" stroke="#333" stroke-width="5" stroke-linejoin="round" marker-end="url(#h333)"/>
+<polyline points="1503,432 1503,470 1713,470 1713,850" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round"/>
+<polyline points="1713,530 1688,530" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round" marker-end="url(#h333)"/>
+<polyline points="1713,680 1688,680" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round" marker-end="url(#h333)"/>
+<polyline points="1713,850 1688,850" fill="none" stroke="#333" stroke-width="4" stroke-linejoin="round" marker-end="url(#h333)"/>
+<rect x="1410" y="495" width="275" height="110" rx="10" fill="#fff" stroke="#1d5fa8" stroke-width="3" />
+<text x="1548" y="520" font-size="24" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link 1 · EDCA/AC</text>
+<rect x="1425" y="538" width="60" height="54" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="1455" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="1489" y="538" width="60" height="54" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="1519" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="1553" y="538" width="60" height="54" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="1583" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1617" y="538" width="60" height="54" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1647" y="574" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<rect x="1410" y="645" width="275" height="110" rx="10" fill="#fff" stroke="#1d5fa8" stroke-width="3" />
+<text x="1548" y="670" font-size="24" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link 2 · EDCA/AC</text>
+<rect x="1425" y="688" width="60" height="54" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="1455" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="1489" y="688" width="60" height="54" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="1519" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="1553" y="688" width="60" height="54" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="1583" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1617" y="688" width="60" height="54" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1647" y="724" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<rect x="1410" y="815" width="275" height="110" rx="10" fill="#fff" stroke="#1d5fa8" stroke-width="3" />
+<text x="1548" y="840" font-size="24" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link N · EDCA/AC</text>
+<rect x="1425" y="858" width="60" height="54" rx="6" fill="#f4b8b8" stroke="#555" stroke-width="2" />
+<text x="1455" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VO</text>
+<rect x="1489" y="858" width="60" height="54" rx="6" fill="#f8dba6" stroke="#555" stroke-width="2" />
+<text x="1519" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">VI</text>
+<rect x="1553" y="858" width="60" height="54" rx="6" fill="#bfe0bf" stroke="#555" stroke-width="2" />
+<text x="1583" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BE</text>
+<rect x="1617" y="858" width="60" height="54" rx="6" fill="#c8d4ec" stroke="#555" stroke-width="2" />
+<text x="1647" y="894" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">BK</text>
+<text x="1548" y="797" font-size="44" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">⋮</text>
+<rect x="1410" y="950" width="313" height="56" rx="10" fill="#fff" stroke="#3d4650" stroke-width="3" />
+<text x="1567" y="987" font-size="26" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">RX · BA reorder (MLD)</text>
+<polyline points="1410,578 1393,578 1393,978 1409,978" fill="none" stroke="#1f3a68" stroke-width="4" stroke-linejoin="round" marker-end="url(#h1f3a68)"/>
+<polyline points="1410,728 1393,728" fill="none" stroke="#1f3a68" stroke-width="4" stroke-linejoin="round"/>
+<polyline points="1410,898 1393,898" fill="none" stroke="#1f3a68" stroke-width="4" stroke-linejoin="round"/>
+<text x="1242" y="232" font-size="30" font-weight="normal" font-style="italic" text-anchor="middle" fill="#000">Wireless medium</text>
+<text x="1242" y="266" font-size="28" font-weight="normal" font-style="italic" text-anchor="middle" fill="#000">(MLO, STR+)</text>
+<rect x="1105" y="490" width="275" height="120" rx="0" fill="#e9f3fb" stroke="#000" stroke-width="0" />
+<text x="1242" y="512" font-size="28" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link 1</text>
+<polyline points="1076,545 1410,545" fill="none" stroke="#29abe2" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#h29abe2)"/>
+<polyline points="1410,585 1076,585" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#hee1c25)"/>
+<rect x="1105" y="640" width="275" height="120" rx="0" fill="#e9f3fb" stroke="#000" stroke-width="0" />
+<text x="1242" y="662" font-size="28" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link 2</text>
+<polyline points="1076,695 1410,695" fill="none" stroke="#29abe2" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#h29abe2)"/>
+<polyline points="1410,735 1076,735" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#hee1c25)"/>
+<rect x="1105" y="810" width="275" height="120" rx="0" fill="#e9f3fb" stroke="#000" stroke-width="0" />
+<text x="1242" y="832" font-size="28" font-weight="bold" font-style="normal" text-anchor="middle" fill="#1d5fa8">Link N</text>
+<polyline points="1076,865 1410,865" fill="none" stroke="#29abe2" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#h29abe2)"/>
+<polyline points="1410,905 1076,905" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#hee1c25)"/>
+<text x="1242" y="786" font-size="44" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">⋮</text>
+<polyline points="1118,335 1185,335" fill="none" stroke="#29abe2" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#h29abe2)"/>
+<text x="1198" y="345" font-size="24" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">DL A-MPDU</text>
+<polyline points="1185,385 1118,385" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" stroke-dasharray="30 10 6 10" marker-end="url(#hee1c25)"/>
+<text x="1198" y="395" font-size="24" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">UL A-MPDU</text>
+<text x="1242" y="440" font-size="22" font-weight="normal" font-style="italic" text-anchor="middle" fill="#333">Own EDCA backoff</text>
+<text x="1242" y="466" font-size="22" font-weight="normal" font-style="italic" text-anchor="middle" fill="#333">per link and AC</text>
+<rect x="790" y="1055" width="220" height="90" rx="16" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="900.0" y="1088.0" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Network</text>
+<text x="900.0" y="1128.0" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Logger</text>
+<polyline points="1016,1104.0 1042,1104.0" fill="none" stroke="#ed8b2f" stroke-width="7" stroke-linejoin="round" marker-end="url(#hed8b2f)"/>
+<image x="1050" y="1050.0" width="84" height="101" href="data:image/png;base64,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"/>
+<rect x="1800" y="240" width="56" height="770" rx="8" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="1843" y="625" font-size="46" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000" transform="rotate(-90 1843 625)">ALVR sockets</text>
+<polyline points="1799,360 1730,360" fill="none" stroke="#8a8a8a" stroke-width="7" stroke-linejoin="round" stroke-dasharray="10 12" marker-end="url(#h8a8a8a)"/>
+<polyline points="1748,978 1796,978" fill="none" stroke="#1f3a68" stroke-width="7" stroke-linejoin="round" marker-end="url(#h1f3a68)"/>
+<text x="1990" y="196" font-size="32" font-weight="normal" font-style="italic" text-anchor="middle" fill="#000">Jitter Buffer</text>
+<rect x="1910" y="210" width="110" height="78" rx="2" fill="#fff" stroke="#000" stroke-width="3" />
+<rect x="1940" y="210" width="40" height="78" rx="0" fill="#cfe6b8" stroke="#000" stroke-width="3" />
+<rect x="1980" y="210" width="40" height="78" rx="0" fill="#cfe6b8" stroke="#000" stroke-width="3" />
+<text x="1960" y="254" font-size="20" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000" transform="rotate(-90 1960 254)">#12</text>
+<text x="2000" y="254" font-size="20" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000" transform="rotate(-90 2000 254)">#11</text>
+<circle cx="2050" cy="249" r="15" fill="#fff" stroke="#000" stroke-width="3"/>
+<polyline points="1858,249 1908,249" fill="none" stroke="#3f6b2a" stroke-width="6" stroke-linejoin="round" marker-end="url(#h3f6b2a)"/>
+<polyline points="2022,249 2034,249" fill="none" stroke="#3f6b2a" stroke-width="6" stroke-linejoin="round"/>
+<polyline points="2066,249 2098,249" fill="none" stroke="#3f6b2a" stroke-width="6" stroke-linejoin="round" marker-end="url(#h3f6b2a)"/>
+<rect x="2100" y="205" width="190" height="90" rx="16" fill="#d6eac0" stroke="#3f6b2a" stroke-width="3" />
+<text x="2195" y="242" font-size="34" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Video</text>
+<text x="2195" y="280" font-size="34" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Decoder</text>
+<polyline points="2294,250 2350,250" fill="none" stroke="#3f6b2a" stroke-width="8" stroke-linejoin="round" marker-end="url(#h3f6b2a)"/>
+<text x="2410" y="244" font-size="34" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">RGB</text>
+<text x="2410" y="282" font-size="34" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Display</text>
+<text x="2080" y="346" font-size="32" font-weight="normal" font-style="normal" text-anchor="middle" fill="#000">Video RX statistics</text>
+<polyline points="1858,310 2290,310 2290,560 2262,560" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" marker-end="url(#hee1c25)"/>
+<text x="2100" y="508" font-size="38" font-weight="normal" font-style="italic" text-anchor="middle" fill="#000">UL Streams</text>
+<rect x="1950" y="525" width="312" height="190" rx="4" fill="#fbe3d6" stroke="#000" stroke-width="0" />
+<text x="1964" y="572" font-size="34" font-weight="bold" font-style="normal" text-anchor="start" fill="#000">Statistics:</text>
+<text x="1964" y="608" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">every RX frame</text>
+<text x="1964" y="658" font-size="34" font-weight="bold" font-style="normal" text-anchor="start" fill="#000">Tracking:</text>
+<text x="1964" y="694" font-size="30" font-weight="normal" font-style="normal" text-anchor="start" fill="#000">3 · FPS</text>
+<polyline points="1948,565 1860,565" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" marker-end="url(#hee1c25)"/>
+<polyline points="1948,660 1860,660" fill="none" stroke="#ee1c25" stroke-width="6" stroke-linejoin="round" marker-end="url(#hee1c25)"/>
+<rect x="1930" y="905" width="200" height="100" rx="16" fill="#fff" stroke="#000" stroke-width="3" />
+<text x="2030.0" y="943.0" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Video</text>
+<text x="2030.0" y="983.0" font-size="32" font-weight="bold" font-style="normal" text-anchor="middle" fill="#000">Logger</text>
+<polyline points="2136,959.0 2182,959.0" fill="none" stroke="#ed8b2f" stroke-width="7" stroke-linejoin="round" marker-end="url(#hed8b2f)"/>
+<image x="2190" y="905.0" width="84" height="101" href="data:image/png;base64,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"/>
+</svg>
