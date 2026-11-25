@@ -55,7 +55,7 @@ Runs are deterministic: the same build, command and seed write the same files by
 
 The simulator is designed to handle multiple VR sessions concurrently, with a synchronized simulation time across all devices in the network. It supports static user positions and dynamic mobility (via random walk) with configurable distances to the Access Point (AP). The VR streaming simulated sessions follow the bidirectional pipeline illustrated below:
 
-![VR Emulation Pipeline](assets/VR_emu_pipeline.png)
+![VR Emulation Pipeline: the 802.11be MAC of the AP and the STA has per-AC EDCA queues, MLO link selection and one EDCA instance per AC on each link](assets/VR_emu_pipeline.svg)
 
 ---
 
